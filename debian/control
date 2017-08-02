@@ -104,7 +104,6 @@ Build-Depends-Indep: bandit (>= 0.13.2),
                      sqlite3,
                      subunit,
                      testrepository,
-                     websockify (>= 0.8.0),
 Build-Conflicts: python-cjson
 Standards-Version: 3.9.8
 Vcs-Browser: https://git.openstack.org/cgit/openstack/deb-nova?h=debian%2Fnewton
@@ -178,9 +177,12 @@ Depends: openssh-client,
          python-stevedore (>= 1.16.0),
          python-tempita,
          python-webob,
+<<<<<<< HEAD
          python-wsgi-intercept (>= 0.6.1),
+=======
+         python-websockify (>= 0.8.0),
+>>>>>>> 54c897b22d4f5562d28627ef67ac80cbbe202afe
          sudo,
-         websockify (>= 0.8.0),
          ${misc:Depends},
          ${python:Depends},
 Suggests: python-suds (>= 0.4.0)
@@ -626,7 +628,7 @@ Depends: debconf,
          nova-common (= ${binary:Version}),
          novnc,
          spice-html5,
-         websockify,
+         python-websockify (>= 0.8.0),
          ${misc:Depends},
          ${ostack-lsb-base},
          ${python:Depends},

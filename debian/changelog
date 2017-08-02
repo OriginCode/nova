@@ -62,6 +62,14 @@ nova (2:14.0.0~rc1-1) experimental; urgency=medium
 
  -- Thomas Goirand <zigo@debian.org>  Wed, 14 Sep 2016 09:40:05 +0200
 
+nova (2:14.0.0~b2-2) experimental; urgency=medium
+
+  * Team upload.
+  * Added python-pep8 to build depends (Closes: #834134)
+  * (Build-)Depends on python-websockify instead of websockify
+
+ -- Ondřej Nový <onovy@debian.org>  Sun, 14 Aug 2016 17:49:12 +0200
+
 nova (2:14.0.0~b2-1) experimental; urgency=medium
 
   * New upstream release.
