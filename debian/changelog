@@ -7,6 +7,9 @@ nova (2:14.0.0-4) unstable; urgency=medium
   [ Thomas Goirand ]
   * CVE-2017-7214: apply upstream patch (Closes: 858568).
 
+  [ Daniel Baumann ]
+  * Updating vcs fields.
+
  -- Thomas Goirand <zigo@debian.org>  Sun, 02 Apr 2017 12:52:50 +0200
 
 nova (2:14.0.0-3) unstable; urgency=medium
