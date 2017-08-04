@@ -9,6 +9,7 @@ nova (2:14.0.0-4) unstable; urgency=medium
 
   [ Daniel Baumann ]
   * Updating vcs fields.
+  * Updating copyright format url.
 
  -- Thomas Goirand <zigo@debian.org>  Sun, 02 Apr 2017 12:52:50 +0200
 
