@@ -2,6 +2,7 @@ nova (2:14.0.0-5) UNRELEASED; urgency=medium
 
   * Updating vcs fields.
   * Updating copyright format url.
+  * Updating maintainer field.
 
  -- Daniel Baumann <daniel.baumann@progress-linux.org>  Fri, 04 Aug 2017 22:25:44 +0200
 
