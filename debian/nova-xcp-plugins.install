@@ -1,4 +1,3 @@
-
 debian/xen-openvswitch-nova.rules						/lib/udev/rules.d
 plugins/xenserver/networking/etc/sysconfig/openvswitch-nova			/etc/default
 plugins/xenserver/networking/etc/xensource/scripts/novalib.py			/usr/lib/xcp/plugins
