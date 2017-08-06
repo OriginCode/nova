@@ -1,6 +1,6 @@
 Source: nova
 Section: net
-Priority: extra
+Priority: optional
 Maintainer: Debian OpenStack <openstack-devel@lists.alioth.debian.org>
 Uploaders:
  Thomas Goirand <zigo@debian.org>,
