@@ -8,6 +8,7 @@ nova (2:14.0.0-5) UNRELEASED; urgency=medium
   * Removing gbp.conf, not used anymore or should be specified in the
     developers dotfiles.
   * Correcting permissions in debian packaging files.
+  * Updating standards version to 4.0.1.
 
  -- Daniel Baumann <daniel.baumann@progress-linux.org>  Fri, 04 Aug 2017 22:25:44 +0200
 
