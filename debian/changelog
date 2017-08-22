@@ -10,6 +10,7 @@ nova (2:14.0.0-5) UNRELEASED; urgency=medium
   * Correcting permissions in debian packaging files.
   * Updating standards version to 4.0.1.
   * Deprecating priority extra as per policy 4.0.1.
+  * Updating standards version to 4.1.0.
 
  -- Daniel Baumann <daniel.baumann@progress-linux.org>  Fri, 04 Aug 2017 22:25:44 +0200
 
