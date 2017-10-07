@@ -38,7 +38,7 @@ class TestCinderForbidden(test.TestCase):
         """
         cinder_client = mock.Mock()
         mock_cinder.return_value = cinder_client
-        exc = cinder_exceptions.Forbidden('')
+        exc = cinder_exceptions.Forbidden(403)
         cinder_client.volumes.create.side_effect = exc
 
         volume = {'display_name': 'vol1', 'size': 3}
@@ -57,16 +57,17 @@ class TestCinderOverLimit(test.TestCase):
         self.api = api_fixture.api
 
     @mock.patch('nova.volume.cinder.cinderclient')
-    def test_over_limit_volumes(self, mock_cinder):
-        """Regression test for bug #1554631.
+    def test_over_limit_volumes_with_message(self, mock_cinder):
+        """Regression test for bug #1680457.
 
         When the Cinder client returns OverLimit when trying to create
-        a volume, an OverQuota exception should be raised with the value being
-        volumes.
+        a volume, an OverQuota exception should be raised.
         """
         cinder_client = mock.Mock()
         mock_cinder.return_value = cinder_client
-        exc = cinder_exceptions.OverLimit('')
+        msg = ("VolumeSizeExceedsLimit: Requested volume size XG is larger"
+               " than maximum allowed limit YG.")
+        exc = cinder_exceptions.OverLimit(413, message=msg)
         cinder_client.volumes.create.side_effect = exc
 
         volume = {'display_name': 'vol1', 'size': 3}
@@ -74,7 +75,7 @@ class TestCinderOverLimit(test.TestCase):
                               self.api.post_volume, {'volume': volume})
         self.assertEqual(403, e.response.status_code)
         # Make sure we went over on volumes
-        self.assertIn('volumes', e.response.content)
+        self.assertIn('VolumeSizeExceedsLimit', e.response.text)
 
     @mock.patch('nova.volume.cinder.cinderclient')
     def test_over_limit_snapshots(self, mock_cinder):
@@ -99,7 +100,7 @@ class TestCinderOverLimit(test.TestCase):
     def _do_snapshot_over_test(self, mock_cinder, force=False):
         cinder_client = mock.Mock()
         mock_cinder.return_value = cinder_client
-        exc = cinder_exceptions.OverLimit('')
+        exc = cinder_exceptions.OverLimit(413)
         cinder_client.volume_snapshots.create.side_effect = exc
 
         snap = {'display_name': 'snap1',
@@ -109,4 +110,4 @@ class TestCinderOverLimit(test.TestCase):
                               self.api.post_snapshot, {'snapshot': snap})
         self.assertEqual(403, e.response.status_code)
         # Make sure we went over on snapshots
-        self.assertIn('snapshots', e.response.content)
+        self.assertIn('snapshots', e.response.text)

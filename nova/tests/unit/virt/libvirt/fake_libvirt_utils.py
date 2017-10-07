@@ -12,14 +12,13 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import io
 import os
-
-from six.moves import StringIO
 
 from nova.virt.libvirt import utils as libvirt_utils
 
 
-files = {'console.log': True}
+files = {'console.log': b''}
 disk_sizes = {}
 disk_backing_files = {}
 disk_type = "qcow2"
@@ -32,6 +31,10 @@ def create_image(disk_format, path, size):
 
 
 def create_cow_image(backing_file, path):
+    pass
+
+
+def create_ploop_image(disk_format, path, size, fs_type):
     pass
 
 
@@ -88,15 +91,15 @@ def update_mtime(path):
 
 
 def extract_snapshot(disk_path, source_fmt, out_path, dest_fmt):
-    files[out_path] = ''
+    files[out_path] = b''
 
 
 class File(object):
     def __init__(self, path, mode=None):
         if path in files:
-            self.fp = StringIO(files[path])
+            self.fp = io.BytesIO(files[path])
         else:
-            self.fp = StringIO(files[os.path.split(path)[-1]])
+            self.fp = io.BytesIO(files[os.path.split(path)[-1]])
 
     def __enter__(self):
         return self.fp
@@ -174,3 +177,7 @@ def chown_for_id_maps(path, id_maps):
 
 def get_arch(image_meta):
     return libvirt_utils.get_arch(image_meta)
+
+
+def last_bytes(file_like_object, num):
+    return libvirt_utils.last_bytes(file_like_object, num)

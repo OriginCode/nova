@@ -15,7 +15,6 @@
 
 import mock
 from oslo_config import cfg
-import six
 
 from nova import exception
 from nova import objects
@@ -131,15 +130,14 @@ class PciDeviceStatsTestCase(test.NoDBTestCase):
                          set(['v1', 'v2', 'v3']))
 
     def test_support_requests(self):
-        self.assertEqual(self.pci_stats.support_requests(pci_requests),
-                         True)
+        self.assertTrue(self.pci_stats.support_requests(pci_requests))
         self.assertEqual(len(self.pci_stats.pools), 3)
         self.assertEqual(set([d['count'] for d in self.pci_stats]),
                          set((1, 2)))
 
     def test_support_requests_failed(self):
-        self.assertEqual(
-            self.pci_stats.support_requests(pci_requests_multiple), False)
+        self.assertFalse(
+            self.pci_stats.support_requests(pci_requests_multiple))
         self.assertEqual(len(self.pci_stats.pools), 3)
         self.assertEqual(set([d['count'] for d in self.pci_stats]),
                          set([1, 2]))
@@ -170,37 +168,34 @@ class PciDeviceStatsTestCase(test.NoDBTestCase):
                           pci_requests_multiple))
 
     def test_support_requests_numa(self):
-        cells = [objects.NUMACell(id=0, cpuset=set(), memory=0),
-                 objects.NUMACell(id=1, cpuset=set(), memory=0)]
-        self.assertTrue(self.pci_stats.support_requests(
-                                                        pci_requests, cells))
+        cells = [objects.InstanceNUMACell(id=0, cpuset=set(), memory=0),
+                 objects.InstanceNUMACell(id=1, cpuset=set(), memory=0)]
+        self.assertTrue(self.pci_stats.support_requests(pci_requests, cells))
 
     def test_support_requests_numa_failed(self):
-        cells = [objects.NUMACell(id=0, cpuset=set(), memory=0)]
-        self.assertFalse(self.pci_stats.support_requests(
-                                                        pci_requests, cells))
+        cells = [objects.InstanceNUMACell(id=0, cpuset=set(), memory=0)]
+        self.assertFalse(self.pci_stats.support_requests(pci_requests, cells))
 
     def test_support_requests_no_numa_info(self):
-        cells = [objects.NUMACell(id=0, cpuset=set(), memory=0)]
+        cells = [objects.InstanceNUMACell(id=0, cpuset=set(), memory=0)]
         pci_request = [objects.InstancePCIRequest(count=1,
                     spec=[{'vendor_id': 'v3'}])]
-        self.assertTrue(self.pci_stats.support_requests(
-                                                        pci_request, cells))
+        self.assertTrue(self.pci_stats.support_requests(pci_request, cells))
 
     def test_consume_requests_numa(self):
-        cells = [objects.NUMACell(id=0, cpuset=set(), memory=0),
-                 objects.NUMACell(id=1, cpuset=set(), memory=0)]
+        cells = [objects.InstanceNUMACell(id=0, cpuset=set(), memory=0),
+                 objects.InstanceNUMACell(id=1, cpuset=set(), memory=0)]
         devs = self.pci_stats.consume_requests(pci_requests, cells)
         self.assertEqual(2, len(devs))
         self.assertEqual(set(['v1', 'v2']),
                          set([dev.vendor_id for dev in devs]))
 
     def test_consume_requests_numa_failed(self):
-        cells = [objects.NUMACell(id=0, cpuset=set(), memory=0)]
+        cells = [objects.InstanceNUMACell(id=0, cpuset=set(), memory=0)]
         self.assertIsNone(self.pci_stats.consume_requests(pci_requests, cells))
 
     def test_consume_requests_no_numa_info(self):
-        cells = [objects.NUMACell(id=0, cpuset=set(), memory=0)]
+        cells = [objects.InstanceNUMACell(id=0, cpuset=set(), memory=0)]
         pci_request = [objects.InstancePCIRequest(count=1,
                     spec=[{'vendor_id': 'v3'}])]
         devs = self.pci_stats.consume_requests(pci_request, cells)
@@ -212,7 +207,7 @@ class PciDeviceStatsTestCase(test.NoDBTestCase):
         'nova.pci.whitelist.Whitelist._parse_white_list_from_config')
     def test_white_list_parsing(self, mock_whitelist_parse):
         white_list = '{"product_id":"0001", "vendor_id":"8086"}'
-        CONF.set_override('pci_passthrough_whitelist', white_list)
+        CONF.set_override('passthrough_whitelist', white_list, 'pci')
         pci_stats = stats.PciDeviceStats()
         pci_stats.add_device(self.fake_dev_2)
         pci_stats.remove_device(self.fake_dev_2)
@@ -226,7 +221,7 @@ class PciDeviceStatsWithTagsTestCase(test.NoDBTestCase):
         white_list = ['{"vendor_id":"1137","product_id":"0071",'
                         '"address":"*:0a:00.*","physical_network":"physnet1"}',
                        '{"vendor_id":"1137","product_id":"0072"}']
-        self.flags(pci_passthrough_whitelist=white_list)
+        self.flags(passthrough_whitelist=white_list, group='pci')
         dev_filter = whitelist.Whitelist(white_list)
         self.pci_stats = stats.PciDeviceStats(dev_filter=dev_filter)
 
@@ -270,7 +265,7 @@ class PciDeviceStatsWithTagsTestCase(test.NoDBTestCase):
         self.assertEqual(product_id, pool['product_id'])
         self.assertEqual(count, pool['count'])
         if tags:
-            for k, v in six.iteritems(tags):
+            for k, v in tags.items():
                 self.assertEqual(v, pool[k])
 
     def _assertPools(self):
@@ -356,7 +351,7 @@ class PciDeviceVFPFStatsTestCase(test.NoDBTestCase):
         super(PciDeviceVFPFStatsTestCase, self).setUp()
         white_list = ['{"vendor_id":"8086","product_id":"1528"}',
                       '{"vendor_id":"8086","product_id":"1515"}']
-        self.flags(pci_passthrough_whitelist=white_list)
+        self.flags(passthrough_whitelist=white_list, group='pci')
         self.pci_stats = stats.PciDeviceStats()
 
     def _create_pci_devices(self, vf_product_id=1515, pf_product_id=1528):

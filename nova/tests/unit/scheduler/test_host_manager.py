@@ -17,6 +17,7 @@ Tests For HostManager
 """
 
 import collections
+import contextlib
 import datetime
 
 import mock
@@ -27,7 +28,7 @@ import six
 import nova
 from nova.compute import task_states
 from nova.compute import vm_states
-import nova.conf
+from nova import context as nova_context
 from nova import exception
 from nova import objects
 from nova.objects import base as obj_base
@@ -40,8 +41,6 @@ from nova.tests.unit import fake_instance
 from nova.tests.unit import matchers
 from nova.tests.unit.scheduler import fakes
 from nova.tests import uuidsentinel as uuids
-
-CONF = nova.conf.CONF
 
 
 class FakeFilterClass1(filters.BaseHostFilter):
@@ -61,15 +60,17 @@ class HostManagerTestCase(test.NoDBTestCase):
     @mock.patch.object(host_manager.HostManager, '_init_aggregates')
     def setUp(self, mock_init_agg, mock_init_inst):
         super(HostManagerTestCase, self).setUp()
-        self.flags(scheduler_available_filters=['%s.%s' % (__name__, cls) for
-                                                cls in ['FakeFilterClass1',
-                                                        'FakeFilterClass2']])
-        self.flags(scheduler_default_filters=['FakeFilterClass1'])
+        self.flags(available_filters=[
+            __name__ + '.FakeFilterClass1', __name__ + '.FakeFilterClass2'],
+            group='filter_scheduler')
+        self.flags(enabled_filters=['FakeFilterClass1'],
+                   group='filter_scheduler')
         self.host_manager = host_manager.HostManager()
+        cell = uuids.cell
         self.fake_hosts = [host_manager.HostState('fake_host%s' % x,
-                'fake-node') for x in range(1, 5)]
+                'fake-node', cell) for x in range(1, 5)]
         self.fake_hosts += [host_manager.HostState('fake_multihost',
-                'fake-node%s' % x) for x in range(1, 5)]
+                'fake-node%s' % x, cell) for x in range(1, 5)]
 
         self.useFixture(fixtures.SpawnIsSynchronousFixture())
 
@@ -121,11 +122,13 @@ class HostManagerTestCase(test.NoDBTestCase):
         inst1 = objects.Instance(host='host1', uuid=uuids.instance_1)
         inst2 = objects.Instance(host='host1', uuid=uuids.instance_2)
         inst3 = objects.Instance(host='host2', uuid=uuids.instance_3)
+        cell = objects.CellMapping(database_connection='',
+                                   target_url='')
         mock_get_by_filters.return_value = objects.InstanceList(
                 objects=[inst1, inst2, inst3])
         hm = self.host_manager
         hm._instance_info = {}
-        hm._init_instance_info([cn1, cn2])
+        hm._init_instance_info({cell: [cn1, cn2]})
         self.assertEqual(len(hm._instance_info), 2)
         fake_info = hm._instance_info['host1']
         self.assertIn(uuids.instance_1, fake_info['instances'])
@@ -136,10 +139,10 @@ class HostManagerTestCase(test.NoDBTestCase):
         # should not be called if the list of nodes was passed explicitly
         self.assertFalse(mock_get_all.called)
 
-    def test_default_filters(self):
-        default_filters = self.host_manager.default_filters
-        self.assertEqual(1, len(default_filters))
-        self.assertIsInstance(default_filters[0], FakeFilterClass1)
+    def test_enabled_filters(self):
+        enabled_filters = self.host_manager.enabled_filters
+        self.assertEqual(1, len(enabled_filters))
+        self.assertIsInstance(enabled_filters[0], FakeFilterClass1)
 
     @mock.patch.object(host_manager.HostManager, '_init_instance_info')
     @mock.patch.object(objects.AggregateList, 'get_all')
@@ -657,7 +660,7 @@ class HostManagerTestCase(test.NoDBTestCase):
         cn1 = objects.ComputeNode(host='host1')
         hm._instance_info = {'host1': {'instances': {uuids.instance: inst1},
                                        'updated': True}}
-        host_state = host_manager.HostState('host1', cn1)
+        host_state = host_manager.HostState('host1', cn1, uuids.cell)
         self.assertFalse(host_state.instances)
         mock_get_by_host.return_value = None
         host_state.update(
@@ -680,7 +683,7 @@ class HostManagerTestCase(test.NoDBTestCase):
         cn1 = objects.ComputeNode(host='host1')
         hm._instance_info = {'host1': {'instances': {uuids.instance: inst1},
                                        'updated': False}}
-        host_state = host_manager.HostState('host1', cn1)
+        host_state = host_manager.HostState('host1', cn1, uuids.cell)
         self.assertFalse(host_state.instances)
         mock_get_by_host.return_value = objects.InstanceList(objects=[inst1])
         host_state.update(
@@ -765,6 +768,23 @@ class HostManagerTestCase(test.NoDBTestCase):
                 'fake_context', bad_host)
         self.assertEqual(len(new_info['instances']), len(orig_inst_dict))
         self.assertFalse(new_info['updated'])
+
+    @mock.patch('nova.objects.HostMapping.get_by_host',
+                side_effect=exception.HostMappingNotFound(name='host1'))
+    def test_update_instance_info_unknown_host_mapping_not_found(self,
+                                                                 get_by_host):
+        """Tests that case that update_instance_info is called with an
+        unregistered host so the host manager attempts to recreate the
+        instance list, but there is no host mapping found for the given
+        host (it might have just started not be discovered for cells
+        v2 yet).
+        """
+        ctxt = nova_context.RequestContext()
+        instance_info = objects.InstanceList()
+        self.host_manager.update_instance_info(ctxt, 'host1', instance_info)
+        self.assertDictEqual(
+            {}, self.host_manager._instance_info['host1']['instances'])
+        get_by_host.assert_called_once_with(ctxt, 'host1')
 
     def test_delete_instance_info(self):
         host_name = 'fake_host'
@@ -855,6 +875,107 @@ class HostManagerTestCase(test.NoDBTestCase):
                 'fake_context', host_name)
         self.assertFalse(new_info['updated'])
 
+    @mock.patch('nova.objects.CellMappingList.get_all')
+    @mock.patch('nova.objects.ComputeNodeList.get_all')
+    @mock.patch('nova.objects.ServiceList.get_by_binary')
+    def test_get_computes_for_cells(self, mock_sl, mock_cn, mock_cm):
+        cells = [
+            objects.CellMapping(uuid=uuids.cell1,
+                                db_connection='none://1',
+                                transport_url='none://'),
+            objects.CellMapping(uuid=uuids.cell2,
+                                db_connection='none://2',
+                                transport_url='none://'),
+        ]
+        mock_cm.return_value = cells
+        mock_sl.side_effect = [
+            [objects.ServiceList(host='foo')],
+            [objects.ServiceList(host='bar')],
+        ]
+        mock_cn.side_effect = [
+            [objects.ComputeNode(host='foo')],
+            [objects.ComputeNode(host='bar')],
+        ]
+        context = nova_context.RequestContext('fake', 'fake')
+        cns, srv = self.host_manager._get_computes_for_cells(context, cells)
+        self.assertEqual({uuids.cell1: ['foo'],
+                          uuids.cell2: ['bar']},
+                         {cell: [cn.host for cn in computes]
+                          for cell, computes in cns.items()})
+        self.assertEqual(['bar', 'foo'], sorted(list(srv.keys())))
+
+    @mock.patch('nova.objects.CellMappingList.get_all')
+    @mock.patch('nova.objects.ComputeNodeList.get_all_by_uuids')
+    @mock.patch('nova.objects.ServiceList.get_by_binary')
+    def test_get_computes_for_cells_uuid(self, mock_sl, mock_cn, mock_cm):
+        cells = [
+            objects.CellMapping(uuid=uuids.cell1,
+                                db_connection='none://1',
+                                transport_url='none://'),
+            objects.CellMapping(uuid=uuids.cell2,
+                                db_connection='none://2',
+                                transport_url='none://'),
+        ]
+        mock_cm.return_value = cells
+        mock_sl.side_effect = [
+            [objects.ServiceList(host='foo')],
+            [objects.ServiceList(host='bar')],
+        ]
+        mock_cn.side_effect = [
+            [objects.ComputeNode(host='foo')],
+            [objects.ComputeNode(host='bar')],
+        ]
+        context = nova_context.RequestContext('fake', 'fake')
+        cns, srv = self.host_manager._get_computes_for_cells(context, cells,
+                                                             [])
+        self.assertEqual({uuids.cell1: ['foo'],
+                          uuids.cell2: ['bar']},
+                         {cell: [cn.host for cn in computes]
+                          for cell, computes in cns.items()})
+        self.assertEqual(['bar', 'foo'], sorted(list(srv.keys())))
+
+    @mock.patch('nova.context.target_cell')
+    @mock.patch('nova.objects.CellMappingList.get_all')
+    @mock.patch('nova.objects.ComputeNodeList.get_all')
+    @mock.patch('nova.objects.ServiceList.get_by_binary')
+    def test_get_computes_for_cells_limit_to_cell(self, mock_sl,
+                                                  mock_cn, mock_cm,
+                                                  mock_target):
+        host_manager.LOG.debug = host_manager.LOG.error
+        cells = [
+            objects.CellMapping(uuid=uuids.cell1,
+                                database_connection='none://1',
+                                transport_url='none://'),
+            objects.CellMapping(uuid=uuids.cell2,
+                                database_connection='none://2',
+                                transport_url='none://'),
+        ]
+        mock_sl.return_value = [objects.ServiceList(host='foo')]
+        mock_cn.return_value = [objects.ComputeNode(host='foo')]
+        mock_cm.return_value = cells
+
+        @contextlib.contextmanager
+        def fake_set_target(context, cell):
+            yield mock.sentinel.cctxt
+
+        mock_target.side_effect = fake_set_target
+
+        context = nova_context.RequestContext('fake', 'fake')
+        cns, srv = self.host_manager._get_computes_for_cells(
+            context, cells=cells[1:])
+        self.assertEqual({uuids.cell2: ['foo']},
+                         {cell: [cn.host for cn in computes]
+                          for cell, computes in cns.items()})
+        self.assertEqual(['foo'], list(srv.keys()))
+
+        # NOTE(danms): We have two cells, but we should only have
+        # targeted one if we honored the only-cell destination requirement,
+        # and only looked up services and compute nodes in one
+        mock_target.assert_called_once_with(context, cells[1])
+        mock_cn.assert_called_once_with(mock.sentinel.cctxt)
+        mock_sl.assert_called_once_with(mock.sentinel.cctxt, 'nova-compute',
+                                        include_disabled=True)
+
 
 class HostManagerChangedNodesTestCase(test.NoDBTestCase):
     """Test case for HostManager class."""
@@ -865,10 +986,10 @@ class HostManagerChangedNodesTestCase(test.NoDBTestCase):
         super(HostManagerChangedNodesTestCase, self).setUp()
         self.host_manager = host_manager.HostManager()
         self.fake_hosts = [
-              host_manager.HostState('host1', 'node1'),
-              host_manager.HostState('host2', 'node2'),
-              host_manager.HostState('host3', 'node3'),
-              host_manager.HostState('host4', 'node4')
+              host_manager.HostState('host1', 'node1', uuids.cell),
+              host_manager.HostState('host2', 'node2', uuids.cell),
+              host_manager.HostState('host3', 'node3', uuids.cell),
+              host_manager.HostState('host4', 'node4', uuids.cell)
             ]
 
     @mock.patch('nova.objects.ServiceList.get_by_binary')
@@ -957,11 +1078,12 @@ class HostStateTestCase(test.NoDBTestCase):
 
         hyper_ver_int = versionutils.convert_version_to_int('6.0.0')
         compute = objects.ComputeNode(
+            uuid=uuids.cn1,
             stats=stats, memory_mb=1, free_disk_gb=0, local_gb=0,
             local_gb_used=0, free_ram_mb=0, vcpus=0, vcpus_used=0,
             disk_available_least=None,
-            updated_at=None, host_ip='127.0.0.1',
-            hypervisor_type='htype',
+            updated_at=datetime.datetime(2015, 11, 11, 11, 0, 0),
+            host_ip='127.0.0.1', hypervisor_type='htype',
             hypervisor_hostname='hostname', cpu_info='cpu_info',
             supported_hv_specs=[],
             hypervisor_version=hyper_ver_int, numa_topology=None,
@@ -969,7 +1091,7 @@ class HostStateTestCase(test.NoDBTestCase):
             cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5,
             disk_allocation_ratio=1.0)
 
-        host = host_manager.HostState("fakehost", "fakenode")
+        host = host_manager.HostState("fakehost", "fakenode", uuids.cell)
         host.update(compute=compute)
 
         sync_mock.assert_called_once_with(("fakehost", "fakenode"))
@@ -1000,11 +1122,12 @@ class HostStateTestCase(test.NoDBTestCase):
 
         hyper_ver_int = versionutils.convert_version_to_int('6.0.0')
         compute = objects.ComputeNode(
+            uuid=uuids.cn1,
             stats=stats, memory_mb=0, free_disk_gb=0, local_gb=0,
             local_gb_used=0, free_ram_mb=0, vcpus=0, vcpus_used=0,
             disk_available_least=None,
-            updated_at=None, host_ip='127.0.0.1',
-            hypervisor_type='htype',
+            updated_at=datetime.datetime(2015, 11, 11, 11, 0, 0),
+            host_ip='127.0.0.1', hypervisor_type='htype',
             hypervisor_hostname='hostname', cpu_info='cpu_info',
             supported_hv_specs=[],
             hypervisor_version=hyper_ver_int, numa_topology=None,
@@ -1012,7 +1135,7 @@ class HostStateTestCase(test.NoDBTestCase):
             cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5,
             disk_allocation_ratio=1.0)
 
-        host = host_manager.HostState("fakehost", "fakenode")
+        host = host_manager.HostState("fakehost", "fakenode", uuids.cell)
         host.update(compute=compute)
         self.assertEqual([], host.pci_stats.pools)
         self.assertEqual(hyper_ver_int, host.hypervisor_version)
@@ -1033,11 +1156,12 @@ class HostStateTestCase(test.NoDBTestCase):
 
         hyper_ver_int = versionutils.convert_version_to_int('6.0.0')
         compute = objects.ComputeNode(
+            uuid=uuids.cn1,
             stats=stats, memory_mb=0, free_disk_gb=0, local_gb=0,
             local_gb_used=0, free_ram_mb=0, vcpus=0, vcpus_used=0,
             disk_available_least=None,
-            updated_at=None, host_ip='127.0.0.1',
-            hypervisor_type='htype',
+            updated_at=datetime.datetime(2015, 11, 11, 11, 0, 0),
+            host_ip='127.0.0.1', hypervisor_type='htype',
             hypervisor_hostname='hostname', cpu_info='cpu_info',
             supported_hv_specs=[],
             hypervisor_version=hyper_ver_int, numa_topology=None,
@@ -1045,7 +1169,7 @@ class HostStateTestCase(test.NoDBTestCase):
             cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5,
             disk_allocation_ratio=1.0)
 
-        host = host_manager.HostState("fakehost", "fakenode")
+        host = host_manager.HostState("fakehost", "fakenode", uuids.cell)
         host.update(compute=compute)
 
         self.assertEqual(5, host.num_instances)
@@ -1080,7 +1204,7 @@ class HostStateTestCase(test.NoDBTestCase):
                                   vcpus=0),
             numa_topology=fake_numa_topology,
             pci_requests=objects.InstancePCIRequests(requests=[]))
-        host = host_manager.HostState("fakehost", "fakenode")
+        host = host_manager.HostState("fakehost", "fakenode", uuids.cell)
 
         self.assertIsNone(host.updated)
         host.consume_from_request(spec_obj)
@@ -1135,7 +1259,7 @@ class HostStateTestCase(test.NoDBTestCase):
                                   ephemeral_gb=0,
                                   memory_mb=512,
                                   vcpus=1))
-        host = host_manager.HostState("fakehost", "fakenode")
+        host = host_manager.HostState("fakehost", "fakenode", uuids.cell)
         self.assertIsNone(host.updated)
         host.pci_stats = pci_stats.PciDeviceStats(
                                       [objects.PciDevicePool(vendor_id='8086',
@@ -1168,7 +1292,7 @@ class HostStateTestCase(test.NoDBTestCase):
                                   ephemeral_gb=0,
                                   memory_mb=1024,
                                   vcpus=1))
-        host = host_manager.HostState("fakehost", "fakenode")
+        host = host_manager.HostState("fakehost", "fakenode", uuids.cell)
         self.assertIsNone(host.updated)
         fake_updated = mock.sentinel.fake_updated
         host.updated = fake_updated
@@ -1192,12 +1316,13 @@ class HostStateTestCase(test.NoDBTestCase):
         ]
         hyper_ver_int = versionutils.convert_version_to_int('6.0.0')
         compute = objects.ComputeNode(
+            uuid=uuids.cn1,
             metrics=jsonutils.dumps(metrics),
             memory_mb=0, free_disk_gb=0, local_gb=0,
             local_gb_used=0, free_ram_mb=0, vcpus=0, vcpus_used=0,
             disk_available_least=None,
-            updated_at=None, host_ip='127.0.0.1',
-            hypervisor_type='htype',
+            updated_at=datetime.datetime(2015, 11, 11, 11, 0, 0),
+            host_ip='127.0.0.1', hypervisor_type='htype',
             hypervisor_hostname='hostname', cpu_info='cpu_info',
             supported_hv_specs=[],
             hypervisor_version=hyper_ver_int,
@@ -1205,7 +1330,7 @@ class HostStateTestCase(test.NoDBTestCase):
             stats=None, pci_device_pools=None,
             cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5,
             disk_allocation_ratio=1.0)
-        host = host_manager.HostState("fakehost", "fakenode")
+        host = host_manager.HostState("fakehost", "fakenode", uuids.cell)
         host.update(compute=compute)
 
         self.assertEqual(len(host.metrics), 2)
@@ -1217,3 +1342,13 @@ class HostStateTestCase(test.NoDBTestCase):
         self.assertEqual({'0': 10, '1': 43},
                          host.metrics[1].numa_membw_values)
         self.assertIsInstance(host.numa_topology, six.string_types)
+
+    def test_stat_consumption_from_compute_node_not_ready(self):
+        compute = objects.ComputeNode(free_ram_mb=100,
+            uuid=uuids.compute_node_uuid)
+
+        host = host_manager.HostState("fakehost", "fakenode", uuids.cell)
+        host._update_from_compute_node(compute)
+        # Because compute record not ready, the update of free ram
+        # will not happen and the value will still be 0
+        self.assertEqual(0, host.free_ram_mb)

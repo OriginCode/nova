@@ -13,25 +13,24 @@ Evacuates a server from a failed host to a new host.
 
 Normal response codes: 200
 
-Error response codes: computeFault(400, 500), serviceUnavailable(503), badRequest(400),
-unauthorized(401), forbidden(403), badMethod(405), itemNotFound(404)
+Error response codes: badRequest(400), unauthorized(401), forbidden(403),
+itemNotFound(404), conflict(409)
 
 Request
 -------
 
 .. rest_parameters:: parameters.yaml
 
-
-  - server_id: server_id
+  - server_id: server_id_path
   - evacuate: evacuate
   - host: host
-  - adminPass: adminPass_evacuate_rebuild_request
+  - adminPass: adminPass_evacuate_request
   - onSharedStorage: on_shared_storage
   - force: force_evacuate
 
 |
 
-**Example Evacuate Server (evacuate Action):**
+**Example Evacuate Server (evacuate Action)**
 
 .. literalinclude:: ../../doc/api_samples/os-evacuate/server-evacuate-req.json
    :language: javascript
@@ -42,11 +41,12 @@ Response
 
 .. rest_parameters:: parameters.yaml
 
-  - adminPass: adminPass_evacuate_rebuild
+  - adminPass: adminPass_evacuate
 
-|
+.. note:: API does not return any Response for Microversion 2.14 or greater.
 
-**Example Evacuate Server (evacuate Action):**
+
+**Example Evacuate Server (evacuate Action)**
 
 .. literalinclude:: ../../doc/api_samples/os-evacuate/server-evacuate-resp.json
    :language: javascript

@@ -23,20 +23,41 @@ POLICY_ROOT = 'os_compute_api:os-attach-interfaces:%s'
 
 
 attach_interfaces_policies = [
-    policy.RuleDefault(
-        name=BASE_POLICY_NAME,
-        check_str=base.RULE_ADMIN_OR_OWNER),
-    policy.RuleDefault(
-        name=POLICY_ROOT % 'discoverable',
-        check_str=base.RULE_ANY),
-    policy.RuleDefault(
-        name=POLICY_ROOT % 'create',
-        check_str=base.RULE_ADMIN_OR_OWNER,
-        description='Controls who can attach an interface to an instance'),
-    policy.RuleDefault(
-        name=POLICY_ROOT % 'delete',
-        check_str=base.RULE_ADMIN_OR_OWNER,
-        description='Controls who can detach an interface from an instance'),
+    policy.DocumentedRuleDefault(
+        BASE_POLICY_NAME,
+        base.RULE_ADMIN_OR_OWNER,
+        "List port interfaces or show details of a port interface attached "
+        "to a server",
+        [
+            {
+                'method': 'GET',
+                'path': '/servers/{server_id}/os-interface'
+            },
+            {
+                'method': 'GET',
+                'path': '/servers/{server_id}/os-interface/{port_id}'
+            }
+        ]),
+    policy.DocumentedRuleDefault(
+        POLICY_ROOT % 'create',
+        base.RULE_ADMIN_OR_OWNER,
+        "Attach an interface to a server",
+        [
+            {
+                'method': 'POST',
+                'path': '/servers/{server_id}/os-interface'
+            }
+        ]),
+    policy.DocumentedRuleDefault(
+        POLICY_ROOT % 'delete',
+        base.RULE_ADMIN_OR_OWNER,
+        "Detach an interface from a server",
+        [
+            {
+                'method': 'DELETE',
+                'path': '/servers/{server_id}/os-interface/{port_id}'
+            }
+        ])
 ]
 
 

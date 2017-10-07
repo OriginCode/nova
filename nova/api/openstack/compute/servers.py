@@ -14,7 +14,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import re
+import copy
 
 from oslo_log import log as logging
 import oslo_messaging as messaging
@@ -22,14 +22,22 @@ from oslo_utils import strutils
 from oslo_utils import timeutils
 from oslo_utils import uuidutils
 import six
-import stevedore
 import webob
 from webob import exc
 
 from nova.api.openstack import api_version_request
 from nova.api.openstack import common
+from nova.api.openstack.compute import availability_zone
+from nova.api.openstack.compute import block_device_mapping
+from nova.api.openstack.compute import block_device_mapping_v1
+from nova.api.openstack.compute import config_drive
 from nova.api.openstack.compute import helpers
+from nova.api.openstack.compute import keypairs
+from nova.api.openstack.compute import multiple_create
+from nova.api.openstack.compute import scheduler_hints
 from nova.api.openstack.compute.schemas import servers as schema_servers
+from nova.api.openstack.compute import security_groups
+from nova.api.openstack.compute import user_data
 from nova.api.openstack.compute.views import servers as views_servers
 from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
@@ -41,13 +49,12 @@ import nova.conf
 from nova import context as nova_context
 from nova import exception
 from nova.i18n import _
-from nova.i18n import _LW
 from nova.image import glance
 from nova import objects
+from nova.objects import service as service_obj
 from nova.policies import servers as server_policies
 from nova import utils
 
-ALIAS = 'servers'
 TAG_SEARCH_FILTERS = ('tags', 'tags-any', 'not-tags', 'not-tags-any')
 DEVICE_TAGGING_MIN_COMPUTE_VERSION = 14
 
@@ -59,14 +66,11 @@ LOG = logging.getLogger(__name__)
 class ServersController(wsgi.Controller):
     """The Server API base controller class for the OpenStack API."""
 
-    EXTENSION_CREATE_NAMESPACE = 'nova.api.v21.extensions.server.create'
-
     _view_builder_class = views_servers.ViewBuilder
 
     schema_server_create = schema_servers.base_create
     schema_server_update = schema_servers.base_update
     schema_server_rebuild = schema_servers.base_rebuild
-    schema_server_resize = schema_servers.base_resize
 
     schema_server_create_v20 = schema_servers.base_create_v20
     schema_server_update_v20 = schema_servers.base_update_v20
@@ -78,6 +82,36 @@ class ServersController(wsgi.Controller):
 
     schema_server_create_v232 = schema_servers.base_create_v232
     schema_server_create_v237 = schema_servers.base_create_v237
+    schema_server_create_v242 = schema_servers.base_create_v242
+    schema_server_create_v252 = schema_servers.base_create_v252
+
+    # NOTE(alex_xu): Please do not add more items into this list. This list
+    # should be removed in the future.
+    schema_func_list = [
+        availability_zone.get_server_create_schema,
+        block_device_mapping.get_server_create_schema,
+        block_device_mapping_v1.get_server_create_schema,
+        config_drive.get_server_create_schema,
+        keypairs.get_server_create_schema,
+        multiple_create.get_server_create_schema,
+        scheduler_hints.get_server_create_schema,
+        security_groups.get_server_create_schema,
+        user_data.get_server_create_schema,
+    ]
+
+    # NOTE(alex_xu): Please do not add more items into this list. This list
+    # should be removed in the future.
+    server_create_func_list = [
+        availability_zone.server_create,
+        block_device_mapping.server_create,
+        block_device_mapping_v1.server_create,
+        config_drive.server_create,
+        keypairs.server_create,
+        multiple_create.server_create,
+        scheduler_hints.server_create,
+        security_groups.server_create,
+        user_data.server_create,
+    ]
 
     @staticmethod
     def _add_location(robj):
@@ -93,101 +127,26 @@ class ServersController(wsgi.Controller):
         return robj
 
     def __init__(self, **kwargs):
-        def _check_load_extension(required_function):
+        # TODO(alex_xu): Remove this line when 'extension_info' won't be passed
+        # in when creating controller.
+        kwargs.pop('extension_info', None)
 
-            def should_load_extension(ext):
-                # Check whitelist is either empty or if not then the extension
-                # is in the whitelist
-                whitelist = CONF.osapi_v21.extensions_whitelist
-                blacklist = CONF.osapi_v21.extensions_blacklist
-                if not whitelist:
-                    # if there is no whitelist, we accept everything,
-                    # so we only care about the blacklist.
-                    if ext.obj.alias in blacklist:
-                        return False
-                    else:
-                        return True
-                else:
-                    if ext.obj.alias in whitelist:
-                        if ext.obj.alias in blacklist:
-                            LOG.warning(
-                                _LW(
-                                    "Extension %s is both in whitelist and "
-                                    "blacklist, blacklisting takes precedence"
-                                ),
-                                ext.obj.alias)
-                            return False
-                        else:
-                            return True
-                    else:
-                        return False
-
-            def check_load_extension(ext):
-                if isinstance(ext.obj, extensions.V21APIExtensionBase):
-                    # Filter out for the existence of the required
-                    # function here rather than on every request. We
-                    # don't have a new abstract base class to reduce
-                    # duplication in the extensions as they may want
-                    # to implement multiple server (and other) entry
-                    # points if hasattr(ext.obj, 'server_create'):
-                    if hasattr(ext.obj, required_function):
-                        LOG.debug('extension %(ext_alias)s detected by '
-                                  'servers extension for function %(func)s',
-                                  {'ext_alias': ext.obj.alias,
-                                   'func': required_function})
-                        return should_load_extension(ext)
-                    else:
-                        LOG.debug(
-                            'extension %(ext_alias)s is missing %(func)s',
-                            {'ext_alias': ext.obj.alias,
-                            'func': required_function})
-                        return False
-                else:
-                    return False
-            return check_load_extension
-
-        self.extension_info = kwargs.pop('extension_info')
         super(ServersController, self).__init__(**kwargs)
         self.compute_api = compute.API()
 
-        # Look for implementation of extension point of server creation
-        self.create_extension_manager = \
-          stevedore.enabled.EnabledExtensionManager(
-              namespace=self.EXTENSION_CREATE_NAMESPACE,
-              check_func=_check_load_extension('server_create'),
-              invoke_on_load=True,
-              invoke_kwds={"extension_info": self.extension_info},
-              propagate_map_exceptions=True)
-        if not list(self.create_extension_manager):
-            LOG.debug("Did not find any server create extensions")
-
-        # Look for API schema of server create extension
-        self.create_schema_manager = \
-            stevedore.enabled.EnabledExtensionManager(
-                namespace=self.EXTENSION_CREATE_NAMESPACE,
-                check_func=_check_load_extension('get_server_create_schema'),
-                invoke_on_load=True,
-                invoke_kwds={"extension_info": self.extension_info},
-                propagate_map_exceptions=True)
-        if list(self.create_schema_manager):
-            self.create_schema_manager.map(self._create_extension_schema,
-                                           self.schema_server_create_v237,
-                                           '2.37')
-            self.create_schema_manager.map(self._create_extension_schema,
-                                           self.schema_server_create_v232,
-                                          '2.32')
-            self.create_schema_manager.map(self._create_extension_schema,
-                                           self.schema_server_create_v219,
-                                          '2.19')
-            self.create_schema_manager.map(self._create_extension_schema,
-                                           self.schema_server_create, '2.1')
-            self.create_schema_manager.map(self._create_extension_schema,
-                                           self.schema_server_create_v20,
-                                           '2.0')
-        else:
-            LOG.debug("Did not find any server create schemas")
+        # TODO(alex_xu): The final goal is that merging all of
+        # extended json-schema into server main json-schema.
+        self._create_schema(self.schema_server_create_v252, '2.52')
+        self._create_schema(self.schema_server_create_v242, '2.42')
+        self._create_schema(self.schema_server_create_v237, '2.37')
+        self._create_schema(self.schema_server_create_v232, '2.32')
+        self._create_schema(self.schema_server_create_v219, '2.19')
+        self._create_schema(self.schema_server_create, '2.1')
+        self._create_schema(self.schema_server_create_v20, '2.0')
 
     @extensions.expected_errors((400, 403))
+    @validation.query_schema(schema_servers.query_params_v226, '2.26')
+    @validation.query_schema(schema_servers.query_params_v21, '2.1', '2.25')
     def index(self, req):
         """Returns a list of server names and ids for a given user."""
         context = req.environ['nova.context']
@@ -199,6 +158,8 @@ class ServersController(wsgi.Controller):
         return servers
 
     @extensions.expected_errors((400, 403))
+    @validation.query_schema(schema_servers.query_params_v226, '2.26')
+    @validation.query_schema(schema_servers.query_params_v21, '2.1', '2.25')
     def detail(self, req):
         """Returns a list of server details for a given user."""
         context = req.environ['nova.context']
@@ -218,6 +179,13 @@ class ServersController(wsgi.Controller):
         context = req.environ['nova.context']
         remove_invalid_options(context, search_opts,
                 self._get_server_search_options(req))
+
+        for search_opt in search_opts:
+            if (search_opt in
+                schema_servers.JOINED_TABLE_QUERY_PARAMS_SERVERS.keys() or
+                    search_opt.startswith('_')):
+                msg = _("Invalid filter field: %s.") % search_opt
+                raise exc.HTTPBadRequest(explanation=msg)
 
         # Verify search by 'status' contains a valid status.
         # Convert it to filter by vm_state or task_state for compute_api.
@@ -242,12 +210,8 @@ class ServersController(wsgi.Controller):
                 search_opts['task_state'] = task_state
 
         if 'changes-since' in search_opts:
-            try:
-                parsed = timeutils.parse_isotime(search_opts['changes-since'])
-            except ValueError:
-                msg = _('Invalid changes-since value')
-                raise exc.HTTPBadRequest(explanation=msg)
-            search_opts['changes-since'] = parsed
+            search_opts['changes-since'] = timeutils.parse_isotime(
+                search_opts['changes-since'])
 
         # By default, compute's get_all() will return deleted instances.
         # If an admin hasn't specified a 'deleted' search option, we need
@@ -272,14 +236,6 @@ class ServersController(wsgi.Controller):
             else:
                 msg = _("Only administrators may list deleted instances")
                 raise exc.HTTPForbidden(explanation=msg)
-
-        # Verify the value of the 'name' option is a correct regex.
-        if 'name' in search_opts:
-            try:
-                re.compile(search_opts['name'])
-            except re.error:
-                msg = _("The regex for server name is incorrect")
-                raise exc.HTTPBadRequest(explanation=msg)
 
         if api_version_request.is_supported(req, min_version='2.26'):
             for tag_filter in TAG_SEARCH_FILTERS:
@@ -321,6 +277,11 @@ class ServersController(wsgi.Controller):
                 context.can(server_policies.SERVERS % 'index:get_all_tenants')
             elevated = context.elevated()
         else:
+            # As explained in lp:#1185290, if `all_tenants` is not passed
+            # we must ignore the `tenant_id` search option. As explained
+            # in a above code comment, any change to this behavior would
+            # require a microversion bump.
+            search_opts.pop('tenant_id', None)
             if context.project_id:
                 search_opts['project_id'] = context.project_id
             else:
@@ -328,8 +289,11 @@ class ServersController(wsgi.Controller):
 
         limit, marker = common.get_limit_and_marker(req)
         sort_keys, sort_dirs = common.get_sort_params(req.params)
+        sort_keys, sort_dirs = remove_invalid_sort_keys(
+            context, sort_keys, sort_dirs,
+            schema_servers.SERVER_LIST_IGNORE_SORT_KEY, ('host', 'node'))
 
-        expected_attrs = ['pci_devices']
+        expected_attrs = []
         if is_detail:
             expected_attrs.append('services')
             if api_version_request.is_supported(req, '2.26'):
@@ -371,7 +335,7 @@ class ServersController(wsgi.Controller):
         :param is_detail: True if you plan on showing the details of the
             instance in the response, False otherwise.
         """
-        expected_attrs = ['flavor', 'pci_devices', 'numa_topology']
+        expected_attrs = ['flavor', 'numa_topology']
         if is_detail:
             if api_version_request.is_supported(req, '2.26'):
                 expected_attrs.append("tags")
@@ -412,36 +376,6 @@ class ServersController(wsgi.Controller):
             expl = _("Duplicate networks (%s) are not allowed") % net_id
             raise exc.HTTPBadRequest(explanation=expl)
 
-    @staticmethod
-    def _validate_auto_or_none_network_request(requested_networks):
-        """Validates a set of network requests with 'auto' or 'none' in it.
-
-        :param requested_networks: nova.objects.NetworkRequestList
-        :returns: nova.objects.NetworkRequestList - the same list as the input
-            if validation is OK, None if the request can't be honored due to
-            the minimum nova-compute service version in the deployment is not
-            new enough to support auto-allocated networking.
-        """
-
-        # Check the minimum nova-compute service version since Mitaka
-        # computes can't handle network IDs that aren't UUIDs.
-        # TODO(mriedem): Remove this check in Ocata.
-        min_compute_version = objects.Service.get_minimum_version(
-            nova_context.get_admin_context(), 'nova-compute')
-
-        # NOTE(mriedem): If the minimum compute version is not new enough
-        # for supporting auto-allocation, change the network request to
-        # None so it works the same as it did in Mitaka when you don't
-        # request anything.
-        if min_compute_version < 12:
-            LOG.debug("User requested network '%s' but the minimum "
-                      "nova-compute version in the deployment is not new "
-                      "enough to support that request, so treating it as "
-                      "though a specific network was not requested.",
-                      requested_networks[0].network_id)
-            return None
-        return requested_networks
-
     def _get_requested_networks(self, requested_networks,
                                 supports_device_tagging=False):
         """Create a list of requested networks from the networks attribute."""
@@ -450,12 +384,9 @@ class ServersController(wsgi.Controller):
         # list or a string enum with value 'auto' or 'none'. The auto/none
         # values are verified via jsonschema so we don't check them again here.
         if isinstance(requested_networks, six.string_types):
-            req_nets = objects.NetworkRequestList(
+            return objects.NetworkRequestList(
                 objects=[objects.NetworkRequest(
                     network_id=requested_networks)])
-            # Check the minimum nova-compute service version for supporting
-            # these special values.
-            return self._validate_auto_or_none_network_request(req_nets)
 
         networks = []
         network_uuids = []
@@ -516,40 +447,31 @@ class ServersController(wsgi.Controller):
     @validation.schema(schema_server_create, '2.1', '2.18')
     @validation.schema(schema_server_create_v219, '2.19', '2.31')
     @validation.schema(schema_server_create_v232, '2.32', '2.36')
-    @validation.schema(schema_server_create_v237, '2.37')
+    @validation.schema(schema_server_create_v237, '2.37', '2.41')
+    @validation.schema(schema_server_create_v242, '2.42', '2.51')
+    @validation.schema(schema_server_create_v252, '2.52')
     def create(self, req, body):
         """Creates a new server for a given user."""
-
         context = req.environ['nova.context']
         server_dict = body['server']
         password = self._get_server_admin_password(server_dict)
         name = common.normalize_name(server_dict['name'])
-
+        description = name
         if api_version_request.is_supported(req, min_version='2.19'):
-            if 'description' in server_dict:
-                # This is allowed to be None
-                description = server_dict['description']
-            else:
-                # No default description
-                description = None
-        else:
-            description = name
+            description = server_dict.get('description')
 
         # Arguments to be passed to instance create function
         create_kwargs = {}
 
-        # Query extensions which want to manipulate the keyword
-        # arguments.
-        # NOTE(cyeoh): This is the hook that extensions use
-        # to replace the extension specific code below.
-        # When the extensions are ported this will also result
-        # in some convenience function from this class being
-        # moved to the extension
-        if list(self.create_extension_manager):
-            self.create_extension_manager.map(self._create_extension_point,
-                                              server_dict, create_kwargs, body)
+        # TODO(alex_xu): This is for back-compatible with stevedore
+        # extension interface. But the final goal is that merging
+        # all of extended code into ServersController.
+        self._create_by_func_list(server_dict, create_kwargs, body)
 
         availability_zone = create_kwargs.pop("availability_zone", None)
+
+        if api_version_request.is_supported(req, min_version='2.52'):
+            create_kwargs['tags'] = server_dict.get('tags')
 
         helpers.translate_attributes(helpers.CREATE,
                                      server_dict, create_kwargs)
@@ -571,8 +493,8 @@ class ServersController(wsgi.Controller):
         if host or node:
             context.can(server_policies.SERVERS % 'create:forced_host', {})
 
-        min_compute_version = objects.Service.get_minimum_version(
-            nova_context.get_admin_context(), 'nova-compute')
+        min_compute_version = service_obj.get_minimum_version_all_cells(
+            nova_context.get_admin_context(), ['nova-compute'])
         supports_device_tagging = (min_compute_version >=
                                    DEVICE_TAGGING_MIN_COMPUTE_VERSION)
 
@@ -589,7 +511,7 @@ class ServersController(wsgi.Controller):
 
         image_uuid = self._image_from_req_data(server_dict, create_kwargs)
 
-        # NOTE(cyeoh): Although an extension can set
+        # NOTE(cyeoh): Although upper layer can set the value of
         # return_reservation_id in order to request that a reservation
         # id be returned to the client instead of the newly created
         # instance information we do not want to pass this parameter
@@ -599,16 +521,16 @@ class ServersController(wsgi.Controller):
         return_reservation_id = create_kwargs.pop('return_reservation_id',
                                                   False)
 
-        requested_networks = None
-        if ('os-networks' in self.extension_info.get_extensions()
-                or utils.is_neutron()):
-            requested_networks = server_dict.get('networks')
+        requested_networks = server_dict.get('networks', None)
 
         if requested_networks is not None:
             requested_networks = self._get_requested_networks(
                 requested_networks, supports_device_tagging)
 
-        if requested_networks and len(requested_networks):
+        # Skip policy check for 'create:attach_network' if there is no
+        # network allocation request.
+        if requested_networks and len(requested_networks) and \
+                not requested_networks.no_allocate:
             context.can(server_policies.SERVERS % 'create:attach_network',
                         target)
 
@@ -651,8 +573,10 @@ class ServersController(wsgi.Controller):
         except UnicodeDecodeError as error:
             msg = "UnicodeError: %s" % error
             raise exc.HTTPBadRequest(explanation=msg)
-        except (exception.ImageNotActive,
+        except (exception.CPUThreadPolicyConfigurationInvalid,
+                exception.ImageNotActive,
                 exception.ImageBadRequest,
+                exception.ImageNotAuthorized,
                 exception.FixedIpNotFoundForAddress,
                 exception.FlavorNotFound,
                 exception.FlavorDiskTooSmall,
@@ -670,7 +594,6 @@ class ServersController(wsgi.Controller):
                 exception.PortRequiresFixedIP,
                 exception.NetworkRequiresSubnet,
                 exception.NetworkNotFound,
-                exception.NetworkDuplicated,
                 exception.InvalidBDM,
                 exception.InvalidBDMSnapshot,
                 exception.InvalidBDMVolume,
@@ -682,6 +605,8 @@ class ServersController(wsgi.Controller):
                 exception.InvalidBDMFormat,
                 exception.InvalidBDMSwapSize,
                 exception.AutoDiskConfigDisabledByImage,
+                exception.ImageCPUPinningForbidden,
+                exception.ImageCPUThreadPolicyForbidden,
                 exception.ImageNUMATopologyIncomplete,
                 exception.ImageNUMATopologyForbidden,
                 exception.ImageNUMATopologyAsymmetric,
@@ -691,7 +616,11 @@ class ServersController(wsgi.Controller):
                 exception.ImageNUMATopologyMemoryOutOfRange,
                 exception.InvalidNUMANodesNumber,
                 exception.InstanceGroupNotFound,
+                exception.MemoryPageSizeInvalid,
+                exception.MemoryPageSizeForbidden,
                 exception.PciRequestAliasNotDefined,
+                exception.RealtimeConfigurationInvalid,
+                exception.RealtimeMaskNotFoundOrInvalid,
                 exception.SnapshotNotFound,
                 exception.UnableToAutoAllocateNetwork) as error:
             raise exc.HTTPBadRequest(explanation=error.format_message())
@@ -708,7 +637,7 @@ class ServersController(wsgi.Controller):
         req.cache_db_instances(instances)
         server = self._view_builder.create(req, instances[0])
 
-        if CONF.enable_instance_password:
+        if CONF.api.enable_instance_password:
             server['server']['adminPass'] = password
 
         robj = wsgi.ResponseObject(server)
@@ -718,38 +647,26 @@ class ServersController(wsgi.Controller):
     # NOTE(gmann): Parameter 'req_body' is placed to handle scheduler_hint
     # extension for V2.1. No other extension supposed to use this as
     # it will be removed soon.
-    def _create_extension_point(self, ext, server_dict,
-                                create_kwargs, req_body):
-        handler = ext.obj
-        LOG.debug("Running _create_extension_point for %s", ext.obj)
+    def _create_by_func_list(self, server_dict,
+                             create_kwargs, req_body):
+        for func in self.server_create_func_list:
+            func(server_dict, create_kwargs, req_body)
 
-        handler.server_create(server_dict, create_kwargs, req_body)
+    def _create_schema(self, create_schema, version):
+        for schema_func in self.schema_func_list:
+            self._create_schema_by_func(create_schema, version, schema_func)
 
-    def _rebuild_extension_point(self, ext, rebuild_dict, rebuild_kwargs):
-        handler = ext.obj
-        LOG.debug("Running _rebuild_extension_point for %s", ext.obj)
+    def _create_schema_by_func(self, create_schema, version, schema_func):
+        schema = schema_func(version)
 
-        handler.server_rebuild(rebuild_dict, rebuild_kwargs)
-
-    def _create_extension_schema(self, ext, create_schema, version):
-        handler = ext.obj
-        LOG.debug("Running _create_extension_schema for %s", ext.obj)
-
-        schema = handler.get_server_create_schema(version)
-        if ext.obj.name == 'SchedulerHints':
+        if (schema_func.__module__ ==
+                'nova.api.openstack.compute.scheduler_hints'):
             # NOTE(oomichi): The request parameter position of scheduler-hint
             # extension is different from the other extensions, so here handles
             # the difference.
             create_schema['properties'].update(schema)
         else:
             create_schema['properties']['server']['properties'].update(schema)
-
-    def _rebuild_extension_schema(self, ext, rebuild_schema, version):
-        handler = ext.obj
-        LOG.debug("Running _rebuild_extension_schema for %s", ext.obj)
-
-        schema = handler.get_server_rebuild_schema(version)
-        rebuild_schema['properties']['rebuild']['properties'].update(schema)
 
     def _delete(self, context, req, instance_uuid):
         instance = self._get_server(context, req, instance_uuid)
@@ -947,7 +864,7 @@ class ServersController(wsgi.Controller):
     @wsgi.response(202)
     @extensions.expected_errors((400, 401, 403, 404, 409))
     @wsgi.action('resize')
-    @validation.schema(schema_server_resize)
+    @validation.schema(schema_servers.resize)
     def _action_resize(self, req, id, body):
         """Resizes a given instance to the flavor size requested."""
         resize_dict = body['resize']
@@ -1032,7 +949,7 @@ class ServersController(wsgi.Controller):
 
         # Add on the admin_password attribute since the view doesn't do it
         # unless instance passwords are disabled
-        if CONF.enable_instance_password:
+        if CONF.api.enable_instance_password:
             view['server']['adminPass'] = password
 
         robj = wsgi.ResponseObject(view)
@@ -1053,7 +970,11 @@ class ServersController(wsgi.Controller):
         image_name = common.normalize_name(entity["name"])
         metadata = entity.get('metadata', {})
 
-        common.check_img_metadata_properties_quota(context, metadata)
+        # Starting from microversion 2.39 we don't check quotas on createImage
+        if api_version_request.is_supported(
+                req, max_version=
+                api_version_request.MAX_IMAGE_META_PROXY_API_VERSION):
+            common.check_img_metadata_properties_quota(context, metadata)
 
         instance = self._get_server(context, req, id)
 
@@ -1083,6 +1004,13 @@ class ServersController(wsgi.Controller):
                         'createImage', id)
         except exception.Invalid as err:
             raise exc.HTTPBadRequest(explanation=err.format_message())
+        except exception.OverQuota as e:
+            raise exc.HTTPForbidden(explanation=e.format_message())
+
+        # Starting with microversion 2.45 we return a response body containing
+        # the snapshot image id without the Location header.
+        if api_version_request.is_supported(req, '2.45'):
+            return {'image_id': image['id']}
 
         # build location of newly-created image entity
         image_id = str(image['id'])
@@ -1113,9 +1041,16 @@ class ServersController(wsgi.Controller):
     def _get_instance(self, context, instance_uuid):
         try:
             attrs = ['system_metadata', 'metadata']
-            return objects.Instance.get_by_uuid(context, instance_uuid,
-                                                expected_attrs=attrs)
-        except exception.InstanceNotFound as e:
+            if not CONF.cells.enable:
+                # NOTE(danms): We can't target a cell database if we're
+                # in cellsv1 otherwise we'll short-circuit the replication.
+                mapping = objects.InstanceMapping.get_by_instance_uuid(
+                    context, instance_uuid)
+                nova_context.set_target_cell(context, mapping.cell_mapping)
+            return objects.Instance.get_by_uuid(
+                context, instance_uuid, expected_attrs=attrs)
+        except (exception.InstanceNotFound,
+                exception.InstanceMappingNotFound) as e:
             raise webob.exc.HTTPNotFound(explanation=e.format_message())
 
     @wsgi.response(202)
@@ -1126,7 +1061,6 @@ class ServersController(wsgi.Controller):
         context = req.environ['nova.context']
         instance = self._get_instance(context, id)
         context.can(server_policies.SERVERS % 'start', instance)
-        LOG.debug('start instance', instance=instance)
         try:
             self.compute_api.start(context, instance)
         except (exception.InstanceNotReady, exception.InstanceIsLocked) as e:
@@ -1147,7 +1081,6 @@ class ServersController(wsgi.Controller):
         context.can(server_policies.SERVERS % 'stop',
                     target={'user_id': instance.user_id,
                             'project_id': instance.project_id})
-        LOG.debug('stop instance', instance=instance)
         try:
             self.compute_api.stop(context, instance)
         except (exception.InstanceNotReady, exception.InstanceIsLocked) as e:
@@ -1198,24 +1131,24 @@ def remove_invalid_options(context, search_options, allowed_search_options):
             search_options.pop(opt, None)
 
 
-class Servers(extensions.V21APIExtensionBase):
-    """Servers."""
+def remove_invalid_sort_keys(context, sort_keys, sort_dirs,
+                             blacklist, admin_only_fields):
+    key_list = copy.deepcopy(sort_keys)
+    for key in key_list:
+        # NOTE(Kevin Zheng): We are intend to remove the sort_key
+        # in the blacklist and its' corresponding sort_dir, since
+        # the sort_key and sort_dir are not strict to be provide
+        # in pairs in the current implement, sort_dirs could be
+        # less than sort_keys, in order to avoid IndexError, we
+        # only pop sort_dir when number of sort_dirs is no less
+        # than the sort_key index.
+        if key in blacklist:
+            if len(sort_dirs) > sort_keys.index(key):
+                sort_dirs.pop(sort_keys.index(key))
+            sort_keys.pop(sort_keys.index(key))
+        elif key in admin_only_fields and not context.is_admin:
+            msg = _("Only administrators can sort servers "
+                    "by %s") % key
+            raise exc.HTTPForbidden(explanation=msg)
 
-    name = "Servers"
-    alias = ALIAS
-    version = 1
-
-    def get_resources(self):
-        member_actions = {'action': 'POST'}
-        collection_actions = {'detail': 'GET'}
-        resources = [
-            extensions.ResourceExtension(
-                ALIAS,
-                ServersController(extension_info=self.extension_info),
-                member_name='server', collection_actions=collection_actions,
-                member_actions=member_actions)]
-
-        return resources
-
-    def get_controller_extensions(self):
-        return []
+    return sort_keys, sort_dirs

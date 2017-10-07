@@ -26,7 +26,7 @@ from oslo_utils import uuidutils
 
 import nova.conf
 from nova import exception
-from nova.i18n import _, _LI
+from nova.i18n import _
 from nova import utils
 from nova.virt.hyperv import pathutils
 from nova.virt import imagecache
@@ -35,17 +35,6 @@ from nova.virt import images
 LOG = logging.getLogger(__name__)
 
 CONF = nova.conf.CONF
-
-
-def synchronize_with_path(f):
-    def wrapper(self, image_path):
-
-        @utils.synchronized(image_path)
-        def inner():
-            return f(self, image_path)
-        return inner()
-
-    return wrapper
 
 
 class ImageCache(imagecache.ImageCacheManager):
@@ -79,7 +68,11 @@ class ImageCache(imagecache.ImageCacheManager):
                                             root_vhd_size_gb,
                                             path_parts[1])
 
-            @utils.synchronized(resized_vhd_path)
+            lock_path = os.path.dirname(resized_vhd_path)
+            lock_name = "%s-cache.lock" % os.path.basename(resized_vhd_path)
+
+            @utils.synchronized(name=lock_name, external=True,
+                                lock_path=lock_path)
             def copy_and_resize_vhd():
                 if not self._pathutils.exists(resized_vhd_path):
                     try:
@@ -109,7 +102,10 @@ class ImageCache(imagecache.ImageCacheManager):
         base_vhd_dir = self._pathutils.get_base_vhd_dir()
         base_vhd_path = os.path.join(base_vhd_dir, image_id)
 
-        @utils.synchronized(base_vhd_path)
+        lock_name = "%s-cache.lock" % image_id
+
+        @utils.synchronized(name=lock_name, external=True,
+                            lock_path=base_vhd_dir)
         def fetch_image_if_not_existing():
             vhd_path = None
             for format_ext in ['vhd', 'vhdx']:
@@ -205,12 +201,19 @@ class ImageCache(imagecache.ImageCacheManager):
         for img in backing_files:
             age_seconds = self._pathutils.get_age_of_file(img)
             if age_seconds > max_age_seconds:
-                LOG.info(_LI("Removing old, unused image: %s"), img)
-                self.remove_old_image(img)
+                LOG.info("Removing old, unused image: %s", img)
+                self._remove_old_image(img)
 
-    @synchronize_with_path
-    def remove_old_image(self, img):
-        self._pathutils.remove(img)
+    def _remove_old_image(self, image_path):
+        lock_path = os.path.dirname(image_path)
+        lock_name = "%s-cache.lock" % os.path.basename(image_path)
+
+        @utils.synchronized(name=lock_name, external=True,
+                            lock_path=lock_path)
+        def _image_synchronized_remove():
+            self._pathutils.remove(image_path)
+
+        _image_synchronized_remove()
 
     def update(self, context, all_instances):
         base_vhd_dir = self._pathutils.get_base_vhd_dir()

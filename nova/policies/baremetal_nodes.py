@@ -19,16 +19,26 @@ from nova.policies import base
 
 
 BASE_POLICY_NAME = 'os_compute_api:os-baremetal-nodes'
-POLICY_ROOT = 'os_compute_api:os-baremetal-nodes:%s'
 
 
 baremetal_nodes_policies = [
-    policy.RuleDefault(
-        name=POLICY_ROOT % 'discoverable',
-        check_str=base.RULE_ANY),
-    policy.RuleDefault(
-        name=BASE_POLICY_NAME,
-        check_str=base.RULE_ADMIN_API),
+    policy.DocumentedRuleDefault(
+        BASE_POLICY_NAME,
+        base.RULE_ADMIN_API,
+        """List and show details of bare metal nodes.
+
+These APIs are proxy calls to the Ironic service and are deprecated.
+""",
+        [
+            {
+                'method': 'GET',
+                'path': '/os-baremetal-nodes'
+            },
+            {
+                'method': 'GET',
+                'path': '/os-baremetal-nodes/{node_id}'
+            }
+        ]),
 ]
 
 

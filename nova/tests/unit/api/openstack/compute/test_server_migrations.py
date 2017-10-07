@@ -45,10 +45,10 @@ fake_migrations = [
         'hidden': False,
         'memory_total': 123456,
         'memory_processed': 12345,
-        'memory_remaining': 120000,
+        'memory_remaining': 111111,
         'disk_total': 234567,
         'disk_processed': 23456,
-        'disk_remaining': 230000,
+        'disk_remaining': 211111,
         'created_at': datetime.datetime(2012, 10, 29, 13, 42, 2),
         'updated_at': datetime.datetime(2012, 10, 29, 13, 42, 2),
         'deleted_at': None,
@@ -69,10 +69,10 @@ fake_migrations = [
         'hidden': False,
         'memory_total': 456789,
         'memory_processed': 56789,
-        'memory_remaining': 45000,
+        'memory_remaining': 400000,
         'disk_total': 96789,
         'disk_processed': 6789,
-        'disk_remaining': 96000,
+        'disk_remaining': 90000,
         'created_at': datetime.datetime(2013, 10, 22, 13, 42, 2),
         'updated_at': datetime.datetime(2013, 10, 22, 13, 42, 2),
         'deleted_at': None,
@@ -342,9 +342,6 @@ class ServerMigrationsPolicyEnforcementV223(
 
     wsgi_api_version = '2.23'
 
-    def setUp(self):
-        super(ServerMigrationsPolicyEnforcementV223, self).setUp()
-
     def test_migration_index_failed(self):
         rule_name = "os_compute_api:servers:migrations:index"
         self.policy.set_rules({rule_name: "project:non_fake"})
@@ -368,9 +365,6 @@ class ServerMigrationsPolicyEnforcementV224(
                 ServerMigrationsPolicyEnforcementV223):
 
     wsgi_api_version = '2.24'
-
-    def setUp(self):
-        super(ServerMigrationsPolicyEnforcementV224, self).setUp()
 
     def test_migrate_delete_failed(self):
         rule_name = "os_compute_api:servers:migrations:delete"

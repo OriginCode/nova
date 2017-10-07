@@ -27,23 +27,23 @@ from nova.virt.libvirt.volume import hgst
 
 class LibvirtHGSTVolumeDriverTestCase(test_volume.LibvirtVolumeBaseTestCase):
     def test_libvirt_hgst_driver_type(self):
-        drvr = hgst.LibvirtHGSTVolumeDriver(self.fake_conn)
+        drvr = hgst.LibvirtHGSTVolumeDriver(self.fake_host)
         self.assertIsInstance(drvr.connector, connector.HGSTConnector)
 
     def test_libvirt_hgst_driver_connect(self):
         def brick_conn_vol(data):
             return {'path': '/dev/space01'}
 
-        drvr = hgst.LibvirtHGSTVolumeDriver(self.fake_conn)
+        drvr = hgst.LibvirtHGSTVolumeDriver(self.fake_host)
         drvr.connector.connect_volume = brick_conn_vol
         di = {'path': '/dev/space01', 'name': 'space01'}
         ci = {'data': di}
-        drvr.connect_volume(ci, None)
+        drvr.connect_volume(ci, None, mock.sentinel.instance)
         self.assertEqual('/dev/space01',
                          ci['data']['device_path'])
 
     def test_libvirt_hgst_driver_get_config(self):
-        drvr = hgst.LibvirtHGSTVolumeDriver(self.fake_conn)
+        drvr = hgst.LibvirtHGSTVolumeDriver(self.fake_host)
         di = {'path': '/dev/space01', 'name': 'space01', 'type': 'raw',
               'dev': 'vda1', 'bus': 'pci0', 'device_path': '/dev/space01'}
         ci = {'data': di}
@@ -52,11 +52,11 @@ class LibvirtHGSTVolumeDriverTestCase(test_volume.LibvirtVolumeBaseTestCase):
         self.assertEqual('/dev/space01', conf.source_path)
 
     def test_libvirt_hgst_driver_disconnect(self):
-        drvr = hgst.LibvirtHGSTVolumeDriver(self.fake_conn)
+        drvr = hgst.LibvirtHGSTVolumeDriver(self.fake_host)
         drvr.connector.disconnect_volume = mock.MagicMock()
         di = {'path': '/dev/space01', 'name': 'space01', 'type': 'raw',
               'dev': 'vda1', 'bus': 'pci0', 'device_path': '/dev/space01'}
         ci = {'data': di}
-        drvr.disconnect_volume(ci, di)
+        drvr.disconnect_volume(ci, di, mock.sentinel.instance)
         drvr.connector.disconnect_volume.assert_called_once_with(
                        di, None)

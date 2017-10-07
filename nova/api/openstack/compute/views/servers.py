@@ -23,8 +23,11 @@ from nova.api.openstack import common
 from nova.api.openstack.compute.views import addresses as views_addresses
 from nova.api.openstack.compute.views import flavors as views_flavors
 from nova.api.openstack.compute.views import images as views_images
-from nova.i18n import _LW
+from nova import context as nova_context
+from nova import exception
+from nova import objects
 from nova.objects import base as obj_base
+from nova.policies import flavor_extra_specs as fes_policies
 from nova import utils
 
 
@@ -57,7 +60,7 @@ class ViewBuilder(common.ViewBuilder):
     def __init__(self):
         """Initialize view builder."""
         super(ViewBuilder, self).__init__()
-        self._address_builder = views_addresses.ViewBuilderV21()
+        self._address_builder = views_addresses.ViewBuilder()
         self._image_builder = views_images.ViewBuilder()
         self._flavor_builder = views_flavors.ViewBuilder()
 
@@ -242,12 +245,30 @@ class ViewBuilder(common.ViewBuilder):
         else:
             return ""
 
+    def _get_flavor_dict(self, request, instance_type):
+        flavordict = {
+            "vcpus": instance_type.vcpus,
+            "ram": instance_type.memory_mb,
+            "disk": instance_type.root_gb,
+            "ephemeral": instance_type.ephemeral_gb,
+            "swap": instance_type.swap,
+            "original_name": instance_type.name
+        }
+        context = request.environ['nova.context']
+        if context.can(fes_policies.POLICY_ROOT % 'index', fatal=False):
+            flavordict['extra_specs'] = instance_type.extra_specs
+        return flavordict
+
     def _get_flavor(self, request, instance):
         instance_type = instance.get_flavor()
         if not instance_type:
-            LOG.warning(_LW("Instance has had its instance_type removed "
-                            "from the DB"), instance=instance)
+            LOG.warning("Instance has had its instance_type removed "
+                        "from the DB", instance=instance)
             return {}
+
+        if api_version_request.is_supported(request, min_version="2.47"):
+            return self._get_flavor_dict(request, instance_type)
+
         flavor_id = instance_type["flavorid"]
         flavor_bookmark = self._flavor_builder._get_bookmark_link(request,
                                                                   flavor_id,
@@ -260,9 +281,26 @@ class ViewBuilder(common.ViewBuilder):
             }],
         }
 
+    def _load_fault(self, request, instance):
+        try:
+            mapping = objects.InstanceMapping.get_by_instance_uuid(
+                request.environ['nova.context'], instance.uuid)
+            if mapping.cell_mapping is not None:
+                with nova_context.target_cell(instance._context,
+                                              mapping.cell_mapping):
+                    return instance.fault
+        except exception.InstanceMappingNotFound:
+            pass
+
+        # NOTE(danms): No instance mapping at all, or a mapping with no cell,
+        # which means a legacy environment or instance.
+        return instance.fault
+
     def _get_fault(self, request, instance):
-        # This can result in a lazy load of the fault information
-        fault = instance.fault
+        if 'fault' in instance:
+            fault = instance.fault
+        else:
+            fault = self._load_fault(request, instance)
 
         if not fault:
             return None

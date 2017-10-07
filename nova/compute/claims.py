@@ -21,7 +21,6 @@ from oslo_log import log as logging
 
 from nova import exception
 from nova.i18n import _
-from nova.i18n import _LI
 from nova import objects
 from nova.virt import hardware
 
@@ -74,11 +73,12 @@ class Claim(NopClaim):
     correct decisions with respect to host selection.
     """
 
-    def __init__(self, context, instance, tracker, resources, pci_requests,
-                 overhead=None, limits=None):
+    def __init__(self, context, instance, nodename, tracker, resources,
+                 pci_requests, overhead=None, limits=None):
         super(Claim, self).__init__()
         # Stash a copy of the instance at the current point of time
         self.instance = instance.obj_clone()
+        self.nodename = nodename
         self._numa_topology_loaded = False
         self.tracker = tracker
         self._pci_requests = pci_requests
@@ -121,7 +121,8 @@ class Claim(NopClaim):
         been aborted.
         """
         LOG.debug("Aborting claim: %s", self, instance=self.instance)
-        self.tracker.abort_instance_claim(self.context, self.instance)
+        self.tracker.abort_instance_claim(self.context, self.instance,
+                                          self.nodename)
 
     def _claim_test(self, resources, limits=None):
         """Test if this claim can be satisfied given available resources and
@@ -143,10 +144,12 @@ class Claim(NopClaim):
         vcpus_limit = limits.get('vcpu')
         numa_topology_limit = limits.get('numa_topology')
 
-        LOG.info(_LI("Attempting claim: memory %(memory_mb)d MB, "
-                     "disk %(disk_gb)d GB, vcpus %(vcpus)d CPU"),
-                 {'memory_mb': self.memory_mb, 'disk_gb': self.disk_gb,
-                  'vcpus': self.vcpus}, instance=self.instance)
+        LOG.info("Attempting claim on node %(node)s: "
+                 "memory %(memory_mb)d MB, "
+                 "disk %(disk_gb)d GB, vcpus %(vcpus)d CPU",
+                 {'node': self.nodename, 'memory_mb': self.memory_mb,
+                  'disk_gb': self.disk_gb, 'vcpus': self.vcpus},
+                 instance=self.instance)
 
         reasons = [self._test_memory(resources, memory_mb_limit),
                    self._test_disk(resources, disk_gb_limit),
@@ -158,7 +161,8 @@ class Claim(NopClaim):
             raise exception.ComputeResourcesUnavailable(reason=
                     "; ".join(reasons))
 
-        LOG.info(_LI('Claim successful'), instance=self.instance)
+        LOG.info('Claim successful on node %s', self.nodename,
+                 instance=self.instance)
 
     def _test_memory(self, resources, limit):
         type_ = _("memory")
@@ -228,22 +232,22 @@ class Claim(NopClaim):
         """Test if the given type of resource needed for a claim can be safely
         allocated.
         """
-        LOG.info(_LI('Total %(type)s: %(total)d %(unit)s, used: %(used).02f '
-                    '%(unit)s'),
+        LOG.info('Total %(type)s: %(total)d %(unit)s, used: %(used).02f '
+                 '%(unit)s',
                   {'type': type_, 'total': total, 'unit': unit, 'used': used},
                   instance=self.instance)
 
         if limit is None:
             # treat resource as unlimited:
-            LOG.info(_LI('%(type)s limit not specified, defaulting to '
-                        'unlimited'), {'type': type_}, instance=self.instance)
+            LOG.info('%(type)s limit not specified, defaulting to unlimited',
+                     {'type': type_}, instance=self.instance)
             return
 
         free = limit - used
 
         # Oversubscribed resource policy info:
-        LOG.info(_LI('%(type)s limit: %(limit).02f %(unit)s, '
-                     'free: %(free).02f %(unit)s'),
+        LOG.info('%(type)s limit: %(limit).02f %(unit)s, '
+                 'free: %(free).02f %(unit)s',
                   {'type': type_, 'limit': limit, 'free': free, 'unit': unit},
                   instance=self.instance)
 
@@ -259,14 +263,14 @@ class MoveClaim(Claim):
 
     Move can be either a migrate/resize, live-migrate or an evacuate operation.
     """
-    def __init__(self, context, instance, instance_type, image_meta, tracker,
-                 resources, pci_requests, overhead=None, limits=None):
+    def __init__(self, context, instance, nodename, instance_type, image_meta,
+                 tracker, resources, pci_requests, overhead=None, limits=None):
         self.context = context
         self.instance_type = instance_type
         if isinstance(image_meta, dict):
             image_meta = objects.ImageMeta.from_dict(image_meta)
         self.image_meta = image_meta
-        super(MoveClaim, self).__init__(context, instance, tracker,
+        super(MoveClaim, self).__init__(context, instance, nodename, tracker,
                                         resources, pci_requests,
                                         overhead=overhead, limits=limits)
         self.migration = None
@@ -297,4 +301,6 @@ class MoveClaim(Claim):
         LOG.debug("Aborting claim: %s", self, instance=self.instance)
         self.tracker.drop_move_claim(
             self.context,
-            self.instance, instance_type=self.instance_type)
+            self.instance, self.nodename,
+            instance_type=self.instance_type)
+        self.instance.drop_migration_context()

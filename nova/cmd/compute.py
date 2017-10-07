@@ -19,15 +19,16 @@
 import shlex
 import sys
 
+import os_vif
 from oslo_log import log as logging
 from oslo_privsep import priv_context
 from oslo_reports import guru_meditation_report as gmr
 
 from nova.cmd import common as cmd_common
+from nova.compute import rpcapi as compute_rpcapi
 from nova.conductor import rpcapi as conductor_rpcapi
 import nova.conf
 from nova import config
-from nova.i18n import _LW
 from nova import objects
 from nova.objects import base as objects_base
 from nova import service
@@ -44,19 +45,15 @@ def main():
     priv_context.init(root_helper=shlex.split(utils.get_root_helper()))
     utils.monkey_patch()
     objects.register_all()
+    # Ensure os-vif objects are registered and plugins loaded
+    os_vif.initialize()
 
     gmr.TextGuruMeditation.setup_autorun(version)
 
-    if not CONF.conductor.use_local:
-        cmd_common.block_db_access('nova-compute')
-        objects_base.NovaObject.indirection_api = \
-            conductor_rpcapi.ConductorAPI()
-    else:
-        LOG.warning(_LW('Conductor local mode is deprecated and will '
-                        'be removed in a subsequent release'))
-
+    cmd_common.block_db_access('nova-compute')
+    objects_base.NovaObject.indirection_api = conductor_rpcapi.ConductorAPI()
+    objects.Service.enable_min_version_cache()
     server = service.Service.create(binary='nova-compute',
-                                    topic=CONF.compute_topic,
-                                    db_allowed=CONF.conductor.use_local)
+                                    topic=compute_rpcapi.RPC_TOPIC)
     service.serve(server)
     service.wait()

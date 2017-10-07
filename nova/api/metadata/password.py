@@ -13,6 +13,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import six
 from six.moves import range
 from webob import exc
 
@@ -42,6 +43,9 @@ def convert_password(context, password):
     Password is stored with the keys 'password_0' -> 'password_3'.
     """
     password = password or ''
+    if six.PY3 and isinstance(password, bytes):
+        password = password.decode('utf-8')
+
     meta = {}
     for i in range(CHUNKS):
         meta['password_%d' % i] = password[:CHUNK_LENGTH]
@@ -63,7 +67,9 @@ def handle_password(req, meta_data):
             msg = _("Request is too large.")
             raise exc.HTTPBadRequest(explanation=msg)
 
-        instance = objects.Instance.get_by_uuid(ctxt, meta_data.uuid)
+        im = objects.InstanceMapping.get_by_instance_uuid(ctxt, meta_data.uuid)
+        with context.target_cell(ctxt, im.cell_mapping) as cctxt:
+            instance = objects.Instance.get_by_uuid(cctxt, meta_data.uuid)
         instance.system_metadata.update(convert_password(ctxt, req.body))
         instance.save()
     else:

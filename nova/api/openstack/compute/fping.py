@@ -17,7 +17,7 @@
 import itertools
 import os
 
-import six
+
 from webob import exc
 
 from nova.api.openstack.api_version_request \
@@ -31,8 +31,6 @@ from nova.i18n import _
 from nova.policies import fping as fping_policies
 from nova import utils
 
-ALIAS = "os-fping"
-
 CONF = nova.conf.CONF
 
 
@@ -43,13 +41,13 @@ class FpingController(wsgi.Controller):
         self.last_call = {}
 
     def check_fping(self):
-        if not os.access(CONF.fping_path, os.X_OK):
+        if not os.access(CONF.api.fping_path, os.X_OK):
             raise exc.HTTPServiceUnavailable(
                 explanation=_("fping utility is not found."))
 
     @staticmethod
     def fping(ips):
-        fping_ret = utils.execute(CONF.fping_path, *ips,
+        fping_ret = utils.execute(CONF.api.fping_path, *ips,
                                   check_exit_code=False)
         if not fping_ret:
             return set()
@@ -112,7 +110,7 @@ class FpingController(wsgi.Controller):
             ip_list += ips
         alive_ips = self.fping(ip_list)
         res = []
-        for instance_uuid, ips in six.iteritems(instance_ips):
+        for instance_uuid, ips in instance_ips.items():
             res.append({
                 "id": instance_uuid,
                 "project_id": instance_projects[instance_uuid],
@@ -136,18 +134,3 @@ class FpingController(wsgi.Controller):
                 "alive": bool(set(ips) & alive_ips),
             }
         }
-
-
-class Fping(extensions.V21APIExtensionBase):
-    """Fping Management Extension."""
-
-    name = "Fping"
-    alias = ALIAS
-    version = 1
-
-    def get_resources(self):
-        res = extensions.ResourceExtension(ALIAS, FpingController())
-        return [res]
-
-    def get_controller_extensions(self):
-        return []

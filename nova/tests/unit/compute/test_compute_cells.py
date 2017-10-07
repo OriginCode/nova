@@ -20,7 +20,6 @@ import functools
 import inspect
 
 import mock
-from mox3 import mox
 from oslo_utils import timeutils
 
 from nova import block_device
@@ -28,16 +27,21 @@ from nova.cells import manager
 from nova.compute import api as compute_api
 from nova.compute import cells_api as compute_cells_api
 from nova.compute import flavors
+from nova.compute import power_state
 from nova.compute import utils as compute_utils
 from nova.compute import vm_states
 import nova.conf
 from nova import context
 from nova import db
+from nova.db.sqlalchemy import api as db_api
+from nova.db.sqlalchemy import api_models
 from nova import exception
 from nova import objects
+from nova.objects import fields as obj_fields
 from nova import quota
 from nova import test
 from nova.tests.unit.compute import test_compute
+from nova.tests.unit.compute import test_shelve
 from nova.tests.unit import fake_instance
 from nova.tests.unit.objects import test_flavor
 from nova.tests import uuidsentinel as uuids
@@ -45,6 +49,10 @@ from nova.tests import uuidsentinel as uuids
 
 ORIG_COMPUTE_API = None
 CONF = nova.conf.CONF
+FAKE_IMAGE_REF = uuids.image_ref
+
+NODENAME = 'fakenode1'
+NODENAME2 = 'fakenode2'
 
 
 def stub_call_to_cells(context, instance, method, *args, **kwargs):
@@ -106,6 +114,7 @@ def deploy_stubs(stubs, api, original_instance=None):
 
 class CellsComputeAPITestCase(test_compute.ComputeAPITestCase):
     def setUp(self):
+        self.flags(use_neutron=False)
         super(CellsComputeAPITestCase, self).setUp()
         global ORIG_COMPUTE_API
         ORIG_COMPUTE_API = self.compute_api
@@ -144,9 +153,93 @@ class CellsComputeAPITestCase(test_compute.ComputeAPITestCase):
     def test_error_evacuate(self):
         self.skipTest("Test is incompatible with cells.")
 
+    def test_create_instance_sets_system_metadata(self):
+        self.skipTest("Test is incompatible with cells.")
+
+    def test_create_saves_flavor(self):
+        self.skipTest("Test is incompatible with cells.")
+
+    def test_create_instance_associates_security_groups(self):
+        self.skipTest("Test is incompatible with cells.")
+
+    @mock.patch('nova.objects.quotas.Quotas.check_deltas')
+    def test_create_instance_over_quota_during_recheck(
+            self, check_deltas_mock):
+        self.stub_out('nova.tests.unit.image.fake._FakeImageService.show',
+                      self.fake_show)
+
+        # Simulate a race where the first check passes and the recheck fails.
+        fake_quotas = {'instances': 5, 'cores': 10, 'ram': 4096}
+        fake_headroom = {'instances': 5, 'cores': 10, 'ram': 4096}
+        fake_usages = {'instances': 5, 'cores': 10, 'ram': 4096}
+        exc = exception.OverQuota(overs=['instances'], quotas=fake_quotas,
+                                  headroom=fake_headroom, usages=fake_usages)
+        check_deltas_mock.side_effect = [None, exc]
+
+        inst_type = flavors.get_default_flavor()
+        # Try to create 3 instances.
+        self.assertRaises(exception.QuotaError, self.compute_api.create,
+            self.context, inst_type, self.fake_image['id'], min_count=3)
+
+        project_id = self.context.project_id
+
+        self.assertEqual(2, check_deltas_mock.call_count)
+        call1 = mock.call(self.context,
+                          {'instances': 3, 'cores': inst_type.vcpus * 3,
+                           'ram': inst_type.memory_mb * 3},
+                          project_id, user_id=None,
+                          check_project_id=project_id, check_user_id=None)
+        call2 = mock.call(self.context, {'instances': 0, 'cores': 0, 'ram': 0},
+                          project_id, user_id=None,
+                          check_project_id=project_id, check_user_id=None)
+        check_deltas_mock.assert_has_calls([call1, call2])
+
+        # Verify we removed the artifacts that were added after the first
+        # quota check passed.
+        instances = objects.InstanceList.get_all(self.context)
+        self.assertEqual(0, len(instances))
+        build_requests = objects.BuildRequestList.get_all(self.context)
+        self.assertEqual(0, len(build_requests))
+
+        @db_api.api_context_manager.reader
+        def request_spec_get_all(context):
+            return context.session.query(api_models.RequestSpec).all()
+
+        request_specs = request_spec_get_all(self.context)
+        self.assertEqual(0, len(request_specs))
+
+        instance_mappings = objects.InstanceMappingList.get_by_project_id(
+            self.context, project_id)
+        self.assertEqual(0, len(instance_mappings))
+
+    @mock.patch('nova.objects.quotas.Quotas.check_deltas')
+    def test_create_instance_no_quota_recheck(
+            self, check_deltas_mock):
+        self.stub_out('nova.tests.unit.image.fake._FakeImageService.show',
+                      self.fake_show)
+        # Disable recheck_quota.
+        self.flags(recheck_quota=False, group='quota')
+
+        inst_type = flavors.get_default_flavor()
+        (refs, resv_id) = self.compute_api.create(self.context,
+                                                  inst_type,
+                                                  self.fake_image['id'])
+        self.assertEqual(1, len(refs))
+
+        project_id = self.context.project_id
+
+        # check_deltas should have been called only once.
+        check_deltas_mock.assert_called_once_with(self.context,
+                                                  {'instances': 1,
+                                                   'cores': inst_type.vcpus,
+                                                   'ram': inst_type.memory_mb},
+                                                  project_id, user_id=None,
+                                                  check_project_id=project_id,
+                                                  check_user_id=None)
+
     @mock.patch.object(compute_api.API, '_local_delete')
     @mock.patch.object(compute_api.API, '_lookup_instance',
-                       return_value=None)
+                       return_value=(None, None))
     def test_delete_instance_no_cell_instance_disappear(self, mock_lookup,
                                                         mock_local_delete):
         inst = self._create_fake_instance_obj()
@@ -161,25 +254,28 @@ class CellsComputeAPITestCase(test_compute.ComputeAPITestCase):
 
         test()
 
-    def _test_delete_instance_no_cell(self, method_name):
+    @mock.patch.object(compute_api.API, '_local_delete')
+    def _test_delete_instance_no_cell(self, method_name, mock_local_delete):
         cells_rpcapi = self.compute_api.cells_rpcapi
-        self.mox.StubOutWithMock(cells_rpcapi,
-                                 'instance_delete_everywhere')
-        self.mox.StubOutWithMock(compute_api.API, '_local_delete')
-        self.mox.StubOutWithMock(compute_api.API, '_lookup_instance')
         inst = self._create_fake_instance_obj()
         delete_type = method_name == 'soft_delete' and 'soft' or 'hard'
-        cells_rpcapi.instance_delete_everywhere(self.context,
-                inst, delete_type)
-        compute_api.API._lookup_instance(self.context,
-                                         inst.uuid).AndReturn(inst)
-        compute_api.API._local_delete(self.context, inst,
-                                      mox.IsA(objects.BlockDeviceMappingList),
-                                      method_name, mox.IgnoreArg())
-        self.mox.ReplayAll()
-        self.stubs.Set(self.compute_api.network_api, 'deallocate_for_instance',
-                       lambda *a, **kw: None)
-        getattr(self.compute_api, method_name)(self.context, inst)
+
+        @mock.patch.object(cells_rpcapi,
+                           'instance_delete_everywhere')
+        @mock.patch.object(compute_api.API, '_lookup_instance',
+                           return_value=(None, inst))
+        def test(mock_lookup, mock_inst_del):
+            self.stub_out('nova.network.api.deallocate_for_instance',
+                          lambda *a, **kw: None)
+            getattr(self.compute_api, method_name)(self.context, inst)
+            mock_lookup.assert_called_once_with(self.context, inst.uuid)
+            mock_local_delete.assert_called_once_with(self.context, inst,
+                                                      mock.ANY, method_name,
+                                                      mock.ANY)
+            mock_inst_del.assert_called_once_with(self.context,
+                                                  inst, delete_type)
+
+        test()
 
     def test_delete_instance_no_cell_constraint_failure_does_not_loop(self):
         inst = self._create_fake_instance_obj()
@@ -193,7 +289,7 @@ class CellsComputeAPITestCase(test_compute.ComputeAPITestCase):
         @mock.patch.object(self.compute_api.cells_rpcapi,
                            'instance_delete_everywhere')
         @mock.patch.object(compute_api.API, '_lookup_instance',
-                           return_value=inst)
+                           return_value=(None, inst))
         def _test(_mock_lookup_inst, _mock_delete_everywhere):
             self.assertRaises(exception.ObjectActionError,
                     self.compute_api.delete, self.context, inst)
@@ -218,7 +314,7 @@ class CellsComputeAPITestCase(test_compute.ComputeAPITestCase):
         @mock.patch.object(self.compute_api.cells_rpcapi,
                 'instance_delete_everywhere', side_effect=add_cell_name)
         @mock.patch.object(compute_api.API, '_lookup_instance',
-                           return_value=inst)
+                           return_value=(None, inst))
         def _test(_mock_lookup_inst, mock_delete_everywhere,
                   mock_compute_delete):
             self.compute_api.delete(self.context, inst)
@@ -246,7 +342,7 @@ class CellsComputeAPITestCase(test_compute.ComputeAPITestCase):
                            side_effect=actionerror)
         @mock.patch.object(instance, 'refresh', side_effect=notfound)
         @mock.patch.object(compute_api.API, '_lookup_instance',
-                           return_value=instance)
+                           return_value=(None, instance))
         def _test(_mock_lookup_instance, mock_refresh, mock_local_delete,
                   mock_delete_everywhere, mock_compute_delete):
             self.compute_api.delete(self.context, instance)
@@ -273,7 +369,7 @@ class CellsComputeAPITestCase(test_compute.ComputeAPITestCase):
         @mock.patch.object(self.compute_api.cells_rpcapi,
                            'instance_delete_everywhere')
         @mock.patch.object(compute_api.API, '_lookup_instance',
-                           return_value=instance)
+                           return_value=(None, instance))
         @mock.patch.object(compute_api.API, '_local_delete',
                            side_effect=notfound)
         def _test(mock_local_delete, _mock_lookup, mock_delete_everywhere,
@@ -312,7 +408,7 @@ class CellsComputeAPITestCase(test_compute.ComputeAPITestCase):
         instance = self._create_fake_instance_obj()
         instance_with_cell = copy.deepcopy(instance)
         instance_with_cell.cell_name = 'foo'
-        mock_lookup_instance.return_value = instance_with_cell
+        mock_lookup_instance.return_value = None, instance_with_cell
 
         cells_rpcapi = self.compute_api.cells_rpcapi
 
@@ -338,7 +434,7 @@ class CellsComputeAPITestCase(test_compute.ComputeAPITestCase):
         # and therefore no host, set but instance.destroy fails because
         # there is now a host. And then the instance can't be looked up.
         instance = self._create_fake_instance_obj()
-        mock_lookup_instance.return_value = None
+        mock_lookup_instance.return_value = None, None
 
         cells_rpcapi = self.compute_api.cells_rpcapi
 
@@ -353,15 +449,17 @@ class CellsComputeAPITestCase(test_compute.ComputeAPITestCase):
     def test_get_migrations(self):
         filters = {'cell_name': 'ChildCell', 'status': 'confirmed'}
         migrations = {'migrations': [{'id': 1234}]}
-        cells_rpcapi = self.compute_api.cells_rpcapi
-        self.mox.StubOutWithMock(cells_rpcapi, 'get_migrations')
-        cells_rpcapi.get_migrations(self.context,
-                                        filters).AndReturn(migrations)
-        self.mox.ReplayAll()
 
-        response = self.compute_api.get_migrations(self.context, filters)
+        @mock.patch.object(self.compute_api.cells_rpcapi, 'get_migrations',
+                           return_value=migrations)
+        def test(mock_cell_get_migrations):
+            response = self.compute_api.get_migrations(self.context,
+                                                       filters)
+            mock_cell_get_migrations.assert_called_once_with(self.context,
+                                                             filters)
+            self.assertEqual(migrations, response)
 
-        self.assertEqual(migrations, response)
+        test()
 
     def test_create_block_device_mapping(self):
         instance_type = {'swap': 1, 'ephemeral_gb': 1}
@@ -425,6 +523,97 @@ class CellsComputeAPITestCase(test_compute.ComputeAPITestCase):
                   cells_enabled=True)
 
 
+class CellsShelveComputeAPITestCase(test_shelve.ShelveComputeAPITestCase):
+    def setUp(self):
+        super(CellsShelveComputeAPITestCase, self).setUp()
+        global ORIG_COMPUTE_API
+        ORIG_COMPUTE_API = self.compute_api
+        self.compute_api = compute_cells_api.ComputeCellsAPI()
+
+        def _fake_validate_cell(*args, **kwargs):
+            return
+
+        self.stub_out('nova.compute.api.API._validate_cell',
+                      _fake_validate_cell)
+
+    def _create_fake_instance_obj(self, params=None, type_name='m1.tiny',
+                                  services=False, context=None):
+        flavor = flavors.get_flavor_by_name(type_name)
+        inst = objects.Instance(context=context or self.context)
+        inst.cell_name = 'api!child'
+        inst.vm_state = vm_states.ACTIVE
+        inst.task_state = None
+        inst.power_state = power_state.RUNNING
+        inst.image_ref = FAKE_IMAGE_REF
+        inst.reservation_id = 'r-fakeres'
+        inst.user_id = self.user_id
+        inst.project_id = self.project_id
+        inst.host = self.compute.host
+        inst.node = NODENAME
+        inst.instance_type_id = flavor.id
+        inst.ami_launch_index = 0
+        inst.memory_mb = 0
+        inst.vcpus = 0
+        inst.root_gb = 0
+        inst.ephemeral_gb = 0
+        inst.architecture = obj_fields.Architecture.X86_64
+        inst.os_type = 'Linux'
+        inst.system_metadata = (
+            params and params.get('system_metadata', {}) or {})
+        inst.locked = False
+        inst.created_at = timeutils.utcnow()
+        inst.updated_at = timeutils.utcnow()
+        inst.launched_at = timeutils.utcnow()
+        inst.security_groups = objects.SecurityGroupList(objects=[])
+        inst.flavor = flavor
+        inst.old_flavor = None
+        inst.new_flavor = None
+        if params:
+            inst.flavor.update(params.pop('flavor', {}))
+            inst.update(params)
+        inst.create()
+
+        return inst
+
+    def _test_shelve(self, vm_state=vm_states.ACTIVE,
+                     boot_from_volume=False, clean_shutdown=True):
+        params = dict(task_state=None, vm_state=vm_state,
+                      display_name='fake-name')
+        instance = self._create_fake_instance_obj(params=params)
+        with mock.patch.object(self.compute_api,
+                               '_cast_to_cells') as cast_to_cells:
+            self.compute_api.shelve(self.context, instance,
+                                    clean_shutdown=clean_shutdown)
+            cast_to_cells.assert_called_once_with(self.context,
+                                                  instance, 'shelve',
+                                                  clean_shutdown=clean_shutdown
+                                                  )
+
+    def test_unshelve(self):
+        # Ensure instance can be unshelved on cell environment.
+        # The super class tests nova-shelve.
+        instance = self._create_fake_instance_obj()
+
+        self.assertIsNone(instance['task_state'])
+
+        self.compute_api.shelve(self.context, instance)
+
+        instance.task_state = None
+        instance.vm_state = vm_states.SHELVED
+        instance.save()
+
+        with mock.patch.object(self.compute_api,
+                               '_cast_to_cells') as cast_to_cells:
+            self.compute_api.unshelve(self.context, instance)
+            cast_to_cells.assert_called_once_with(self.context,
+                                                  instance, 'unshelve')
+
+    def tearDown(self):
+        global ORIG_COMPUTE_API
+        self.compute_api = ORIG_COMPUTE_API
+        super(CellsShelveComputeAPITestCase, self).tearDown()
+
+
 class CellsConductorAPIRPCRedirect(test.NoDBTestCase):
     def setUp(self):
         super(CellsConductorAPIRPCRedirect, self).setUp()
@@ -445,15 +634,18 @@ class CellsConductorAPIRPCRedirect(test.NoDBTestCase):
                              _validate, _get_image, _check_bdm,
                              _provision, _record_action_start):
         _get_image.return_value = (None, 'fake-image')
-        _validate.return_value = ({}, 1, None)
+        _validate.return_value = ({}, 1, None, ['default'])
         _check_bdm.return_value = objects.BlockDeviceMappingList()
-        _provision.return_value = 'instances'
+        _provision.return_value = []
 
-        self.compute_api.create(self.context, 'fake-flavor', 'fake-image')
+        with mock.patch.object(self.compute_api.compute_task_api,
+                               'schedule_and_build_instances') as sbi:
+            self.compute_api.create(self.context, 'fake-flavor', 'fake-image')
 
-        # Subsequent tests in class are verifying the hooking.  We don't check
-        # args since this is verified in compute test code.
-        self.assertTrue(self.cells_rpcapi.build_instances.called)
+            # Subsequent tests in class are verifying the hooking.  We
+            # don't check args since this is verified in compute test
+            # code.
+            self.assertTrue(sbi.called)
 
     @mock.patch.object(objects.RequestSpec, 'get_by_instance_uuid')
     @mock.patch.object(compute_api.API, '_record_action_start')

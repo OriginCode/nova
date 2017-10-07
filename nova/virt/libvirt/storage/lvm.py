@@ -27,7 +27,6 @@ import six
 import nova.conf
 from nova import exception
 from nova.i18n import _
-from nova.i18n import _LW
 from nova.virt.libvirt import utils
 
 CONF = nova.conf.CONF
@@ -62,11 +61,11 @@ def create_volume(vg, lv, size, sparse=False):
         preallocated_space = 64 * units.Mi
         check_size(vg, lv, preallocated_space)
         if free_space < size:
-            LOG.warning(_LW('Volume group %(vg)s will not be able'
-                         ' to hold sparse volume %(lv)s.'
-                         ' Virtual volume size is %(size)d bytes,'
-                         ' but free space on volume group is'
-                         ' only %(free_space)db.'),
+            LOG.warning('Volume group %(vg)s will not be able'
+                        ' to hold sparse volume %(lv)s.'
+                        ' Virtual volume size is %(size)d bytes,'
+                        ' but free space on volume group is'
+                        ' only %(free_space)db.',
                         {'vg': vg,
                          'free_space': free_space,
                          'size': size,
@@ -179,8 +178,8 @@ def _zero_volume(path, volume_size):
     # and caters for versions of dd that don't have
     # the easier to use iflag=count_bytes option.
     while remaining_bytes:
-        zero_blocks = remaining_bytes / bs
-        seek_blocks = (volume_size - remaining_bytes) / bs
+        zero_blocks = remaining_bytes // bs
+        seek_blocks = (volume_size - remaining_bytes) // bs
         zero_cmd = ('dd', 'bs=%s' % bs,
                     'if=/dev/zero', 'of=%s' % path,
                     'seek=%s' % seek_blocks, 'count=%s' % zero_blocks)
@@ -189,7 +188,7 @@ def _zero_volume(path, volume_size):
         if zero_blocks:
             utils.execute(*zero_cmd, run_as_root=True)
         remaining_bytes %= bs
-        bs /= units.Ki  # Limit to 3 iterations
+        bs //= units.Ki  # Limit to 3 iterations
         # Use O_DIRECT with initial block size and fdatasync otherwise
         direct_flags = ()
         sync_flags = ('conv=fdatasync',)
@@ -210,8 +209,7 @@ def clear_volume(path):
     try:
         volume_size = get_volume_size(path)
     except exception.VolumeBDMPathNotFound:
-        LOG.warning(_LW('ignoring missing logical volume %(path)s'),
-                 {'path': path})
+        LOG.warning('ignoring missing logical volume %(path)s', {'path': path})
         return
 
     if volume_clear_size != 0 and volume_clear_size < volume_size:

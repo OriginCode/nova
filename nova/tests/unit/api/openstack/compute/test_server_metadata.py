@@ -13,8 +13,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import uuid
-
 import mock
 from oslo_config import cfg
 from oslo_serialization import jsonutils
@@ -32,6 +30,7 @@ from nova import objects
 from nova import test
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit import fake_instance
+from nova.tests import uuidsentinel as uuids
 
 
 CONF = cfg.CONF
@@ -76,7 +75,7 @@ def stub_server_metadata():
 
 def stub_max_server_metadata():
     metadata = {"metadata": {}}
-    for num in range(CONF.quota_metadata_items):
+    for num in range(CONF.quota.metadata_items):
         metadata['metadata']['key%i' % num] = "blah"
     return metadata
 
@@ -132,7 +131,7 @@ class ServerMetaDataTestV21(test.TestCase):
 
     def _set_up_resources(self):
         self.controller = server_metadata_v21.ServerMetadataController()
-        self.uuid = str(uuid.uuid4())
+        self.uuid = uuids.fake
         self.url = '/fake/servers/%s/metadata' % self.uuid
 
     def _get_request(self, param_url=''):
@@ -583,7 +582,7 @@ class ServerMetaDataTestV21(test.TestCase):
         self.stub_out('nova.db.instance_metadata_update',
                       return_create_instance_metadata)
         data = {"metadata": {}}
-        for num in range(CONF.quota_metadata_items + 1):
+        for num in range(CONF.quota.metadata_items + 1):
             data['metadata']['key%i' % num] = "blah"
         req = self._get_request()
         req.method = 'POST'
@@ -622,7 +621,7 @@ class ServerMetaDataTestV21(test.TestCase):
         self.stub_out('nova.db.instance_metadata_update',
                       return_create_instance_metadata)
         data = {"metadata": {}}
-        for num in range(CONF.quota_metadata_items + 1):
+        for num in range(CONF.quota.metadata_items + 1):
             data['metadata']['key%i' % num] = "blah"
         req = self._get_request()
         req.method = 'PUT'
@@ -638,7 +637,7 @@ class ServerMetaDataTestV21(test.TestCase):
         self.stub_out('nova.db.instance_metadata_update',
                       return_create_instance_metadata)
         data = {"metadata": {}}
-        for num in range(CONF.quota_metadata_items + 1):
+        for num in range(CONF.quota.metadata_items + 1):
             data['metadata']['key%i' % num] = "blah"
         req = self._get_request()
         req.method = 'PUT'
@@ -685,7 +684,7 @@ class BadStateServerMetaDataTestV21(test.TestCase):
 
     def _set_up_resources(self):
         self.controller = server_metadata_v21.ServerMetadataController()
-        self.uuid = str(uuid.uuid4())
+        self.uuid = uuids.fake
         self.url = '/fake/servers/%s/metadata' % self.uuid
 
     def _get_request(self, param_url=''):

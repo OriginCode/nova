@@ -12,6 +12,7 @@
 
 import mock
 import oslo_messaging as messaging
+import six
 
 from nova.compute import power_state
 from nova.compute import rpcapi as compute_rpcapi
@@ -60,45 +61,56 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
             self.fake_spec)
 
     def test_execute_with_destination(self):
-        self.mox.StubOutWithMock(self.task, '_check_host_is_up')
-        self.mox.StubOutWithMock(self.task, '_check_requested_destination')
-        self.mox.StubOutWithMock(self.task.compute_rpcapi, 'live_migration')
+        with test.nested(
+            mock.patch.object(self.task, '_check_host_is_up'),
+            mock.patch.object(self.task, '_check_requested_destination',
+                              return_value=(mock.sentinel.source_node,
+                                            mock.sentinel.dest_node)),
+            mock.patch.object(scheduler_utils,
+                              'claim_resources_on_destination'),
+            mock.patch.object(self.task.compute_rpcapi, 'live_migration'),
+        ) as (mock_check_up, mock_check_dest, mock_claim, mock_mig):
+            mock_mig.return_value = "bob"
 
-        self.task._check_host_is_up(self.instance_host)
-        self.task._check_requested_destination()
-        self.task.compute_rpcapi.live_migration(self.context,
+            self.assertEqual("bob", self.task.execute())
+            mock_check_up.assert_called_once_with(self.instance_host)
+            mock_check_dest.assert_called_once_with()
+            mock_claim.assert_called_once_with(
+                self.task.scheduler_client.reportclient, self.instance,
+                mock.sentinel.source_node, mock.sentinel.dest_node)
+            mock_mig.assert_called_once_with(
+                self.context,
                 host=self.instance_host,
                 instance=self.instance,
                 dest=self.destination,
                 block_migration=self.block_migration,
                 migration=self.migration,
-                migrate_data=None).AndReturn("bob")
-
-        self.mox.ReplayAll()
-        self.assertEqual("bob", self.task.execute())
+                migrate_data=None)
 
     def test_execute_without_destination(self):
         self.destination = None
         self._generate_task()
         self.assertIsNone(self.task.destination)
 
-        self.mox.StubOutWithMock(self.task, '_check_host_is_up')
-        self.mox.StubOutWithMock(self.task, '_find_destination')
-        self.mox.StubOutWithMock(self.task.compute_rpcapi, 'live_migration')
+        with test.nested(
+            mock.patch.object(self.task, '_check_host_is_up'),
+            mock.patch.object(self.task, '_find_destination'),
+            mock.patch.object(self.task.compute_rpcapi, 'live_migration'),
+            mock.patch.object(self.migration, 'save')
+        ) as (mock_check, mock_find, mock_mig, mock_save):
+            mock_find.return_value = "found_host"
+            mock_mig.return_value = "bob"
 
-        self.task._check_host_is_up(self.instance_host)
-        self.task._find_destination().AndReturn("found_host")
-        self.task.compute_rpcapi.live_migration(self.context,
+            self.assertEqual("bob", self.task.execute())
+            mock_check.assert_called_once_with(self.instance_host)
+            mock_find.assert_called_once_with()
+            mock_mig.assert_called_once_with(self.context,
                 host=self.instance_host,
                 instance=self.instance,
                 dest="found_host",
                 block_migration=self.block_migration,
                 migration=self.migration,
-                migrate_data=None).AndReturn("bob")
-
-        self.mox.ReplayAll()
-        with mock.patch.object(self.migration, 'save') as mock_save:
-            self.assertEqual("bob", self.task.execute())
+                migrate_data=None)
             self.assertTrue(mock_save.called)
             self.assertEqual('found_host', self.migration.dest_compute)
 
@@ -111,72 +123,63 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
         self.assertRaises(exception.InstanceInvalidState,
                           self.task._check_instance_is_active)
 
-    def test_check_instance_host_is_up(self):
-        self.mox.StubOutWithMock(objects.Service, 'get_by_compute_host')
-        self.mox.StubOutWithMock(self.task.servicegroup_api, 'service_is_up')
+    @mock.patch.object(objects.Service, 'get_by_compute_host')
+    @mock.patch.object(servicegroup.API, 'service_is_up')
+    def test_check_instance_host_is_up(self, mock_is_up, mock_get):
+        mock_get.return_value = "service"
+        mock_is_up.return_value = True
 
-        objects.Service.get_by_compute_host(self.context,
-                                            "host").AndReturn("service")
-        self.task.servicegroup_api.service_is_up("service").AndReturn(True)
-
-        self.mox.ReplayAll()
         self.task._check_host_is_up("host")
+        mock_get.assert_called_once_with(self.context, "host")
+        mock_is_up.assert_called_once_with("service")
 
-    def test_check_instance_host_is_up_fails_if_not_up(self):
-        self.mox.StubOutWithMock(objects.Service, 'get_by_compute_host')
-        self.mox.StubOutWithMock(self.task.servicegroup_api, 'service_is_up')
+    @mock.patch.object(objects.Service, 'get_by_compute_host')
+    @mock.patch.object(servicegroup.API, 'service_is_up')
+    def test_check_instance_host_is_up_fails_if_not_up(self, mock_is_up,
+                                                       mock_get):
+        mock_get.return_value = "service"
+        mock_is_up.return_value = False
 
-        objects.Service.get_by_compute_host(self.context,
-                                            "host").AndReturn("service")
-        self.task.servicegroup_api.service_is_up("service").AndReturn(False)
-
-        self.mox.ReplayAll()
         self.assertRaises(exception.ComputeServiceUnavailable,
                 self.task._check_host_is_up, "host")
+        mock_get.assert_called_once_with(self.context, "host")
+        mock_is_up.assert_called_once_with("service")
 
-    def test_check_instance_host_is_up_fails_if_not_found(self):
-        self.mox.StubOutWithMock(objects.Service, 'get_by_compute_host')
-
-        objects.Service.get_by_compute_host(
-            self.context, "host").AndRaise(
-            exception.ComputeHostNotFound(host='host'))
-
-        self.mox.ReplayAll()
+    @mock.patch.object(objects.Service, 'get_by_compute_host',
+                       side_effect=exception.ComputeHostNotFound(host='host'))
+    def test_check_instance_host_is_up_fails_if_not_found(self, mock):
         self.assertRaises(exception.ComputeHostNotFound,
             self.task._check_host_is_up, "host")
 
-    def test_check_requested_destination(self):
-        self.mox.StubOutWithMock(objects.Service, 'get_by_compute_host')
-        self.mox.StubOutWithMock(self.task, '_get_compute_info')
-        self.mox.StubOutWithMock(self.task.servicegroup_api, 'service_is_up')
-        self.mox.StubOutWithMock(self.task.compute_rpcapi,
-                                 'check_can_live_migrate_destination')
-
-        objects.Service.get_by_compute_host(
-            self.context, self.destination).AndReturn("service")
-        self.task.servicegroup_api.service_is_up("service").AndReturn(True)
+    @mock.patch.object(objects.Service, 'get_by_compute_host')
+    @mock.patch.object(live_migrate.LiveMigrationTask, '_get_compute_info')
+    @mock.patch.object(servicegroup.API, 'service_is_up')
+    @mock.patch.object(compute_rpcapi.ComputeAPI,
+                       'check_can_live_migrate_destination')
+    def test_check_requested_destination(self, mock_check, mock_is_up,
+                                         mock_get_info, mock_get_host):
+        mock_get_host.return_value = "service"
+        mock_is_up.return_value = True
         hypervisor_details = objects.ComputeNode(
             hypervisor_type="a",
             hypervisor_version=6.1,
             free_ram_mb=513,
             memory_mb=512,
-            ram_allocation_ratio=1.0,
-        )
-        self.task._get_compute_info(self.destination)\
-                .AndReturn(hypervisor_details)
-        self.task._get_compute_info(self.instance_host)\
-                .AndReturn(hypervisor_details)
-        self.task._get_compute_info(self.destination)\
-                .AndReturn(hypervisor_details)
+            ram_allocation_ratio=1.0)
+        mock_get_info.return_value = hypervisor_details
+        mock_check.return_value = "migrate_data"
 
-        self.task.compute_rpcapi.check_can_live_migrate_destination(
-                self.context, self.instance, self.destination,
-                self.block_migration, self.disk_over_commit).AndReturn(
-                        "migrate_data")
-
-        self.mox.ReplayAll()
-        self.task._check_requested_destination()
+        self.assertEqual((hypervisor_details, hypervisor_details),
+                         self.task._check_requested_destination())
         self.assertEqual("migrate_data", self.task.migrate_data)
+        mock_get_host.assert_called_once_with(self.context, self.destination)
+        mock_is_up.assert_called_once_with("service")
+        self.assertEqual([mock.call(self.destination),
+                          mock.call(self.instance_host),
+                          mock.call(self.destination)],
+                         mock_get_info.call_args_list)
+        mock_check.assert_called_once_with(self.context, self.instance,
+            self.destination, self.block_migration, self.disk_over_commit)
 
     def test_check_requested_destination_fails_with_same_dest(self):
         self.task.destination = "same"
@@ -184,76 +187,94 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
         self.assertRaises(exception.UnableToMigrateToSelf,
                           self.task._check_requested_destination)
 
-    def test_check_requested_destination_fails_when_destination_is_up(self):
-        self.mox.StubOutWithMock(objects.Service, 'get_by_compute_host')
-
-        objects.Service.get_by_compute_host(
-            self.context, self.destination).AndRaise(
-            exception.ComputeHostNotFound(host='host'))
-
-        self.mox.ReplayAll()
+    @mock.patch.object(objects.Service, 'get_by_compute_host',
+                       side_effect=exception.ComputeHostNotFound(host='host'))
+    def test_check_requested_destination_fails_when_destination_is_up(self,
+                                                                      mock):
         self.assertRaises(exception.ComputeHostNotFound,
                           self.task._check_requested_destination)
 
-    def test_check_requested_destination_fails_with_not_enough_memory(self):
-        self.mox.StubOutWithMock(self.task, '_check_host_is_up')
-        self.mox.StubOutWithMock(objects.ComputeNode,
-                                 'get_first_node_by_host_for_old_compat')
+    @mock.patch.object(live_migrate.LiveMigrationTask, '_check_host_is_up')
+    @mock.patch.object(objects.ComputeNode,
+                       'get_first_node_by_host_for_old_compat')
+    def test_check_requested_destination_fails_with_not_enough_memory(
+        self, mock_get_first, mock_is_up):
+        mock_get_first.return_value = (
+            objects.ComputeNode(free_ram_mb=513,
+                                memory_mb=1024,
+                                ram_allocation_ratio=0.9,))
 
-        self.task._check_host_is_up(self.destination)
-        objects.ComputeNode.get_first_node_by_host_for_old_compat(self.context,
-            self.destination).AndReturn(
-                objects.ComputeNode(free_ram_mb=513,
-                                    memory_mb=1024,
-                                    ram_allocation_ratio=0.9,
-                                    ))
-
-        self.mox.ReplayAll()
-        # free_ram is bigger than instance.ram (512) but the allocation ratio
-        # reduces the total available RAM to 410MB (1024 * 0.9 - (1024 - 513))
+        # free_ram is bigger than instance.ram (512) but the allocation
+        # ratio reduces the total available RAM to 410MB
+        # (1024 * 0.9 - (1024 - 513))
         self.assertRaises(exception.MigrationPreCheckError,
                           self.task._check_requested_destination)
+        mock_is_up.assert_called_once_with(self.destination)
+        mock_get_first.assert_called_once_with(self.context, self.destination)
 
-    def test_check_requested_destination_fails_with_hypervisor_diff(self):
-        self.mox.StubOutWithMock(self.task, '_check_host_is_up')
-        self.mox.StubOutWithMock(self.task,
-                '_check_destination_has_enough_memory')
-        self.mox.StubOutWithMock(self.task, '_get_compute_info')
+    @mock.patch.object(live_migrate.LiveMigrationTask, '_check_host_is_up')
+    @mock.patch.object(live_migrate.LiveMigrationTask,
+                       '_check_destination_has_enough_memory')
+    @mock.patch.object(live_migrate.LiveMigrationTask, '_get_compute_info')
+    def test_check_requested_destination_fails_with_hypervisor_diff(
+        self, mock_get_info, mock_check, mock_is_up):
+        mock_get_info.side_effect = [
+            objects.ComputeNode(hypervisor_type='b'),
+            objects.ComputeNode(hypervisor_type='a')]
 
-        self.task._check_host_is_up(self.destination)
-        self.task._check_destination_has_enough_memory()
-
-        self.task._get_compute_info(self.instance_host).AndReturn(
-            objects.ComputeNode(hypervisor_type='b')
-        )
-        self.task._get_compute_info(self.destination).AndReturn(
-            objects.ComputeNode(hypervisor_type='a')
-        )
-
-        self.mox.ReplayAll()
         self.assertRaises(exception.InvalidHypervisorType,
                           self.task._check_requested_destination)
+        mock_is_up.assert_called_once_with(self.destination)
+        mock_check.assert_called_once_with()
+        self.assertEqual([mock.call(self.instance_host),
+                          mock.call(self.destination)],
+                         mock_get_info.call_args_list)
 
-    def test_check_requested_destination_fails_with_hypervisor_too_old(self):
-        self.mox.StubOutWithMock(self.task, '_check_host_is_up')
-        self.mox.StubOutWithMock(self.task,
-                '_check_destination_has_enough_memory')
-        self.mox.StubOutWithMock(self.task, '_get_compute_info')
-
-        self.task._check_host_is_up(self.destination)
-        self.task._check_destination_has_enough_memory()
+    @mock.patch.object(live_migrate.LiveMigrationTask, '_check_host_is_up')
+    @mock.patch.object(live_migrate.LiveMigrationTask,
+                       '_check_destination_has_enough_memory')
+    @mock.patch.object(live_migrate.LiveMigrationTask, '_get_compute_info')
+    def test_check_requested_destination_fails_with_hypervisor_too_old(
+        self, mock_get_info, mock_check, mock_is_up):
         host1 = {'hypervisor_type': 'a', 'hypervisor_version': 7}
-        self.task._get_compute_info(self.instance_host).AndReturn(
-            objects.ComputeNode(**host1)
-        )
         host2 = {'hypervisor_type': 'a', 'hypervisor_version': 6}
-        self.task._get_compute_info(self.destination).AndReturn(
-            objects.ComputeNode(**host2)
-        )
+        mock_get_info.side_effect = [objects.ComputeNode(**host1),
+                                     objects.ComputeNode(**host2)]
 
-        self.mox.ReplayAll()
         self.assertRaises(exception.DestinationHypervisorTooOld,
                           self.task._check_requested_destination)
+        mock_is_up.assert_called_once_with(self.destination)
+        mock_check.assert_called_once_with()
+        self.assertEqual([mock.call(self.instance_host),
+                          mock.call(self.destination)],
+                         mock_get_info.call_args_list)
+
+    @mock.patch.object(objects.Service, 'get_by_compute_host')
+    @mock.patch.object(live_migrate.LiveMigrationTask, '_get_compute_info')
+    @mock.patch.object(servicegroup.API, 'service_is_up')
+    @mock.patch.object(compute_rpcapi.ComputeAPI,
+                       'check_can_live_migrate_destination')
+    @mock.patch.object(objects.HostMapping, 'get_by_host',
+                       return_value=objects.HostMapping(
+                           cell_mapping=objects.CellMapping(
+                               uuid=uuids.different)))
+    def test_check_requested_destination_fails_different_cells(
+            self, mock_get_host_mapping, mock_check, mock_is_up,
+            mock_get_info, mock_get_host):
+        mock_get_host.return_value = "service"
+        mock_is_up.return_value = True
+        hypervisor_details = objects.ComputeNode(
+            hypervisor_type="a",
+            hypervisor_version=6.1,
+            free_ram_mb=513,
+            memory_mb=512,
+            ram_allocation_ratio=1.0)
+        mock_get_info.return_value = hypervisor_details
+        mock_check.return_value = "migrate_data"
+
+        ex = self.assertRaises(exception.MigrationPreCheckError,
+                               self.task._check_requested_destination)
+        self.assertIn('across cells', six.text_type(ex))
 
     def test_find_destination_works(self):
         self.mox.StubOutWithMock(utils, 'get_image_from_system_metadata')
@@ -268,18 +289,21 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
 
         utils.get_image_from_system_metadata(
             self.instance.system_metadata).AndReturn("image")
-        fake_props = {'instance_properties': {'uuid': self.instance_uuid}}
         scheduler_utils.setup_instance_group(
-            self.context, fake_props, {'ignore_hosts': [self.instance_host]})
+            self.context, self.fake_spec)
         self.fake_spec.reset_forced_destinations()
         self.task.scheduler_client.select_destinations(
-            self.context, self.fake_spec).AndReturn(
+            self.context, self.fake_spec, [self.instance.uuid]).AndReturn(
                         [{'host': 'host1'}])
         self.task._check_compatible_with_source_hypervisor("host1")
         self.task._call_livem_checks_on_host("host1")
 
         self.mox.ReplayAll()
         self.assertEqual("host1", self.task._find_destination())
+
+        # Make sure the request_spec was updated to include the cell
+        # mapping.
+        self.assertIsNotNone(self.fake_spec.requested_destination.cell)
 
     def test_find_destination_works_with_no_request_spec(self):
         task = live_migrate.LiveMigrationTask(
@@ -307,12 +331,12 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
             self.assertEqual("host1", task._find_destination())
 
             get_image.assert_called_once_with(self.instance.system_metadata)
-            fake_props = {'instance_properties': {'uuid': self.instance_uuid}}
-            setup_ig.assert_called_once_with(
-                self.context, fake_props,
-                {'ignore_hosts': [self.instance_host]}
-            )
-            select_dest.assert_called_once_with(self.context, another_spec)
+            setup_ig.assert_called_once_with(self.context, another_spec)
+            select_dest.assert_called_once_with(self.context, another_spec,
+                    [self.instance.uuid])
+            # Make sure the request_spec was updated to include the cell
+            # mapping.
+            self.assertIsNotNone(another_spec.requested_destination.cell)
             check_compat.assert_called_once_with("host1")
             call_livem_checks.assert_called_once_with("host1")
         do_test()
@@ -327,11 +351,9 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
                 '_check_compatible_with_source_hypervisor')
         self.mox.StubOutWithMock(self.task, '_call_livem_checks_on_host')
 
-        fake_props = {'instance_properties': {'uuid': self.instance_uuid}}
-        scheduler_utils.setup_instance_group(
-            self.context, fake_props, {'ignore_hosts': [self.instance_host]})
+        scheduler_utils.setup_instance_group(self.context, self.fake_spec)
         self.task.scheduler_client.select_destinations(self.context,
-                self.fake_spec).AndReturn(
+                self.fake_spec, [self.instance.uuid]).AndReturn(
                         [{'host': 'host1'}])
         self.task._check_compatible_with_source_hypervisor("host1")
         self.task._call_livem_checks_on_host("host1")
@@ -350,23 +372,25 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
 
         utils.get_image_from_system_metadata(
             self.instance.system_metadata).AndReturn("image")
-        fake_props = {'instance_properties': {'uuid': self.instance_uuid}}
-        scheduler_utils.setup_instance_group(
-            self.context, fake_props, {'ignore_hosts': [self.instance_host]})
+        scheduler_utils.setup_instance_group(self.context, self.fake_spec)
         self.task.scheduler_client.select_destinations(self.context,
-                self.fake_spec).AndReturn(
-                        [{'host': 'host1'}])
+                self.fake_spec, [self.instance.uuid]).AndReturn(
+                        [{'host': 'host1', 'nodename': 'node1'}])
         self.task._check_compatible_with_source_hypervisor("host1")\
                 .AndRaise(error)
 
         self.task.scheduler_client.select_destinations(self.context,
-                self.fake_spec).AndReturn(
+                self.fake_spec, [self.instance.uuid]).AndReturn(
                         [{'host': 'host2'}])
         self.task._check_compatible_with_source_hypervisor("host2")
         self.task._call_livem_checks_on_host("host2")
 
         self.mox.ReplayAll()
-        self.assertEqual("host2", self.task._find_destination())
+        with mock.patch.object(self.task,
+                               '_remove_host_allocations') as remove_allocs:
+            self.assertEqual("host2", self.task._find_destination())
+        # Should have removed allocations for the first host.
+        remove_allocs.assert_called_once_with('host1', 'node1')
 
     def test_find_destination_retry_with_old_hypervisor(self):
         self._test_find_destination_retry_hypervisor_raises(
@@ -388,24 +412,26 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
 
         utils.get_image_from_system_metadata(
             self.instance.system_metadata).AndReturn("image")
-        fake_props = {'instance_properties': {'uuid': self.instance_uuid}}
-        scheduler_utils.setup_instance_group(
-            self.context, fake_props, {'ignore_hosts': [self.instance_host]})
+        scheduler_utils.setup_instance_group(self.context, self.fake_spec)
         self.task.scheduler_client.select_destinations(self.context,
-                self.fake_spec).AndReturn(
-                        [{'host': 'host1'}])
+                self.fake_spec, [self.instance.uuid]).AndReturn(
+                        [{'host': 'host1', 'nodename': 'node1'}])
         self.task._check_compatible_with_source_hypervisor("host1")
         self.task._call_livem_checks_on_host("host1")\
                 .AndRaise(exception.Invalid)
 
         self.task.scheduler_client.select_destinations(self.context,
-                self.fake_spec).AndReturn(
+                self.fake_spec, [self.instance.uuid]).AndReturn(
                         [{'host': 'host2'}])
         self.task._check_compatible_with_source_hypervisor("host2")
         self.task._call_livem_checks_on_host("host2")
 
         self.mox.ReplayAll()
-        self.assertEqual("host2", self.task._find_destination())
+        with mock.patch.object(self.task,
+                               '_remove_host_allocations') as remove_allocs:
+            self.assertEqual("host2", self.task._find_destination())
+        # Should have removed allocations for the first host.
+        remove_allocs.assert_called_once_with('host1', 'node1')
 
     def test_find_destination_retry_with_failed_migration_pre_checks(self):
         self.flags(migrate_max_retries=1)
@@ -419,24 +445,26 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
 
         utils.get_image_from_system_metadata(
             self.instance.system_metadata).AndReturn("image")
-        fake_props = {'instance_properties': {'uuid': self.instance_uuid}}
-        scheduler_utils.setup_instance_group(
-            self.context, fake_props, {'ignore_hosts': [self.instance_host]})
+        scheduler_utils.setup_instance_group(self.context, self.fake_spec)
         self.task.scheduler_client.select_destinations(self.context,
-                self.fake_spec).AndReturn(
-                        [{'host': 'host1'}])
+                self.fake_spec, [self.instance.uuid]).AndReturn(
+                        [{'host': 'host1', 'nodename': 'node1'}])
         self.task._check_compatible_with_source_hypervisor("host1")
         self.task._call_livem_checks_on_host("host1")\
                 .AndRaise(exception.MigrationPreCheckError("reason"))
 
         self.task.scheduler_client.select_destinations(self.context,
-                self.fake_spec).AndReturn(
+                self.fake_spec, [self.instance.uuid]).AndReturn(
                         [{'host': 'host2'}])
         self.task._check_compatible_with_source_hypervisor("host2")
         self.task._call_livem_checks_on_host("host2")
 
         self.mox.ReplayAll()
-        self.assertEqual("host2", self.task._find_destination())
+        with mock.patch.object(self.task,
+                               '_remove_host_allocations') as remove_allocs:
+            self.assertEqual("host2", self.task._find_destination())
+        # Should have removed allocations for the first host.
+        remove_allocs.assert_called_once_with('host1', 'node1')
 
     def test_find_destination_retry_exceeds_max(self):
         self.flags(migrate_max_retries=0)
@@ -449,21 +477,26 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
 
         utils.get_image_from_system_metadata(
             self.instance.system_metadata).AndReturn("image")
-        fake_props = {'instance_properties': {'uuid': self.instance_uuid}}
-        scheduler_utils.setup_instance_group(
-            self.context, fake_props, {'ignore_hosts': [self.instance_host]})
+        scheduler_utils.setup_instance_group(self.context, self.fake_spec)
         self.task.scheduler_client.select_destinations(self.context,
-                self.fake_spec).AndReturn(
-                        [{'host': 'host1'}])
+                self.fake_spec, [self.instance.uuid]).AndReturn(
+                        [{'host': 'host1', 'nodename': 'node1'}])
         self.task._check_compatible_with_source_hypervisor("host1")\
                 .AndRaise(exception.DestinationHypervisorTooOld)
 
         self.mox.ReplayAll()
-        with mock.patch.object(self.task.migration, 'save') as save_mock:
+        with test.nested(
+            mock.patch.object(self.task.migration, 'save'),
+            mock.patch.object(self.task, '_remove_host_allocations')
+        ) as (
+            save_mock, remove_allocs
+        ):
             self.assertRaises(exception.MaxRetriesExceeded,
                               self.task._find_destination)
             self.assertEqual('failed', self.task.migration.status)
             save_mock.assert_called_once_with()
+            # Should have removed allocations for the first host.
+            remove_allocs.assert_called_once_with('host1', 'node1')
 
     def test_find_destination_when_runs_out_of_hosts(self):
         self.mox.StubOutWithMock(utils, 'get_image_from_system_metadata')
@@ -472,11 +505,9 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
                                  'select_destinations')
         utils.get_image_from_system_metadata(
             self.instance.system_metadata).AndReturn("image")
-        fake_props = {'instance_properties': {'uuid': self.instance_uuid}}
-        scheduler_utils.setup_instance_group(
-            self.context, fake_props, {'ignore_hosts': [self.instance_host]})
+        scheduler_utils.setup_instance_group(self.context, self.fake_spec)
         self.task.scheduler_client.select_destinations(self.context,
-                self.fake_spec).AndRaise(
+                self.fake_spec, [self.instance.uuid]).AndRaise(
                         exception.NoValidHost(reason=""))
 
         self.mox.ReplayAll()
@@ -506,3 +537,39 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
             side_effect=messaging.MessagingTimeout):
             self.assertRaises(exception.MigrationPreCheckError,
                 self.task._call_livem_checks_on_host, {})
+
+    @mock.patch.object(objects.InstanceMapping, 'get_by_instance_uuid',
+                       side_effect=exception.InstanceMappingNotFound(
+                           uuid=uuids.instance))
+    def test_get_source_cell_mapping_not_found(self, mock_get):
+        """Negative test where InstanceMappingNotFound is raised and converted
+        to MigrationPreCheckError.
+        """
+        self.assertRaises(exception.MigrationPreCheckError,
+                          self.task._get_source_cell_mapping)
+        mock_get.assert_called_once_with(
+            self.task.context, self.task.instance.uuid)
+
+    @mock.patch.object(objects.HostMapping, 'get_by_host',
+                       side_effect=exception.HostMappingNotFound(
+                           name='destination'))
+    def test_get_destination_cell_mapping_not_found(self, mock_get):
+        """Negative test where HostMappingNotFound is raised and converted
+        to MigrationPreCheckError.
+        """
+        self.assertRaises(exception.MigrationPreCheckError,
+                          self.task._get_destination_cell_mapping)
+        mock_get.assert_called_once_with(
+            self.task.context, self.task.destination)
+
+    @mock.patch.object(objects.ComputeNode, 'get_by_host_and_nodename',
+                       side_effect=exception.ComputeHostNotFound(host='host'))
+    def test_remove_host_allocations_compute_host_not_found(self, get_cn):
+        """Tests that failing to find a ComputeNode will not blow up
+        the _remove_host_allocations method.
+        """
+        with mock.patch.object(
+                self.task.scheduler_client.reportclient,
+                'remove_provider_from_instance_allocation') as remove_provider:
+            self.task._remove_host_allocations('host', 'node')
+        remove_provider.assert_not_called()

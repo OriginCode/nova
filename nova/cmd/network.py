@@ -25,7 +25,7 @@ from nova.cmd import common as cmd_common
 from nova.conductor import rpcapi as conductor_rpcapi
 import nova.conf
 from nova import config
-from nova.i18n import _LW
+from nova.network import rpcapi as network_rpcapi
 from nova import objects
 from nova.objects import base as objects_base
 from nova import service
@@ -39,23 +39,24 @@ LOG = logging.getLogger('nova.network')
 def main():
     config.parse_args(sys.argv)
     logging.setup(CONF, "nova")
+
+    if not CONF.cells.enable:
+        LOG.error('Nova network is deprecated and not supported '
+                  'except as required for CellsV1 deployments.')
+        return 1
+
     utils.monkey_patch()
     objects.register_all()
 
     gmr.TextGuruMeditation.setup_autorun(version)
 
-    if not CONF.conductor.use_local:
-        cmd_common.block_db_access('nova-network')
-        objects_base.NovaObject.indirection_api = \
-            conductor_rpcapi.ConductorAPI()
-    else:
-        LOG.warning(_LW('Conductor local mode is deprecated and will '
-                        'be removed in a subsequent release'))
+    cmd_common.block_db_access('nova-network')
+    objects_base.NovaObject.indirection_api = conductor_rpcapi.ConductorAPI()
 
-    LOG.warning(_LW('Nova network is deprecated and will be removed '
-                    'in the future'))
+    LOG.warning('Nova network is deprecated and will be removed '
+                'in the future')
     server = service.Service.create(binary='nova-network',
-                                    topic=CONF.network_topic,
-                                    db_allowed=CONF.conductor.use_local)
+                                    topic=network_rpcapi.RPC_TOPIC,
+                                    manager=CONF.network_manager)
     service.serve(server)
     service.wait()

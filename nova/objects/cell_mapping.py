@@ -10,6 +10,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from sqlalchemy.sql.expression import asc
+
 from nova.db.sqlalchemy import api as db_api
 from nova.db.sqlalchemy import api_models
 from nova import exception
@@ -31,6 +33,13 @@ class CellMapping(base.NovaTimestampObject, base.NovaObject):
         'transport_url': fields.StringField(),
         'database_connection': fields.StringField(),
         }
+
+    @property
+    def identity(self):
+        if 'name' in self and self.name:
+            return '%s(%s)' % (self.uuid, self.name)
+        else:
+            return self.uuid
 
     @staticmethod
     def _from_db_object(context, cell_mapping, db_cell_mapping):
@@ -104,6 +113,9 @@ class CellMapping(base.NovaTimestampObject, base.NovaObject):
     def destroy(self):
         self._destroy_in_db(self._context, self.uuid)
 
+    def is_cell0(self):
+        return self.obj_attr_is_set('uuid') and self.uuid == self.CELL0_UUID
+
 
 @base.NovaObjectRegistry.register
 class CellMappingList(base.ObjectListBase, base.NovaObject):
@@ -117,7 +129,8 @@ class CellMappingList(base.ObjectListBase, base.NovaObject):
     @staticmethod
     @db_api.api_context_manager.reader
     def _get_all_from_db(context):
-        return context.session.query(api_models.CellMapping).all()
+        return context.session.query(api_models.CellMapping).order_by(
+            asc(api_models.CellMapping.id)).all()
 
     @base.remotable_classmethod
     def get_all(cls, context):

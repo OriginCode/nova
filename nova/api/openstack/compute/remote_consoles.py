@@ -24,9 +24,6 @@ from nova import exception
 from nova.policies import remote_consoles as rc_policies
 
 
-ALIAS = "os-remote-consoles"
-
-
 class RemoteConsolesController(wsgi.Controller):
     def __init__(self, *args, **kwargs):
         self.compute_api = compute.API()
@@ -49,8 +46,8 @@ class RemoteConsolesController(wsgi.Controller):
         # If type is not supplied or unknown, get_vnc_console below will cope
         console_type = body['os-getVNCConsole'].get('type')
 
+        instance = common.get_instance(self.compute_api, context, id)
         try:
-            instance = common.get_instance(self.compute_api, context, id)
             output = self.compute_api.get_vnc_console(context,
                                                       instance,
                                                       console_type)
@@ -78,8 +75,8 @@ class RemoteConsolesController(wsgi.Controller):
         # If type is not supplied or unknown, get_spice_console below will cope
         console_type = body['os-getSPICEConsole'].get('type')
 
+        instance = common.get_instance(self.compute_api, context, id)
         try:
-            instance = common.get_instance(self.compute_api, context, id)
             output = self.compute_api.get_spice_console(context,
                                                         instance,
                                                         console_type)
@@ -137,8 +134,8 @@ class RemoteConsolesController(wsgi.Controller):
 
         # If type is not supplied or unknown get_serial_console below will cope
         console_type = body['os-getSerialConsole'].get('type')
+        instance = common.get_instance(self.compute_api, context, id)
         try:
-            instance = common.get_instance(self.compute_api, context, id)
             output = self.compute_api.get_serial_console(context,
                                                          instance,
                                                          console_type)
@@ -186,24 +183,3 @@ class RemoteConsolesController(wsgi.Controller):
             raise webob.exc.HTTPBadRequest(explanation=e.format_message())
         except NotImplementedError:
             common.raise_feature_not_supported()
-
-
-class RemoteConsoles(extensions.V21APIExtensionBase):
-    """Interactive Console support."""
-    name = "Consoles"
-    alias = ALIAS
-    version = 1
-
-    def get_controller_extensions(self):
-        controller = RemoteConsolesController()
-        extension = extensions.ControllerExtension(self, 'servers', controller)
-        return [extension]
-
-    def get_resources(self):
-        parent = {'member_name': 'server',
-                  'collection_name': 'servers'}
-        resources = [
-            extensions.ResourceExtension(
-                'remote-consoles', RemoteConsolesController(), parent=parent,
-                member_name='remote-console')]
-        return resources

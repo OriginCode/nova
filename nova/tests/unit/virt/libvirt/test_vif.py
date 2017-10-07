@@ -12,7 +12,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import copy
 import os
 
 import fixtures
@@ -21,6 +20,7 @@ import mock
 import os_vif
 from os_vif import exception as osv_exception
 from os_vif import objects as osv_objects
+from os_vif.objects import fields as osv_fields
 from oslo_concurrency import processutils
 from oslo_config import cfg
 import six
@@ -33,6 +33,7 @@ from nova.pci import utils as pci_utils
 from nova import test
 from nova.tests.unit import matchers
 from nova.tests.unit.virt import fakelibosinfo
+from nova.tests.unit.virt.libvirt import fakelibvirt
 from nova import utils
 from nova.virt.libvirt import config as vconfig
 from nova.virt.libvirt import host
@@ -40,345 +41,343 @@ from nova.virt.libvirt import vif
 
 CONF = cfg.CONF
 
+MIN_LIBVIRT_VHOSTUSER_MQ = vif.MIN_LIBVIRT_VHOSTUSER_MQ
+
 
 class LibvirtVifTestCase(test.NoDBTestCase):
 
     gateway_bridge_4 = network_model.IP(address='101.168.1.1', type='gateway')
     dns_bridge_4 = network_model.IP(address='8.8.8.8', type=None)
     ips_bridge_4 = [network_model.IP(address='101.168.1.9', type=None)]
-    subnet_bridge_4 = network_model.Subnet(cidr='101.168.1.0/24',
-                                           dns=[dns_bridge_4],
-                                           gateway=gateway_bridge_4,
-                                           routes=None,
-                                           dhcp_server='191.168.1.1')
+    subnet_bridge_4 = network_model.Subnet(
+        cidr='101.168.1.0/24',
+        dns=[dns_bridge_4],
+        gateway=gateway_bridge_4,
+        routes=None,
+        dhcp_server='191.168.1.1')
 
     gateway_bridge_6 = network_model.IP(address='101:1db9::1', type='gateway')
     subnet_bridge_6 = network_model.Subnet(cidr='101:1db9::/64',
-                                           dns=None,
-                                           gateway=gateway_bridge_6,
-                                           ips=None,
-                                           routes=None)
+        dns=None,
+        gateway=gateway_bridge_6,
+        ips=None,
+        routes=None)
 
     network_bridge = network_model.Network(id='network-id-xxx-yyy-zzz',
-                                           bridge='br0',
-                                           label=None,
-                                           subnets=[subnet_bridge_4,
-                                                    subnet_bridge_6],
-                                           bridge_interface='eth0',
-                                           vlan=99, mtu=9000)
+        bridge='br0',
+        label=None,
+        subnets=[subnet_bridge_4, subnet_bridge_6],
+        bridge_interface='eth0',
+        vlan=99, mtu=9000)
 
     vif_bridge = network_model.VIF(id='vif-xxx-yyy-zzz',
-                                   address='ca:fe:de:ad:be:ef',
-                                   network=network_bridge,
-                                   type=network_model.VIF_TYPE_BRIDGE,
-                                   devname='tap-xxx-yyy-zzz',
-                                   ovs_interfaceid=None)
+        address='ca:fe:de:ad:be:ef',
+        network=network_bridge,
+        type=network_model.VIF_TYPE_BRIDGE,
+        devname='tap-xxx-yyy-zzz',
+        ovs_interfaceid=None)
 
     network_bridge_neutron = network_model.Network(id='network-id-xxx-yyy-zzz',
-                                                   bridge=None,
-                                                   label=None,
-                                                   subnets=[subnet_bridge_4,
-                                                            subnet_bridge_6],
-                                                   bridge_interface='eth0',
-                                                   vlan=99)
+        bridge=None,
+        label=None,
+        subnets=[subnet_bridge_4, subnet_bridge_6],
+        bridge_interface='eth0',
+        vlan=99)
 
     vif_bridge_neutron = network_model.VIF(id='vif-xxx-yyy-zzz',
-                                           address='ca:fe:de:ad:be:ef',
-                                           network=network_bridge_neutron,
-                                           type=None,
-                                           devname='tap-xxx-yyy-zzz',
-                                           ovs_interfaceid='aaa-bbb-ccc')
+        address='ca:fe:de:ad:be:ef',
+        network=network_bridge_neutron,
+        type=None,
+        devname='tap-xxx-yyy-zzz',
+        ovs_interfaceid='aaa-bbb-ccc')
 
     network_ovs = network_model.Network(id='network-id-xxx-yyy-zzz',
-                                        bridge='br0',
-                                        label=None,
-                                        subnets=[subnet_bridge_4,
-                                                 subnet_bridge_6],
-                                        bridge_interface=None,
-                                        vlan=99, mtu=1000)
+        bridge='br0',
+        label=None,
+        subnets=[subnet_bridge_4, subnet_bridge_6],
+        bridge_interface=None,
+        vlan=99, mtu=1000)
 
     network_ivs = network_model.Network(id='network-id-xxx-yyy-zzz',
-                                        bridge='br0',
-                                        label=None,
-                                        subnets=[subnet_bridge_4,
-                                                 subnet_bridge_6],
-                                        bridge_interface=None,
-                                        vlan=99)
+        bridge='br0',
+        label=None,
+        subnets=[subnet_bridge_4, subnet_bridge_6],
+        bridge_interface=None,
+        vlan=99)
+
+    vif_agilio_ovs = network_model.VIF(id='vif-xxx-yyy-zzz',
+        address='ca:fe:de:ad:be:ef',
+        network=network_ovs,
+        type=network_model.VIF_TYPE_AGILIO_OVS,
+        details={'port_filter': False},
+        devname='tap-xxx-yyy-zzz',
+        ovs_interfaceid='aaa-bbb-ccc')
+
+    vif_agilio_ovs_direct = network_model.VIF(id='vif-xxx-yyy-zzz',
+        address='ca:fe:de:ad:be:ef',
+        network=network_ovs,
+        type=network_model.VIF_TYPE_AGILIO_OVS,
+        vnic_type=network_model.VNIC_TYPE_DIRECT,
+        ovs_interfaceid='aaa-bbb-ccc',
+        devname='tap-xxx-yyy-zzz',
+        profile={'pci_slot': '0000:0a:00.1'})
+
+    vif_agilio_ovs_forwarder = network_model.VIF(id='vif-xxx-yyy-zzz',
+        address='ca:fe:de:ad:be:ef',
+        network=network_ovs,
+        type=network_model.VIF_TYPE_AGILIO_OVS,
+        vnic_type=network_model.VNIC_TYPE_VIRTIO_FORWARDER,
+        profile={'pci_slot': '0000:0a:00.1'},
+        details={
+            network_model.VIF_DETAILS_VHOSTUSER_MODE: 'client',
+            network_model.VIF_DETAILS_VHOSTUSER_SOCKET: '/tmp/usv-xxx-yyy-zzz',
+            network_model.VIF_DETAILS_VHOSTUSER_OVS_PLUG: True},
+        ovs_interfaceid='aaa-bbb-ccc', mtu=1500)
 
     vif_ovs = network_model.VIF(id='vif-xxx-yyy-zzz',
-                                address='ca:fe:de:ad:be:ef',
-                                network=network_ovs,
-                                type=network_model.VIF_TYPE_OVS,
-                                devname='tap-xxx-yyy-zzz',
-                                ovs_interfaceid='aaa-bbb-ccc')
+        address='ca:fe:de:ad:be:ef',
+        network=network_ovs,
+        type=network_model.VIF_TYPE_OVS,
+        details={'port_filter': False},
+        devname='tap-xxx-yyy-zzz',
+        ovs_interfaceid='aaa-bbb-ccc')
+
+    vif_ovs_direct = network_model.VIF(id='vif-xxx-yyy-zzz',
+        address='ca:fe:de:ad:be:ef',
+        network=network_ovs,
+        vnic_type=network_model.VNIC_TYPE_DIRECT,
+        profile={'pci_slot': '0000:0a:00.1'},
+        type=network_model.VIF_TYPE_OVS,
+        details={'port_filter': False},
+        ovs_interfaceid='aaa-bbb-ccc')
 
     vif_ovs_hybrid = network_model.VIF(id='vif-xxx-yyy-zzz',
-                                       address='ca:fe:de:ad:be:ef',
-                                       network=network_ovs,
-                                       type=network_model.VIF_TYPE_OVS,
-                                       details={'ovs_hybrid_plug': True,
-                                                'port_filter': True},
-                                       devname='tap-xxx-yyy-zzz',
-                                       ovs_interfaceid='aaa-bbb-ccc')
+        address='ca:fe:de:ad:be:ef',
+        network=network_ovs,
+        type=network_model.VIF_TYPE_OVS,
+        details={'ovs_hybrid_plug': True,
+                 'port_filter': True},
+        devname='tap-xxx-yyy-zzz',
+        ovs_interfaceid='aaa-bbb-ccc')
 
     vif_ovs_filter_cap = network_model.VIF(id='vif-xxx-yyy-zzz',
-                                           address='ca:fe:de:ad:be:ef',
-                                           network=network_ovs,
-                                           type=network_model.VIF_TYPE_OVS,
-                                           details={'port_filter': True},
-                                           devname='tap-xxx-yyy-zzz',
-                                           ovs_interfaceid='aaa-bbb-ccc')
+        address='ca:fe:de:ad:be:ef',
+        network=network_ovs,
+        type=network_model.VIF_TYPE_OVS,
+        details={'port_filter': True},
+        devname='tap-xxx-yyy-zzz',
+        ovs_interfaceid='aaa-bbb-ccc')
 
     vif_ovs_legacy = network_model.VIF(id='vif-xxx-yyy-zzz',
-                                       address='ca:fe:de:ad:be:ef',
-                                       network=network_ovs,
-                                       type=None,
-                                       devname=None,
-                                       ovs_interfaceid=None)
+        address='ca:fe:de:ad:be:ef',
+        network=network_ovs,
+        type=None,
+        devname=None,
+        ovs_interfaceid=None)
 
     vif_ivs = network_model.VIF(id='vif-xxx-yyy-zzz',
-                                address='ca:fe:de:ad:be:ef',
-                                network=network_ivs,
-                                type=network_model.VIF_TYPE_IVS,
-                                devname='tap-xxx-yyy-zzz',
-                                ovs_interfaceid='aaa-bbb-ccc')
+        address='ca:fe:de:ad:be:ef',
+        network=network_ivs,
+        type=network_model.VIF_TYPE_IVS,
+        devname='tap-xxx-yyy-zzz',
+        ovs_interfaceid='aaa-bbb-ccc')
+
+    vif_ivs_filter_cap = network_model.VIF(id='vif-xxx-yyy-zzz',
+        address='ca:fe:de:ad:be:ef',
+        network=network_ivs,
+        type=network_model.VIF_TYPE_IVS,
+        details={'port_filter': True},
+        devname='tap-xxx-yyy-zzz',
+        ovs_interfaceid='aaa-bbb-ccc')
+
+    vif_ivs_hybrid = network_model.VIF(id='vif-xxx-yyy-zzz',
+        address='ca:fe:de:ad:be:ef',
+        network=network_ivs,
+        type=network_model.VIF_TYPE_IVS,
+        details={
+            'port_filter': True,
+            'ovs_hybrid_plug': True},
+        devname='tap-xxx-yyy-zzz',
+        ovs_interfaceid='aaa-bbb-ccc')
 
     vif_ivs_legacy = network_model.VIF(id='vif-xxx-yyy-zzz',
-                                       address='ca:fe:de:ad:be:ef',
-                                       network=network_ovs,
-                                       type=None,
-                                       devname=None,
-                                       ovs_interfaceid='aaa')
-
-    vif_ivs_filter_direct = network_model.VIF(id='vif-xxx-yyy-zzz',
-                                              address='ca:fe:de:ad:be:ef',
-                                              network=network_ivs,
-                                              type=network_model.VIF_TYPE_IVS,
-                                              details={'port_filter': True},
-                                              devname='tap-xxx-yyy-zzz',
-                                              ovs_interfaceid='aaa-bbb-ccc')
-
-    vif_ivs_filter_hybrid = network_model.VIF(id='vif-xxx-yyy-zzz',
-                                              address='ca:fe:de:ad:be:ef',
-                                              network=network_ivs,
-                                              type=network_model.VIF_TYPE_IVS,
-                                              details={
-                                                  'port_filter': True,
-                                                  'ovs_hybrid_plug': True},
-                                              devname='tap-xxx-yyy-zzz',
-                                              ovs_interfaceid='aaa-bbb-ccc')
+        address='ca:fe:de:ad:be:ef',
+        network=network_ovs,
+        type=None,
+        devname=None,
+        ovs_interfaceid='aaa')
 
     vif_none = network_model.VIF(id='vif-xxx-yyy-zzz',
-                                 address='ca:fe:de:ad:be:ef',
-                                 network=network_bridge,
-                                 type=None,
-                                 devname='tap-xxx-yyy-zzz',
-                                 ovs_interfaceid=None)
+        address='ca:fe:de:ad:be:ef',
+        network=network_bridge,
+        type=None,
+        devname='tap-xxx-yyy-zzz',
+        ovs_interfaceid=None)
 
     network_8021 = network_model.Network(id='network-id-xxx-yyy-zzz',
-                                         bridge=None,
-                                         label=None,
-                                         subnets=[subnet_bridge_4,
-                                                  subnet_bridge_6],
-                                         interface='eth0',
-                                         vlan=99)
+        bridge=None,
+        label=None,
+        subnets=[subnet_bridge_4,
+                 subnet_bridge_6],
+        interface='eth0',
+        vlan=99)
 
     vif_8021qbh = network_model.VIF(id='vif-xxx-yyy-zzz',
-                                    address='ca:fe:de:ad:be:ef',
-                                    network=network_8021,
-                                    type=network_model.VIF_TYPE_802_QBH,
-                                    vnic_type=network_model.VNIC_TYPE_DIRECT,
-                                    ovs_interfaceid=None,
-                                    details={
-                                        network_model.VIF_DETAILS_PROFILEID:
-                                        'MyPortProfile'},
-                                    profile={'pci_vendor_info': '1137:0043',
-                                             'pci_slot': '0000:0a:00.1',
-                                             'physical_network': 'phynet1'})
+        address='ca:fe:de:ad:be:ef',
+        network=network_8021,
+        type=network_model.VIF_TYPE_802_QBH,
+        vnic_type=network_model.VNIC_TYPE_DIRECT,
+        ovs_interfaceid=None,
+        details={
+            network_model.VIF_DETAILS_PROFILEID:
+            'MyPortProfile'},
+        profile={'pci_vendor_info': '1137:0043',
+                 'pci_slot': '0000:0a:00.1',
+                 'physical_network': 'phynet1'})
 
     vif_hw_veb = network_model.VIF(id='vif-xxx-yyy-zzz',
-                                   address='ca:fe:de:ad:be:ef',
-                                   network=network_8021,
-                                   type=network_model.VIF_TYPE_HW_VEB,
-                                   vnic_type=network_model.VNIC_TYPE_DIRECT,
-                                   ovs_interfaceid=None,
-                                   details={
-                                       network_model.VIF_DETAILS_VLAN: '100'},
-                                   profile={'pci_vendor_info': '1137:0043',
-                                            'pci_slot': '0000:0a:00.1',
-                                            'physical_network': 'phynet1'})
+        address='ca:fe:de:ad:be:ef',
+        network=network_8021,
+        type=network_model.VIF_TYPE_HW_VEB,
+        vnic_type=network_model.VNIC_TYPE_DIRECT,
+        ovs_interfaceid=None,
+        details={
+            network_model.VIF_DETAILS_VLAN: 100},
+        profile={'pci_vendor_info': '1137:0043',
+                 'pci_slot': '0000:0a:00.1',
+                 'physical_network': 'phynet1'})
 
     vif_hostdev_physical = network_model.VIF(id='vif-xxx-yyy-zzz',
-                                   address='ca:fe:de:ad:be:ef',
-                                   network=network_8021,
-                                   type=network_model.VIF_TYPE_HOSTDEV,
-                                   vnic_type=
-                                       network_model.VNIC_TYPE_DIRECT_PHYSICAL,
-                                   ovs_interfaceid=None,
-                                   profile={'pci_vendor_info': '1137:0043',
-                                            'pci_slot': '0000:0a:00.1',
-                                            'physical_network': 'phynet1'})
+        address='ca:fe:de:ad:be:ef',
+        network=network_8021,
+        type=network_model.VIF_TYPE_HOSTDEV,
+        vnic_type=network_model.VNIC_TYPE_DIRECT_PHYSICAL,
+        ovs_interfaceid=None,
+        profile={'pci_vendor_info': '1137:0043',
+                 'pci_slot': '0000:0a:00.1',
+                 'physical_network': 'phynet1'})
 
     vif_hw_veb_macvtap = network_model.VIF(id='vif-xxx-yyy-zzz',
-                                    address='ca:fe:de:ad:be:ef',
-                                    network=network_8021,
-                                    type=network_model.VIF_TYPE_HW_VEB,
-                                    vnic_type=network_model.VNIC_TYPE_MACVTAP,
-                                    ovs_interfaceid=None,
-                                    details={
-                                      network_model.VIF_DETAILS_VLAN: '100'},
-                                    profile={'pci_vendor_info': '1137:0043',
-                                             'pci_slot': '0000:0a:00.1',
-                                             'physical_network': 'phynet1'})
+        address='ca:fe:de:ad:be:ef',
+        network=network_8021,
+        type=network_model.VIF_TYPE_HW_VEB,
+        vnic_type=network_model.VNIC_TYPE_MACVTAP,
+        ovs_interfaceid=None,
+        details={network_model.VIF_DETAILS_VLAN: 100},
+        profile={'pci_vendor_info': '1137:0043',
+                 'pci_slot': '0000:0a:00.1',
+                 'physical_network': 'phynet1'})
 
     vif_8021qbg = network_model.VIF(id='vif-xxx-yyy-zzz',
-                                    address='ca:fe:de:ad:be:ef',
-                                    network=network_8021,
-                                    type=network_model.VIF_TYPE_802_QBG,
-                                    ovs_interfaceid=None,
-                                    qbg_params=network_model.VIF8021QbgParams(
-                                    managerid="xxx-yyy-zzz",
-                                    typeid="aaa-bbb-ccc",
-                                    typeidversion="1",
-                                    instanceid="ddd-eee-fff"))
+        address='ca:fe:de:ad:be:ef',
+        network=network_8021,
+        type=network_model.VIF_TYPE_802_QBG,
+        ovs_interfaceid=None,
+        qbg_params=network_model.VIF8021QbgParams(
+        managerid="xxx-yyy-zzz",
+        typeid="aaa-bbb-ccc",
+        typeidversion="1",
+        instanceid="ddd-eee-fff"))
 
     network_midonet = network_model.Network(id='network-id-xxx-yyy-zzz',
-                                            label=None,
-                                            bridge=None,
-                                            subnets=[subnet_bridge_4],
-                                            interface='eth0')
+        label=None,
+        bridge=None,
+        subnets=[subnet_bridge_4],
+        interface='eth0')
 
     network_vrouter = network_model.Network(id='network-id-xxx-yyy-zzz',
-                                            label=None,
-                                            bridge=None,
-                                            subnets=[subnet_bridge_4,
-                                                     subnet_bridge_6],
-                                            interface='eth0')
+        label=None,
+        bridge=None,
+        subnets=[subnet_bridge_4, subnet_bridge_6],
+        interface='eth0')
 
     vif_vrouter = network_model.VIF(id='vif-xxx-yyy-zzz',
-                                    address='ca:fe:de:ad:be:ef',
-                                    network=network_vrouter,
-                                    type=network_model.VIF_TYPE_VROUTER,
-                                    devname='tap-xxx-yyy-zzz')
+        address='ca:fe:de:ad:be:ef',
+        network=network_vrouter,
+        type=network_model.VIF_TYPE_VROUTER,
+        devname='tap-xxx-yyy-zzz')
 
     vif_ib_hostdev = network_model.VIF(id='vif-xxx-yyy-zzz',
-                                   address='ca:fe:de:ad:be:ef',
-                                   network=network_8021,
-                                   type=network_model.VIF_TYPE_IB_HOSTDEV,
-                                   vnic_type=network_model.VNIC_TYPE_DIRECT,
-                                   ovs_interfaceid=None,
-                                   details={
-                                       network_model.VIF_DETAILS_VLAN: '100'},
-                                   profile={'pci_vendor_info': '1137:0043',
-                                            'pci_slot': '0000:0a:00.1',
-                                            'physical_network': 'phynet1'})
+        address='ca:fe:de:ad:be:ef',
+        network=network_8021,
+        type=network_model.VIF_TYPE_IB_HOSTDEV,
+        vnic_type=network_model.VNIC_TYPE_DIRECT,
+        ovs_interfaceid=None,
+        details={network_model.VIF_DETAILS_VLAN: 100},
+        profile={'pci_vendor_info': '1137:0043',
+                 'pci_slot': '0000:0a:00.1',
+                 'physical_network': 'phynet1'})
 
     vif_midonet = network_model.VIF(id='vif-xxx-yyy-zzz',
-                                    address='ca:fe:de:ad:be:ef',
-                                    network=network_midonet,
-                                    type=network_model.VIF_TYPE_MIDONET,
-                                    devname='tap-xxx-yyy-zzz')
+        address='ca:fe:de:ad:be:ef',
+        network=network_midonet,
+        type=network_model.VIF_TYPE_MIDONET,
+        devname='tap-xxx-yyy-zzz')
 
     vif_tap = network_model.VIF(id='vif-xxx-yyy-zzz',
-                                address='ca:fe:de:ad:be:ef',
-                                type=network_model.VIF_TYPE_TAP,
-                                devname='tap-xxx-yyy-zzz')
+        address='ca:fe:de:ad:be:ef',
+        type=network_model.VIF_TYPE_TAP,
+        devname='tap-xxx-yyy-zzz')
 
     vif_iovisor = network_model.VIF(id='vif-xxx-yyy-zzz',
-                                   address='ca:fe:de:ad:be:ef',
-                                   network=network_bridge,
-                                   type=network_model.VIF_TYPE_IOVISOR,
-                                   devname='tap-xxx-yyy-zzz',
-                                   ovs_interfaceid=None)
+        address='ca:fe:de:ad:be:ef',
+        network=network_bridge,
+        type=network_model.VIF_TYPE_IOVISOR,
+        devname='tap-xxx-yyy-zzz',
+        ovs_interfaceid=None)
 
     vif_vhostuser = network_model.VIF(id='vif-xxx-yyy-zzz',
-              address='ca:fe:de:ad:be:ef',
-              network=network_bridge,
-              type=network_model.VIF_TYPE_VHOSTUSER,
-              details = {network_model.VIF_DETAILS_VHOSTUSER_MODE: 'client',
-                         network_model.VIF_DETAILS_VHOSTUSER_SOCKET:
-                                                    '/tmp/vif-xxx-yyy-zzz'}
-              )
-
-    vif_vhostuser_fp = network_model.VIF(id='vif-xxx-yyy-zzz',
-              address='ca:fe:de:ad:be:ef',
-              network=network_bridge,
-              type=network_model.VIF_TYPE_VHOSTUSER,
-              devname='tap-xxx-yyy-zzz',
-              details = {network_model.VIF_DETAILS_VHOSTUSER_SOCKET:
-                                                     '/tmp/usv-xxx-yyy-zzz',
-                         network_model.VIF_DETAILS_VHOSTUSER_FP_PLUG: True},
-              )
+        address='ca:fe:de:ad:be:ef',
+        network=network_bridge,
+        type=network_model.VIF_TYPE_VHOSTUSER,
+        details={
+            network_model.VIF_DETAILS_VHOSTUSER_MODE: 'client',
+            network_model.VIF_DETAILS_VHOSTUSER_SOCKET: '/tmp/vif-xxx-yyy-zzz'
+        })
 
     vif_vhostuser_ovs = network_model.VIF(id='vif-xxx-yyy-zzz',
-              address='ca:fe:de:ad:be:ef',
-              network=network_bridge,
-              type=network_model.VIF_TYPE_VHOSTUSER,
-              details = {network_model.VIF_DETAILS_VHOSTUSER_MODE: 'client',
-                         network_model.VIF_DETAILS_VHOSTUSER_SOCKET:
-                                                     '/tmp/usv-xxx-yyy-zzz',
-                         network_model.VIF_DETAILS_VHOSTUSER_OVS_PLUG: True},
-              ovs_interfaceid='aaa-bbb-ccc', mtu=1500
-              )
-
-    vif_vhostuser_ovs_fp = network_model.VIF(id='vif-xxx-yyy-zzz',
-              address='ca:fe:de:ad:be:ef',
-              network=network_bridge,
-              type=network_model.VIF_TYPE_VHOSTUSER,
-              details = {network_model.VIF_DETAILS_VHOSTUSER_MODE: 'server',
-                         network_model.VIF_DETAILS_VHOSTUSER_SOCKET:
-                                                     '/tmp/usv-xxx-yyy-zzz',
-                         network_model.VIF_DETAILS_VHOSTUSER_FP_PLUG: True,
-                         network_model.VIF_DETAILS_VHOSTUSER_OVS_PLUG: True},
-              devname='tap-xxx-yyy-zzz',
-              ovs_interfaceid='aaa-bbb-ccc'
-              )
-
-    vif_vhostuser_ovs_fp_hybrid = network_model.VIF(id='vif-xxx-yyy-zzz',
-              address='ca:fe:de:ad:be:ef',
-              network=network_bridge,
-              type=network_model.VIF_TYPE_VHOSTUSER,
-              details = {'ovs_hybrid_plug': True,
-                         network_model.VIF_DETAILS_VHOSTUSER_MODE: 'server',
-                         network_model.VIF_DETAILS_VHOSTUSER_SOCKET:
-                                                     '/tmp/usv-xxx-yyy-zzz',
-                         network_model.VIF_DETAILS_VHOSTUSER_OVS_PLUG: True,
-                         network_model.VIF_DETAILS_VHOSTUSER_FP_PLUG: True},
-              devname='tap-xxx-yyy-zzz',
-              ovs_interfaceid='aaa-bbb-ccc'
-              )
+        address='ca:fe:de:ad:be:ef',
+        network=network_bridge,
+        type=network_model.VIF_TYPE_VHOSTUSER,
+        details={
+            network_model.VIF_DETAILS_VHOSTUSER_MODE: 'client',
+            network_model.VIF_DETAILS_VHOSTUSER_SOCKET: '/tmp/usv-xxx-yyy-zzz',
+            network_model.VIF_DETAILS_VHOSTUSER_OVS_PLUG: True},
+        ovs_interfaceid='aaa-bbb-ccc', mtu=1500)
 
     vif_vhostuser_no_path = network_model.VIF(id='vif-xxx-yyy-zzz',
-          address='ca:fe:de:ad:be:ef',
-          network=network_bridge,
-          type=network_model.VIF_TYPE_VHOSTUSER,
-          details = {network_model.VIF_DETAILS_VHOSTUSER_MODE: 'client'})
+        address='ca:fe:de:ad:be:ef',
+        network=network_bridge,
+        type=network_model.VIF_TYPE_VHOSTUSER,
+        details={network_model.VIF_DETAILS_VHOSTUSER_MODE: 'client'})
 
     vif_macvtap_vlan = network_model.VIF(id='vif-xxx-yyy-zzz',
-          address='ca:fe:de:ad:be:ef',
-          network=network_8021,
-          type=network_model.VIF_TYPE_MACVTAP,
-          details={network_model.VIF_DETAILS_VLAN: '1',
-                   network_model.VIF_DETAILS_PHYS_INTERFACE: 'eth0',
-                   network_model.VIF_DETAILS_MACVTAP_SOURCE: 'eth0.1',
-                   network_model.VIF_DETAILS_MACVTAP_MODE: 'vepa'})
+        address='ca:fe:de:ad:be:ef',
+        network=network_8021,
+        type=network_model.VIF_TYPE_MACVTAP,
+        details={
+            network_model.VIF_DETAILS_VLAN: 1,
+            network_model.VIF_DETAILS_PHYS_INTERFACE: 'eth0',
+            network_model.VIF_DETAILS_MACVTAP_SOURCE: 'eth0.1',
+            network_model.VIF_DETAILS_MACVTAP_MODE: 'vepa'})
 
     vif_macvtap_flat = network_model.VIF(id='vif-xxx-yyy-zzz',
-          address='ca:fe:de:ad:be:ef',
-          network=network_8021,
-          type=network_model.VIF_TYPE_MACVTAP,
-          details={network_model.VIF_DETAILS_PHYS_INTERFACE: 'eth0',
-                   network_model.VIF_DETAILS_MACVTAP_SOURCE: 'eth0',
-                   network_model.VIF_DETAILS_MACVTAP_MODE: 'bridge'})
+        address='ca:fe:de:ad:be:ef',
+        network=network_8021,
+        type=network_model.VIF_TYPE_MACVTAP,
+        details={
+            network_model.VIF_DETAILS_PHYS_INTERFACE: 'eth0',
+            network_model.VIF_DETAILS_MACVTAP_SOURCE: 'eth0',
+            network_model.VIF_DETAILS_MACVTAP_MODE: 'bridge'})
 
     vif_macvtap_exception = network_model.VIF(id='vif-xxx-yyy-zzz',
-          address='ca:fe:de:ad:be:ef',
-          network=network_8021,
-          type=network_model.VIF_TYPE_MACVTAP)
+        address='ca:fe:de:ad:be:ef',
+        network=network_8021,
+        type=network_model.VIF_TYPE_MACVTAP)
 
     instance = objects.Instance(id=1,
-                                uuid='f0000000-0000-0000-0000-000000000001',
-                                project_id=723)
+        uuid='f0000000-0000-0000-0000-000000000001',
+        project_id=723)
 
     bandwidth = {
         'quota:vif_inbound_peak': '200',
@@ -389,52 +388,120 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         'quota:vif_outbound_burst': '30'
     }
 
-    os_vif_network = osv_objects.network.Network(
-        id="b82c1929-051e-481d-8110-4669916c7915",
-        label="Demo Net",
-        subnets=osv_objects.subnet.SubnetList(
-            objects=[]))
+    def setup_os_vif_objects(self):
+        self.os_vif_network = osv_objects.network.Network(
+            id="b82c1929-051e-481d-8110-4669916c7915",
+            label="Demo Net",
+            subnets=osv_objects.subnet.SubnetList(
+                objects=[]))
 
-    os_vif_bridge = osv_objects.vif.VIFBridge(
-        id="dc065497-3c8d-4f44-8fb4-e1d33c16a536",
-        address="22:52:25:62:e2:aa",
-        plugin="linux_bridge",
-        vif_name="nicdc065497-3c",
-        bridge_name="br100",
-        has_traffic_filtering=False,
-        network=os_vif_network)
+        self.os_vif_bridge = osv_objects.vif.VIFBridge(
+            id="dc065497-3c8d-4f44-8fb4-e1d33c16a536",
+            address="22:52:25:62:e2:aa",
+            plugin="linux_bridge",
+            vif_name="nicdc065497-3c",
+            bridge_name="br100",
+            has_traffic_filtering=False,
+            network=self.os_vif_network)
 
-    os_vif_ovs_prof = osv_objects.vif.VIFPortProfileOpenVSwitch(
-        interface_id="07bd6cea-fb37-4594-b769-90fc51854ee9",
-        profile_id="fishfood")
+        self.os_vif_ovs_prof = osv_objects.vif.VIFPortProfileOpenVSwitch(
+            interface_id="07bd6cea-fb37-4594-b769-90fc51854ee9",
+            profile_id="fishfood")
 
-    os_vif_ovs = osv_objects.vif.VIFOpenVSwitch(
-        id="dc065497-3c8d-4f44-8fb4-e1d33c16a536",
-        address="22:52:25:62:e2:aa",
-        unplugin="linux_bridge",
-        vif_name="nicdc065497-3c",
-        bridge_name="br0",
-        port_profile=os_vif_ovs_prof,
-        network=os_vif_network)
+        self.os_vif_repr_prof = osv_objects.vif.VIFPortProfileOVSRepresentor(
+            interface_id="07bd6cea-fb37-4594-b769-90fc51854ee9",
+            profile_id="fishfood",
+            representor_name='nicdc065497-3c',
+            representor_address='0000:0a:00.1')
 
-    os_vif_ovs_hybrid = osv_objects.vif.VIFBridge(
-        id="dc065497-3c8d-4f44-8fb4-e1d33c16a536",
-        address="22:52:25:62:e2:aa",
-        unplugin="linux_bridge",
-        vif_name="nicdc065497-3c",
-        bridge_name="br0",
-        port_profile=os_vif_ovs_prof,
-        has_traffic_filtering=False,
-        network=os_vif_network)
+        self.os_vif_agilio_ovs = osv_objects.vif.VIFOpenVSwitch(
+            id="dc065497-3c8d-4f44-8fb4-e1d33c16a536",
+            address="22:52:25:62:e2:aa",
+            plugin="agilio_ovs",
+            vif_name="nicdc065497-3c",
+            bridge_name="br0",
+            port_profile=self.os_vif_ovs_prof,
+            network=self.os_vif_network)
 
-    os_vif_inst_info = osv_objects.instance_info.InstanceInfo(
-        uuid="d5b1090c-9e00-4fa4-9504-4b1494857970",
-        name="instance-000004da",
-        project_id="2f37d7f6-e51a-4a1f-8b6e-b0917ffc8390")
+        self.os_vif_agilio_forwarder = osv_objects.vif.VIFVHostUser(
+            id="dc065497-3c8d-4f44-8fb4-e1d33c16a536",
+            address="22:52:25:62:e2:aa",
+            plugin="agilio_ovs",
+            vif_name="nicdc065497-3c",
+            path='/var/run/openvswitch/vhudc065497-3c',
+            mode='client',
+            port_profile=self.os_vif_repr_prof,
+            network=self.os_vif_network)
+
+        self.os_vif_agilio_direct = osv_objects.vif.VIFHostDevice(
+            id="dc065497-3c8d-4f44-8fb4-e1d33c16a536",
+            address="22:52:25:62:e2:aa",
+            plugin="agilio_ovs",
+            vif_name="nicdc065497-3c",
+            dev_type=osv_fields.VIFHostDeviceDevType.ETHERNET,
+            dev_address='0000:0a:00.1',
+            port_profile=self.os_vif_repr_prof,
+            network=self.os_vif_network)
+
+        self.os_vif_ovs = osv_objects.vif.VIFOpenVSwitch(
+            id="dc065497-3c8d-4f44-8fb4-e1d33c16a536",
+            address="22:52:25:62:e2:aa",
+            unplugin="linux_bridge",
+            vif_name="nicdc065497-3c",
+            bridge_name="br0",
+            port_profile=self.os_vif_ovs_prof,
+            network=self.os_vif_network)
+
+        self.os_vif_ovs_hybrid = osv_objects.vif.VIFBridge(
+            id="dc065497-3c8d-4f44-8fb4-e1d33c16a536",
+            address="22:52:25:62:e2:aa",
+            unplugin="linux_bridge",
+            vif_name="nicdc065497-3c",
+            bridge_name="br0",
+            port_profile=self.os_vif_ovs_prof,
+            has_traffic_filtering=False,
+            network=self.os_vif_network)
+
+        self.os_vif_vhostuser = osv_objects.vif.VIFVHostUser(
+            id="dc065497-3c8d-4f44-8fb4-e1d33c16a536",
+            address="22:52:25:62:e2:aa",
+            plugin="openvswitch",
+            vif_name="vhudc065497-3c",
+            path='/var/run/openvswitch/vhudc065497-3c',
+            mode='client',
+            port_profile=self.os_vif_ovs_prof,
+            network=self.os_vif_network)
+
+        self.os_vif_hostdevice_ethernet = osv_objects.vif.VIFHostDevice(
+            id="dc065497-3c8d-4f44-8fb4-e1d33c16a536",
+            address="22:52:25:62:e2:aa",
+            plugin="linux_bridge",
+            vif_name="nicdc065497-3c",
+            dev_type=osv_fields.VIFHostDeviceDevType.ETHERNET,
+            dev_address='0000:0a:00.1',
+            network=self.os_vif_network)
+
+        self.os_vif_hostdevice_generic = osv_objects.vif.VIFHostDevice(
+            id="dc065497-3c8d-4f44-8fb4-e1d33c16a536",
+            address="22:52:25:62:e2:aa",
+            plugin="linux_bridge",
+            vif_name="nicdc065497-3c",
+            dev_type=osv_fields.VIFHostDeviceDevType.GENERIC,
+            dev_address='0000:0a:00.1',
+            network=self.os_vif_network)
+
+        self.os_vif_inst_info = osv_objects.instance_info.InstanceInfo(
+            uuid="d5b1090c-9e00-4fa4-9504-4b1494857970",
+            name="instance-000004da",
+            project_id="2f37d7f6-e51a-4a1f-8b6e-b0917ffc8390")
 
     def setUp(self):
         super(LibvirtVifTestCase, self).setUp()
-        self.flags(allow_same_net_traffic=True)
+        self.useFixture(fakelibvirt.FakeLibvirtFixture(stub_os_vif=False))
+        self.flags(firewall_driver=None)
+        # os_vif.initialize is typically done in nova-compute startup
+        os_vif.initialize()
+        self.setup_os_vif_objects()
         self.executes = []
 
         def fake_execute(*cmd, **kwargs):
@@ -515,7 +582,8 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         conf.vcpus = 4
         return conf
 
-    def _get_instance_xml(self, driver, vif, image_meta=None, flavor=None):
+    def _get_instance_xml(self, driver, vif, image_meta=None, flavor=None,
+                          has_min_libvirt_version=True):
         if flavor is None:
             flavor = objects.Flavor(name='m1.small',
                                 memory_mb=128,
@@ -532,9 +600,11 @@ class LibvirtVifTestCase(test.NoDBTestCase):
 
         conf = self._get_conf()
         hostimpl = host.Host("qemu:///system")
-        nic = driver.get_config(self.instance, vif, image_meta,
-                                flavor, CONF.libvirt.virt_type,
-                                hostimpl)
+        with mock.patch.object(hostimpl, 'has_min_version',
+                               return_value=has_min_libvirt_version):
+            nic = driver.get_config(self.instance, vif, image_meta,
+                                    flavor, CONF.libvirt.virt_type,
+                                    hostimpl)
         conf.add_device(nic)
         return conf.to_xml()
 
@@ -582,6 +652,42 @@ class LibvirtVifTestCase(test.NoDBTestCase):
     @mock.patch('os.uname', return_value=('Linux', '', '4.2.0-35-generic'))
     def test_virtio_multiqueue_in_kernel_4(self, mock_uname):
         self._test_virtio_multiqueue(10, '10')
+
+    @mock.patch.object(host.Host, "has_min_version")
+    def test_vhostuser_os_vif_multiqueue(self, has_min_version):
+        d = vif.LibvirtGenericVIFDriver()
+        hostimpl = host.Host("qemu:///system")
+        image_meta = objects.ImageMeta.from_dict(
+            {'properties': {'hw_vif_model': 'virtio',
+                            'hw_vif_multiqueue_enabled': 'true'}})
+        flavor = objects.Flavor(name='m1.small',
+                    memory_mb=128,
+                    vcpus=4,
+                    root_gb=0,
+                    ephemeral_gb=0,
+                    swap=0,
+                    deleted_at=None,
+                    deleted=0,
+                    created_at=None, flavorid=1,
+                    is_public=True, vcpu_weight=None,
+                    id=2, disabled=False, rxtx_factor=1.0)
+        conf = d.get_base_config(None, 'ca:fe:de:ad:be:ef', image_meta,
+                                 flavor, 'kvm', 'normal')
+        self.assertEqual(4, conf.vhost_queues)
+        self.assertEqual('vhost', conf.driver_name)
+
+        has_min_version.return_value = True
+        d._set_config_VIFVHostUser(self.instance, self.os_vif_vhostuser,
+                                   conf, hostimpl)
+        self.assertEqual(4, conf.vhost_queues)
+        self.assertEqual('vhost', conf.driver_name)
+        has_min_version.assert_called_once_with(MIN_LIBVIRT_VHOSTUSER_MQ)
+
+        has_min_version.return_value = False
+        d._set_config_VIFVHostUser(self.instance, self.os_vif_vhostuser,
+                                   conf, hostimpl)
+        self.assertIsNone(conf.vhost_queues)
+        self.assertIsNone(conf.driver_name)
 
     def test_multiple_nics(self):
         conf = self._get_conf()
@@ -637,18 +743,38 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         xml = self._get_instance_xml(d, self.vif_bridge)
         self._assertModel(xml, network_model.VIF_MODEL_VIRTIO)
 
-    def test_model_kvm_qemu_custom(self):
-        for virt in ('kvm', 'qemu'):
+    def test_model_parallels(self):
+        self.flags(use_virtio_for_bridges=True,
+                   virt_type='parallels',
+                   group='libvirt')
+
+        d = vif.LibvirtGenericVIFDriver()
+        xml = self._get_instance_xml(d, self.vif_bridge)
+        self._assertModel(xml, network_model.VIF_MODEL_VIRTIO)
+
+    def test_model_kvm_qemu_parallels_custom(self):
+        for virt in ('kvm', 'qemu', 'parallels'):
             self.flags(use_virtio_for_bridges=True,
                        virt_type=virt,
                        group='libvirt')
 
             d = vif.LibvirtGenericVIFDriver()
-            supported = (network_model.VIF_MODEL_NE2K_PCI,
-                         network_model.VIF_MODEL_PCNET,
-                         network_model.VIF_MODEL_RTL8139,
-                         network_model.VIF_MODEL_E1000,
-                         network_model.VIF_MODEL_SPAPR_VLAN)
+            if virt == 'parallels':
+                supported = (network_model.VIF_MODEL_RTL8139,
+                             network_model.VIF_MODEL_E1000)
+            elif virt == 'qemu':
+                supported = (network_model.VIF_MODEL_LAN9118,
+                             network_model.VIF_MODEL_NE2K_PCI,
+                             network_model.VIF_MODEL_PCNET,
+                             network_model.VIF_MODEL_RTL8139,
+                             network_model.VIF_MODEL_E1000,
+                             network_model.VIF_MODEL_SPAPR_VLAN)
+            else:
+                supported = (network_model.VIF_MODEL_NE2K_PCI,
+                             network_model.VIF_MODEL_PCNET,
+                             network_model.VIF_MODEL_RTL8139,
+                             network_model.VIF_MODEL_E1000,
+                             network_model.VIF_MODEL_SPAPR_VLAN)
             for model in supported:
                 image_meta = objects.ImageMeta.from_dict(
                     {'properties': {'hw_vif_model': model}})
@@ -668,9 +794,27 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         image_meta = {'properties': {'os_name': 'fedora22'}}
         image_meta = objects.ImageMeta.from_dict(image_meta)
         d.get_base_config(None, 'ca:fe:de:ad:be:ef', image_meta,
-                          None, 'kvm')
+                          None, 'kvm', 'normal')
         mock_set.assert_called_once_with(mock.ANY, 'ca:fe:de:ad:be:ef',
                                          'virtio', None, None)
+
+    @mock.patch.object(vif.designer, 'set_vif_guest_frontend_config')
+    def test_model_sriov_multi_queue_not_set(self, mock_set):
+        self.flags(use_virtio_for_bridges=True,
+                   virt_type='kvm',
+                   group='libvirt')
+        self.useFixture(fixtures.MonkeyPatch(
+            'nova.virt.osinfo.libosinfo',
+            fakelibosinfo))
+        d = vif.LibvirtGenericVIFDriver()
+        image_meta = {'properties': {'os_name': 'fedora22'}}
+        image_meta = objects.ImageMeta.from_dict(image_meta)
+        conf = d.get_base_config(None, 'ca:fe:de:ad:be:ef', image_meta,
+                                 None, 'kvm', 'direct')
+        mock_set.assert_called_once_with(mock.ANY, 'ca:fe:de:ad:be:ef',
+                                         'virtio', None, None)
+        self.assertIsNone(conf.vhost_queues)
+        self.assertIsNone(conf.driver_name)
 
     def _test_model_qemu(self, *vif_objs, **kw):
         libvirt_version = kw.get('libvirt_version')
@@ -688,7 +832,7 @@ class LibvirtVifTestCase(test.NoDBTestCase):
             doc = etree.fromstring(xml)
 
             bandwidth = doc.find('./devices/interface/bandwidth')
-            self.assertNotEqual(bandwidth, None)
+            self.assertIsNotNone(bandwidth)
 
             inbound = bandwidth.find('inbound')
             self.assertEqual(inbound.get("average"),
@@ -761,8 +905,8 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         node = self._get_node(xml)
         self._assertTypeAndMacEquals(node, "ethernet", "target", "dev",
                                      self.vif_ivs, prefix=dev_prefix)
-        script = node.find("script").get("path")
-        self.assertEqual(script, "")
+        script = node.find("script")
+        self.assertIsNone(script)
 
     def test_unplug_ivs_ethernet(self):
         d = vif.LibvirtGenericVIFDriver()
@@ -792,7 +936,9 @@ class LibvirtVifTestCase(test.NoDBTestCase):
                                   run_as_root=True,
                                   check_exit_code=exit_code),
                         mock.call('ip', 'link', 'set',
-                                  'eth13', port_state,
+                                  'eth13', 'address',
+                                  self.vif_hw_veb_macvtap['address'],
+                                  port_state,
                                   run_as_root=True,
                                   check_exit_code=exit_code)]
         }
@@ -919,6 +1065,7 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         instance.uuid = '46a4308b-e75a-4f90-a34a-650c86ca18b2'
         instance.project_id = 'b168ea26fa0c49c1a84e1566d9565fa5'
         instance.display_name = 'instance1'
+        instance.image_meta = objects.ImageMeta.from_dict({'properties': {}})
         with mock.patch.object(utils, 'execute') as execute:
             d.plug(instance, self.vif_vrouter)
             execute.assert_has_calls([
@@ -939,6 +1086,36 @@ class LibvirtVifTestCase(test.NoDBTestCase):
                     '--port_type=NovaVMPort '
                     '--tx_vlan_id=-1 '
                     '--rx_vlan_id=-1', run_as_root=True)])
+
+    @mock.patch('nova.network.linux_net.create_tap_dev')
+    def test_plug_vrouter_with_details_multiqueue(self, mock_create_tap_dev):
+        d = vif.LibvirtGenericVIFDriver()
+        instance = mock.Mock()
+        instance.name = 'instance-name'
+        instance.uuid = '46a4308b-e75a-4f90-a34a-650c86ca18b2'
+        instance.project_id = 'b168ea26fa0c49c1a84e1566d9565fa5'
+        instance.display_name = 'instance1'
+        instance.image_meta = objects.ImageMeta.from_dict({
+            'properties': {'hw_vif_multiqueue_enabled': True}})
+        instance.flavor.vcpus = 2
+        with mock.patch.object(utils, 'execute') as execute:
+            d.plug(instance, self.vif_vrouter)
+            mock_create_tap_dev.assert_called_once_with('tap-xxx-yyy-zzz',
+                                                        multiqueue=True)
+            execute.assert_called_once_with(
+                'vrouter-port-control',
+                '--oper=add --uuid=vif-xxx-yyy-zzz '
+                '--instance_uuid=46a4308b-e75a-4f90-a34a-650c86ca18b2 '
+                '--vn_uuid=network-id-xxx-yyy-zzz '
+                '--vm_project_uuid=b168ea26fa0c49c1a84e1566d9565fa5 '
+                '--ip_address=0.0.0.0 '
+                '--ipv6_address=None '
+                '--vm_name=instance1 '
+                '--mac=ca:fe:de:ad:be:ef '
+                '--tap_name=tap-xxx-yyy-zzz '
+                '--port_type=NovaVMPort '
+                '--tx_vlan_id=-1 '
+                '--rx_vlan_id=-1', run_as_root=True)
 
     def test_ivs_ethernet_driver(self):
         d = vif.LibvirtGenericVIFDriver()
@@ -995,22 +1172,22 @@ class LibvirtVifTestCase(test.NoDBTestCase):
 
     def test_ivs_plug_with_port_filter_direct_no_nova_firewall(self):
         d = vif.LibvirtGenericVIFDriver()
-        br_want = "qbr" + self.vif_ivs_filter_hybrid['id']
+        br_want = "qbr" + self.vif_ivs_hybrid['id']
         br_want = br_want[:network_model.NIC_NAME_LEN]
         self.flags(firewall_driver="nova.virt.firewall.NoopFirewallDriver")
-        xml = self._get_instance_xml(d, self.vif_ivs_filter_hybrid)
+        xml = self._get_instance_xml(d, self.vif_ivs_hybrid)
         node = self._get_node(xml)
         self._assertTypeAndMacEquals(node, "bridge", "source", "bridge",
-                                     self.vif_ivs_filter_hybrid, br_want, 0)
+                                     self.vif_ivs_hybrid, br_want, 0)
 
-    def test_ivs_plug_with_port_filter_hybrid_no_nova_firewall(self):
+    def test_ivs_plug_with_port_hybrid_no_nova_firewall(self):
         d = vif.LibvirtGenericVIFDriver()
-        br_want = self.vif_ivs_filter_direct['devname']
+        br_want = self.vif_ivs_filter_cap['devname']
         self.flags(firewall_driver="nova.virt.firewall.NoopFirewallDriver")
-        xml = self._get_instance_xml(d, self.vif_ivs_filter_direct)
+        xml = self._get_instance_xml(d, self.vif_ivs_filter_cap)
         node = self._get_node(xml)
         self._assertTypeAndMacEquals(node, "ethernet", "target", "dev",
-                                     self.vif_ivs_filter_direct, br_want, 0)
+                                     self.vif_ivs_filter_cap, br_want, 0)
 
     def test_hybrid_plug_without_nova_firewall(self):
         d = vif.LibvirtGenericVIFDriver()
@@ -1113,9 +1290,10 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         node = self._get_node(xml)
         self._assertTypeAndPciEquals(node, "hostdev", self.vif_hw_veb)
         self._assertMacEquals(node, self.vif_hw_veb)
-        vlan = node.find("vlan").find("tag").get("id")
-        vlan_want = self.vif_hw_veb["details"]["vlan"]
-        self.assertEqual(vlan, vlan_want)
+
+        conf = vconfig.LibvirtConfigGuestInterface()
+        conf.parse_dom(node)
+        self.assertEqual(conf.vlan, self.vif_hw_veb["details"]["vlan"])
 
     def test_hostdev_physical_driver(self):
         d = vif.LibvirtGenericVIFDriver()
@@ -1127,9 +1305,30 @@ class LibvirtVifTestCase(test.NoDBTestCase):
 
     @mock.patch.object(pci_utils, 'get_ifname_by_pci_address',
                        return_value='eth1')
-    def test_hw_veb_driver_macvtap(self, mock_get_ifname):
+    @mock.patch.object(host.Host, "has_min_version", return_value=True)
+    def test_hw_veb_driver_macvtap(self, ver_mock, mock_get_ifname):
         d = vif.LibvirtGenericVIFDriver()
         xml = self._get_instance_xml(d, self.vif_hw_veb_macvtap)
+        node = self._get_node(xml)
+        self.assertEqual(node.get("type"), "direct")
+        self._assertTypeEquals(node, "direct", "source",
+                               "dev", "eth1")
+        self._assertTypeEquals(node, "direct", "source",
+                               "mode", "passthrough")
+        self._assertMacEquals(node, self.vif_hw_veb_macvtap)
+        vlan = node.find("vlan").find("tag").get("id")
+        vlan_want = self.vif_hw_veb["details"]["vlan"]
+        self.assertEqual(int(vlan), vlan_want)
+
+    @mock.patch.object(pci_utils, 'get_ifname_by_pci_address',
+                       return_value='eth1')
+    @mock.patch.object(host.Host, "has_min_version", return_value=False)
+    def test_hw_veb_driver_macvtap_pre_vlan_support(self, ver_mock,
+                                                    mock_get_ifname):
+        d = vif.LibvirtGenericVIFDriver()
+        xml = self._get_instance_xml(
+            d, self.vif_hw_veb_macvtap,
+            has_min_libvirt_version=ver_mock.return_value)
         node = self._get_node(xml)
         self.assertEqual(node.get("type"), "direct")
         self._assertTypeEquals(node, "direct", "source",
@@ -1176,8 +1375,7 @@ class LibvirtVifTestCase(test.NoDBTestCase):
     def test_macvtap_plug_vlan(self, ensure_vlan_mock):
         d = vif.LibvirtGenericVIFDriver()
         d.plug(self.instance, self.vif_macvtap_vlan)
-        ensure_vlan_mock.assert_called_once_with('1', 'eth0',
-                                                 interface='eth0.1')
+        ensure_vlan_mock.assert_called_once_with(1, 'eth0', interface='eth0.1')
 
     @mock.patch.object(linux_net.LinuxBridgeInterfaceDriver, 'ensure_vlan')
     def test_macvtap_plug_flat(self, ensure_vlan_mock):
@@ -1257,7 +1455,8 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         image_meta = objects.ImageMeta.from_dict(
             {'properties': {'hw_vif_model': 'virtio',
                             'hw_vif_multiqueue_enabled': 'true'}})
-        xml = self._get_instance_xml(d, self.vif_vhostuser, image_meta)
+        xml = self._get_instance_xml(d, self.vif_vhostuser, image_meta,
+                                     has_min_libvirt_version=False)
         node = self._get_node(xml)
         self.assertEqual(node.get("type"),
                          network_model.VIF_TYPE_VHOSTUSER)
@@ -1290,155 +1489,40 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         self._assertMacEquals(node, self.vif_vhostuser_ovs)
         self._assertModel(xml, network_model.VIF_MODEL_VIRTIO)
 
-    @mock.patch.object(linux_net, 'create_fp_dev')
-    def test_vhostuser_fp_plug(self, mock_create_fp_dev):
+    def test_ovs_direct(self):
         d = vif.LibvirtGenericVIFDriver()
-        d.plug(self.instance, self.vif_vhostuser_fp)
-        mock_create_fp_dev.assert_has_calls(
-            [mock.call('tap-xxx-yyy-zzz', '/tmp/usv-xxx-yyy-zzz', 'client')])
+        xml = self._get_instance_xml(d, self.vif_ovs_direct)
+        node = self._get_node(xml)
+        self._assertTypeAndPciEquals(node,
+                                     "hostdev",
+                                     self.vif_ovs_direct)
+        self._assertMacEquals(node, self.vif_ovs_direct)
 
-    @mock.patch.object(linux_net, 'delete_fp_dev')
-    def test_vhostuser_fp_unplug(self, mock_delete_fp_dev):
+    def test_agilio_ovs_direct(self):
         d = vif.LibvirtGenericVIFDriver()
-        d.unplug(self.instance, self.vif_vhostuser_fp)
-        mock_delete_fp_dev.assert_has_calls([mock.call('tap-xxx-yyy-zzz')])
+        xml = self._get_instance_xml(d, self.vif_agilio_ovs_direct)
+        node = self._get_node(xml)
+        self._assertTypeAndPciEquals(node,
+                                     "hostdev",
+                                     self.vif_agilio_ovs_direct)
+        self._assertMacEquals(node, self.vif_agilio_ovs_direct)
 
-    def test_vhostuser_ovs_plug(self):
+    def test_agilio_ovs_forwarder(self):
+        d = vif.LibvirtGenericVIFDriver()
+        xml = self._get_instance_xml(d,
+                                     self.vif_agilio_ovs_forwarder)
+        node = self._get_node(xml)
+        self.assertEqual(node.get("type"),
+                         network_model.VIF_TYPE_VHOSTUSER)
 
-        calls = {
-            'create_ovs_vif_port': [
-                 mock.call(
-                     'br0', 'usv-xxx-yyy-zzz',
-                     'aaa-bbb-ccc', 'ca:fe:de:ad:be:ef',
-                     'f0000000-0000-0000-0000-000000000001', 9000,
-                     interface_type=network_model.OVS_VHOSTUSER_INTERFACE_TYPE
-                 )]
-        }
-        with mock.patch.object(linux_net,
-                               'create_ovs_vif_port') as create_ovs_vif_port:
-            d = vif.LibvirtGenericVIFDriver()
-            d.plug(self.instance, self.vif_vhostuser_ovs)
-            create_ovs_vif_port.assert_has_calls(calls['create_ovs_vif_port'])
-
-    def test_vhostuser_ovs_unplug(self):
-        calls = {
-            'delete_ovs_vif_port': [mock.call('br0', 'usv-xxx-yyy-zzz')]
-        }
-        with mock.patch.object(linux_net,
-                               'delete_ovs_vif_port') as delete_port:
-            d = vif.LibvirtGenericVIFDriver()
-            d.unplug(self.instance, self.vif_vhostuser_ovs)
-            delete_port.assert_has_calls(calls['delete_ovs_vif_port'])
-
-    def test_vhostuser_ovs_fp_plug(self):
-        calls = {
-            'create_fp_dev': [mock.call('tap-xxx-yyy-zzz',
-                                        '/tmp/usv-xxx-yyy-zzz',
-                                        'client')],
-            'create_ovs_vif_port': [mock.call(
-                                   'br0', 'tap-xxx-yyy-zzz',
-                                   'aaa-bbb-ccc', 'ca:fe:de:ad:be:ef',
-                                   'f0000000-0000-0000-0000-000000000001',
-                                   9000)]
-        }
-        with test.nested(
-                mock.patch.object(linux_net, 'create_fp_dev'),
-                mock.patch.object(linux_net, 'create_ovs_vif_port'),
-        ) as (create_fp_dev, create_ovs_vif_port):
-            d = vif.LibvirtGenericVIFDriver()
-            d.plug_vhostuser(self.instance, self.vif_vhostuser_ovs_fp)
-            create_fp_dev.assert_has_calls(calls['create_fp_dev'])
-            create_ovs_vif_port.assert_has_calls(calls['create_ovs_vif_port'])
-
-    def test_vhostuser_ovs_fp_unplug(self):
-        calls = {
-            'delete_ovs_vif_port': [mock.call('br0', 'tap-xxx-yyy-zzz',
-                                              False)],
-            'delete_fp_dev': [mock.call('tap-xxx-yyy-zzz')],
-        }
-        with test.nested(
-                mock.patch.object(linux_net, 'delete_ovs_vif_port'),
-                mock.patch.object(linux_net, 'delete_fp_dev')
-        ) as (delete_ovs_port, delete_fp_dev):
-            d = vif.LibvirtGenericVIFDriver()
-            d.unplug_vhostuser(None, self.vif_vhostuser_ovs_fp)
-            delete_ovs_port.assert_has_calls(calls['delete_ovs_vif_port'])
-            delete_fp_dev.assert_has_calls(calls['delete_fp_dev'])
-
-    def test_vhostuser_ovs_fp_hybrid_plug(self):
-        calls = {
-            'create_fp_dev': [mock.call('tap-xxx-yyy-zzz',
-                                        '/tmp/usv-xxx-yyy-zzz',
-                                        'client')],
-            'device_exists': [mock.call('tap-xxx-yyy-zzz'),
-                              mock.call('qbrvif-xxx-yyy'),
-                              mock.call('qvovif-xxx-yyy')],
-            '_create_veth_pair': [mock.call('qvbvif-xxx-yyy',
-                                            'qvovif-xxx-yyy', 9000)],
-            'execute': [mock.call('brctl', 'addbr', 'qbrvif-xxx-yyy',
-                                  run_as_root=True),
-                        mock.call('brctl', 'setfd', 'qbrvif-xxx-yyy', 0,
-                                  run_as_root=True),
-                        mock.call('brctl', 'stp', 'qbrvif-xxx-yyy', 'off',
-                                  run_as_root=True),
-                        mock.call('tee', ('/sys/class/net/qbrvif-xxx-yyy'
-                                          '/bridge/multicast_snooping'),
-                                  process_input='0', run_as_root=True,
-                                  check_exit_code=[0, 1]),
-                        mock.call('ip', 'link', 'set', 'qbrvif-xxx-yyy', 'up',
-                                  run_as_root=True),
-                        mock.call('brctl', 'addif', 'qbrvif-xxx-yyy',
-                                  'qvbvif-xxx-yyy', run_as_root=True),
-                        mock.call('brctl', 'addif', 'qbrvif-xxx-yyy',
-                                  'tap-xxx-yyy-zzz', run_as_root=True)],
-            'create_ovs_vif_port': [mock.call(
-                                   'br0', 'qvovif-xxx-yyy',
-                                   'aaa-bbb-ccc', 'ca:fe:de:ad:be:ef',
-                                   'f0000000-0000-0000-0000-000000000001',
-                                   9000)]
-        }
-        with test.nested(
-                mock.patch.object(linux_net, 'create_fp_dev'),
-                mock.patch.object(linux_net, 'device_exists',
-                                  return_value=False),
-                mock.patch.object(utils, 'execute'),
-                mock.patch.object(linux_net, '_create_veth_pair'),
-                mock.patch.object(linux_net, 'create_ovs_vif_port')
-        ) as (create_fp_dev, device_exists, execute, _create_veth_pair,
-              create_ovs_vif_port):
-            d = vif.LibvirtGenericVIFDriver()
-            d.plug_vhostuser(self.instance, self.vif_vhostuser_ovs_fp_hybrid)
-            create_fp_dev.assert_has_calls(calls['create_fp_dev'])
-            device_exists.assert_has_calls(calls['device_exists'])
-            _create_veth_pair.assert_has_calls(calls['_create_veth_pair'])
-            execute.assert_has_calls(calls['execute'])
-            create_ovs_vif_port.assert_has_calls(calls['create_ovs_vif_port'])
-
-    def test_vhostuser_ovs_fp_hybrid_unplug(self):
-        calls = {
-            'device_exists': [mock.call('qbrvif-xxx-yyy')],
-            'execute': [mock.call('brctl', 'delif', 'qbrvif-xxx-yyy',
-                                  'qvbvif-xxx-yyy', run_as_root=True),
-                        mock.call('ip', 'link', 'set',
-                                  'qbrvif-xxx-yyy', 'down', run_as_root=True),
-                        mock.call('brctl', 'delbr',
-                                  'qbrvif-xxx-yyy', run_as_root=True)],
-            'delete_ovs_vif_port': [mock.call('br0', 'qvovif-xxx-yyy')],
-            'delete_fp_dev': [mock.call('tap-xxx-yyy-zzz')]
-        }
-        with test.nested(
-                mock.patch.object(linux_net, 'device_exists',
-                                  return_value=True),
-                mock.patch.object(utils, 'execute'),
-                mock.patch.object(linux_net, 'delete_ovs_vif_port'),
-                mock.patch.object(linux_net, 'delete_fp_dev')
-        ) as (device_exists, execute, delete_ovs_vif_port, delete_fp_dev):
-            d = vif.LibvirtGenericVIFDriver()
-            d.unplug_vhostuser(None, self.vif_vhostuser_ovs_fp_hybrid)
-            device_exists.assert_has_calls(calls['device_exists'])
-            execute.assert_has_calls(calls['execute'])
-            delete_ovs_vif_port.assert_has_calls(calls['delete_ovs_vif_port'])
-            delete_fp_dev.assert_has_calls(calls['delete_fp_dev'])
+        self._assertTypeEquals(node, network_model.VIF_TYPE_VHOSTUSER,
+                               "source", "mode", "client")
+        self._assertTypeEquals(node, network_model.VIF_TYPE_VHOSTUSER,
+                               "source", "path", "/tmp/usv-xxx-yyy-zzz")
+        self._assertTypeEquals(node, network_model.VIF_TYPE_VHOSTUSER,
+                               "source", "type", "unix")
+        self._assertMacEquals(node, self.vif_agilio_ovs_forwarder)
+        self._assertModel(xml, network_model.VIF_MODEL_VIRTIO)
 
     @mock.patch("nova.network.os_vif_util.nova_to_osvif_instance")
     @mock.patch("nova.network.os_vif_util.nova_to_osvif_vif")
@@ -1547,6 +1631,86 @@ class LibvirtVifTestCase(test.NoDBTestCase):
 
     @mock.patch("nova.network.os_vif_util.nova_to_osvif_instance")
     @mock.patch("nova.network.os_vif_util.nova_to_osvif_vif")
+    def test_config_os_vif_agilio_ovs_fallthrough(self, mock_convert_vif,
+                                                  mock_convert_inst):
+        mock_convert_vif.return_value = self.os_vif_agilio_ovs
+        mock_convert_inst.return_value = self.os_vif_inst_info
+
+        d = vif.LibvirtGenericVIFDriver()
+        hostimpl = host.Host("qemu:///system")
+        flavor = objects.Flavor(name='m1.small')
+        image_meta = objects.ImageMeta.from_dict({})
+        d = vif.LibvirtGenericVIFDriver()
+        cfg = d.get_config(self.instance, self.vif_agilio_ovs,
+                           image_meta, flavor,
+                           CONF.libvirt.virt_type,
+                           hostimpl)
+
+        self._assertXmlEqual("""
+            <interface type="bridge">
+                <mac address="22:52:25:62:e2:aa"/>
+                <model type="virtio"/>
+                <source bridge="br0"/>
+                <target dev="nicdc065497-3c"/>
+                <virtualport type="openvswitch">
+                    <parameters
+                     interfaceid="07bd6cea-fb37-4594-b769-90fc51854ee9"/>
+                </virtualport>
+            </interface>""", cfg.to_xml())
+
+    @mock.patch("nova.network.os_vif_util.nova_to_osvif_instance")
+    @mock.patch("nova.network.os_vif_util.nova_to_osvif_vif")
+    def test_config_os_vif_agilio_ovs_forwarder(self, mock_convert_vif,
+                                                mock_convert_inst):
+        mock_convert_vif.return_value = self.os_vif_agilio_forwarder
+        mock_convert_inst.return_value = self.os_vif_inst_info
+
+        d = vif.LibvirtGenericVIFDriver()
+        hostimpl = host.Host("qemu:///system")
+        flavor = objects.Flavor(name='m1.small')
+        image_meta = objects.ImageMeta.from_dict({})
+        d = vif.LibvirtGenericVIFDriver()
+        cfg = d.get_config(self.instance, self.vif_agilio_ovs_forwarder,
+                           image_meta, flavor,
+                           CONF.libvirt.virt_type,
+                           hostimpl)
+
+        self._assertXmlEqual("""
+            <interface type="vhostuser">
+              <mac address="22:52:25:62:e2:aa"/>
+              <model type="virtio"/>
+              <source mode="client"
+               path="/var/run/openvswitch/vhudc065497-3c" type="unix"/>
+            </interface>""", cfg.to_xml())
+
+    @mock.patch("nova.network.os_vif_util.nova_to_osvif_instance")
+    @mock.patch("nova.network.os_vif_util.nova_to_osvif_vif")
+    def test_config_os_vif_agilio_ovs_direct(self, mock_convert_vif,
+                                             mock_convert_inst):
+        mock_convert_vif.return_value = self.os_vif_agilio_direct
+        mock_convert_inst.return_value = self.os_vif_inst_info
+
+        d = vif.LibvirtGenericVIFDriver()
+        hostimpl = host.Host("qemu:///system")
+        flavor = objects.Flavor(name='m1.small')
+        image_meta = objects.ImageMeta.from_dict({})
+        d = vif.LibvirtGenericVIFDriver()
+        cfg = d.get_config(self.instance, self.vif_agilio_ovs_direct,
+                           image_meta, flavor,
+                           CONF.libvirt.virt_type,
+                           hostimpl)
+
+        self._assertXmlEqual("""
+            <interface type="hostdev" managed="yes">
+              <mac address="22:52:25:62:e2:aa"/>
+              <source>
+                <address type="pci" domain="0x0000"
+                 bus="0x0a" slot="0x00" function="0x1"/>
+              </source>
+            </interface>""", cfg.to_xml())
+
+    @mock.patch("nova.network.os_vif_util.nova_to_osvif_instance")
+    @mock.patch("nova.network.os_vif_util.nova_to_osvif_vif")
     def test_config_os_vif_ovs(self, mock_convert_vif, mock_convert_inst):
         mock_convert_vif.return_value = self.os_vif_ovs
         mock_convert_inst.return_value = self.os_vif_inst_info
@@ -1600,58 +1764,44 @@ class LibvirtVifTestCase(test.NoDBTestCase):
                  filter="nova-instance-instance-00000001-22522562e2aa"/>
             </interface>""", cfg.to_xml())
 
-    @mock.patch('nova.network.linux_net._set_device_mtu')
     @mock.patch("nova.network.os_vif_util.nova_to_osvif_instance")
     @mock.patch("nova.network.os_vif_util.nova_to_osvif_vif")
-    @mock.patch.object(os_vif, "plug")
-    def test_plug_ovs_vif_no_mtu(self, mock_plug,
-                              mock_convert_vif, mock_convert_inst,
-                              mock_set_mtu):
-        mock_convert_vif.return_value = self.os_vif_bridge
+    def test_config_os_vif_hostdevice_ethernet(self, mock_convert_vif,
+                                               mock_convert_inst):
+        mock_convert_vif.return_value = self.os_vif_hostdevice_ethernet
         mock_convert_inst.return_value = self.os_vif_inst_info
 
+        hostimpl = host.Host("qemu:///system")
+        flavor = objects.Flavor(name='m1.small')
+        image_meta = objects.ImageMeta.from_dict({})
         d = vif.LibvirtGenericVIFDriver()
-        # Hack the network mtu in the vif_bridge object - make sure to copy it
-        # so we don't change state on a global object during a test run.
-        vif_bridge = copy.deepcopy(self.vif_bridge)
-        vif_bridge['network']._set_meta({'mtu': None})
-        d.plug(self.instance, vif_bridge)
+        cfg = d.get_config(self.instance, self.vif_bridge,
+                           image_meta, flavor,
+                           CONF.libvirt.virt_type,
+                           hostimpl)
 
-        self.assertFalse(mock_set_mtu.called)
+        self._assertXmlEqual("""
+            <interface type="hostdev" managed="yes">
+              <mac address="22:52:25:62:e2:aa"/>
+              <source>
+                <address type="pci" domain="0x0000"
+                 bus="0x0a" slot="0x00" function="0x1"/>
+              </source>
+            </interface>""", cfg.to_xml())
 
-    @mock.patch('nova.network.linux_net._set_device_mtu')
     @mock.patch("nova.network.os_vif_util.nova_to_osvif_instance")
     @mock.patch("nova.network.os_vif_util.nova_to_osvif_vif")
-    @mock.patch.object(os_vif, "plug")
-    def test_plug_ovs_vif_mtu(self, mock_plug,
-                              mock_convert_vif, mock_convert_inst,
-                              mock_set_mtu):
-        # Hack port profile to say ovs, just like ovn
-        os_vif_bridge = copy.deepcopy(self.os_vif_bridge)
-        os_vif_bridge.port_profile = self.os_vif_ovs_prof
-        mock_convert_vif.return_value = os_vif_bridge
+    def test_config_os_vif_hostdevice_generic(self, mock_convert_vif,
+                                              mock_convert_inst):
+        mock_convert_vif.return_value = self.os_vif_hostdevice_generic
         mock_convert_inst.return_value = self.os_vif_inst_info
 
+        hostimpl = host.Host("qemu:///system")
+        flavor = objects.Flavor(name='m1.small')
+        image_meta = objects.ImageMeta.from_dict({})
         d = vif.LibvirtGenericVIFDriver()
-        d.plug(self.instance, self.vif_bridge)
 
-        self.assertEqual(3, mock_set_mtu.call_count)
-        mock_set_mtu.assert_any_call("br0", 9000)
-        mock_set_mtu.assert_any_call("qvbdc065497-3c", 9000)
-        mock_set_mtu.assert_any_call("qvodc065497-3c", 9000)
-
-    @mock.patch('nova.network.linux_net._set_device_mtu')
-    @mock.patch("nova.network.os_vif_util.nova_to_osvif_instance")
-    @mock.patch("nova.network.os_vif_util.nova_to_osvif_vif")
-    @mock.patch.object(os_vif, "plug")
-    def test_plug_ovs_vif_no_mtu_venv(self, mock_plug,
-                              mock_convert_vif, mock_convert_inst,
-                              mock_set_mtu):
-        mock_convert_vif.return_value = self.os_vif_ovs
-        mock_convert_inst.return_value = self.os_vif_inst_info
-
-        d = vif.LibvirtGenericVIFDriver()
-        d.plug(self.instance, self.vif_ovs)
-
-        self.assertEqual(1, mock_set_mtu.call_count)
-        mock_set_mtu.assert_any_call("br0", 1000)
+        self.assertRaises(exception.InternalError,
+                          d.get_config, self.instance, self.vif_bridge,
+                          image_meta, flavor, CONF.libvirt.virt_type,
+                          hostimpl)

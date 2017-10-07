@@ -13,10 +13,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import uuid
-
 import mock
-from mox3 import mox
 from oslo_utils import uuidutils
 import webob
 
@@ -34,6 +31,7 @@ from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit import fake_block_device
 from nova.tests.unit import fake_instance
 from nova.tests.unit.image import fake
+from nova.tests import uuidsentinel as uuids
 
 CONF = nova.conf.CONF
 FAKE_UUID = fakes.FAKE_UUID
@@ -81,7 +79,7 @@ class ServerActionsControllerTestV21(test.TestCase):
         self.flags(group='glance', api_servers=['http://localhost:9292'])
         self.stub_out('nova.db.instance_get_by_uuid',
                       fakes.fake_instance_get(vm_state=vm_states.ACTIVE,
-                                               host='fake_host'))
+                                              host='fake_host'))
         self.stub_out('nova.db.instance_update_and_get_original',
                       instance_update_and_get_original)
 
@@ -89,7 +87,8 @@ class ServerActionsControllerTestV21(test.TestCase):
         fakes.stub_out_compute_api_snapshot(self.stubs)
         fake.stub_out_image_service(self)
         self.flags(allow_instance_snapshots=True,
-                   enable_instance_password=True)
+                   enable_instance_password=True,
+                   group='api')
         self._image_href = '155d900f-4e14-4e4c-a73d-069cbf4541e6'
 
         self.controller = self._get_controller()
@@ -104,31 +103,6 @@ class ServerActionsControllerTestV21(test.TestCase):
     def _set_fake_extension(self):
         pass
 
-    def _rebuild(self, context, image_ref, value=None):
-        if value is not None:
-            compute_api.API.rebuild(context, mox.IgnoreArg(), image_ref,
-                                    mox.IgnoreArg(), preserve_ephemeral=value)
-        else:
-            compute_api.API.rebuild(context, mox.IgnoreArg(), image_ref,
-                                    mox.IgnoreArg())
-
-    def _stub_instance_get(self, context, uuid=None):
-        self.mox.StubOutWithMock(compute_api.API, 'get')
-        if uuid is None:
-            uuid = uuidutils.generate_uuid()
-        instance = fake_instance.fake_db_instance(
-            id=1, uuid=uuid, vm_state=vm_states.ACTIVE, task_state=None,
-            project_id=context.project_id,
-            user_id=context.user_id)
-        instance = objects.Instance._from_db_object(
-            self.context, objects.Instance(), instance)
-
-        self.compute_api.get(self.context, uuid,
-                             expected_attrs=['flavor', 'pci_devices',
-                                             'numa_topology']
-                             ).AndReturn(instance)
-        return instance
-
     def _test_locked_instance(self, action, method=None, body_map=None,
                               compute_api_args_map=None):
         if body_map is None:
@@ -136,24 +110,35 @@ class ServerActionsControllerTestV21(test.TestCase):
         if compute_api_args_map is None:
             compute_api_args_map = {}
 
-        instance = self._stub_instance_get(self.req.environ['nova.context'])
         args, kwargs = compute_api_args_map.get(action, ((), {}))
 
-        getattr(compute_api.API, method)(self.context, instance,
-                                         *args, **kwargs).AndRaise(
-            exception.InstanceIsLocked(instance_uuid=instance['uuid']))
+        uuid = uuidutils.generate_uuid()
+        context = self.req.environ['nova.context']
+        instance = fake_instance.fake_db_instance(
+            id=1, uuid=uuid, vm_state=vm_states.ACTIVE, task_state=None,
+            project_id=context.project_id,
+            user_id=context.user_id)
+        instance = objects.Instance._from_db_object(
+            self.context, objects.Instance(), instance)
 
-        self.mox.ReplayAll()
+        with test.nested(
+            mock.patch.object(compute_api.API, 'get',
+                              return_value=instance),
+            mock.patch.object(compute_api.API, method,
+                              side_effect=exception.InstanceIsLocked(
+                                  instance_uuid=instance['uuid'])),
+        ) as (mock_get, mock_method):
 
-        controller_function = 'self.controller.' + action
-        self.assertRaises(webob.exc.HTTPConflict,
-                          eval(controller_function),
-                          self.req, instance['uuid'],
-                          body=body_map.get(action))
-        # Do these here instead of tearDown because this method is called
-        # more than once for the same test case
-        self.mox.VerifyAll()
-        self.mox.UnsetStubs()
+            controller_function = 'self.controller.' + action
+            self.assertRaises(webob.exc.HTTPConflict,
+                              eval(controller_function),
+                              self.req, instance['uuid'],
+                              body=body_map.get(action))
+
+            mock_get.assert_called_once_with(self.context, uuid,
+                expected_attrs=['flavor', 'numa_topology'])
+            mock_method.assert_called_once_with(self.context, instance,
+                                                *args, **kwargs)
 
     def test_actions_with_locked_instance(self):
         actions = ['_action_resize', '_action_confirm_resize',
@@ -180,7 +165,6 @@ class ServerActionsControllerTestV21(test.TestCase):
 
         for action in actions:
             method = method_translations.get(action)
-            self.mox.StubOutWithMock(compute_api.API, method)
             self._test_locked_instance(action, method=method,
                                        body_map=body_map,
                                        compute_api_args_map=args_map)
@@ -218,7 +202,7 @@ class ServerActionsControllerTestV21(test.TestCase):
         body = dict(reboot=dict(type="HARD"))
         self.assertRaises(webob.exc.HTTPNotFound,
                           self.controller._action_reboot,
-                          self.req, str(uuid.uuid4()), body=body)
+                          self.req, uuids.fake, body=body)
 
     def test_reboot_raises_conflict_on_invalid_state(self):
         body = dict(reboot=dict(type="HARD"))
@@ -228,7 +212,7 @@ class ServerActionsControllerTestV21(test.TestCase):
                 state='fake_state', method='fake_method',
                 instance_uuid='fake')
 
-        self.stubs.Set(compute_api.API, 'reboot', fake_reboot)
+        self.stub_out('nova.compute.api.API.reboot', fake_reboot)
 
         self.assertRaises(webob.exc.HTTPConflict,
                           self.controller._action_reboot,
@@ -281,13 +265,15 @@ class ServerActionsControllerTestV21(test.TestCase):
         if value is not None:
             body['rebuild']['preserve_ephemeral'] = value
 
-        self.mox.StubOutWithMock(compute_api.API, 'rebuild')
+        with mock.patch.object(compute_api.API, 'rebuild') as mock_rebuild:
+            self.controller._action_rebuild(self.req, FAKE_UUID, body=body)
 
-        self._rebuild(self.context, self._image_href, value)
-
-        self.mox.ReplayAll()
-
-        self.controller._action_rebuild(self.req, FAKE_UUID, body=body)
+            if value is not None:
+                mock_rebuild.assert_called_once_with(self.context, mock.ANY,
+                    self._image_href, mock.ANY, preserve_ephemeral=value)
+            else:
+                mock_rebuild.assert_called_once_with(self.context, mock.ANY,
+                    self._image_href, mock.ANY)
 
     def test_rebuild_preserve_ephemeral_true(self):
         self._test_rebuild_preserve_ephemeral(True)
@@ -326,8 +312,8 @@ class ServerActionsControllerTestV21(test.TestCase):
             info['image_href_in_call'] = image_href
 
         self.stub_out('nova.db.instance_get',
-                fakes.fake_instance_get(vm_state=vm_states.ACTIVE))
-        self.stubs.Set(compute_api.API, 'rebuild', rebuild)
+                      fakes.fake_instance_get(vm_state=vm_states.ACTIVE))
+        self.stub_out('nova.compute.api.API.rebuild', rebuild)
 
         # proper local hrefs must start with 'http://localhost/v2/'
         body = {
@@ -354,7 +340,7 @@ class ServerActionsControllerTestV21(test.TestCase):
     def test_rebuild_accepted_minimum_pass_disabled(self):
         # run with enable_instance_password disabled to verify adminPass
         # is missing from response. See lp bug 921814
-        self.flags(enable_instance_password=False)
+        self.flags(enable_instance_password=False, group='api')
 
         return_server = fakes.fake_instance_get(image_ref='2',
                 vm_state=vm_states.ACTIVE, host='fake_host')
@@ -387,7 +373,7 @@ class ServerActionsControllerTestV21(test.TestCase):
                 state='fake_state', method='fake_method',
                 instance_uuid='fake')
 
-        self.stubs.Set(compute_api.API, 'rebuild', fake_rebuild)
+        self.stub_out('nova.compute.api.API.rebuild', fake_rebuild)
 
         self.assertRaises(webob.exc.HTTPConflict,
                           self.controller._action_rebuild,
@@ -470,7 +456,7 @@ class ServerActionsControllerTestV21(test.TestCase):
     def test_rebuild_admin_pass_pass_disabled(self):
         # run with enable_instance_password disabled to verify adminPass
         # is missing from response. See lp bug 921814
-        self.flags(enable_instance_password=False)
+        self.flags(enable_instance_password=False, group='api')
 
         return_server = fakes.fake_instance_get(image_ref='2',
                 vm_state=vm_states.ACTIVE, host='fake_host')
@@ -539,8 +525,8 @@ class ServerActionsControllerTestV21(test.TestCase):
         def fake_save(context, **kwargs):
             data['changes'].update(data['instance'].obj_get_changes())
 
-        self.stubs.Set(compute_api.API, 'get', wrap_get)
-        self.stubs.Set(objects.Instance, 'save', fake_save)
+        self.stub_out('nova.compute.api.API.get', wrap_get)
+        self.stub_out('nova.objects.Instance.save', fake_save)
 
         self.controller._action_rebuild(self.req, FAKE_UUID, body=body)
 
@@ -569,7 +555,8 @@ class ServerActionsControllerTestV21(test.TestCase):
 
             return image_meta
 
-        self.stubs.Set(fake._FakeImageService, 'show', return_image_meta)
+        self.stub_out('nova.tests.unit.image.fake._FakeImageService.show',
+                      return_image_meta)
         body = {
             "rebuild": {
                 "imageRef": "155d900f-4e14-4e4c-a73d-069cbf4541e6",
@@ -611,9 +598,10 @@ class ServerActionsControllerTestV21(test.TestCase):
 
             return image_meta
 
-        self.stubs.Set(fake._FakeImageService, 'show', return_image_meta)
-        self.stubs.Set(compute_api.API, 'get', wrap_get)
-        self.stubs.Set(objects.Instance, 'save', fake_save)
+        self.stub_out('nova.tests.unit.image.fake._FakeImageService.show',
+                      return_image_meta)
+        self.stub_out('nova.compute.api.API.get', wrap_get)
+        self.stub_out('nova.objects.Instance.save', fake_save)
         body = {
             "rebuild": {
                 "imageRef": "155d900f-4e14-4e4c-a73d-069cbf4541e6",
@@ -647,7 +635,7 @@ class ServerActionsControllerTestV21(test.TestCase):
         def resize_mock(*args):
             self.resize_called = True
 
-        self.stubs.Set(compute_api.API, 'resize', resize_mock)
+        self.stub_out('nova.compute.api.API.resize', resize_mock)
 
         self.controller._action_resize(self.req, FAKE_UUID, body=body)
 
@@ -684,7 +672,7 @@ class ServerActionsControllerTestV21(test.TestCase):
     def test_resize_with_server_not_found(self):
         body = dict(resize=dict(flavorRef="http://localhost/3"))
 
-        self.stubs.Set(compute_api.API, 'get', return_server_not_found)
+        self.stub_out('nova.compute.api.API.get', return_server_not_found)
 
         self.assertRaises(webob.exc.HTTPNotFound,
                           self.controller._action_resize,
@@ -713,7 +701,7 @@ class ServerActionsControllerTestV21(test.TestCase):
             self.resize_called += 1
             raise next(raised)
 
-        self.stubs.Set(compute_api.API, 'resize', _fake_resize)
+        self.stub_out('nova.compute.api.API.resize', _fake_resize)
 
         for call_no in range(len(exceptions)):
             next_exception = next(expected)
@@ -754,7 +742,7 @@ class ServerActionsControllerTestV21(test.TestCase):
         def fake_resize(*args, **kwargs):
             raise exception.TooManyInstances(message="TooManyInstance")
 
-        self.stubs.Set(compute_api.API, 'resize', fake_resize)
+        self.stub_out('nova.compute.api.API.resize', fake_resize)
 
         self.assertRaises(webob.exc.HTTPForbidden,
                           self.controller._action_resize,
@@ -768,7 +756,7 @@ class ServerActionsControllerTestV21(test.TestCase):
                 state='fake_state', method='fake_method',
                 instance_uuid='fake')
 
-        self.stubs.Set(compute_api.API, 'resize', fake_resize)
+        self.stub_out('nova.compute.api.API.resize', fake_resize)
 
         self.assertRaises(webob.exc.HTTPConflict,
                           self.controller._action_resize,
@@ -812,7 +800,7 @@ class ServerActionsControllerTestV21(test.TestCase):
         def cr_mock(*args):
             self.confirm_resize_called = True
 
-        self.stubs.Set(compute_api.API, 'confirm_resize', cr_mock)
+        self.stub_out('nova.compute.api.API.confirm_resize', cr_mock)
 
         self.controller._action_confirm_resize(self.req, FAKE_UUID, body=body)
 
@@ -825,9 +813,8 @@ class ServerActionsControllerTestV21(test.TestCase):
             raise exception.MigrationNotFoundByStatus(instance_id=1,
                                                       status='finished')
 
-        self.stubs.Set(compute_api.API,
-                       'confirm_resize',
-                       confirm_resize_mock)
+        self.stub_out('nova.compute.api.API.confirm_resize',
+                      confirm_resize_mock)
 
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller._action_confirm_resize,
@@ -841,8 +828,8 @@ class ServerActionsControllerTestV21(test.TestCase):
                 state='fake_state', method='fake_method',
                 instance_uuid='fake')
 
-        self.stubs.Set(compute_api.API, 'confirm_resize',
-                fake_confirm_resize)
+        self.stub_out('nova.compute.api.API.confirm_resize',
+                      fake_confirm_resize)
 
         self.assertRaises(webob.exc.HTTPConflict,
                           self.controller._action_confirm_resize,
@@ -855,9 +842,8 @@ class ServerActionsControllerTestV21(test.TestCase):
             raise exception.MigrationNotFoundByStatus(instance_id=1,
                                                       status='finished')
 
-        self.stubs.Set(compute_api.API,
-                       'revert_resize',
-                       revert_resize_mock)
+        self.stub_out('nova.compute.api.API.revert_resize',
+                      revert_resize_mock)
 
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller._action_revert_resize,
@@ -878,7 +864,7 @@ class ServerActionsControllerTestV21(test.TestCase):
         def revert_mock(*args):
             self.revert_resize_called = True
 
-        self.stubs.Set(compute_api.API, 'revert_resize', revert_mock)
+        self.stub_out('nova.compute.api.API.revert_resize', revert_mock)
 
         body = self.controller._action_revert_resize(self.req, FAKE_UUID,
                                                      body=body)
@@ -893,8 +879,8 @@ class ServerActionsControllerTestV21(test.TestCase):
                 state='fake_state', method='fake_method',
                 instance_uuid='fake')
 
-        self.stubs.Set(compute_api.API, 'revert_resize',
-                fake_revert_resize)
+        self.stub_out('nova.compute.api.API.revert_resize',
+                      fake_revert_resize)
 
         self.assertRaises(webob.exc.HTTPConflict,
                           self.controller._action_revert_resize,
@@ -915,6 +901,21 @@ class ServerActionsControllerTestV21(test.TestCase):
                          glance.generate_image_url('123'),
                          location)
 
+    def test_create_image_v2_45(self):
+        """Tests the createImage server action API with the 2.45 microversion
+        where there is a response body but no Location header.
+        """
+        body = {
+            'createImage': {
+                'name': 'Snapshot 1',
+            },
+        }
+        req = fakes.HTTPRequest.blank('', version='2.45')
+        response = self.controller._action_create_image(req, FAKE_UUID,
+                                                        body=body)
+        self.assertIsInstance(response, dict)
+        self.assertEqual('123', response['image_id'])
+
     def test_create_image_name_too_long(self):
         long_name = 'a' * 260
         body = {
@@ -927,7 +928,8 @@ class ServerActionsControllerTestV21(test.TestCase):
                           self.controller._action_create_image, self.req,
                           FAKE_UUID, body=body)
 
-    def _do_test_create_volume_backed_image(self, extra_properties):
+    def _do_test_create_volume_backed_image(
+            self, extra_properties, mock_vol_create_side_effect=None):
 
         def _fake_id(x):
             return '%s-%s-%s-%s' % (x * 8, x * 4, x * 4, x * 12)
@@ -965,57 +967,64 @@ class ServerActionsControllerTestV21(test.TestCase):
                                image_root_device_name='/dev/vda',
                                image_block_device_mapping=str(bdm),
                                image_container_format='ami')
-        instance = fakes.fake_instance_get(image_ref=str(uuid.uuid4()),
+        instance = fakes.fake_instance_get(image_ref=uuids.fake,
                                            vm_state=vm_states.ACTIVE,
                                            root_device_name='/dev/vda',
                                            system_metadata=system_metadata)
         self.stub_out('nova.db.instance_get_by_uuid', instance)
 
-        self.mox.StubOutWithMock(self.controller.compute_api.compute_rpcapi,
-                                 'quiesce_instance')
-        self.controller.compute_api.compute_rpcapi.quiesce_instance(
-            mox.IgnoreArg(), mox.IgnoreArg()).AndRaise(
-                exception.InstanceQuiesceNotSupported(instance_id='fake',
-                                                      reason='test'))
-
         volume = dict(id=_fake_id('a'),
                       size=1,
                       host='fake',
                       display_description='fake')
+
         snapshot = dict(id=_fake_id('d'))
-        self.mox.StubOutWithMock(self.controller.compute_api, 'volume_api')
-        volume_api = self.controller.compute_api.volume_api
-        volume_api.get(mox.IgnoreArg(), volume['id']).AndReturn(volume)
-        volume_api.create_snapshot_force(mox.IgnoreArg(), volume['id'],
-                mox.IgnoreArg(), mox.IgnoreArg()).AndReturn(snapshot)
 
-        self.mox.ReplayAll()
+        with test.nested(
+            mock.patch.object(self.controller.compute_api.compute_rpcapi,
+                'quiesce_instance',
+                side_effect=exception.InstanceQuiesceNotSupported(
+                    instance_id='fake', reason='test')),
+            mock.patch.object(self.controller.compute_api.volume_api, 'get',
+                              return_value=volume),
+            mock.patch.object(self.controller.compute_api.volume_api,
+                              'create_snapshot_force',
+                              return_value=snapshot),
+        ) as (mock_quiesce, mock_vol_get, mock_vol_create):
 
-        response = self.controller._action_create_image(self.req, FAKE_UUID,
-                                                        body=body)
+            if mock_vol_create_side_effect:
+                mock_vol_create.side_effect = mock_vol_create_side_effect
 
-        location = response.headers['Location']
-        image_id = location.replace(self.image_url or
+            response = self.controller._action_create_image(self.req,
+                FAKE_UUID, body=body)
+
+            location = response.headers['Location']
+            image_id = location.replace(self.image_url or
                                         glance.generate_image_url(''), '')
-        image = image_service.show(None, image_id)
+            image = image_service.show(None, image_id)
 
-        self.assertEqual(image['name'], 'snapshot_of_volume_backed')
-        properties = image['properties']
-        self.assertEqual(properties['kernel_id'], _fake_id('b'))
-        self.assertEqual(properties['ramdisk_id'], _fake_id('c'))
-        self.assertEqual(properties['root_device_name'], '/dev/vda')
-        self.assertTrue(properties['bdm_v2'])
-        bdms = properties['block_device_mapping']
-        self.assertEqual(len(bdms), 1)
-        self.assertEqual(bdms[0]['boot_index'], 0)
-        self.assertEqual(bdms[0]['source_type'], 'snapshot')
-        self.assertEqual(bdms[0]['destination_type'], 'volume')
-        self.assertEqual(bdms[0]['snapshot_id'], snapshot['id'])
-        self.assertEqual('/dev/vda', bdms[0]['device_name'])
-        for fld in ('connection_info', 'id', 'instance_uuid'):
-            self.assertNotIn(fld, bdms[0])
-        for k in extra_properties.keys():
-            self.assertEqual(properties[k], extra_properties[k])
+            self.assertEqual(image['name'], 'snapshot_of_volume_backed')
+            properties = image['properties']
+            self.assertEqual(properties['kernel_id'], _fake_id('b'))
+            self.assertEqual(properties['ramdisk_id'], _fake_id('c'))
+            self.assertEqual(properties['root_device_name'], '/dev/vda')
+            self.assertTrue(properties['bdm_v2'])
+            bdms = properties['block_device_mapping']
+            self.assertEqual(len(bdms), 1)
+            self.assertEqual(bdms[0]['boot_index'], 0)
+            self.assertEqual(bdms[0]['source_type'], 'snapshot')
+            self.assertEqual(bdms[0]['destination_type'], 'volume')
+            self.assertEqual(bdms[0]['snapshot_id'], snapshot['id'])
+            self.assertEqual('/dev/vda', bdms[0]['device_name'])
+            for fld in ('connection_info', 'id', 'instance_uuid'):
+                self.assertNotIn(fld, bdms[0])
+            for k in extra_properties.keys():
+                self.assertEqual(properties[k], extra_properties[k])
+
+            mock_quiesce.assert_called_once_with(mock.ANY, mock.ANY)
+            mock_vol_get.assert_called_once_with(mock.ANY, volume['id'])
+            mock_vol_create.assert_called_once_with(mock.ANY, volume['id'],
+                                                    mock.ANY, mock.ANY)
 
     def test_create_volume_backed_image_no_metadata(self):
         self._do_test_create_volume_backed_image({})
@@ -1023,6 +1032,13 @@ class ServerActionsControllerTestV21(test.TestCase):
     def test_create_volume_backed_image_with_metadata(self):
         self._do_test_create_volume_backed_image(dict(ImageType='Gold',
                                                       ImageVersion='2.0'))
+
+    def test_create_volume_backed_image_cinder_over_quota(self):
+        self.assertRaises(
+            webob.exc.HTTPForbidden,
+            self._do_test_create_volume_backed_image, {},
+            mock_vol_create_side_effect=exception.OverQuota(
+                overs='snapshot'))
 
     def _test_create_volume_backed_image_with_metadata_from_volume(
             self, extra_metadata=None):
@@ -1060,37 +1076,42 @@ class ServerActionsControllerTestV21(test.TestCase):
                              'image_test_key2': 'test_value2'})
         self.stub_out('nova.db.instance_get_by_uuid', instance)
 
-        self.mox.StubOutWithMock(self.controller.compute_api.compute_rpcapi,
-                                 'quiesce_instance')
-        self.controller.compute_api.compute_rpcapi.quiesce_instance(
-            mox.IgnoreArg(), mox.IgnoreArg()).AndRaise(
-                exception.InstanceQuiesceNotSupported(instance_id='fake',
-                                                      reason='test'))
-
         volume = dict(id=_fake_id('a'),
                       size=1,
                       host='fake',
                       display_description='fake')
+
         snapshot = dict(id=_fake_id('d'))
-        self.mox.StubOutWithMock(self.controller.compute_api, 'volume_api')
-        volume_api = self.controller.compute_api.volume_api
-        volume_api.get(mox.IgnoreArg(), volume['id']).AndReturn(volume)
-        volume_api.create_snapshot_force(mox.IgnoreArg(), volume['id'],
-               mox.IgnoreArg(), mox.IgnoreArg()).AndReturn(snapshot)
 
-        self.mox.ReplayAll()
-        response = self.controller._action_create_image(self.req, FAKE_UUID,
-                                                        body=body)
-        location = response.headers['Location']
-        image_id = location.replace(self.image_base_url, '')
-        image = image_service.show(None, image_id)
+        with test.nested(
+            mock.patch.object(self.controller.compute_api.compute_rpcapi,
+                'quiesce_instance',
+                side_effect=exception.InstanceQuiesceNotSupported(
+                    instance_id='fake', reason='test')),
+            mock.patch.object(self.controller.compute_api.volume_api, 'get',
+                              return_value=volume),
+            mock.patch.object(self.controller.compute_api.volume_api,
+                              'create_snapshot_force',
+                              return_value=snapshot),
+        ) as (mock_quiesce, mock_vol_get, mock_vol_create):
 
-        properties = image['properties']
-        self.assertEqual(properties['test_key1'], 'test_value1')
-        self.assertEqual(properties['test_key2'], 'test_value2')
-        if extra_metadata:
-            for key, val in extra_metadata.items():
-                self.assertEqual(properties[key], val)
+            response = self.controller._action_create_image(self.req,
+                FAKE_UUID, body=body)
+            location = response.headers['Location']
+            image_id = location.replace(self.image_base_url, '')
+            image = image_service.show(None, image_id)
+
+            properties = image['properties']
+            self.assertEqual(properties['test_key1'], 'test_value1')
+            self.assertEqual(properties['test_key2'], 'test_value2')
+            if extra_metadata:
+                for key, val in extra_metadata.items():
+                    self.assertEqual(properties[key], val)
+
+            mock_quiesce.assert_called_once_with(mock.ANY, mock.ANY)
+            mock_vol_get.assert_called_once_with(mock.ANY, volume['id'])
+            mock_vol_create.assert_called_once_with(mock.ANY, volume['id'],
+                                                    mock.ANY, mock.ANY)
 
     def test_create_vol_backed_img_with_meta_from_vol_without_extra_meta(self):
         self._test_create_volume_backed_image_with_metadata_from_volume()
@@ -1103,7 +1124,7 @@ class ServerActionsControllerTestV21(test.TestCase):
         """Don't permit a snapshot if the allow_instance_snapshots flag is
         False
         """
-        self.flags(allow_instance_snapshots=False)
+        self.flags(allow_instance_snapshots=False, group='api')
         body = {
             'createImage': {
                 'name': 'Snapshot 1',
@@ -1135,7 +1156,7 @@ class ServerActionsControllerTestV21(test.TestCase):
                 'metadata': {},
             },
         }
-        for num in range(CONF.quota_metadata_items + 1):
+        for num in range(CONF.quota.metadata_items + 1):
             body['createImage']['metadata']['foo%i' % num] = "bar"
 
         self.assertRaises(webob.exc.HTTPForbidden,
@@ -1179,7 +1200,7 @@ class ServerActionsControllerTestV21(test.TestCase):
             raise exception.InstanceInvalidState(attr='fake_attr',
                 state='fake_state', method='fake_method',
                 instance_uuid='fake')
-        self.stubs.Set(compute_api.API, 'snapshot', snapshot)
+        self.stub_out('nova.compute.api.API.snapshot', snapshot)
 
         body = {
             "createImage": {

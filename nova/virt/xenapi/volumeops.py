@@ -22,7 +22,6 @@ from oslo_utils import excutils
 from oslo_utils import strutils
 
 from nova import exception
-from nova.i18n import _LI, _LW
 from nova.virt.xenapi import vm_utils
 from nova.virt.xenapi import volume_utils
 
@@ -39,12 +38,9 @@ class VolumeOps(object):
     def attach_volume(self, connection_info, instance_name, mountpoint,
                       hotplug=True):
         """Attach volume to VM instance."""
-        # TODO(johngarbutt) move this into _attach_volume_to_vm
-        dev_number = volume_utils.get_device_number(mountpoint)
-
         vm_ref = vm_utils.vm_ref_or_raise(self._session, instance_name)
         return self._attach_volume(connection_info, vm_ref,
-                                   instance_name, dev_number, hotplug)
+                                   instance_name, mountpoint, hotplug)
 
     def connect_volume(self, connection_info):
         """Attach volume to hypervisor, but not the VM."""
@@ -62,7 +58,7 @@ class VolumeOps(object):
             vdi_ref = self._connect_hypervisor_to_volume(sr_ref,
                                                          connection_data)
             vdi_uuid = self._session.VDI.get_uuid(vdi_ref)
-            LOG.info(_LI('Connected volume (vdi_uuid): %s'), vdi_uuid)
+            LOG.info('Connected volume (vdi_uuid): %s', vdi_uuid)
 
             if vm_ref:
                 self._attach_volume_to_vm(vdi_ref, vm_ref, instance_name,
@@ -112,10 +108,12 @@ class VolumeOps(object):
 
         return vdi_ref
 
-    def _attach_volume_to_vm(self, vdi_ref, vm_ref, instance_name, dev_number,
+    def _attach_volume_to_vm(self, vdi_ref, vm_ref, instance_name, mountpoint,
                              hotplug):
         LOG.debug('Attach_volume vdi: %(vdi_ref)s vm: %(vm_ref)s',
                   {'vdi_ref': vdi_ref, 'vm_ref': vm_ref})
+
+        dev_number = volume_utils.get_device_number(mountpoint)
 
         # osvol is added to the vbd so we can spot which vbds are volumes
         vbd_ref = vm_utils.create_vbd(self._session, vm_ref, vdi_ref,
@@ -128,8 +126,8 @@ class VolumeOps(object):
                 LOG.debug("Plugging VBD: %s", vbd_ref)
                 self._session.VBD.plug(vbd_ref, vm_ref)
 
-        LOG.info(_LI('Dev %(dev_number)s attached to'
-                     ' instance %(instance_name)s'),
+        LOG.info('Dev %(dev_number)s attached to'
+                 ' instance %(instance_name)s',
                  {'instance_name': instance_name, 'dev_number': dev_number})
 
     def detach_volume(self, connection_info, instance_name, mountpoint):
@@ -146,12 +144,12 @@ class VolumeOps(object):
         if vbd_ref is None:
             # NOTE(sirp): If we don't find the VBD then it must have been
             # detached previously.
-            LOG.warning(_LW('Skipping detach because VBD for %s was '
-                            'not found'), instance_name)
+            LOG.warning('Skipping detach because VBD for %s was not found',
+                        instance_name)
         else:
             self._detach_vbds_and_srs(vm_ref, [vbd_ref])
-            LOG.info(_LI('Mountpoint %(mountpoint)s detached from instance'
-                         ' %(instance_name)s'),
+            LOG.info('Mountpoint %(mountpoint)s detached from instance'
+                     ' %(instance_name)s',
                      {'instance_name': instance_name,
                       'mountpoint': mountpoint})
 
@@ -224,5 +222,5 @@ class VolumeOps(object):
                 # Forget (i.e. disconnect) SR only if not in use
                 volume_utils.purge_sr(self._session, sr_ref)
             except Exception:
-                LOG.debug('Ignoring error while purging sr: %s' % sr_ref,
-                        exc_info=True)
+                LOG.debug('Ignoring error while purging sr: %s', sr_ref,
+                          exc_info=True)

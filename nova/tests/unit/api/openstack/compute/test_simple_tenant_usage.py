@@ -24,6 +24,7 @@ import webob
 from nova.api.openstack.compute import simple_tenant_usage as \
     simple_tenant_usage_v21
 from nova.compute import vm_states
+import nova.conf
 from nova import context
 from nova import exception
 from nova import objects
@@ -31,6 +32,10 @@ from nova import policy
 from nova import test
 from nova.tests.unit.api.openstack import fakes
 from nova.tests import uuidsentinel as uuids
+
+
+CONF = nova.conf.CONF
+
 
 SERVERS = 5
 TENANTS = 2
@@ -88,16 +93,18 @@ def _fake_instance(start, end, instance_id, tenant_id,
 @classmethod
 def fake_get_active_by_window_joined(cls, context, begin, end=None,
                                      project_id=None, host=None,
-                                     expected_attrs=None, use_slave=False):
+                                     expected_attrs=None, use_slave=False,
+                                     limit=None, marker=None):
     return objects.InstanceList(objects=[
         _fake_instance(START, STOP, x,
-                       project_id or 'faketenant_%s' % (x / SERVERS))
+                       project_id or 'faketenant_%s' % (x // SERVERS))
         for x in range(TENANTS * SERVERS)])
 
 
 @mock.patch('nova.objects.InstanceList.get_active_by_window_joined',
             fake_get_active_by_window_joined)
 class SimpleTenantUsageTestV21(test.TestCase):
+    version = '2.1'
     policy_rule_prefix = "os_compute_api:os-simple-tenant-usage"
     controller = simple_tenant_usage_v21.SimpleTenantUsageController()
 
@@ -112,22 +119,45 @@ class SimpleTenantUsageTestV21(test.TestCase):
         self.alt_user_context = context.RequestContext('fakeadmin_0',
                                                       'faketenant_1',
                                                        is_admin=False)
+        self.num_cells = len(objects.CellMappingList.get_all(
+            self.admin_context))
 
-    def _test_verify_index(self, start, stop):
-        req = fakes.HTTPRequest.blank('?start=%s&end=%s' %
-                    (start.isoformat(), stop.isoformat()))
+    def _test_verify_index(self, start, stop, limit=None):
+        url = '?start=%s&end=%s'
+        if limit:
+            url += '&limit=%s' % (limit)
+        req = fakes.HTTPRequest.blank(url %
+                    (start.isoformat(), stop.isoformat()),
+                    version=self.version)
         req.environ['nova.context'] = self.admin_context
         res_dict = self.controller.index(req)
+
         usages = res_dict['tenant_usages']
+
+        if limit:
+            num = 1
+        else:
+            # NOTE(danms): We call our fake data mock once per cell,
+            # and the default fixture has two cells (cell0 and cell1),
+            # so all our math will be doubled.
+            num = self.num_cells
+
         for i in range(TENANTS):
-            self.assertEqual(SERVERS * HOURS, int(usages[i]['total_hours']))
-            self.assertEqual(SERVERS * (ROOT_GB + EPHEMERAL_GB) * HOURS,
+            self.assertEqual(SERVERS * HOURS * num,
+                             int(usages[i]['total_hours']))
+            self.assertEqual(SERVERS * (ROOT_GB + EPHEMERAL_GB) * HOURS * num,
                              int(usages[i]['total_local_gb_usage']))
-            self.assertEqual(SERVERS * MEMORY_MB * HOURS,
+            self.assertEqual(SERVERS * MEMORY_MB * HOURS * num,
                              int(usages[i]['total_memory_mb_usage']))
-            self.assertEqual(SERVERS * VCPUS * HOURS,
+            self.assertEqual(SERVERS * VCPUS * HOURS * num,
                              int(usages[i]['total_vcpus_usage']))
             self.assertFalse(usages[i].get('server_usages'))
+
+        if limit:
+            self.assertIn('tenant_usages_links', res_dict)
+            self.assertEqual('next', res_dict['tenant_usages_links'][0]['rel'])
+        else:
+            self.assertNotIn('tenant_usages_links', res_dict)
 
     def test_verify_index(self):
         self._test_verify_index(START, STOP)
@@ -145,7 +175,8 @@ class SimpleTenantUsageTestV21(test.TestCase):
 
     def _get_tenant_usages(self, detailed=''):
         req = fakes.HTTPRequest.blank('?detailed=%s&start=%s&end=%s' %
-                    (detailed, START.isoformat(), STOP.isoformat()))
+                    (detailed, START.isoformat(), STOP.isoformat()),
+                    version=self.version)
         req.environ['nova.context'] = self.admin_context
 
         # Make sure that get_active_by_window_joined is only called with
@@ -155,8 +186,8 @@ class SimpleTenantUsageTestV21(test.TestCase):
 
         def fake_get_active_by_window_joined(context, begin, end=None,
                                     project_id=None, host=None,
-                                    expected_attrs=None,
-                                    use_slave=False):
+                                    expected_attrs=None, use_slave=False,
+                                    limit=None, marker=None):
             self.assertEqual(['flavor'], expected_attrs)
             return orig_get_active_by_window_joined(context, begin, end,
                                                     project_id, host,
@@ -186,17 +217,28 @@ class SimpleTenantUsageTestV21(test.TestCase):
         for i in range(TENANTS):
             self.assertIsNone(usages[i].get('server_usages'))
 
-    def _test_verify_show(self, start, stop):
+    def _test_verify_show(self, start, stop, limit=None):
         tenant_id = 1
-        req = fakes.HTTPRequest.blank('?start=%s&end=%s' %
-                    (start.isoformat(), stop.isoformat()))
+        url = '?start=%s&end=%s'
+        if limit:
+            url += '&limit=%s' % (limit)
+        req = fakes.HTTPRequest.blank(url %
+                    (start.isoformat(), stop.isoformat()),
+                    version=self.version)
         req.environ['nova.context'] = self.user_context
-
         res_dict = self.controller.show(req, tenant_id)
+
+        if limit:
+            num = 1
+        else:
+            # NOTE(danms): We call our fake data mock once per cell,
+            # and the default fixture has two cells (cell0 and cell1),
+            # so all our math will be doubled.
+            num = self.num_cells
 
         usage = res_dict['tenant_usage']
         servers = usage['server_usages']
-        self.assertEqual(TENANTS * SERVERS, len(usage['server_usages']))
+        self.assertEqual(TENANTS * SERVERS * num, len(usage['server_usages']))
         server_uuids = [getattr(uuids, 'instance_%d' % x)
                         for x in range(SERVERS)]
         for j in range(SERVERS):
@@ -207,9 +249,16 @@ class SimpleTenantUsageTestV21(test.TestCase):
             self.assertEqual(HOURS, int(servers[j]['hours']))
             self.assertIn(servers[j]['instance_id'], server_uuids)
 
+        if limit:
+            self.assertIn('tenant_usage_links', res_dict)
+            self.assertEqual('next', res_dict['tenant_usage_links'][0]['rel'])
+        else:
+            self.assertNotIn('tenant_usage_links', res_dict)
+
     def test_verify_show_cannot_view_other_tenant(self):
         req = fakes.HTTPRequest.blank('?start=%s&end=%s' %
-                    (START.isoformat(), STOP.isoformat()))
+                    (START.isoformat(), STOP.isoformat()),
+                    version=self.version)
         req.environ['nova.context'] = self.alt_user_context
 
         rules = {
@@ -227,20 +276,23 @@ class SimpleTenantUsageTestV21(test.TestCase):
     def test_get_tenants_usage_with_bad_start_date(self):
         future = NOW + datetime.timedelta(hours=HOURS)
         req = fakes.HTTPRequest.blank('?start=%s&end=%s' %
-                    (future.isoformat(), NOW.isoformat()))
+                    (future.isoformat(), NOW.isoformat()),
+                    version=self.version)
         req.environ['nova.context'] = self.user_context
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller.show, req, 'faketenant_0')
 
     def test_get_tenants_usage_with_invalid_start_date(self):
         req = fakes.HTTPRequest.blank('?start=%s&end=%s' %
-                    ("xxxx", NOW.isoformat()))
+                    ("xxxx", NOW.isoformat()),
+                    version=self.version)
         req.environ['nova.context'] = self.user_context
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller.show, req, 'faketenant_0')
 
     def _test_get_tenants_usage_with_one_date(self, date_url_param):
-        req = fakes.HTTPRequest.blank('?%s' % date_url_param)
+        req = fakes.HTTPRequest.blank('?%s' % date_url_param,
+                                      version=self.version)
         req.environ['nova.context'] = self.user_context
         res = self.controller.show(req, 'faketenant_0')
         self.assertIn('tenant_usage', res)
@@ -252,6 +304,86 @@ class SimpleTenantUsageTestV21(test.TestCase):
     def test_get_tenants_usage_with_no_end_date(self):
         self._test_get_tenants_usage_with_one_date(
             'start=%s' % (NOW - datetime.timedelta(5)).isoformat())
+
+
+@mock.patch('nova.objects.InstanceList.get_active_by_window_joined',
+            fake_get_active_by_window_joined)
+class SimpleTenantUsageTestV40(SimpleTenantUsageTestV21):
+    version = '2.40'
+
+    def test_next_links_show(self):
+        self._test_verify_show(START, STOP,
+                               limit=SERVERS * TENANTS)
+
+    def test_next_links_index(self):
+        self._test_verify_index(START, STOP,
+                                limit=SERVERS * TENANTS)
+
+
+class SimpleTenantUsageLimitsTestV21(test.TestCase):
+    version = '2.1'
+
+    def setUp(self):
+        super(SimpleTenantUsageLimitsTestV21, self).setUp()
+        self.controller = simple_tenant_usage_v21.SimpleTenantUsageController()
+        self.tenant_id = 1
+
+    def _get_request(self, url):
+        url = url % (START.isoformat(), STOP.isoformat())
+        return fakes.HTTPRequest.blank(url, version=self.version)
+
+    def assert_limit(self, mock_get, limit):
+        mock_get.assert_called_with(
+            mock.ANY, mock.ANY, mock.ANY, mock.ANY, expected_attrs=['flavor'],
+            limit=1000, marker=None)
+
+    @mock.patch('nova.objects.InstanceList.get_active_by_window_joined')
+    def test_limit_defaults_to_conf_max_limit_show(self, mock_get):
+        req = self._get_request('?start=%s&end=%s')
+        self.controller.show(req, self.tenant_id)
+        self.assert_limit(mock_get, CONF.api.max_limit)
+
+    @mock.patch('nova.objects.InstanceList.get_active_by_window_joined')
+    def test_limit_defaults_to_conf_max_limit_index(self, mock_get):
+        req = self._get_request('?start=%s&end=%s')
+        self.controller.index(req)
+        self.assert_limit(mock_get, CONF.api.max_limit)
+
+
+class SimpleTenantUsageLimitsTestV240(SimpleTenantUsageLimitsTestV21):
+    version = '2.40'
+
+    def assert_limit_and_marker(self, mock_get, limit, marker):
+        # NOTE(danms): Make sure we called at least once with the marker
+        mock_get.assert_any_call(
+            mock.ANY, mock.ANY, mock.ANY, mock.ANY, expected_attrs=['flavor'],
+            limit=3, marker=marker)
+
+    @mock.patch('nova.objects.InstanceList.get_active_by_window_joined')
+    def test_limit_and_marker_show(self, mock_get):
+        req = self._get_request('?start=%s&end=%s&limit=3&marker=some-marker')
+        self.controller.show(req, self.tenant_id)
+        self.assert_limit_and_marker(mock_get, 3, 'some-marker')
+
+    @mock.patch('nova.objects.InstanceList.get_active_by_window_joined')
+    def test_limit_and_marker_index(self, mock_get):
+        req = self._get_request('?start=%s&end=%s&limit=3&marker=some-marker')
+        self.controller.index(req)
+        self.assert_limit_and_marker(mock_get, 3, 'some-marker')
+
+    @mock.patch('nova.objects.InstanceList.get_active_by_window_joined')
+    def test_marker_not_found_show(self, mock_get):
+        mock_get.side_effect = exception.MarkerNotFound(marker='some-marker')
+        req = self._get_request('?start=%s&end=%s&limit=3&marker=some-marker')
+        self.assertRaises(
+            webob.exc.HTTPBadRequest, self.controller.show, req, 1)
+
+    @mock.patch('nova.objects.InstanceList.get_active_by_window_joined')
+    def test_marker_not_found_index(self, mock_get):
+        mock_get.side_effect = exception.MarkerNotFound(marker='some-marker')
+        req = self._get_request('?start=%s&end=%s&limit=3&marker=some-marker')
+        self.assertRaises(
+            webob.exc.HTTPBadRequest, self.controller.index, req)
 
 
 class SimpleTenantUsageControllerTestV21(test.TestCase):

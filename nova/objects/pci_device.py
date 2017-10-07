@@ -17,9 +17,10 @@ import copy
 
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
+from oslo_utils import uuidutils
 from oslo_utils import versionutils
+import six
 
-from nova import context
 from nova import db
 from nova import exception
 from nova import objects
@@ -93,10 +94,12 @@ class PciDevice(base.NovaPersistentObject, base.NovaObject):
     # Version 1.3: Added field to represent PCI device NUMA node
     # Version 1.4: Added parent_addr field
     # Version 1.5: Added 2 new device statuses: UNCLAIMABLE and UNAVAILABLE
-    VERSION = '1.5'
+    # Version 1.6: Added uuid field
+    VERSION = '1.6'
 
     fields = {
         'id': fields.IntegerField(),
+        'uuid': fields.UUIDField(),
         # Note(yjiang5): the compute_node_id may be None because the pci
         # device objects are created before the compute node is created in DB
         'compute_node_id': fields.IntegerField(nullable=True),
@@ -113,18 +116,6 @@ class PciDevice(base.NovaPersistentObject, base.NovaObject):
         'numa_node': fields.IntegerField(nullable=True),
         'parent_addr': fields.StringField(nullable=True),
     }
-
-    @staticmethod
-    def should_migrate_data():
-        # NOTE(ndipanov): Only migrate parent_addr if all services are up to at
-        # least version 4 - this should only ever be called from save()
-        services = ('conductor', 'api')
-        min_parent_addr_version = 4
-
-        min_deployed = min(objects.Service.get_minimum_version(
-            context.get_admin_context(), 'nova-' + service)
-            for service in services)
-        return min_deployed >= min_parent_addr_version
 
     def obj_make_compatible(self, primitive, target_version):
         target_version = versionutils.convert_version_to_tuple(target_version)
@@ -144,6 +135,8 @@ class PciDevice(base.NovaPersistentObject, base.NovaObject):
                     action='obj_make_compatible',
                     reason='status=%s not supported in version %s' % (
                         status, target_version))
+        if target_version < (1, 6) and 'uuid' in primitive:
+            del primitive['uuid']
 
     def update_device(self, dev_dict):
         """Sync the content from device dictionary to device object.
@@ -167,10 +160,15 @@ class PciDevice(base.NovaPersistentObject, base.NovaObject):
             if k in self.fields.keys():
                 setattr(self, k, v)
             else:
-                # Note (yjiang5) extra_info.update does not update
+                # NOTE(yjiang5): extra_info.update does not update
                 # obj_what_changed, set it explicitly
+                # NOTE(ralonsoh): list of parameters currently added to
+                # "extra_info" dict:
+                #     - "capabilities": dict of (strings/list of strings)
                 extra_info = self.extra_info
-                extra_info.update({k: v})
+                data = (v if isinstance(v, six.string_types) else
+                        jsonutils.dumps(v))
+                extra_info.update({k: data})
                 self.extra_info = extra_info
 
     def __init__(self, *args, **kwargs):
@@ -199,10 +197,13 @@ class PciDevice(base.NovaPersistentObject, base.NovaObject):
                 pci_device.extra_info = jsonutils.loads(extra_info)
         pci_device._context = context
         pci_device.obj_reset_changes()
-        # NOTE(ndipanov): As long as there is PF data in the old location, we
-        # want to load it as it may have be the only place we have it
-        if 'phys_function' in pci_device.extra_info:
-            pci_device.parent_addr = pci_device.extra_info['phys_function']
+
+        # TODO(jaypipes): Remove in 2.0 version of object. This does an inline
+        # migration to populate the uuid field. A similar inline migration is
+        # performed in the save() method.
+        if db_dev['uuid'] is None:
+            pci_device.uuid = uuidutils.generate_uuid()
+            pci_device.save()
 
         return pci_device
 
@@ -227,6 +228,7 @@ class PciDevice(base.NovaPersistentObject, base.NovaObject):
         pci_device = cls()
         pci_device.update_device(dev_dict)
         pci_device.status = fields.PciDeviceStatus.AVAILABLE
+        pci_device.uuid = uuidutils.generate_uuid()
         pci_device._context = context
         return pci_device
 
@@ -237,24 +239,14 @@ class PciDevice(base.NovaPersistentObject, base.NovaObject):
             db.pci_device_destroy(self._context, self.compute_node_id,
                                   self.address)
         elif self.status != fields.PciDeviceStatus.DELETED:
+            # TODO(jaypipes): Remove in 2.0 version of object. This does an
+            # inline migration to populate the uuid field. A similar migration
+            # is done in the _from_db_object() method to migrate objects as
+            # they are read from the DB.
+            if 'uuid' not in self:
+                self.uuid = uuidutils.generate_uuid()
             updates = self.obj_get_changes()
-            if not self.should_migrate_data():
-                # NOTE(ndipanov): If we are not migrating data yet, make sure
-                # that any changes to parent_addr are also in the old location
-                # in extra_info
-                if 'parent_addr' in updates and updates['parent_addr']:
-                    extra_update = updates.get('extra_info', {})
-                    if not extra_update and self.obj_attr_is_set('extra_info'):
-                        extra_update = self.extra_info
-                    extra_update['phys_function'] = updates['parent_addr']
-                    updates['extra_info'] = extra_update
-            else:
-                # NOTE(ndipanov): Once we start migrating, meaning all control
-                # plane has been upgraded - aggressively migrate on every save
-                pf_extra = self.extra_info.pop('phys_function', None)
-                if pf_extra and 'parent_addr' not in updates:
-                    updates['parent_addr'] = pf_extra
-                updates['extra_info'] = self.extra_info
+            updates['extra_info'] = self.extra_info
 
             if 'extra_info' in updates:
                 updates['extra_info'] = jsonutils.dumps(updates['extra_info'])
@@ -289,7 +281,7 @@ class PciDevice(base.NovaPersistentObject, base.NovaObject):
 
         elif self.dev_type == fields.PciDeviceType.SRIOV_VF:
             # Update VF status to CLAIMED if it's parent has not been
-            # previuosly allocated or claimed
+            # previously allocated or claimed
             # When claiming/allocating a VF, it's parent PF becomes
             # unclaimable/unavailable. Therefore, it is expected to find the
             # parent PF in an unclaimable/unavailable state for any following

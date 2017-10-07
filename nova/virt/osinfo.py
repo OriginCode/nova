@@ -16,7 +16,6 @@ from oslo_log import log as logging
 from oslo_utils import importutils
 
 from nova import exception
-from nova.i18n import _LW, _LI
 
 libosinfo = None
 LOG = logging.getLogger(__name__)
@@ -40,7 +39,7 @@ class _OsInfoDatabase(object):
                 libosinfo = importutils.import_module(
                                              'gi.repository.Libosinfo')
         except ImportError as exp:
-            LOG.info(_LI("Cannot load Libosinfo: (%s)"), exp)
+            LOG.info("Cannot load Libosinfo: (%s)", exp)
         else:
             self.loader = libosinfo.Loader()
             self.loader.process_default_path()
@@ -90,10 +89,11 @@ class OsInfo(object):
         self._os_obj = self._get_os_obj(os_name)
 
     def _get_os_obj(self, os_name):
-        try:
-            return _OsInfoDatabase.get_instance().get_os(os_name)
-        except exception.NovaException as e:
-            LOG.warning(_LW("Cannot find OS information - Reason: (%s)"), e)
+        if os_name is not None:
+            try:
+                return _OsInfoDatabase.get_instance().get_os(os_name)
+            except exception.NovaException as e:
+                LOG.warning("Cannot find OS information - Reason: (%s)", e)
 
     @property
     def network_model(self):

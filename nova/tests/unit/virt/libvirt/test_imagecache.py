@@ -23,10 +23,9 @@ from oslo_concurrency import lockutils
 from oslo_concurrency import processutils
 from oslo_log import formatters
 from oslo_log import log as logging
-from oslo_utils import importutils
 from six.moves import cStringIO
 
-from nova import conductor
+from nova.compute import manager as compute_manager
 import nova.conf
 from nova import context
 from nova import objects
@@ -155,12 +154,12 @@ class ImageCacheManagerTestCase(test.NoDBTestCase):
 
     def test_list_backing_images_small(self):
         self.stub_out('os.listdir',
-                       lambda x: ['_base', 'instance-00000001',
-                                  'instance-00000002', 'instance-00000003'])
+                      lambda x: ['_base', 'instance-00000001',
+                                 'instance-00000002', 'instance-00000003'])
         self.stub_out('os.path.exists',
-                       lambda x: x.find('instance-') != -1)
-        self.stubs.Set(libvirt_utils, 'get_disk_backing_file',
-                       lambda x: 'e97222e91fc4241f49a7f520d1dcf446751129b3_sm')
+                      lambda x: x.find('instance-') != -1)
+        self.stub_out('nova.virt.libvirt.utils.get_disk_backing_file',
+                      lambda x: 'e97222e91fc4241f49a7f520d1dcf446751129b3_sm')
 
         found = os.path.join(CONF.instances_path,
                              CONF.image_cache_subdirectory_name,
@@ -177,13 +176,13 @@ class ImageCacheManagerTestCase(test.NoDBTestCase):
 
     def test_list_backing_images_resized(self):
         self.stub_out('os.listdir',
-                       lambda x: ['_base', 'instance-00000001',
-                                  'instance-00000002', 'instance-00000003'])
+                      lambda x: ['_base', 'instance-00000001',
+                                 'instance-00000002', 'instance-00000003'])
         self.stub_out('os.path.exists',
-                       lambda x: x.find('instance-') != -1)
-        self.stubs.Set(libvirt_utils, 'get_disk_backing_file',
-                       lambda x: ('e97222e91fc4241f49a7f520d1dcf446751129b3_'
-                                  '10737418240'))
+                      lambda x: x.find('instance-') != -1)
+        self.stub_out('nova.virt.libvirt.utils.get_disk_backing_file',
+                      lambda x: ('e97222e91fc4241f49a7f520d1dcf446751129b3_'
+                                 '10737418240'))
 
         found = os.path.join(CONF.instances_path,
                              CONF.image_cache_subdirectory_name,
@@ -201,11 +200,11 @@ class ImageCacheManagerTestCase(test.NoDBTestCase):
 
     def test_list_backing_images_instancename(self):
         self.stub_out('os.listdir',
-                       lambda x: ['_base', 'banana-42-hamster'])
+                      lambda x: ['_base', 'banana-42-hamster'])
         self.stub_out('os.path.exists',
-                       lambda x: x.find('banana-42-hamster') != -1)
-        self.stubs.Set(libvirt_utils, 'get_disk_backing_file',
-                       lambda x: 'e97222e91fc4241f49a7f520d1dcf446751129b3_sm')
+                      lambda x: x.find('banana-42-hamster') != -1)
+        self.stub_out('nova.virt.libvirt.utils.get_disk_backing_file',
+                      lambda x: 'e97222e91fc4241f49a7f520d1dcf446751129b3_sm')
 
         found = os.path.join(CONF.instances_path,
                              CONF.image_cache_subdirectory_name,
@@ -222,14 +221,15 @@ class ImageCacheManagerTestCase(test.NoDBTestCase):
 
     def test_list_backing_images_disk_notexist(self):
         self.stub_out('os.listdir',
-                       lambda x: ['_base', 'banana-42-hamster'])
+                      lambda x: ['_base', 'banana-42-hamster'])
         self.stub_out('os.path.exists',
-                       lambda x: x.find('banana-42-hamster') != -1)
+                      lambda x: x.find('banana-42-hamster') != -1)
 
         def fake_get_disk(disk_path):
             raise processutils.ProcessExecutionError()
 
-        self.stubs.Set(libvirt_utils, 'get_disk_backing_file', fake_get_disk)
+        self.stub_out('nova.virt.libvirt.utils.get_disk_backing_file',
+                      fake_get_disk)
 
         image_cache_manager = imagecache.ImageCacheManager()
         image_cache_manager.unexplained_images = []
@@ -258,7 +258,7 @@ class ImageCacheManagerTestCase(test.NoDBTestCase):
         res = list(image_cache_manager._find_base_file(base_dir, fingerprint))
 
         base_file = os.path.join(base_dir, fingerprint + '_sm')
-        self.assertEqual(res, [(base_file, True, False)])
+        self.assertEqual([base_file], res)
 
     def test_find_base_file_resized(self):
         fingerprint = '968dd6cc49e01aaa044ed11c0cce733e0fa44a6a'
@@ -278,7 +278,7 @@ class ImageCacheManagerTestCase(test.NoDBTestCase):
         res = list(image_cache_manager._find_base_file(base_dir, fingerprint))
 
         base_file = os.path.join(base_dir, fingerprint + '_10737418240')
-        self.assertEqual(res, [(base_file, False, True)])
+        self.assertEqual([base_file], res)
 
     def test_find_base_file_all(self):
         fingerprint = '968dd6cc49e01aaa044ed11c0cce733e0fa44a6a'
@@ -300,9 +300,7 @@ class ImageCacheManagerTestCase(test.NoDBTestCase):
         base_file1 = os.path.join(base_dir, fingerprint)
         base_file2 = os.path.join(base_dir, fingerprint + '_sm')
         base_file3 = os.path.join(base_dir, fingerprint + '_10737418240')
-        self.assertEqual(res, [(base_file1, False, False),
-                               (base_file2, True, False),
-                               (base_file3, False, True)])
+        self.assertEqual([base_file1, base_file2, base_file3], res)
 
     @contextlib.contextmanager
     def _make_base_file(self, lock=True, info=False):
@@ -432,77 +430,17 @@ class ImageCacheManagerTestCase(test.NoDBTestCase):
                 self.assertNotEqual(stream.getvalue().find('Failed to remove'),
                                     -1)
 
-    def test_handle_base_image_unused(self):
-        img = '123'
-
-        with self._make_base_file() as fname:
-            os.utime(fname, (-1, time.time() - 3601))
-
-            image_cache_manager = imagecache.ImageCacheManager()
-            image_cache_manager.unexplained_images = [fname]
-            image_cache_manager._handle_base_image(img, fname)
-
-            self.assertEqual(image_cache_manager.unexplained_images, [])
-            self.assertEqual(image_cache_manager.removable_base_files,
-                             [fname])
-
     @mock.patch.object(libvirt_utils, 'update_mtime')
-    def test_handle_base_image_used(self, mock_mtime):
+    def test_mark_in_use(self, mock_mtime):
         img = '123'
 
         with self._make_base_file() as fname:
             image_cache_manager = imagecache.ImageCacheManager()
             image_cache_manager.unexplained_images = [fname]
             image_cache_manager.used_images = {'123': (1, 0, ['banana-42'])}
-            image_cache_manager._handle_base_image(img, fname)
+            image_cache_manager._mark_in_use(img, fname)
 
             mock_mtime.assert_called_once_with(fname)
-            self.assertEqual(image_cache_manager.unexplained_images, [])
-            self.assertEqual(image_cache_manager.removable_base_files, [])
-
-    @mock.patch.object(libvirt_utils, 'update_mtime')
-    def test_handle_base_image_used_remotely(self, mock_mtime):
-        img = '123'
-
-        with self._make_base_file() as fname:
-            image_cache_manager = imagecache.ImageCacheManager()
-            image_cache_manager.unexplained_images = [fname]
-            image_cache_manager.used_images = {'123': (0, 1, ['banana-42'])}
-            image_cache_manager._handle_base_image(img, fname)
-
-            mock_mtime.assert_called_once_with(fname)
-            self.assertEqual(image_cache_manager.unexplained_images, [])
-            self.assertEqual(image_cache_manager.removable_base_files, [])
-
-    def test_handle_base_image_absent(self):
-        img = '123'
-
-        with intercept_log_messages() as stream:
-            image_cache_manager = imagecache.ImageCacheManager()
-            image_cache_manager.used_images = {'123': (1, 0, ['banana-42'])}
-            image_cache_manager._handle_base_image(img, None)
-
-            self.assertEqual(image_cache_manager.unexplained_images, [])
-            self.assertEqual(image_cache_manager.removable_base_files, [])
-            self.assertNotEqual(stream.getvalue().find('an absent base file'),
-                                -1)
-
-    def test_handle_base_image_used_missing(self):
-        img = '123'
-
-        with utils.tempdir() as tmpdir:
-            self.flags(instances_path=tmpdir)
-            self.flags(image_info_filename_pattern=('$instances_path/'
-                                                    '%(image)s.info'),
-                       group='libvirt')
-
-            fname = os.path.join(tmpdir, 'aaa')
-
-            image_cache_manager = imagecache.ImageCacheManager()
-            image_cache_manager.unexplained_images = [fname]
-            image_cache_manager.used_images = {'123': (1, 0, ['banana-42'])}
-            image_cache_manager._handle_base_image(img, fname)
-
             self.assertEqual(image_cache_manager.unexplained_images, [])
             self.assertEqual(image_cache_manager.removable_base_files, [])
 
@@ -624,8 +562,8 @@ class ImageCacheManagerTestCase(test.NoDBTestCase):
                 return fq_path('%s_5368709120' % hashed_1)
             self.fail('Unexpected backing file lookup: %s' % path)
 
-        self.stubs.Set(libvirt_utils, 'get_disk_backing_file',
-                       lambda x: get_disk_backing_file(x))
+        self.stub_out('nova.virt.libvirt.utils.get_disk_backing_file',
+                      lambda x: get_disk_backing_file(x))
 
         # Fake getmtime as well
         orig_getmtime = os.path.getmtime
@@ -650,31 +588,30 @@ class ImageCacheManagerTestCase(test.NoDBTestCase):
 
         self.stub_out('os.remove', lambda x: remove(x))
 
-        self.mox.StubOutWithMock(objects.block_device.BlockDeviceMappingList,
-                   'bdms_by_instance_uuid')
+        with mock.patch.object(objects.block_device.BlockDeviceMappingList,
+                               'bdms_by_instance_uuid', return_value={}
+                               ) as mock_bdms:
+            ctxt = context.get_admin_context()
+            # And finally we can make the call we're actually testing...
+            # The argument here should be a context, but it is mocked out
+            image_cache_manager.update(ctxt, all_instances)
 
-        ctxt = context.get_admin_context()
-        objects.block_device.BlockDeviceMappingList.bdms_by_instance_uuid(
-                ctxt, [uuids.instance_1, uuids.instance_2]).AndReturn({})
+            # Verify
+            active = [fq_path(hashed_1), fq_path('%s_5368709120' % hashed_1),
+                      fq_path(hashed_21), fq_path(hashed_22)]
+            for act in active:
+                self.assertIn(act, image_cache_manager.active_base_files)
+            self.assertEqual(len(image_cache_manager.active_base_files),
+                             len(active))
 
-        self.mox.ReplayAll()
-        # And finally we can make the call we're actually testing...
-        # The argument here should be a context, but it is mocked out
-        image_cache_manager.update(ctxt, all_instances)
+            for rem in [fq_path('e97222e91fc4241f49a7f520d1dcf446751129b3_sm'),
+                        fq_path('e09c675c2d1cfac32dae3c2d83689c8c94bc693b_sm'),
+                        fq_path(hashed_42),
+                        fq_path('%s_10737418240' % hashed_1)]:
+                self.assertIn(rem, image_cache_manager.removable_base_files)
 
-        # Verify
-        active = [fq_path(hashed_1), fq_path('%s_5368709120' % hashed_1),
-                  fq_path(hashed_21), fq_path(hashed_22)]
-        for act in active:
-            self.assertIn(act, image_cache_manager.active_base_files)
-        self.assertEqual(len(image_cache_manager.active_base_files),
-                         len(active))
-
-        for rem in [fq_path('e97222e91fc4241f49a7f520d1dcf446751129b3_sm'),
-                    fq_path('e09c675c2d1cfac32dae3c2d83689c8c94bc693b_sm'),
-                    fq_path(hashed_42),
-                    fq_path('%s_10737418240' % hashed_1)]:
-            self.assertIn(rem, image_cache_manager.removable_base_files)
+            mock_bdms.assert_called_once_with(ctxt,
+                [uuids.instance_1, uuids.instance_2])
 
     def test_verify_base_images_no_base(self):
         self.flags(instances_path='/tmp/no/such/dir/name/please')
@@ -698,11 +635,10 @@ class ImageCacheManagerTestCase(test.NoDBTestCase):
         self.assertFalse(is_valid_info_file(base_filename + '.sha1'))
         self.assertTrue(is_valid_info_file(base_filename + '.info'))
 
-    def test_run_image_cache_manager_pass(self):
-        was = {'called': False}
+    @mock.patch('nova.objects.InstanceList.get_by_filters')
+    def test_run_image_cache_manager_pass(self, mock_instance_list):
 
-        def fake_get_all_by_filters(context, *args, **kwargs):
-            was['called'] = True
+        def fake_instances(ctxt):
             instances = []
             for x in range(2):
                 instances.append(
@@ -712,19 +648,22 @@ class ImageCacheManagerTestCase(test.NoDBTestCase):
                         name='instance-%s' % x,
                         vm_state='',
                         task_state=''))
-            return instances
+            return objects.instance._make_instance_list(
+                ctxt, objects.InstanceList(), instances, None)
 
         with utils.tempdir() as tmpdir:
             self.flags(instances_path=tmpdir)
-
-            self.stub_out('nova.db.instance_get_all_by_filters',
-                          fake_get_all_by_filters)
-            compute = importutils.import_object(CONF.compute_manager)
-            self.flags(use_local=True, group='conductor')
-            compute.conductor_api = conductor.API()
             ctxt = context.get_admin_context()
+            mock_instance_list.return_value = fake_instances(ctxt)
+            compute = compute_manager.ComputeManager()
             compute._run_image_cache_manager_pass(ctxt)
-            self.assertTrue(was['called'])
+            filters = {
+                'host': ['fake-mini'],
+                'deleted': False,
+                'soft_deleted': True,
+            }
+            mock_instance_list.assert_called_once_with(
+                ctxt, filters, expected_attrs=[], use_slave=True)
 
     def test_store_swap_image(self):
         image_cache_manager = imagecache.ImageCacheManager()

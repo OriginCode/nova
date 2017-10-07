@@ -26,13 +26,10 @@ import webob
 from webob import exc
 
 from nova.compute import task_states
-from nova.compute import utils as compute_utils
 from nova.compute import vm_states
 import nova.conf
 from nova import exception
 from nova.i18n import _
-from nova.i18n import _LE
-from nova.i18n import _LW
 from nova import objects
 from nova import quota
 from nova import utils
@@ -118,9 +115,9 @@ def status_from_state(vm_state, task_state='default'):
     task_map = _STATE_MAP.get(vm_state, dict(default='UNKNOWN'))
     status = task_map.get(task_state, task_map['default'])
     if status == "UNKNOWN":
-        LOG.error(_LE("status is UNKNOWN from vm_state=%(vm_state)s "
-                      "task_state=%(task_state)s. Bad upgrade or db "
-                      "corrupted?"),
+        LOG.error("status is UNKNOWN from vm_state=%(vm_state)s "
+                  "task_state=%(task_state)s. Bad upgrade or db "
+                  "corrupted?",
                   {'vm_state': vm_state, 'task_state': task_state})
     return status
 
@@ -132,8 +129,8 @@ def task_and_vm_state_from_status(statuses):
     vm_states = set()
     task_states = set()
     lower_statuses = [status.lower() for status in statuses]
-    for state, task_map in six.iteritems(_STATE_MAP):
-        for task_state, mapped_state in six.iteritems(task_map):
+    for state, task_map in _STATE_MAP.items():
+        for task_state, mapped_state in task_map.items():
             status_string = mapped_state
             if status_string.lower() in lower_statuses:
                 vm_states.add(state)
@@ -227,7 +224,7 @@ def limited(items, request):
     """
     params = get_pagination_params(request)
     offset = params.get('offset', 0)
-    limit = CONF.osapi_max_limit
+    limit = CONF.api.max_limit
     limit = min(limit, params.get('limit') or limit)
 
     return items[offset:(offset + limit)]
@@ -236,7 +233,7 @@ def limited(items, request):
 def get_limit_and_marker(request):
     """Get limited parameter from request."""
     params = get_pagination_params(request)
-    limit = CONF.osapi_max_limit
+    limit = CONF.api.max_limit
     limit = min(limit, params.get('limit', limit))
     marker = params.get('marker', None)
 
@@ -290,19 +287,6 @@ def check_img_metadata_properties_quota(context, metadata):
         expl = _("Image metadata limit exceeded")
         raise webob.exc.HTTPForbidden(explanation=expl)
 
-    #  check the key length.
-    if isinstance(metadata, dict):
-        for key, value in six.iteritems(metadata):
-            if len(key) == 0:
-                expl = _("Image metadata key cannot be blank")
-                raise webob.exc.HTTPBadRequest(explanation=expl)
-            if len(key) > 255:
-                expl = _("Image metadata key too long")
-                raise webob.exc.HTTPBadRequest(explanation=expl)
-    else:
-        expl = _("Invalid image metadata")
-        raise webob.exc.HTTPBadRequest(explanation=expl)
-
 
 def get_networks_for_instance_from_nw_info(nw_info):
     networks = collections.OrderedDict()
@@ -338,7 +322,7 @@ def get_networks_for_instance(context, instance):
                                       'mac_address': 'aa:aa:aa:aa:aa:aa'}]},
          ...}
     """
-    nw_info = compute_utils.get_nw_info_for_instance(instance)
+    nw_info = instance.get_network_info()
     return get_networks_for_instance_from_nw_info(nw_info)
 
 
@@ -364,9 +348,9 @@ def raise_http_conflict_for_instance_invalid_state(exc, action, server_id):
 def check_snapshots_enabled(f):
     @functools.wraps(f)
     def inner(*args, **kwargs):
-        if not CONF.allow_instance_snapshots:
-            LOG.warning(_LW('Rejecting snapshot request, snapshots currently'
-                            ' disabled'))
+        if not CONF.api.allow_instance_snapshots:
+            LOG.warning('Rejecting snapshot request, snapshots currently'
+                        ' disabled')
             msg = _("Instance snapshots are not permitted at this time.")
             raise webob.exc.HTTPBadRequest(explanation=msg)
         return f(*args, **kwargs)
@@ -414,7 +398,7 @@ class ViewBuilder(object):
 
     def _get_next_link(self, request, identifier, collection_name):
         """Return href string with proper limit and marker params."""
-        params = request.params.copy()
+        params = collections.OrderedDict(sorted(request.params.items()))
         params["marker"] = identifier
         prefix = self._update_compute_link_prefix(request.application_url)
         url = url_join(prefix,
@@ -446,15 +430,15 @@ class ViewBuilder(object):
                               id_key="uuid"):
         """Retrieve 'next' link, if applicable. This is included if:
         1) 'limit' param is specified and equals the number of items.
-        2) 'limit' param is specified but it exceeds CONF.osapi_max_limit,
-        in this case the number of items is CONF.osapi_max_limit.
+        2) 'limit' param is specified but it exceeds CONF.api.max_limit,
+        in this case the number of items is CONF.api.max_limit.
         3) 'limit' param is NOT specified but the number of items is
-        CONF.osapi_max_limit.
+        CONF.api.max_limit.
         """
         links = []
         max_items = min(
-            int(request.params.get("limit", CONF.osapi_max_limit)),
-            CONF.osapi_max_limit)
+            int(request.params.get("limit", CONF.api.max_limit)),
+            CONF.api.max_limit)
         if max_items and max_items == len(items):
             last_item = items[-1]
             if id_key in last_item:
@@ -481,12 +465,10 @@ class ViewBuilder(object):
         return urlparse.urlunsplit(url_parts).rstrip('/')
 
     def _update_glance_link_prefix(self, orig_url):
-        return self._update_link_prefix(orig_url,
-                                        CONF.osapi_glance_link_prefix)
+        return self._update_link_prefix(orig_url, CONF.api.glance_link_prefix)
 
     def _update_compute_link_prefix(self, orig_url):
-        return self._update_link_prefix(orig_url,
-                                        CONF.osapi_compute_link_prefix)
+        return self._update_link_prefix(orig_url, CONF.api.compute_link_prefix)
 
 
 def get_instance(compute_api, context, instance_id, expected_attrs=None):

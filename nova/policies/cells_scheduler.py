@@ -21,11 +21,19 @@ POLICY_ROOT = 'cells_scheduler_filter:%s'
 
 cells_scheduler_policies = [
     policy.RuleDefault(
-        name=POLICY_ROOT % 'DifferentCellFilter',
-        check_str='is_admin:True'),
+        POLICY_ROOT % 'DifferentCellFilter',
+        'is_admin:True',
+        """Different cell filter to route a build away from a particular cell
+
+This policy is read by nova-scheduler process.
+"""),
     policy.RuleDefault(
-        name=POLICY_ROOT % 'TargetCellFilter',
-        check_str='is_admin:True'),
+        POLICY_ROOT % 'TargetCellFilter',
+        'is_admin:True',
+        """Target cell filter to route a build to a particular cell
+
+This policy is read by nova-scheduler process.
+""")
 ]
 
 

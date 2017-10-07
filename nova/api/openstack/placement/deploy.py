@@ -12,7 +12,8 @@
 """Deployment handling for Placmenent API."""
 
 from keystonemiddleware import auth_token
-from oslo_middleware import request_id
+import oslo_middleware
+from oslo_middleware import cors
 
 from nova.api import openstack as common_api
 from nova.api.openstack.placement import auth
@@ -34,29 +35,49 @@ objects.register_all()
 
 def deploy(conf, project_name):
     """Assemble the middleware pipeline leading to the placement app."""
-    if conf.auth_strategy == 'noauth2':
+    if conf.api.auth_strategy == 'noauth2':
         auth_middleware = auth.NoAuthMiddleware
     else:
         # Do not provide global conf to middleware here.
         auth_middleware = auth_token.filter_factory(
-            {}, olso_config_project=project_name)
+            {}, oslo_config_project=project_name)
+
+    # Pass in our CORS config, if any, manually as that's a)
+    # explicit, b) makes testing more straightfoward, c) let's
+    # us control the use of cors by the presence of its config.
+    conf.register_opts(cors.CORS_OPTS, 'cors')
+    if conf.cors.allowed_origin:
+        cors_middleware = oslo_middleware.CORS.factory(
+            {}, **conf.cors)
+    else:
+        cors_middleware = None
 
     context_middleware = auth.PlacementKeystoneContext
-    req_id_middleware = request_id.RequestId
+    req_id_middleware = oslo_middleware.RequestId
     microversion_middleware = microversion.MicroversionMiddleware
     fault_wrap = common_api.FaultWrapper
     request_log = requestlog.RequestLog
 
     application = handler.PlacementHandler()
 
-    for middleware in (context_middleware,
-                       auth_middleware,
-                       microversion_middleware,
+    # NOTE(cdent): The ordering here is important. The list is ordered
+    # from the inside out. For a single request req_id_middleware is called
+    # first and microversion_middleware last. Then the request is finally
+    # passed to the application (the PlacementHandler). At that point
+    # the response ascends the middleware in the reverse of the
+    # order the request went in. This order ensures that log messages
+    # all see the same contextual information including request id and
+    # authentication information.
+    for middleware in (microversion_middleware,
                        fault_wrap,
-                       req_id_middleware,
                        request_log,
+                       context_middleware,
+                       auth_middleware,
+                       cors_middleware,
+                       req_id_middleware,
                        ):
-        application = middleware(application)
+        if middleware:
+            application = middleware(application)
 
     return application
 

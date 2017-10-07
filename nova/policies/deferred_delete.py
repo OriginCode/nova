@@ -19,16 +19,24 @@ from nova.policies import base
 
 
 BASE_POLICY_NAME = 'os_compute_api:os-deferred-delete'
-POLICY_ROOT = 'os_compute_api:os-deferred-delete:%s'
 
 
 deferred_delete_policies = [
-    policy.RuleDefault(
-        name=POLICY_ROOT % 'discoverable',
-        check_str=base.RULE_ANY),
-    policy.RuleDefault(
-        name=BASE_POLICY_NAME,
-        check_str=base.RULE_ADMIN_OR_OWNER),
+    policy.DocumentedRuleDefault(
+        BASE_POLICY_NAME,
+        base.RULE_ADMIN_OR_OWNER,
+        "Restore a soft deleted server or force delete a server before "
+        "deferred cleanup",
+        [
+            {
+                'method': 'POST',
+                'path': '/servers/{server_id}/action (restore)'
+            },
+            {
+                'method': 'POST',
+                'path': '/servers/{server_id}/action (forceDelete)'
+            }
+        ])
 ]
 
 

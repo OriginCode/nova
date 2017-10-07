@@ -58,11 +58,34 @@ def fake_create_security_group(self, context, name, description):
     return fake_get()
 
 
+def fake_create_security_group_rule(self, context, security_group, new_rule):
+    return {
+        'from_port': 22,
+        'to_port': 22,
+        'cidr': '10.0.0.0/24',
+        'id': '00000000-0000-0000-0000-000000000000',
+        'parent_group_id': '11111111-1111-1111-1111-111111111111',
+        'protocol': 'tcp',
+        'group_id': None
+    }
+
+
+def fake_remove_rules(self, context, security_group, rule_ids):
+    pass
+
+
+def fake_get_rule(self, context, id):
+    return {
+        'id': id,
+        'parent_group_id': '11111111-1111-1111-1111-111111111111'
+    }
+
+
 class SecurityGroupsJsonTest(test_servers.ServersSampleBase):
     sample_dir = 'os-security-groups'
+    USE_NEUTRON = True
 
     def setUp(self):
-        self.flags(use_neutron=True)
         self.neutron = fixtures.NeutronFixture(self)
         self.useFixture(self.neutron)
         super(SecurityGroupsJsonTest, self).setUp()
@@ -77,6 +100,12 @@ class SecurityGroupsJsonTest(test_servers.ServersSampleBase):
                       fake_get_instance_security_groups)
         self.stub_out(path + 'create_security_group',
                       fake_create_security_group)
+        self.stub_out(path + 'create_security_group_rule',
+                      fake_create_security_group_rule)
+        self.stub_out(path + 'remove_rules',
+                      fake_remove_rules)
+        self.stub_out(path + 'get_rule',
+                      fake_get_rule)
 
     def _get_create_subs(self):
         return {
@@ -126,7 +155,7 @@ class SecurityGroupsJsonTest(test_servers.ServersSampleBase):
         uuid = self._post_server()
         response = self._add_group(uuid)
         self.assertEqual(202, response.status_code)
-        self.assertEqual('', response.content)
+        self.assertEqual('', response.text)
 
     def test_security_groups_remove(self):
         self._create_security_group()
@@ -138,4 +167,15 @@ class SecurityGroupsJsonTest(test_servers.ServersSampleBase):
         response = self._do_post('servers/%s/action' % uuid,
                                  'security-group-remove-post-req', subs)
         self.assertEqual(202, response.status_code)
-        self.assertEqual('', response.content)
+        self.assertEqual('', response.text)
+
+    def test_security_group_rules_create(self):
+        response = self._do_post('os-security-group-rules',
+                                 'security-group-rules-post-req', {})
+        self._verify_response('security-group-rules-post-resp', {}, response,
+                              200)
+
+    def test_security_group_rules_remove(self):
+        response = self._do_delete(
+            'os-security-group-rules/00000000-0000-0000-0000-000000000000')
+        self.assertEqual(202, response.status_code)

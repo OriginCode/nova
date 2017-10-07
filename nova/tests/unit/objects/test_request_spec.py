@@ -292,7 +292,8 @@ class _TestRequestSpecObject(object):
         spec = objects.RequestSpec.from_primitives(ctxt, spec_dict, filt_props)
         mock_limits.assert_called_once_with({})
         # Make sure that all fields are set using that helper method
-        for field in [f for f in spec.obj_fields if f != 'id']:
+        skip = ['id', 'security_groups']
+        for field in [f for f in spec.obj_fields if f not in skip]:
             self.assertTrue(spec.obj_attr_is_set(field),
                              'Field: %s is not set' % field)
         # just making sure that the context is set by the method
@@ -309,11 +310,12 @@ class _TestRequestSpecObject(object):
 
         spec = objects.RequestSpec.from_components(ctxt, instance.uuid, image,
                 flavor, instance.numa_topology, instance.pci_requests,
-                filter_properties, instance_group, instance.availability_zone)
+                filter_properties, instance_group, instance.availability_zone,
+                objects.SecurityGroupList())
         # Make sure that all fields are set using that helper method
         for field in [f for f in spec.obj_fields if f != 'id']:
-            self.assertEqual(True, spec.obj_attr_is_set(field),
-                             'Field: %s is not set' % field)
+            self.assertTrue(spec.obj_attr_is_set(field),
+                            'Field: %s is not set' % field)
         # just making sure that the context is set by the method
         self.assertEqual(ctxt, spec._context)
 
@@ -352,6 +354,23 @@ class _TestRequestSpecObject(object):
                 filter_properties, None, instance.availability_zone)
 
         mock_pgi.assert_called_once_with(filter_properties)
+
+    @mock.patch('nova.objects.RequestSpec._populate_group_info')
+    def test_from_components_without_security_groups(self, mock_pgi):
+        # This test makes sure that we populate instance group if not
+        # present
+        ctxt = context.RequestContext(fakes.FAKE_USER_ID,
+                                      fakes.FAKE_PROJECT_ID)
+        instance = fake_instance.fake_instance_obj(ctxt)
+        image = {'id': uuids.image_id, 'properties': {'mappings': []},
+                 'status': 'fake-status', 'location': 'far-away'}
+        flavor = fake_flavor.fake_flavor_obj(ctxt)
+        filter_properties = {'fake': 'property'}
+
+        spec = objects.RequestSpec.from_components(ctxt, instance.uuid, image,
+                flavor, instance.numa_topology, instance.pci_requests,
+                filter_properties, None, instance.availability_zone)
+        self.assertNotIn('security_groups', spec)
 
     def test_get_scheduler_hint(self):
         spec_obj = objects.RequestSpec(scheduler_hints={'foo_single': ['1'],
@@ -499,7 +518,7 @@ class _TestRequestSpecObject(object):
         # object fields
         for field in ['image', 'numa_topology', 'pci_requests', 'flavor',
                 'retry', 'limits', 'instance_group']:
-            self.assertDictEqual(
+            self.assertEqual(
                     getattr(req_obj, field).obj_to_primitive(),
                     getattr(serialized_obj, field).obj_to_primitive())
 
@@ -535,6 +554,14 @@ class _TestRequestSpecObject(object):
                 _test_save_args):
             req_obj.save()
 
+    @mock.patch.object(request_spec.RequestSpec, '_destroy_in_db')
+    def test_destroy(self, destroy_in_db):
+        req_obj = fake_request_spec.fake_spec_obj()
+        req_obj.destroy()
+
+        destroy_in_db.assert_called_once_with(req_obj._context,
+                                              req_obj.instance_uuid)
+
     def test_reset_forced_destinations(self):
         req_obj = fake_request_spec.fake_spec_obj()
         # Making sure the fake object has forced hosts and nodes
@@ -554,9 +581,24 @@ class _TestRequestSpecObject(object):
                                              version_manifest=versions)
         self.assertNotIn('requested_destination', primitive)
 
+    def test_compat_security_groups(self):
+        sgl = objects.SecurityGroupList(objects=[])
+        req_obj = objects.RequestSpec(security_groups=sgl)
+        versions = ovo_base.obj_tree_get_versions('RequestSpec')
+        primitive = req_obj.obj_to_primitive(target_version='1.7',
+                                             version_manifest=versions)
+        self.assertNotIn('security_groups', primitive)
+
     def test_default_requested_destination(self):
         req_obj = objects.RequestSpec()
         self.assertIsNone(req_obj.requested_destination)
+
+    def test_security_groups_load(self):
+        req_obj = objects.RequestSpec()
+        self.assertNotIn('security_groups', req_obj)
+        self.assertIsInstance(req_obj.security_groups,
+                              objects.SecurityGroupList)
+        self.assertIn('security_groups', req_obj)
 
 
 class TestRequestSpecObject(test_objects._LocalTest,

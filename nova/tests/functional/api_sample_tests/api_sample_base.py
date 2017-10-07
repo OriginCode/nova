@@ -18,10 +18,10 @@ import testscenarios
 
 import nova.conf
 from nova import test
+from nova.tests import fixtures
 from nova.tests.functional import api_paste_fixture
 from nova.tests.functional import api_samples_test_base
 from nova.tests.unit import fake_network
-from nova.tests.unit import fake_utils
 
 CONF = nova.conf.CONF
 
@@ -56,6 +56,8 @@ CONF = nova.conf.CONF
 
 class ApiSampleTestBaseV21(testscenarios.WithScenarios,
                           api_samples_test_base.ApiSampleTestBase):
+    SUPPORTS_CELLS = False
+
     api_major_version = 'v2'
     # any additional fixtures needed for this scenario
     _additional_fixtures = []
@@ -78,22 +80,43 @@ class ApiSampleTestBaseV21(testscenarios.WithScenarios,
     ]
 
     def setUp(self):
-        self.flags(use_ipv6=False,
-                   osapi_compute_link_prefix=self._get_host(),
-                   osapi_glance_link_prefix=self._get_glance_host())
+        self.flags(use_ipv6=False)
+        self.flags(glance_link_prefix=self._get_glance_host(),
+                   compute_link_prefix=self._get_host(),
+                   group='api')
 
         # load any additional fixtures specified by the scenario
         for fix in self._additional_fixtures:
             self.useFixture(fix())
+
+        if not self.SUPPORTS_CELLS:
+            # NOTE(danms): Disable base automatic DB (and cells) config
+            self.USES_DB = False
+            self.USES_DB_SELF = True
+        # This is to enable the network quota which is being registered
+        # based on CONF.enable_network_quota. Need this to test the
+        # network quota in quota sample tests.
+        self.flags(enable_network_quota=True)
+        self.useFixture(fixtures.RegisterNetworkQuota())
 
         # super class call is delayed here so that we have the right
         # paste and conf before loading all the services, as we can't
         # change these later.
         super(ApiSampleTestBaseV21, self).setUp()
 
+        if not self.SUPPORTS_CELLS:
+            self.useFixture(fixtures.Database())
+            self.useFixture(fixtures.Database(database='api'))
+            self.useFixture(fixtures.DefaultFlavorsFixture())
+            self.useFixture(fixtures.SingleCellSimple())
+
+        super(ApiSampleTestBaseV21, self)._setup_services()
+
         self.useFixture(test.SampleNetworks(host=self.network.host))
         fake_network.stub_compute_with_ips(self.stubs)
-        fake_utils.stub_out_utils_spawn_n(self.stubs)
-
+        self.useFixture(fixtures.SpawnIsSynchronousFixture())
         # this is used to generate sample docs
         self.generate_samples = os.getenv('GENERATE_SAMPLES') is not None
+
+    def _setup_services(self):
+        pass

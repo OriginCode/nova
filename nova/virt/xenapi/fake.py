@@ -51,19 +51,20 @@ A fake XenAPI SDK.
 import base64
 import pickle
 import random
-import uuid
 from xml.sax import saxutils
 import zlib
 
+from os_xenapi.client import session as xenapi_session
+from os_xenapi.client import XenAPI
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import timeutils
 from oslo_utils import units
-import six
+from oslo_utils import uuidutils
+
 
 from nova import exception
 from nova.i18n import _
-from nova.virt.xenapi.client import session as xenapi_session
 
 
 _CLASSES = ['host', 'network', 'session', 'pool', 'SR', 'VBD',
@@ -235,7 +236,13 @@ def after_VBD_create(vbd_ref, vbd_rec):
     is created.
     """
     vbd_rec['currently_attached'] = False
-    vbd_rec['device'] = ''
+
+    # TODO(snikitin): Find a better way for generating of device name.
+    # Usually 'userdevice' has numeric values like '1', '2', '3', etc.
+    # Ideally they should be transformed to something like 'xvda', 'xvdb',
+    # 'xvdx', etc. But 'userdevice' also may be 'autodetect', 'fake' or even
+    # unset. We should handle it in future.
+    vbd_rec['device'] = vbd_rec.get('userdevice', '')
     vbd_rec.setdefault('other_config', {})
 
     vm_ref = vbd_rec['VM']
@@ -350,8 +357,8 @@ def _create_local_pif(host_ref):
 
 
 def _create_object(table, obj):
-    ref = str(uuid.uuid4())
-    obj['uuid'] = str(uuid.uuid4())
+    ref = uuidutils.generate_uuid()
+    obj['uuid'] = uuidutils.generate_uuid()
     _db_content[table][ref] = obj
     return ref
 
@@ -360,7 +367,7 @@ def _create_sr(table, obj):
     sr_type = obj[6]
     # Forces fake to support iscsi only
     if sr_type != 'iscsi' and sr_type != 'nfs':
-        raise Failure(['SR_UNKNOWN_DRIVER', sr_type])
+        raise XenAPI.Failure(['SR_UNKNOWN_DRIVER', sr_type])
     host_ref = list(_db_content['host'])[0]
     sr_ref = _create_object(table, obj[2])
     if sr_type == 'iscsi':
@@ -452,7 +459,7 @@ def get_record(table, ref):
     if ref in _db_content[table]:
         return _db_content[table].get(ref)
     else:
-        raise Failure(['HANDLE_INVALID', table, ref])
+        raise XenAPI.Failure(['HANDLE_INVALID', table, ref])
 
 
 def check_for_session_leaks():
@@ -511,14 +518,14 @@ class SessionBase(object):
     def VBD_plug(self, _1, ref):
         rec = get_record('VBD', ref)
         if rec['currently_attached']:
-            raise Failure(['DEVICE_ALREADY_ATTACHED', ref])
+            raise XenAPI.Failure(['DEVICE_ALREADY_ATTACHED', ref])
         rec['currently_attached'] = True
         rec['device'] = 'fakedev'
 
     def VBD_unplug(self, _1, ref):
         rec = get_record('VBD', ref)
         if not rec['currently_attached']:
-            raise Failure(['DEVICE_ALREADY_DETACHED', ref])
+            raise XenAPI.Failure(['DEVICE_ALREADY_DETACHED', ref])
         rec['currently_attached'] = False
         rec['device'] = ''
 
@@ -527,8 +534,8 @@ class SessionBase(object):
         if 'other_config' not in db_ref:
             db_ref['other_config'] = {}
         if key in db_ref['other_config']:
-            raise Failure(['MAP_DUPLICATE_KEY', 'VBD', 'other_config',
-                           vbd_ref, key])
+            raise XenAPI.Failure(
+                ['MAP_DUPLICATE_KEY', 'VBD', 'other_config', vbd_ref, key])
         db_ref['other_config'][key] = value
 
     def VBD_get_other_config(self, _1, vbd_ref):
@@ -545,7 +552,7 @@ class SessionBase(object):
     def PBD_plug(self, _1, pbd_ref):
         rec = get_record('PBD', pbd_ref)
         if rec['currently_attached']:
-            raise Failure(['DEVICE_ALREADY_ATTACHED', rec])
+            raise XenAPI.Failure(['DEVICE_ALREADY_ATTACHED', rec])
         rec['currently_attached'] = True
         sr_ref = rec['SR']
         _db_content['SR'][sr_ref]['PBDs'] = [pbd_ref]
@@ -553,14 +560,14 @@ class SessionBase(object):
     def PBD_unplug(self, _1, pbd_ref):
         rec = get_record('PBD', pbd_ref)
         if not rec['currently_attached']:
-            raise Failure(['DEVICE_ALREADY_DETACHED', rec])
+            raise XenAPI.Failure(['DEVICE_ALREADY_DETACHED', rec])
         rec['currently_attached'] = False
         sr_ref = rec['SR']
         _db_content['SR'][sr_ref]['PBDs'].remove(pbd_ref)
 
     def SR_introduce(self, _1, sr_uuid, label, desc, type, content_type,
                      shared, sm_config):
-        for ref, rec in six.iteritems(_db_content['SR']):
+        for ref, rec in _db_content['SR'].items():
             if rec.get('uuid') == sr_uuid:
                 # make forgotten = 0 and return ref
                 _db_content['SR'][ref]['forgotten'] = 0
@@ -625,8 +632,8 @@ class SessionBase(object):
         if 'other_config' not in db_ref:
             db_ref['other_config'] = {}
         if key in db_ref['other_config']:
-            raise Failure(['MAP_DUPLICATE_KEY', 'VDI', 'other_config',
-                           vdi_ref, key])
+            raise XenAPI.Failure(
+                ['MAP_DUPLICATE_KEY', 'VDI', 'other_config', vdi_ref, key])
         db_ref['other_config'][key] = value
 
     def VDI_copy(self, _1, vdi_to_copy_ref, sr_ref):
@@ -775,20 +782,23 @@ class SessionBase(object):
     def _plugin_console_get_console_log(self, method, args):
         dom_id = args["dom_id"]
         if dom_id == 0:
-            raise Failure('Guest does not have a console')
-        return base64.b64encode(zlib.compress("dom_id: %s" % dom_id))
+            raise XenAPI.Failure('Guest does not have a console')
+        return base64.b64encode(
+            zlib.compress(("dom_id: %s" % dom_id).encode('utf-8')))
 
-    def _plugin_nova_plugin_version_get_version(self, method, args):
-        return pickle.dumps("1.7")
+    def _plugin_dom0_plugin_version_get_version(self, method, args):
+        return pickle.dumps(
+            xenapi_session.XenAPISession.PLUGIN_REQUIRED_VERSION)
 
     def _plugin_xenhost_query_gc(self, method, args):
         return pickle.dumps("False")
 
-    def _plugin_partition_utils_dot_py_make_partition(self, method, args):
+    def _plugin_partition_utils_make_partition(self, method, args):
         return pickle.dumps(None)
 
     def host_call_plugin(self, _1, _2, plugin, method, args):
-        plugin = plugin.replace('.', '_dot_')
+        plugin = plugin.rstrip('.py')
+
         func = getattr(self, '_plugin_%s_%s' % (plugin, method), None)
         if not func:
             raise Exception('No simulation in host_call_plugin for %s,%s' %
@@ -807,8 +817,8 @@ class SessionBase(object):
     def _VM_reboot(self, session, vm_ref):
         db_ref = _db_content['VM'][vm_ref]
         if db_ref['power_state'] != 'Running':
-            raise Failure(['VM_BAD_POWER_STATE',
-                'fake-opaque-ref', db_ref['power_state'].lower(), 'halted'])
+            raise XenAPI.Failure(['VM_BAD_POWER_STATE', 'fake-opaque-ref',
+                 db_ref['power_state'].lower(), 'halted'])
         db_ref['power_state'] = 'Running'
         db_ref['domid'] = '%d' % (random.randrange(1, 1 << 16))
 
@@ -831,6 +841,19 @@ class SessionBase(object):
     def VM_pause(self, session, vm_ref):
         db_ref = _db_content['VM'][vm_ref]
         db_ref['power_state'] = 'Paused'
+
+    def VM_query_data_source(self, session, vm_ref, field):
+        vm = {'cpu0': 0.11,
+              'cpu1': 0.22,
+              'cpu2': 0.33,
+              'cpu3': 0.44,
+              'memory': 8 * units.Gi,                # 8GB in bytes
+              'memory_internal_free': 5 * units.Mi,  # 5GB in kilobytes
+              'vif_0_rx': 50,
+              'vif_0_tx': 100,
+              'vbd_0_read': 50,
+              'vbd_0_write': 100}
+        return vm.get(field, 0)
 
     def pool_eject(self, session, host_ref):
         pass
@@ -874,8 +897,8 @@ class SessionBase(object):
             return meth(*full_params)
 
     def _login(self, method, params):
-        self._session = str(uuid.uuid4())
-        _session_info = {'uuid': str(uuid.uuid4()),
+        self._session = uuidutils.generate_uuid()
+        _session_info = {'uuid': uuidutils.generate_uuid(),
                          'this_host': list(_db_content['host'])[0]}
         _db_content['session'][self._session] = _session_info
 
@@ -973,7 +996,7 @@ class SessionBase(object):
                 if (field in _db_content[cls][ref]):
                     return _db_content[cls][ref][field]
             else:
-                raise Failure(['HANDLE_INVALID', cls, ref])
+                raise XenAPI.Failure(['HANDLE_INVALID', cls, ref])
 
         LOG.debug('Raising NotImplemented')
         raise NotImplementedError(
@@ -1036,7 +1059,7 @@ class SessionBase(object):
         table = name.split('.')[0]
         ref = params[1]
         if ref not in _db_content[table]:
-            raise Failure(['HANDLE_INVALID', table, ref])
+            raise XenAPI.Failure(['HANDLE_INVALID', table, ref])
 
         # Call destroy function (if exists)
         destroy_func = _destroy_functions.get('destroy_%s' % table.lower())
@@ -1055,7 +1078,7 @@ class SessionBase(object):
                 result = as_value(result)
             task['result'] = result
             task['status'] = 'success'
-        except Failure as exc:
+        except XenAPI.Failure as exc:
             task['error_info'] = exc.details
             task['status'] = 'failed'
         task['finished'] = timeutils.utcnow()
@@ -1064,7 +1087,8 @@ class SessionBase(object):
     def _check_session(self, params):
         if (self._session is None or
                 self._session not in _db_content['session']):
-            raise Failure(['HANDLE_INVALID', 'session', self._session])
+            raise XenAPI.Failure(
+                ['HANDLE_INVALID', 'session', self._session])
         if len(params) == 0 or params[0] != self._session:
             LOG.debug('Raising NotImplemented')
             raise NotImplementedError('Call to XenAPI without using .xenapi')
@@ -1072,12 +1096,12 @@ class SessionBase(object):
     def _check_arg_count(self, params, expected):
         actual = len(params)
         if actual != expected:
-            raise Failure(['MESSAGE_PARAMETER_COUNT_MISMATCH',
-                                  expected, actual])
+            raise XenAPI.Failure(
+                ['MESSAGE_PARAMETER_COUNT_MISMATCH', expected, actual])
 
     def _get_by_field(self, recs, k, v, return_singleton):
         result = []
-        for ref, rec in six.iteritems(recs):
+        for ref, rec in recs.items():
             if rec.get(k) == v:
                 result.append(ref)
 
@@ -1085,14 +1109,14 @@ class SessionBase(object):
             try:
                 return result[0]
             except IndexError:
-                raise Failure(['UUID_INVALID', v, result, recs, k])
+                raise XenAPI.Failure(['UUID_INVALID', v, result, recs, k])
 
         return result
 
 
 class FakeXenAPI(object):
     def __init__(self):
-        self.Failure = Failure
+        self.Failure = XenAPI.Failure
 
 
 # Based upon _Method from xmlrpclib.

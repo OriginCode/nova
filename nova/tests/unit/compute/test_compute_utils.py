@@ -21,11 +21,10 @@ import string
 import uuid
 
 import mock
-from oslo_serialization import jsonutils
-from oslo_utils import importutils
 import six
 
 from nova.compute import flavors
+from nova.compute import manager
 from nova.compute import power_state
 from nova.compute import task_states
 from nova.compute import utils as compute_utils
@@ -33,14 +32,15 @@ import nova.conf
 from nova import context
 from nova import exception
 from nova.image import glance
-from nova.network import api as network_api
 from nova.network import model
 from nova import objects
 from nova.objects import base
 from nova.objects import block_device as block_device_obj
+from nova.objects import fields
 from nova import rpc
 from nova import test
 from nova.tests.unit import fake_block_device
+from nova.tests.unit import fake_crypto
 from nova.tests.unit import fake_instance
 from nova.tests.unit import fake_network
 from nova.tests.unit import fake_notifier
@@ -386,21 +386,23 @@ class DefaultDeviceNamesForInstanceTestCase(test.NoDBTestCase):
 class UsageInfoTestCase(test.TestCase):
 
     def setUp(self):
+        self.public_key = fake_crypto.get_ssh_public_key()
+        self.fingerprint = '1e:2c:9b:56:79:4b:45:77:f9:ca:7a:98:2c:b0:d5:3c'
+
         def fake_get_nw_info(cls, ctxt, instance):
             self.assertTrue(ctxt.is_admin)
             return fake_network.fake_get_instance_nw_info(self, 1, 1)
 
         super(UsageInfoTestCase, self).setUp()
-        self.stubs.Set(network_api.API, 'get_instance_nw_info',
-                       fake_get_nw_info)
+        self.stub_out('nova.network.api.get_instance_nw_info',
+                      fake_get_nw_info)
 
         fake_notifier.stub_notifier(self)
         self.addCleanup(fake_notifier.reset)
 
-        self.flags(use_local=True, group='conductor')
         self.flags(compute_driver='fake.FakeDriver',
                    network_manager='nova.network.manager.FlatManager')
-        self.compute = importutils.import_object(CONF.compute_manager)
+        self.compute = manager.ComputeManager()
         self.user_id = 'fake'
         self.project_id = 'fake'
         self.context = context.RequestContext(self.user_id, self.project_id)
@@ -409,8 +411,8 @@ class UsageInfoTestCase(test.TestCase):
             return {'id': 1, 'properties': {'kernel_id': 1, 'ramdisk_id': 1}}
 
         self.flags(group='glance', api_servers=['http://localhost:9292'])
-        self.stubs.Set(nova.tests.unit.image.fake._FakeImageService,
-                       'show', fake_show)
+        self.stub_out('nova.tests.unit.image.fake._FakeImageService.show',
+                      fake_show)
         fake_network.set_stub_network_methods(self)
         fake_server_actions.stub_out_action_events(self)
 
@@ -514,10 +516,223 @@ class UsageInfoTestCase(test.TestCase):
         self.assertEqual(str(flavor['flavorid']), flavorid)
 
         for attr in ('display_name', 'created_at', 'launched_at',
-                     'state', 'task_state'):
+                     'state', 'task_state', 'display_description', 'locked',
+                     'auto_disk_config', 'key_name'):
             self.assertIn(attr, payload, "Key %s not in payload" % attr)
 
         self.assertEqual(payload['image_uuid'], uuids.fake_image_ref)
+
+    def test_notify_about_instance_create(self):
+        keypair = objects.KeyPair(name='my-key', user_id='fake', type='ssh',
+                                  public_key=self.public_key,
+                                  fingerprint=self.fingerprint)
+        keypairs = objects.KeyPairList(objects=[keypair])
+        instance = create_instance(self.context, params={'keypairs': keypairs})
+
+        compute_utils.notify_about_instance_create(
+            self.context,
+            instance,
+            host='fake-compute',
+            phase='start')
+
+        self.assertEqual(1, len(fake_notifier.VERSIONED_NOTIFICATIONS))
+        notification = fake_notifier.VERSIONED_NOTIFICATIONS[0]
+
+        self.assertEqual('INFO', notification['priority'])
+        self.assertEqual('instance.create.start', notification['event_type'])
+        self.assertEqual('nova-compute:fake-compute',
+                         notification['publisher_id'])
+
+        payload = notification['payload']['nova_object.data']
+        self.assertEqual('fake', payload['tenant_id'])
+        self.assertEqual('fake', payload['user_id'])
+        self.assertEqual(instance['uuid'], payload['uuid'])
+
+        flavorid = flavors.get_flavor_by_name('m1.tiny')['flavorid']
+        flavor = payload['flavor']['nova_object.data']
+        self.assertEqual(flavorid, str(flavor['flavorid']))
+
+        keypairs_payload = payload['keypairs']
+        self.assertEqual(1, len(keypairs_payload))
+        keypair_data = keypairs_payload[0]['nova_object.data']
+        self.assertEqual(keypair_data,
+                         {'name': 'my-key',
+                          'user_id': 'fake',
+                          'type': 'ssh',
+                          'public_key': self.public_key,
+                          'fingerprint': self.fingerprint})
+
+        for attr in ('display_name', 'created_at', 'launched_at',
+                     'state', 'task_state', 'display_description', 'locked',
+                     'auto_disk_config'):
+            self.assertIn(attr, payload, "Key %s not in payload" % attr)
+
+        self.assertEqual(uuids.fake_image_ref, payload['image_uuid'])
+
+    def test_notify_about_instance_create_without_keypair(self):
+        instance = create_instance(self.context)
+
+        compute_utils.notify_about_instance_create(
+            self.context,
+            instance,
+            host='fake-compute',
+            phase='start')
+
+        self.assertEqual(1, len(fake_notifier.VERSIONED_NOTIFICATIONS))
+        notification = fake_notifier.VERSIONED_NOTIFICATIONS[0]
+
+        self.assertEqual('INFO', notification['priority'])
+        self.assertEqual('instance.create.start', notification['event_type'])
+        self.assertEqual('nova-compute:fake-compute',
+                         notification['publisher_id'])
+
+        payload = notification['payload']['nova_object.data']
+        self.assertEqual('fake', payload['tenant_id'])
+        self.assertEqual('fake', payload['user_id'])
+        self.assertEqual(instance['uuid'], payload['uuid'])
+
+        flavorid = flavors.get_flavor_by_name('m1.tiny')['flavorid']
+        flavor = payload['flavor']['nova_object.data']
+        self.assertEqual(flavorid, str(flavor['flavorid']))
+
+        self.assertEqual(0, len(payload['keypairs']))
+        for attr in ('display_name', 'created_at', 'launched_at',
+                     'state', 'task_state', 'display_description', 'locked',
+                     'auto_disk_config'):
+            self.assertIn(attr, payload, "Key %s not in payload" % attr)
+
+        self.assertEqual(uuids.fake_image_ref, payload['image_uuid'])
+
+    def test_notify_about_instance_create_with_tags(self):
+        instance = create_instance(self.context)
+
+        # TODO(Kevin Zheng): clean this up to pass tags as params to
+        # create_instance() once instance.create() handles tags.
+        instance.tags = objects.TagList(
+            objects=[objects.Tag(self.context, tag='tag1')])
+
+        compute_utils.notify_about_instance_create(
+            self.context,
+            instance,
+            host='fake-compute',
+            phase='start')
+
+        self.assertEqual(1, len(fake_notifier.VERSIONED_NOTIFICATIONS))
+        notification = fake_notifier.VERSIONED_NOTIFICATIONS[0]
+
+        self.assertEqual('INFO', notification['priority'])
+        self.assertEqual('instance.create.start', notification['event_type'])
+        self.assertEqual('nova-compute:fake-compute',
+                         notification['publisher_id'])
+
+        payload = notification['payload']['nova_object.data']
+        self.assertEqual('fake', payload['tenant_id'])
+        self.assertEqual('fake', payload['user_id'])
+        self.assertEqual(instance.uuid, payload['uuid'])
+
+        flavorid = flavors.get_flavor_by_name('m1.tiny')['flavorid']
+        flavor = payload['flavor']['nova_object.data']
+        self.assertEqual(flavorid, str(flavor['flavorid']))
+
+        self.assertEqual(0, len(payload['keypairs']))
+        for attr in ('display_name', 'created_at', 'launched_at',
+                     'state', 'task_state', 'display_description', 'locked',
+                     'auto_disk_config', 'tags'):
+            self.assertIn(attr, payload, "Key %s not in payload" % attr)
+
+        self.assertEqual(1, len(payload['tags']))
+        self.assertEqual('tag1', payload['tags'][0])
+        self.assertEqual(uuids.fake_image_ref, payload['image_uuid'])
+
+    def test_notify_about_volume_swap(self):
+        instance = create_instance(self.context)
+
+        compute_utils.notify_about_volume_swap(
+            self.context, instance, 'fake-compute',
+            fields.NotificationAction.VOLUME_SWAP,
+            fields.NotificationPhase.START,
+            uuids.old_volume_id, uuids.new_volume_id)
+
+        self.assertEqual(len(fake_notifier.VERSIONED_NOTIFICATIONS), 1)
+        notification = fake_notifier.VERSIONED_NOTIFICATIONS[0]
+
+        self.assertEqual('INFO', notification['priority'])
+        self.assertEqual('instance.%s.%s' %
+                         (fields.NotificationAction.VOLUME_SWAP,
+                          fields.NotificationPhase.START),
+                         notification['event_type'])
+        self.assertEqual('nova-compute:fake-compute',
+                         notification['publisher_id'])
+
+        payload = notification['payload']['nova_object.data']
+        self.assertEqual(self.project_id, payload['tenant_id'])
+        self.assertEqual(self.user_id, payload['user_id'])
+        self.assertEqual(instance['uuid'], payload['uuid'])
+
+        flavorid = flavors.get_flavor_by_name('m1.tiny')['flavorid']
+        flavor = payload['flavor']['nova_object.data']
+        self.assertEqual(flavorid, str(flavor['flavorid']))
+
+        for attr in ('display_name', 'created_at', 'launched_at',
+                     'state', 'task_state'):
+            self.assertIn(attr, payload)
+
+        self.assertEqual(uuids.fake_image_ref, payload['image_uuid'])
+
+        self.assertEqual(uuids.old_volume_id, payload['old_volume_id'])
+        self.assertEqual(uuids.new_volume_id, payload['new_volume_id'])
+
+    def test_notify_about_volume_swap_with_error(self):
+        instance = create_instance(self.context)
+
+        try:
+            # To get exception trace, raise and catch an exception
+            raise test.TestingException('Volume swap error.')
+        except Exception as ex:
+            compute_utils.notify_about_volume_swap(
+                self.context, instance, 'fake-compute',
+                fields.NotificationAction.VOLUME_SWAP,
+                fields.NotificationPhase.ERROR,
+                uuids.old_volume_id, uuids.new_volume_id, ex)
+
+        self.assertEqual(len(fake_notifier.VERSIONED_NOTIFICATIONS), 1)
+        notification = fake_notifier.VERSIONED_NOTIFICATIONS[0]
+
+        self.assertEqual('ERROR', notification['priority'])
+        self.assertEqual('instance.%s.%s' %
+                         (fields.NotificationAction.VOLUME_SWAP,
+                          fields.NotificationPhase.ERROR),
+                         notification['event_type'])
+        self.assertEqual('nova-compute:fake-compute',
+                         notification['publisher_id'])
+
+        payload = notification['payload']['nova_object.data']
+        self.assertEqual(self.project_id, payload['tenant_id'])
+        self.assertEqual(self.user_id, payload['user_id'])
+        self.assertEqual(instance['uuid'], payload['uuid'])
+
+        flavorid = flavors.get_flavor_by_name('m1.tiny')['flavorid']
+        flavor = payload['flavor']['nova_object.data']
+        self.assertEqual(flavorid, str(flavor['flavorid']))
+
+        for attr in ('display_name', 'created_at', 'launched_at',
+                     'state', 'task_state'):
+            self.assertIn(attr, payload)
+
+        self.assertEqual(uuids.fake_image_ref, payload['image_uuid'])
+
+        self.assertEqual(uuids.old_volume_id, payload['old_volume_id'])
+        self.assertEqual(uuids.new_volume_id, payload['new_volume_id'])
+
+        # Check ExceptionPayload
+        exception_payload = payload['fault']['nova_object.data']
+        self.assertEqual('TestingException', exception_payload['exception'])
+        self.assertEqual('Volume swap error.',
+                         exception_payload['exception_message'])
+        self.assertEqual('test_notify_about_volume_swap_with_error',
+                         exception_payload['function_name'])
+        self.assertEqual('nova.tests.unit.compute.test_compute_utils',
+                         exception_payload['module_name'])
 
     def test_notify_usage_exists_instance_not_found(self):
         # Ensure 'exists' notification generates appropriate usage data.
@@ -641,15 +856,6 @@ class ComputeUtilsGetValFromSysMetadata(test.NoDBTestCase):
         self.assertEqual(0, result)
 
 
-class ComputeUtilsGetNWInfo(test.NoDBTestCase):
-    def test_instance_object_none_info_cache(self):
-        inst = fake_instance.fake_instance_obj('fake-context',
-                                               expected_attrs=['info_cache'])
-        self.assertIsNone(inst.info_cache)
-        result = compute_utils.get_nw_info_for_instance(inst)
-        self.assertEqual(jsonutils.dumps([]), result.json())
-
-
 class ComputeUtilsGetRebootTypes(test.NoDBTestCase):
     def setUp(self):
         super(ComputeUtilsGetRebootTypes, self).setUp()
@@ -745,10 +951,27 @@ class ComputeUtilsTestCase(test.NoDBTestCase):
             self.assertEqual([], addresses)
         mock_ifaddresses.assert_called_once_with(iface)
 
+    @mock.patch('nova.compute.utils.notify_about_instance_usage')
+    @mock.patch('nova.objects.Instance.destroy')
+    def test_notify_about_instance_delete(self, mock_instance_destroy,
+                                          mock_notify_usage):
+        instance = fake_instance.fake_instance_obj(
+            self.context, expected_attrs=('system_metadata',))
+        with compute_utils.notify_about_instance_delete(
+            mock.sentinel.notifier, self.context, instance):
+            instance.destroy()
+        expected_notify_calls = [
+            mock.call(mock.sentinel.notifier, self.context, instance,
+                      'delete.start'),
+            mock.call(mock.sentinel.notifier, self.context, instance,
+                      'delete.end', system_metadata=instance.system_metadata)
+        ]
+        mock_notify_usage.assert_has_calls(expected_notify_calls)
 
-class ComputeUtilsQuotaDeltaTestCase(test.TestCase):
+
+class ComputeUtilsQuotaTestCase(test.TestCase):
     def setUp(self):
-        super(ComputeUtilsQuotaDeltaTestCase, self).setUp()
+        super(ComputeUtilsQuotaTestCase, self).setUp()
         self.context = context.RequestContext('fake', 'fake')
 
     def test_upsize_quota_delta(self):
@@ -812,6 +1035,35 @@ class ComputeUtilsQuotaDeltaTestCase(test.TestCase):
         compute_utils.reserve_quota_delta(self.context, deltas, inst)
         mock_reserve.assert_called_once_with(project_id=inst.project_id,
                                              user_id=inst.user_id, **deltas)
+
+    @mock.patch('nova.objects.Quotas.count_as_dict')
+    def test_check_instance_quota_exceeds_with_multiple_resources(self,
+                                                                  mock_count):
+        quotas = {'cores': 1, 'instances': 1, 'ram': 512}
+        overs = ['cores', 'instances', 'ram']
+        over_quota_args = dict(quotas=quotas,
+                               usages={'instances': 1, 'cores': 1, 'ram': 512},
+                               overs=overs)
+        e = exception.OverQuota(**over_quota_args)
+        fake_flavor = objects.Flavor(vcpus=1, memory_mb=512)
+        instance_num = 1
+        proj_count = {'instances': 1, 'cores': 1, 'ram': 512}
+        user_count = proj_count.copy()
+        mock_count.return_value = {'project': proj_count, 'user': user_count}
+        with mock.patch.object(objects.Quotas, 'limit_check_project_and_user',
+                               side_effect=e):
+            try:
+                compute_utils.check_num_instances_quota(self.context,
+                                                        fake_flavor,
+                                                        instance_num,
+                                                        instance_num)
+            except exception.TooManyInstances as e:
+                self.assertEqual('cores, instances, ram', e.kwargs['overs'])
+                self.assertEqual('1, 1, 512', e.kwargs['req'])
+                self.assertEqual('1, 1, 512', e.kwargs['used'])
+                self.assertEqual('1, 1, 512', e.kwargs['allowed'])
+            else:
+                self.fail("Exception not raised")
 
 
 class IsVolumeBackedInstanceTestCase(test.TestCase):

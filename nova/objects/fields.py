@@ -12,22 +12,17 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import os
 import re
 
+from cursive import signature_utils
 from oslo_versionedobjects import fields
 import six
 
-# TODO(berrange) Temporary import for Arch class
-from nova.compute import arch
-# TODO(berrange) Temporary import for CPU* classes
-from nova.compute import cpumodel
-# TODO(berrange) Temporary import for HVType class
-from nova.compute import hv_type
-# TODO(berrange) Temporary import for VMMode class
-from nova.compute import vm_mode
 from nova import exception
 from nova.i18n import _
 from nova.network import model as network_model
+from nova import objects
 
 
 # Import field errors from oslo.versionedobjects
@@ -39,8 +34,10 @@ ElementTypeError = fields.ElementTypeError
 BooleanField = fields.BooleanField
 UnspecifiedDefault = fields.UnspecifiedDefault
 IntegerField = fields.IntegerField
+NonNegativeIntegerField = fields.NonNegativeIntegerField
 UUIDField = fields.UUIDField
 FloatField = fields.FloatField
+NonNegativeFloatField = fields.NonNegativeFloatField
 StringField = fields.StringField
 SensitiveStringField = fields.SensitiveStringField
 EnumField = fields.EnumField
@@ -61,12 +58,15 @@ DictOfListOfStringsField = fields.DictOfListOfStringsField
 IPAddressField = fields.IPAddressField
 IPV4AddressField = fields.IPV4AddressField
 IPV6AddressField = fields.IPV6AddressField
+IPV4AndV6AddressField = fields.IPV4AndV6AddressField
 IPNetworkField = fields.IPNetworkField
 IPV4NetworkField = fields.IPV4NetworkField
 IPV6NetworkField = fields.IPV6NetworkField
 AutoTypedField = fields.AutoTypedField
 BaseEnumField = fields.BaseEnumField
 MACAddressField = fields.MACAddressField
+ListOfIntegersField = fields.ListOfIntegersField
+PCIAddressField = fields.PCIAddressField
 
 
 # NOTE(danms): These are things we need to import for some of our
@@ -94,13 +94,118 @@ class BaseNovaEnum(Enum):
 
 
 class Architecture(BaseNovaEnum):
-    # TODO(berrange): move all constants out of 'nova.compute.arch'
-    # into fields on this class
-    ALL = arch.ALL
+    """Represents CPU architectures.
+
+    Provides the standard names for all known processor architectures.
+    Many have multiple variants to deal with big-endian vs little-endian
+    modes, as well as 32 vs 64 bit word sizes. These names are chosen to
+    be identical to the architecture names expected by libvirt, so if
+    ever adding new ones then ensure it matches libvirt's expectation.
+    """
+
+    ALPHA = 'alpha'
+    ARMV6 = 'armv6'
+    ARMV7 = 'armv7l'
+    ARMV7B = 'armv7b'
+
+    AARCH64 = 'aarch64'
+    CRIS = 'cris'
+    I686 = 'i686'
+    IA64 = 'ia64'
+    LM32 = 'lm32'
+
+    M68K = 'm68k'
+    MICROBLAZE = 'microblaze'
+    MICROBLAZEEL = 'microblazeel'
+    MIPS = 'mips'
+    MIPSEL = 'mipsel'
+
+    MIPS64 = 'mips64'
+    MIPS64EL = 'mips64el'
+    OPENRISC = 'openrisc'
+    PARISC = 'parisc'
+    PARISC64 = 'parisc64'
+
+    PPC = 'ppc'
+    PPCLE = 'ppcle'
+    PPC64 = 'ppc64'
+    PPC64LE = 'ppc64le'
+    PPCEMB = 'ppcemb'
+
+    S390 = 's390'
+    S390X = 's390x'
+    SH4 = 'sh4'
+    SH4EB = 'sh4eb'
+    SPARC = 'sparc'
+
+    SPARC64 = 'sparc64'
+    UNICORE32 = 'unicore32'
+    X86_64 = 'x86_64'
+    XTENSA = 'xtensa'
+    XTENSAEB = 'xtensaeb'
+
+    ALL = (
+        ALPHA, ARMV6, ARMV7, ARMV7B,
+        AARCH64, CRIS, I686, IA64, LM32,
+        M68K, MICROBLAZE, MICROBLAZEEL, MIPS, MIPSEL,
+        MIPS64, MIPS64EL, OPENRISC, PARISC, PARISC64,
+        PPC, PPCLE, PPC64, PPC64LE, PPCEMB,
+        S390, S390X, SH4, SH4EB, SPARC,
+        SPARC64, UNICORE32, X86_64, XTENSA, XTENSAEB,
+    )
+
+    @classmethod
+    def from_host(cls):
+        """Get the architecture of the host OS
+
+        :returns: the canonicalized host architecture
+        """
+
+        return cls.canonicalize(os.uname()[4])
+
+    @classmethod
+    def is_valid(cls, name):
+        """Check if a string is a valid architecture
+
+        :param name: architecture name to validate
+
+        :returns: True if @name is valid
+        """
+
+        return name in cls.ALL
+
+    @classmethod
+    def canonicalize(cls, name):
+        """Canonicalize the architecture name
+
+        :param name: architecture name to canonicalize
+
+        :returns: a canonical architecture name
+        """
+
+        if name is None:
+            return None
+
+        newname = name.lower()
+
+        if newname in ("i386", "i486", "i586"):
+            newname = cls.I686
+
+        # Xen mistake from Icehouse or earlier
+        if newname in ("x86_32", "x86_32p"):
+            newname = cls.I686
+
+        if newname == "amd64":
+            newname = cls.X86_64
+
+        if not cls.is_valid(newname):
+            raise exception.InvalidArchitectureName(arch=name)
+
+        return newname
 
     def coerce(self, obj, attr, value):
         try:
-            value = arch.canonicalize(value)
+            value = self.canonicalize(value)
         except exception.InvalidArchitectureName:
             msg = _("Architecture name '%s' is not valid") % value
             raise ValueError(msg)
@@ -174,22 +279,44 @@ class CPUThreadAllocationPolicy(BaseNovaEnum):
     ALL = (PREFER, ISOLATE, REQUIRE)
 
 
+class CPUEmulatorThreadsPolicy(BaseNovaEnum):
+
+    # share (default): Emulator threads float across the pCPUs
+    # associated to the guest.
+    SHARE = "share"
+    # isolate: Emulator threads are isolated on a single pCPU.
+    ISOLATE = "isolate"
+
+    ALL = (SHARE, ISOLATE)
+
+
 class CPUMode(BaseNovaEnum):
-    # TODO(berrange): move all constants out of 'nova.compute.cpumodel'
-    # into fields on this class
-    ALL = cpumodel.ALL_CPUMODES
+
+    CUSTOM = 'custom'
+    HOST_MODEL = 'host-model'
+    HOST_PASSTHROUGH = 'host-passthrough'
+
+    ALL = (CUSTOM, HOST_MODEL, HOST_PASSTHROUGH)
 
 
 class CPUMatch(BaseNovaEnum):
-    # TODO(berrange): move all constants out of 'nova.compute.cpumodel'
-    # into fields on this class
-    ALL = cpumodel.ALL_MATCHES
+
+    MINIMUM = 'minimum'
+    EXACT = 'exact'
+    STRICT = 'strict'
+
+    ALL = (MINIMUM, EXACT, STRICT)
 
 
 class CPUFeaturePolicy(BaseNovaEnum):
-    # TODO(berrange): move all constants out of 'nova.compute.cpumodel'
-    # into fields on this class
-    ALL = cpumodel.ALL_POLICIES
+
+    FORCE = 'force'
+    REQUIRE = 'require'
+    OPTIONAL = 'optional'
+    DISABLE = 'disable'
+    FORBID = 'forbid'
+
+    ALL = (FORCE, REQUIRE, OPTIONAL, DISABLE, FORBID)
 
 
 class DiskBus(BaseNovaEnum):
@@ -207,6 +334,18 @@ class DiskBus(BaseNovaEnum):
     ALL = (FDC, IDE, SATA, SCSI, USB, VIRTIO, XEN, LXC, UML)
 
 
+class DiskConfig(BaseNovaEnum):
+
+    MANUAL = "MANUAL"
+    AUTO = "AUTO"
+
+    ALL = (MANUAL, AUTO)
+
+    def coerce(self, obj, attr, value):
+        enum_value = DiskConfig.AUTO if value else DiskConfig.MANUAL
+        return super(DiskConfig, self).coerce(obj, attr, enum_value)
+
+
 class FirmwareType(BaseNovaEnum):
 
     UEFI = "uefi"
@@ -216,29 +355,94 @@ class FirmwareType(BaseNovaEnum):
 
 
 class HVType(BaseNovaEnum):
-    # TODO(berrange): move all constants out of 'nova.compute.hv_type'
-    # into fields on this class
-    ALL = hv_type.ALL
+    """Represents virtualization types.
+
+    Provide the standard names for all known guest virtualization
+    types. This is not to be confused with the Nova hypervisor driver
+    types, since one driver may support multiple virtualization types
+    and one virtualization type (eg 'xen') may be supported by multiple
+    drivers ('XenAPI' or  'Libvirt-Xen').
+    """
+
+    BAREMETAL = 'baremetal'
+    BHYVE = 'bhyve'
+    DOCKER = 'docker'
+    FAKE = 'fake'
+    HYPERV = 'hyperv'
+    IRONIC = 'ironic'
+    KQEMU = 'kqemu'
+    KVM = 'kvm'
+    LXC = 'lxc'
+    LXD = 'lxd'
+    OPENVZ = 'openvz'
+    PARALLELS = 'parallels'
+    VIRTUOZZO = 'vz'
+    PHYP = 'phyp'
+    QEMU = 'qemu'
+    TEST = 'test'
+    UML = 'uml'
+    VBOX = 'vbox'
+    VMWARE = 'vmware'
+    XEN = 'xen'
+    ZVM = 'zvm'
+    PRSM = 'prsm'
+
+    ALL = (BAREMETAL, BHYVE, DOCKER, FAKE, HYPERV, IRONIC, KQEMU, KVM, LXC,
+           LXD, OPENVZ, PARALLELS, PHYP, QEMU, TEST, UML, VBOX, VIRTUOZZO,
+           VMWARE, XEN, ZVM, PRSM)
 
     def coerce(self, obj, attr, value):
         try:
-            value = hv_type.canonicalize(value)
+            value = self.canonicalize(value)
         except exception.InvalidHypervisorVirtType:
             msg = _("Hypervisor virt type '%s' is not valid") % value
             raise ValueError(msg)
+
         return super(HVType, self).coerce(obj, attr, value)
+
+    @classmethod
+    def is_valid(cls, name):
+        """Check if a string is a valid hypervisor type
+
+        :param name: hypervisor type name to validate
+
+        :returns: True if @name is valid
+        """
+        return name in cls.ALL
+
+    @classmethod
+    def canonicalize(cls, name):
+        """Canonicalize the hypervisor type name
+
+        :param name: hypervisor type name to canonicalize
+
+        :returns: a canonical hypervisor type name
+        """
+        if name is None:
+            return None
+
+        newname = name.lower()
+
+        if newname == 'xapi':
+            newname = cls.XEN
+
+        if not cls.is_valid(newname):
+            raise exception.InvalidHypervisorVirtType(hv_type=name)
+
+        return newname
 
 
 class ImageSignatureHashType(BaseNovaEnum):
     # Represents the possible hash methods used for image signing
-    ALL = ('SHA-224', 'SHA-256', 'SHA-384', 'SHA-512')
+    ALL = tuple(sorted(signature_utils.HASH_METHODS.keys()))
 
 
 class ImageSignatureKeyType(BaseNovaEnum):
     # Represents the possible keypair types used for image signing
-    ALL = ('DSA', 'ECC_SECT571K1', 'ECC_SECT409K1', 'ECC_SECT571R1',
-           'ECC_SECT409R1', 'ECC_SECP521R1', 'ECC_SECP384R1', 'RSA-PSS'
-           )
+    ALL = (
+        'DSA', 'ECC_SECP384R1', 'ECC_SECP521R1', 'ECC_SECT409K1',
+        'ECC_SECT409R1', 'ECC_SECT571K1', 'ECC_SECT571R1', 'RSA-PSS'
+    )
 
 
 class OSType(BaseNovaEnum):
@@ -255,7 +459,7 @@ class OSType(BaseNovaEnum):
         return super(OSType, self).coerce(obj, attr, value)
 
 
-class ResourceClass(BaseNovaEnum):
+class ResourceClass(StringField):
     """Classes of resources provided to consumers."""
 
     VCPU = 'VCPU'
@@ -271,18 +475,26 @@ class ResourceClass(BaseNovaEnum):
 
     # The ordering here is relevant. If you must add a value, only
     # append.
-    ALL = (VCPU, MEMORY_MB, DISK_GB, PCI_DEVICE, SRIOV_NET_VF, NUMA_SOCKET,
-           NUMA_CORE, NUMA_THREAD, NUMA_MEMORY_MB, IPV4_ADDRESS)
+    STANDARD = (VCPU, MEMORY_MB, DISK_GB, PCI_DEVICE, SRIOV_NET_VF,
+                NUMA_SOCKET, NUMA_CORE, NUMA_THREAD, NUMA_MEMORY_MB,
+                IPV4_ADDRESS)
 
-    @classmethod
-    def index(cls, value):
-        """Return an index into the Enum given a value."""
-        return cls.ALL.index(value)
+    # This is the set of standard resource classes that existed before
+    # we opened up for custom resource classes in version 1.1 of various
+    # objects in nova/objects/resource_provider.py
+    V1_0 = (VCPU, MEMORY_MB, DISK_GB, PCI_DEVICE, SRIOV_NET_VF, NUMA_SOCKET,
+            NUMA_CORE, NUMA_THREAD, NUMA_MEMORY_MB, IPV4_ADDRESS)
 
-    @classmethod
-    def from_index(cls, index):
-        """Return the Enum value at a given index."""
-        return cls.ALL[index]
+    @staticmethod
+    def normalize_name(rc_name):
+        if rc_name is None:
+            return None
+        norm_name = rc_name.upper()
+        cust_prefix = objects.ResourceClass.CUSTOM_NAMESPACE
+        norm_name = cust_prefix + norm_name
+        # Replace some punctuation characters with underscores
+        norm_name = re.sub('[^0-9A-Z]+', '_', norm_name)
+        return norm_name
 
 
 class RNGModel(BaseNovaEnum):
@@ -355,9 +567,6 @@ class VIFModel(BaseNovaEnum):
 
     ALL = network_model.VIF_MODEL_ALL
 
-    def _get_legacy(self, value):
-        return value
-
     def coerce(self, obj, attr, value):
         # Some compat for strings we'd see in the legacy
         # hw_vif_model image property
@@ -367,17 +576,79 @@ class VIFModel(BaseNovaEnum):
 
 
 class VMMode(BaseNovaEnum):
-    # TODO(berrange): move all constants out of 'nova.compute.vm_mode'
-    # into fields on this class
-    ALL = vm_mode.ALL
+    """Represents possible vm modes for instances.
+
+    Compute instance VM modes represent the host/guest ABI used for the
+    virtual machine or container. Individual hypervisors may support
+    multiple different vm modes per host. Available VM modes for a
+    hypervisor driver may also vary according to the architecture it is
+    running on.
+    """
+    HVM = 'hvm'  # Native ABI (aka fully virtualized)
+    XEN = 'xen'  # Xen 3.0 paravirtualized
+    UML = 'uml'  # User Mode Linux paravirtualized
+    EXE = 'exe'  # Executables in containers
+
+    ALL = (HVM, XEN, UML, EXE)
 
     def coerce(self, obj, attr, value):
         try:
-            value = vm_mode.canonicalize(value)
+            value = self.canonicalize(value)
         except exception.InvalidVirtualMachineMode:
             msg = _("Virtual machine mode '%s' is not valid") % value
             raise ValueError(msg)
+
         return super(VMMode, self).coerce(obj, attr, value)
+
+    @classmethod
+    def get_from_instance(cls, instance):
+        """Get the vm mode for an instance
+
+        :param instance: instance object to query
+
+        :returns: canonicalized vm mode for the instance
+        """
+        mode = instance.vm_mode
+
+        return cls.canonicalize(mode)
+
+    @classmethod
+    def is_valid(cls, name):
+        """Check if a string is a valid vm mode
+
+        :param name: vm mode name to validate
+
+        :returns: True if @name is valid
+        """
+        return name in cls.ALL
+
+    @classmethod
+    def canonicalize(cls, mode):
+        """Canonicalize the vm mode
+
+        :param name: vm mode name to canonicalize
+
+        :returns: a canonical vm mode name
+        """
+        if mode is None:
+            return None
+
+        mode = mode.lower()
+
+        # For compatibility with pre-Folsom deployments
+        if mode == 'pv':
+            mode = cls.XEN
+
+        if mode == 'hv':
+            mode = cls.HVM
+
+        if mode == 'baremetal':
+            mode = cls.HVM
+
+        if not cls.is_valid(mode):
+            raise exception.InvalidVirtualMachineMode(vmmode=mode)
+
+        return mode
 
 
 class WatchdogAction(BaseNovaEnum):
@@ -386,8 +657,9 @@ class WatchdogAction(BaseNovaEnum):
     PAUSE = "pause"
     POWEROFF = "poweroff"
     RESET = "reset"
+    DISABLED = "disabled"
 
-    ALL = (NONE, PAUSE, POWEROFF, RESET)
+    ALL = (NONE, PAUSE, POWEROFF, RESET, DISABLED)
 
 
 class MonitorMetricType(BaseNovaEnum):
@@ -471,6 +743,16 @@ class DiskFormat(BaseNovaEnum):
     ALL = (RBD, LVM, QCOW2, RAW, PLOOP, VHD, VMDK, VDI, ISO)
 
 
+class HypervisorDriver(BaseNovaEnum):
+    LIBVIRT = "libvirt"
+    XENAPI = "xenapi"
+    VMWAREAPI = "vmwareapi"
+    IRONIC = "ironic"
+    HYPERV = "hyperv"
+
+    ALL = (LIBVIRT, XENAPI, VMWAREAPI, IRONIC, HYPERV)
+
+
 class PointerModelType(BaseNovaEnum):
 
     USBTABLET = "usbtablet"
@@ -516,10 +798,42 @@ class NotificationAction(BaseNovaEnum):
     SHELVE = 'shelve'
     RESUME = 'resume'
     RESTORE = 'restore'
+    EXISTS = 'exists'
+    RESCUE = 'rescue'
+    VOLUME_ATTACH = 'volume_attach'
+    VOLUME_DETACH = 'volume_detach'
+    CREATE = 'create'
+    EVACUATE = 'evacuate'
+    RESIZE_FINISH = 'resize_finish'
+    LIVE_MIGRATION_ABORT = 'live_migration_abort'
+    LIVE_MIGRATION_POST_DEST = 'live_migration_post_dest'
+    LIVE_MIGRATION_POST = 'live_migration_post'
+    LIVE_MIGRATION_PRE = 'live_migration_pre'
+    LIVE_MIGRATION_ROLLBACK_DEST = 'live_migration_rollback_dest'
+    LIVE_MIGRATION_ROLLBACK = 'live_migration_rollback'
+    REBUILD = 'rebuild'
+    REMOVE_FIXED_IP = 'remove_fixed_ip'
+    RESIZE_CONFIRM = 'resize_confirm'
+    RESIZE_PREP = 'resize_prep'
+    RESIZE_REVERT = 'resize_revert'
+    SHELVE_OFFLOAD = 'shelve_offload'
+    SOFT_DELETE = 'soft_delete'
+    TRIGGER_CRASH_DUMP = 'trigger_crash_dump'
+    UNRESCUE = 'unrescue'
+    UNSHELVE = 'unshelve'
+    ADD_HOST = 'add_host'
+    REMOVE_HOST = 'remove_host'
 
     ALL = (UPDATE, EXCEPTION, DELETE, PAUSE, UNPAUSE, RESIZE, VOLUME_SWAP,
            SUSPEND, POWER_ON, REBOOT, SHUTDOWN, SNAPSHOT, ADD_FIXED_IP,
-           POWER_OFF, SHELVE, RESUME, RESTORE)
+           POWER_OFF, SHELVE, RESUME, RESTORE, EXISTS, RESCUE, VOLUME_ATTACH,
+           VOLUME_DETACH, CREATE, EVACUATE, RESIZE_FINISH,
+           LIVE_MIGRATION_ABORT, LIVE_MIGRATION_POST_DEST, LIVE_MIGRATION_POST,
+           LIVE_MIGRATION_PRE, LIVE_MIGRATION_ROLLBACK,
+           LIVE_MIGRATION_ROLLBACK_DEST, REBUILD, REMOVE_FIXED_IP,
+           RESIZE_CONFIRM, RESIZE_PREP, RESIZE_REVERT, SHELVE_OFFLOAD,
+           SOFT_DELETE, TRIGGER_CRASH_DUMP, UNRESCUE, UNSHELVE, ADD_HOST,
+           REMOVE_HOST)
 
 
 # TODO(rlrossit): These should be changed over to be a StateMachine enum from
@@ -647,17 +961,6 @@ class InstancePowerState(Enum):
         return cls.ALL[index]
 
 
-class IPV4AndV6Address(IPAddress):
-    @staticmethod
-    def coerce(obj, attr, value):
-        result = IPAddress.coerce(obj, attr, value)
-        if result.version != 4 and result.version != 6:
-            raise ValueError(_('Network "%(val)s" is not valid '
-                               'in field %(attr)s') %
-                             {'val': value, 'attr': attr})
-        return result
-
-
 class NetworkModel(FieldType):
     @staticmethod
     def coerce(obj, attr, value):
@@ -682,23 +985,8 @@ class NetworkModel(FieldType):
         return 'NetworkModel(%s)' % (
             ','.join([str(vif['id']) for vif in value]))
 
-
-class NonNegativeFloat(FieldType):
-    @staticmethod
-    def coerce(obj, attr, value):
-        v = float(value)
-        if v < 0:
-            raise ValueError(_('Value must be >= 0 for field %s') % attr)
-        return v
-
-
-class NonNegativeInteger(FieldType):
-    @staticmethod
-    def coerce(obj, attr, value):
-        v = int(value)
-        if v < 0:
-            raise ValueError(_('Value must be >= 0 for field %s') % attr)
-        return v
+    def get_schema(self):
+        return {'type': ['string']}
 
 
 class AddressBase(FieldType):
@@ -709,13 +997,8 @@ class AddressBase(FieldType):
         else:
             raise ValueError(_('Value must match %s') % obj.PATTERN)
 
-
-class PCIAddress(AddressBase):
-    PATTERN = '[a-f0-9]{4}:[a-f0-9]{2}:[a-f0-9]{2}.[a-f0-9]'
-
-    @staticmethod
-    def coerce(obj, attr, value):
-        return AddressBase.coerce(PCIAddress, attr, value)
+    def get_schema(self):
+        return {'type': ['string'], 'pattern': self.PATTERN}
 
 
 class USBAddress(AddressBase):
@@ -742,8 +1025,12 @@ class IDEAddress(AddressBase):
         return AddressBase.coerce(IDEAddress, attr, value)
 
 
-class PCIAddressField(AutoTypedField):
-    AUTO_TYPE = PCIAddress()
+class XenAddress(AddressBase):
+    PATTERN = '(00[0-9]{2}00)|[1-9][0-9]+'
+
+    @staticmethod
+    def coerce(obj, attr, value):
+        return AddressBase.coerce(XenAddress, attr, value)
 
 
 class USBAddressField(AutoTypedField):
@@ -756,6 +1043,10 @@ class SCSIAddressField(AutoTypedField):
 
 class IDEAddressField(AutoTypedField):
     AUTO_TYPE = IDEAddress()
+
+
+class XenAddressField(AutoTypedField):
+    AUTO_TYPE = XenAddress()
 
 
 class ArchitectureField(BaseEnumField):
@@ -786,6 +1077,10 @@ class CPUThreadAllocationPolicyField(BaseEnumField):
     AUTO_TYPE = CPUThreadAllocationPolicy()
 
 
+class CPUEmulatorThreadsPolicyField(BaseEnumField):
+    AUTO_TYPE = CPUEmulatorThreadsPolicy()
+
+
 class CPUModeField(BaseEnumField):
     AUTO_TYPE = CPUMode()
 
@@ -800,6 +1095,10 @@ class CPUFeaturePolicyField(BaseEnumField):
 
 class DiskBusField(BaseEnumField):
     AUTO_TYPE = DiskBus()
+
+
+class DiskConfigField(BaseEnumField):
+    AUTO_TYPE = DiskConfig()
 
 
 class FirmwareTypeField(BaseEnumField):
@@ -822,16 +1121,8 @@ class OSTypeField(BaseEnumField):
     AUTO_TYPE = OSType()
 
 
-class ResourceClassField(BaseEnumField):
+class ResourceClassField(AutoTypedField):
     AUTO_TYPE = ResourceClass()
-
-    def index(self, value):
-        """Return an index into the Enum given a value."""
-        return self._type.index(value)
-
-    def from_index(self, index):
-        """Return the Enum value at a given index."""
-        return self._type.from_index(index)
 
 
 class RNGModelField(BaseEnumField):
@@ -878,6 +1169,10 @@ class DiskFormatField(BaseEnumField):
     AUTO_TYPE = DiskFormat()
 
 
+class HypervisorDriverField(BaseEnumField):
+    AUTO_TYPE = HypervisorDriver()
+
+
 class PointerModelField(BaseEnumField):
     AUTO_TYPE = PointerModelType()
 
@@ -904,19 +1199,3 @@ class InstanceTaskStateField(BaseEnumField):
 
 class InstancePowerStateField(BaseEnumField):
     AUTO_TYPE = InstancePowerState()
-
-
-class IPV4AndV6AddressField(AutoTypedField):
-    AUTO_TYPE = IPV4AndV6Address()
-
-
-class ListOfIntegersField(AutoTypedField):
-    AUTO_TYPE = List(fields.Integer())
-
-
-class NonNegativeFloatField(AutoTypedField):
-    AUTO_TYPE = NonNegativeFloat()
-
-
-class NonNegativeIntegerField(AutoTypedField):
-    AUTO_TYPE = NonNegativeInteger()

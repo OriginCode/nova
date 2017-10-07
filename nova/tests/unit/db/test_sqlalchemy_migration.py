@@ -13,22 +13,23 @@
 #    under the License.
 
 import importlib
-import mock
-import uuid
 
 from migrate import exceptions as versioning_exceptions
 from migrate import UniqueConstraint
 from migrate.versioning import api as versioning_api
+import mock
 from oslo_db.sqlalchemy import utils as db_utils
 import sqlalchemy
 
 from nova import context
 from nova.db.sqlalchemy import api as db_api
 from nova.db.sqlalchemy import migration
+from nova.db.sqlalchemy import models
 from nova import exception
 from nova import objects
 from nova import test
 from nova.tests import fixtures as nova_fixtures
+from nova.tests import uuidsentinel
 
 
 class TestNullInstanceUuidScanDB(test.TestCase):
@@ -199,7 +200,7 @@ class TestFlavorCheck(test.TestCase):
 
     def test_upgrade_clean(self):
         inst = objects.Instance(context=self.context,
-                                uuid=uuid.uuid4(),
+                                uuid=uuidsentinel.fake,
                                 user_id=self.context.user_id,
                                 project_id=self.context.project_id,
                                 system_metadata={'foo': 'bar'})
@@ -208,7 +209,7 @@ class TestFlavorCheck(test.TestCase):
 
     def test_upgrade_dirty(self):
         inst = objects.Instance(context=self.context,
-                                uuid=uuid.uuid4(),
+                                uuid=uuidsentinel.fake,
                                 user_id=self.context.user_id,
                                 project_id=self.context.project_id,
                                 system_metadata={'foo': 'bar',
@@ -219,7 +220,7 @@ class TestFlavorCheck(test.TestCase):
 
     def test_upgrade_flavor_deleted_instances(self):
         inst = objects.Instance(context=self.context,
-                                uuid=uuid.uuid4(),
+                                uuid=uuidsentinel.fake,
                                 user_id=self.context.user_id,
                                 project_id=self.context.project_id,
                                 system_metadata={'foo': 'bar',
@@ -239,44 +240,230 @@ class TestNewtonCheck(test.TestCase):
             '330_enforce_mitaka_online_migrations')
         self.engine = db_api.get_engine()
 
-    def test_all_migrated(self):
-        cn = objects.ComputeNode(context=self.context,
-                                 vcpus=1, memory_mb=512, local_gb=10,
-                                 vcpus_used=0, memory_mb_used=256,
-                                 local_gb_used=5, hypervisor_type='HyperDanVM',
-                                 hypervisor_version='34', cpu_info='foo')
-        cn.create()
-        objects.Aggregate(context=self.context,
-                          name='foo').create()
-        objects.PciDevice.create(self.context, {})
-        self.migration.upgrade(self.engine)
-
-    def test_cn_not_migrated(self):
-        cn = objects.ComputeNode(context=self.context,
-                                 vcpus=1, memory_mb=512, local_gb=10,
-                                 vcpus_used=0, memory_mb_used=256,
-                                 local_gb_used=5, hypervisor_type='HyperDanVM',
-                                 hypervisor_version='34', cpu_info='foo')
-        cn.create()
-        db_api.compute_node_update(self.context, cn.id, {'uuid': None})
-        self.assertRaises(exception.ValidationError,
-                          self.migration.upgrade, self.engine)
-
     def test_aggregate_not_migrated(self):
         agg = db_api.aggregate_create(self.context, {"name": "foobar"})
         db_api.aggregate_update(self.context, agg.id, {'uuid': None})
         self.assertRaises(exception.ValidationError,
                           self.migration.upgrade, self.engine)
 
-    def test_pci_device_not_migrated(self):
-        db_api.pci_device_update(self.context, 1, 'foo:bar',
-                                 {'parent_addr': None,
-                                  'compute_node_id': 1,
-                                  'address': 'foo:bar',
-                                  'vendor_id': '123',
-                                  'product_id': '456',
-                                  'dev_type': 'foo',
-                                  'label': 'foobar',
-                                  'status': 'whatisthis?'})
+    def setup_pci_device(self, dev_type):
+        # NOTE(jaypipes): We cannot use db_api.pci_device_update() here because
+        # newer models of PciDevice contain fields (uuid) that are not present
+        # in the older Newton DB schema and pci_device_update() uses the
+        # SQLAlchemy ORM model_query().update() form which will produce an
+        # UPDATE SQL statement that contains those new fields, resulting in an
+        # OperationalError about table pci_devices has no such column uuid.
+        engine = db_api.get_engine()
+        tbl = models.PciDevice.__table__
+        with engine.connect() as conn:
+            ins_stmt = tbl.insert().values(
+                address='foo:bar',
+                compute_node_id=1,
+                parent_addr=None,
+                vendor_id='123',
+                product_id='456',
+                dev_type=dev_type,
+                label='foobar',
+                status='whatisthis?',
+            )
+            conn.execute(ins_stmt)
+
+    def test_pci_device_type_vf_not_migrated(self):
+        self.setup_pci_device('type-VF')
+        # type-VF devices should have a parent_addr
         self.assertRaises(exception.ValidationError,
                           self.migration.upgrade, self.engine)
+
+    def test_pci_device_type_pf_not_migrated(self):
+        self.setup_pci_device('type-PF')
+        # blocker should not block on type-PF devices
+        self.migration.upgrade(self.engine)
+
+    def test_pci_device_type_pci_not_migrated(self):
+        self.setup_pci_device('type-PCI')
+        # blocker should not block on type-PCI devices
+        self.migration.upgrade(self.engine)
+
+
+class TestOcataCheck(test.TestCase):
+    def setUp(self):
+        super(TestOcataCheck, self).setUp()
+        self.context = context.get_admin_context()
+        self.migration = importlib.import_module(
+            'nova.db.sqlalchemy.migrate_repo.versions.'
+            '345_require_online_migration_completion')
+        self.engine = db_api.get_engine()
+        self.flavor_values = {
+            'name': 'foo',
+            'memory_mb': 256,
+            'vcpus': 1,
+            'root_gb': 10,
+            'ephemeral_gb': 100,
+            'flavorid': 'bar',
+            'swap': 1,
+            'rxtx_factor': 1.0,
+            'vcpu_weight': 1,
+            'disabled': False,
+            'is_public': True,
+        }
+        self.keypair_values = {
+            'name': 'foo',
+            'user_ud': 'bar',
+            'fingerprint': 'baz',
+            'public_key': 'bat',
+            'type': 'ssh',
+        }
+        self.aggregate_values = {
+            'uuid': uuidsentinel.agg,
+            'name': 'foo',
+        }
+        self.ig_values = {
+            'user_id': 'foo',
+            'project_id': 'bar',
+            'uuid': uuidsentinel.ig,
+            'name': 'baz',
+        }
+
+    def test_upgrade_clean(self):
+        self.migration.upgrade(self.engine)
+
+    def test_upgrade_dirty_flavors(self):
+        db_api.flavor_create(self.context, self.flavor_values)
+        self.assertRaises(exception.ValidationError,
+                          self.migration.upgrade, self.engine)
+
+    def test_upgrade_with_deleted_flavors(self):
+        flavor = db_api.flavor_create(self.context, self.flavor_values)
+        db_api.flavor_destroy(self.context, flavor['flavorid'])
+        self.migration.upgrade(self.engine)
+
+    def test_upgrade_dirty_keypairs(self):
+        db_api.key_pair_create(self.context, self.keypair_values)
+        self.assertRaises(exception.ValidationError,
+                          self.migration.upgrade, self.engine)
+
+    def test_upgrade_with_deleted_keypairs(self):
+        keypair = db_api.key_pair_create(self.context, self.keypair_values)
+        db_api.key_pair_destroy(self.context,
+                                keypair['user_id'], keypair['name'])
+        self.migration.upgrade(self.engine)
+
+    def test_upgrade_dirty_aggregates(self):
+        db_api.aggregate_create(self.context, self.aggregate_values)
+        self.assertRaises(exception.ValidationError,
+                          self.migration.upgrade, self.engine)
+
+    def test_upgrade_with_deleted_aggregates(self):
+        agg = db_api.aggregate_create(self.context, self.aggregate_values)
+        db_api.aggregate_delete(self.context, agg['id'])
+        self.migration.upgrade(self.engine)
+
+    def test_upgrade_dirty_instance_groups(self):
+        db_api.instance_group_create(self.context, self.ig_values)
+        self.assertRaises(exception.ValidationError,
+                          self.migration.upgrade, self.engine)
+
+    def test_upgrade_with_deleted_instance_groups(self):
+        group = db_api.instance_group_create(self.context, self.ig_values)
+        db_api.instance_group_delete(self.context, group['uuid'])
+        self.migration.upgrade(self.engine)
+
+
+class TestNewtonCellsCheck(test.NoDBTestCase):
+    USES_DB_SELF = True
+
+    def setUp(self):
+        super(TestNewtonCellsCheck, self).setUp()
+        self.useFixture(nova_fixtures.DatabaseAtVersion(28, 'api'))
+        self.context = context.get_admin_context()
+        self.migration = importlib.import_module(
+            'nova.db.sqlalchemy.api_migrations.migrate_repo.versions.'
+            '030_require_cell_setup')
+        self.engine = db_api.get_api_engine()
+
+    @mock.patch('nova.objects.Flavor._ensure_migrated')
+    def _flavor_me(self, _):
+        flavor = objects.Flavor(context=self.context,
+                                name='foo', memory_mb=123,
+                                vcpus=1, root_gb=1,
+                                flavorid='m1.foo')
+        flavor.create()
+
+    def test_upgrade_with_no_cell_mappings(self):
+        self._flavor_me()
+        self.assertRaisesRegex(exception.ValidationError,
+                               'Cell mappings',
+                               self.migration.upgrade, self.engine)
+
+    def test_upgrade_with_only_cell0(self):
+        self._flavor_me()
+        cell0 = objects.CellMapping(context=self.context,
+                                    uuid=objects.CellMapping.CELL0_UUID,
+                                    name='cell0',
+                                    transport_url='fake',
+                                    database_connection='fake')
+        cell0.create()
+        self.assertRaisesRegex(exception.ValidationError,
+                               'Cell mappings',
+                               self.migration.upgrade, self.engine)
+
+    def test_upgrade_without_cell0(self):
+        self._flavor_me()
+        cell1 = objects.CellMapping(context=self.context,
+                                    uuid=uuidsentinel.cell1,
+                                    name='cell1',
+                                    transport_url='fake',
+                                    database_connection='fake')
+        cell1.create()
+        cell2 = objects.CellMapping(context=self.context,
+                                    uuid=uuidsentinel.cell2,
+                                    name='cell2',
+                                    transport_url='fake',
+                                    database_connection='fake')
+        cell2.create()
+        self.assertRaisesRegex(exception.ValidationError,
+                               'Cell0',
+                               self.migration.upgrade, self.engine)
+
+    def test_upgrade_with_no_host_mappings(self):
+        self._flavor_me()
+        cell0 = objects.CellMapping(context=self.context,
+                                    uuid=objects.CellMapping.CELL0_UUID,
+                                    name='cell0',
+                                    transport_url='fake',
+                                    database_connection='fake')
+        cell0.create()
+        cell1 = objects.CellMapping(context=self.context,
+                                    uuid=uuidsentinel.cell1,
+                                    name='cell1',
+                                    transport_url='fake',
+                                    database_connection='fake')
+        cell1.create()
+
+        with mock.patch.object(self.migration, 'LOG') as log:
+            self.migration.upgrade(self.engine)
+            self.assertTrue(log.warning.called)
+
+    def test_upgrade_with_required_mappings(self):
+        self._flavor_me()
+        cell0 = objects.CellMapping(context=self.context,
+                                    uuid=objects.CellMapping.CELL0_UUID,
+                                    name='cell0',
+                                    transport_url='fake',
+                                    database_connection='fake')
+        cell0.create()
+        cell1 = objects.CellMapping(context=self.context,
+                                    uuid=uuidsentinel.cell1,
+                                    name='cell1',
+                                    transport_url='fake',
+                                    database_connection='fake')
+        cell1.create()
+        hostmapping = objects.HostMapping(context=self.context,
+                                          cell_mapping=cell1,
+                                          host='foo')
+        hostmapping.create()
+
+        self.migration.upgrade(self.engine)
+
+    def test_upgrade_new_deploy(self):
+        self.migration.upgrade(self.engine)

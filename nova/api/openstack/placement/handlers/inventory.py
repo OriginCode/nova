@@ -13,12 +13,15 @@
 
 import copy
 
-import jsonschema
 from oslo_db import exception as db_exc
 from oslo_serialization import jsonutils
+from oslo_utils import encodeutils
 import webob
 
+from nova.api.openstack.placement import microversion
 from nova.api.openstack.placement import util
+from nova.api.openstack.placement import wsgi_wrapper
+from nova import db
 from nova import exception
 from nova.i18n import _
 from nova import objects
@@ -31,22 +34,33 @@ BASE_INVENTORY_SCHEMA = {
             "type": "integer"
         },
         "total": {
-            "type": "integer"
+            "type": "integer",
+            "maximum": db.MAX_INT,
+            "minimum": 1,
         },
         "reserved": {
-            "type": "integer"
+            "type": "integer",
+            "maximum": db.MAX_INT,
+            "minimum": 0,
         },
         "min_unit": {
-            "type": "integer"
+            "type": "integer",
+            "maximum": db.MAX_INT,
+            "minimum": 1
         },
         "max_unit": {
-            "type": "integer"
+            "type": "integer",
+            "maximum": db.MAX_INT,
+            "minimum": 1
         },
         "step_size": {
-            "type": "integer"
+            "type": "integer",
+            "maximum": db.MAX_INT,
+            "minimum": 1
         },
         "allocation_ratio": {
-            "type": "number"
+            "type": "number",
+            "maximum": db.SQL_SP_FLOAT_MAX
         },
     },
     "required": [
@@ -97,33 +111,16 @@ OUTPUT_INVENTORY_FIELDS = [
 ]
 INVENTORY_DEFAULTS = {
     'reserved': 0,
-    'min_unit': 0,
-    'max_unit': 0,
+    'min_unit': 1,
+    'max_unit': db.MAX_INT,
     'step_size': 1,
     'allocation_ratio': 1.0
 }
 
 
-def _extract_json(body, schema):
-    """Extract and validate data from JSON body."""
-    try:
-        data = jsonutils.loads(body)
-    except ValueError as exc:
-        raise webob.exc.HTTPBadRequest(
-            _('Malformed JSON: %(error)s') % {'error': exc},
-            json_formatter=util.json_error_formatter)
-    try:
-        jsonschema.validate(data, schema)
-    except jsonschema.ValidationError as exc:
-        raise webob.exc.HTTPBadRequest(
-            _('JSON does not validate: %(error)s') % {'error': exc},
-            json_formatter=util.json_error_formatter)
-    return data
-
-
 def _extract_inventory(body, schema):
     """Extract and validate inventory from JSON body."""
-    data = _extract_json(body, schema)
+    data = util.extract_json(body, schema)
 
     inventory_data = copy.copy(INVENTORY_DEFAULTS)
     inventory_data.update(data)
@@ -133,7 +130,7 @@ def _extract_inventory(body, schema):
 
 def _extract_inventories(body, schema):
     """Extract and validate multiple inventories from JSON body."""
-    data = _extract_json(body, schema)
+    data = util.extract_json(body, schema)
 
     inventories = {}
     for res_class, raw_inventory in data['inventories'].items():
@@ -160,16 +157,15 @@ def _make_inventory_object(resource_provider, resource_class, **data):
             _('Bad inventory %(class)s for resource provider '
               '%(rp_uuid)s: %(error)s') % {'class': resource_class,
                                            'rp_uuid': resource_provider.uuid,
-                                           'error': exc},
-            json_formatter=util.json_error_formatter)
+                                           'error': exc})
     return inventory
 
 
 def _send_inventories(response, resource_provider, inventories):
     """Send a JSON representation of a list of inventories."""
     response.status = 200
-    response.body = jsonutils.dumps(_serialize_inventories(
-        inventories, resource_provider.generation))
+    response.body = encodeutils.to_utf8(jsonutils.dumps(
+        _serialize_inventories(inventories, resource_provider.generation)))
     response.content_type = 'application/json'
     return response
 
@@ -177,8 +173,8 @@ def _send_inventories(response, resource_provider, inventories):
 def _send_inventory(response, resource_provider, inventory, status=200):
     """Send a JSON representation of one single inventory."""
     response.status = status
-    response.body = jsonutils.dumps(_serialize_inventory(
-        inventory, generation=resource_provider.generation))
+    response.body = encodeutils.to_utf8(jsonutils.dumps(_serialize_inventory(
+        inventory, generation=resource_provider.generation)))
     response.content_type = 'application/json'
     return response
 
@@ -206,7 +202,7 @@ def _serialize_inventories(inventories, generation):
             'inventories': inventories_dict}
 
 
-@webob.dec.wsgify
+@wsgi_wrapper.PlacementWsgify
 @util.require_content('application/json')
 def create_inventory(req):
     """POST to create one inventory.
@@ -231,14 +227,13 @@ def create_inventory(req):
     except (exception.ConcurrentUpdateDetected,
             db_exc.DBDuplicateEntry) as exc:
         raise webob.exc.HTTPConflict(
-            _('Update conflict: %(error)s') % {'error': exc},
-            json_formatter=util.json_error_formatter)
-    except exception.InvalidInventoryCapacity as exc:
+            _('Update conflict: %(error)s') % {'error': exc})
+    except (exception.InvalidInventoryCapacity,
+            exception.NotFound) as exc:
         raise webob.exc.HTTPBadRequest(
             _('Unable to create inventory for resource provider '
               '%(rp_uuid)s: %(error)s') % {'rp_uuid': resource_provider.uuid,
-                                           'error': exc},
-            json_formatter=util.json_error_formatter)
+                                           'error': exc})
 
     response = req.response
     response.location = util.inventory_url(
@@ -247,7 +242,7 @@ def create_inventory(req):
                            status=201)
 
 
-@webob.dec.wsgify
+@wsgi_wrapper.PlacementWsgify
 def delete_inventory(req):
     """DELETE to destroy a single inventory.
 
@@ -268,8 +263,11 @@ def delete_inventory(req):
             exception.InventoryInUse) as exc:
         raise webob.exc.HTTPConflict(
             _('Unable to delete inventory of class %(class)s: %(error)s') %
-            {'class': resource_class, 'error': exc},
-            json_formatter=util.json_error_formatter)
+            {'class': resource_class, 'error': exc})
+    except exception.NotFound as exc:
+        raise webob.exc.HTTPNotFound(
+            _('No inventory of class %(class)s found for delete: %(error)s') %
+             {'class': resource_class, 'error': exc})
 
     response = req.response
     response.status = 204
@@ -277,7 +275,7 @@ def delete_inventory(req):
     return response
 
 
-@webob.dec.wsgify
+@wsgi_wrapper.PlacementWsgify
 @util.check_accept('application/json')
 def get_inventories(req):
     """GET a list of inventories.
@@ -287,15 +285,21 @@ def get_inventories(req):
     """
     context = req.environ['placement.context']
     uuid = util.wsgi_path_item(req.environ, 'uuid')
-    resource_provider = objects.ResourceProvider.get_by_uuid(
-        context, uuid)
+    try:
+        resource_provider = objects.ResourceProvider.get_by_uuid(
+            context, uuid)
+    except exception.NotFound as exc:
+        raise webob.exc.HTTPNotFound(
+            _("No resource provider with uuid %(uuid)s found : %(error)s") %
+             {'uuid': uuid, 'error': exc})
+
     inventories = objects.InventoryList.get_all_by_resource_provider_uuid(
         context, resource_provider.uuid)
 
     return _send_inventories(req.response, resource_provider, inventories)
 
 
-@webob.dec.wsgify
+@wsgi_wrapper.PlacementWsgify
 @util.check_accept('application/json')
 def get_inventory(req):
     """GET one inventory.
@@ -315,13 +319,12 @@ def get_inventory(req):
     if not inventory:
         raise webob.exc.HTTPNotFound(
             _('No inventory of class %(class)s for %(rp_uuid)s') %
-            {'class': resource_class, 'rp_uuid': resource_provider.uuid},
-            json_formatter=util.json_error_formatter)
+            {'class': resource_class, 'rp_uuid': resource_provider.uuid})
 
     return _send_inventory(req.response, resource_provider, inventory)
 
 
-@webob.dec.wsgify
+@wsgi_wrapper.PlacementWsgify
 @util.require_content('application/json')
 def set_inventories(req):
     """PUT to set all inventory for a resource provider.
@@ -345,8 +348,7 @@ def set_inventories(req):
     data = _extract_inventories(req.body, PUT_INVENTORY_SCHEMA)
     if data['resource_provider_generation'] != resource_provider.generation:
         raise webob.exc.HTTPConflict(
-            _('resource provider generation conflict'),
-            json_formatter=util.json_error_formatter)
+            _('resource provider generation conflict'))
 
     inv_list = []
     for res_class, inventory_data in data['inventories'].items():
@@ -357,23 +359,69 @@ def set_inventories(req):
 
     try:
         resource_provider.set_inventory(inventories)
+    except exception.ResourceClassNotFound as exc:
+        raise webob.exc.HTTPBadRequest(
+            _('Unknown resource class in inventory for resource provider '
+              '%(rp_uuid)s: %(error)s') % {'rp_uuid': resource_provider.uuid,
+                                           'error': exc})
+    except exception.InventoryWithResourceClassNotFound as exc:
+        raise webob.exc.HTTPConflict(
+            _('Race condition detected when setting inventory. No inventory '
+              'record with resource class for resource provider '
+              '%(rp_uuid)s: %(error)s') % {'rp_uuid': resource_provider.uuid,
+                                           'error': exc})
     except (exception.ConcurrentUpdateDetected,
             exception.InventoryInUse,
             db_exc.DBDuplicateEntry) as exc:
         raise webob.exc.HTTPConflict(
-            _('update conflict: %(error)s') % {'error': exc},
-            json_formatter=util.json_error_formatter)
+            _('update conflict: %(error)s') % {'error': exc})
     except exception.InvalidInventoryCapacity as exc:
         raise webob.exc.HTTPBadRequest(
             _('Unable to update inventory for resource provider '
               '%(rp_uuid)s: %(error)s') % {'rp_uuid': resource_provider.uuid,
-                                          'error': exc},
-            json_formatter=util.json_error_formatter)
+                                          'error': exc})
 
     return _send_inventories(req.response, resource_provider, inventories)
 
 
-@webob.dec.wsgify
+@wsgi_wrapper.PlacementWsgify
+def delete_inventories(req):
+    """DELETE all inventory for a resource provider.
+
+    Delete inventory as required to reset all the inventory.
+    If an inventory to be deleted is in use, return a 409 Conflict.
+    On success return a 204 No content.
+    Return 405 Method Not Allowed if the wanted microversion does not match.
+    """
+    microversion.raise_http_status_code_if_not_version(req, 405, (1, 5))
+    context = req.environ['placement.context']
+    uuid = util.wsgi_path_item(req.environ, 'uuid')
+    resource_provider = objects.ResourceProvider.get_by_uuid(
+        context, uuid)
+
+    inventories = objects.InventoryList(objects=[])
+
+    try:
+        resource_provider.set_inventory(inventories)
+    except exception.ConcurrentUpdateDetected:
+        raise webob.exc.HTTPConflict(
+            _('Unable to delete inventory for resource provider '
+              '%(rp_uuid)s because the inventory was updated by '
+              'another process. Please retry your request.')
+              % {'rp_uuid': resource_provider.uuid})
+    except exception.InventoryInUse as ex:
+        # NOTE(mriedem): This message cannot change without impacting the
+        # nova.scheduler.client.report._RE_INV_IN_USE regex.
+        raise webob.exc.HTTPConflict(explanation=ex.format_message())
+
+    response = req.response
+    response.status = 204
+    response.content_type = None
+
+    return response
+
+
+@wsgi_wrapper.PlacementWsgify
 @util.require_content('application/json')
 def update_inventory(req):
     """PUT to update one inventory.
@@ -395,8 +443,7 @@ def update_inventory(req):
     data = _extract_inventory(req.body, BASE_INVENTORY_SCHEMA)
     if data['resource_provider_generation'] != resource_provider.generation:
         raise webob.exc.HTTPConflict(
-            _('resource provider generation conflict'),
-            json_formatter=util.json_error_formatter)
+            _('resource provider generation conflict'))
 
     inventory = _make_inventory_object(resource_provider,
                                        resource_class,
@@ -407,13 +454,16 @@ def update_inventory(req):
     except (exception.ConcurrentUpdateDetected,
             db_exc.DBDuplicateEntry) as exc:
         raise webob.exc.HTTPConflict(
-            _('update conflict: %(error)s') % {'error': exc},
-            json_formatter=util.json_error_formatter)
+            _('update conflict: %(error)s') % {'error': exc})
+    except exception.InventoryWithResourceClassNotFound as exc:
+        raise webob.exc.HTTPBadRequest(
+            _('No inventory record with resource class for resource provider '
+              '%(rp_uuid)s: %(error)s') % {'rp_uuid': resource_provider.uuid,
+                                           'error': exc})
     except exception.InvalidInventoryCapacity as exc:
         raise webob.exc.HTTPBadRequest(
             _('Unable to update inventory for resource provider '
               '%(rp_uuid)s: %(error)s') % {'rp_uuid': resource_provider.uuid,
-                                          'error': exc},
-            json_formatter=util.json_error_formatter)
+                                          'error': exc})
 
     return _send_inventory(req.response, resource_provider, inventory)

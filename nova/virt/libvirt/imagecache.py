@@ -28,11 +28,10 @@ import time
 from oslo_concurrency import lockutils
 from oslo_concurrency import processutils
 from oslo_log import log as logging
+from oslo_utils import encodeutils
+import six
 
 import nova.conf
-from nova.i18n import _LE
-from nova.i18n import _LI
-from nova.i18n import _LW
 from nova import utils
 from nova.virt import imagecache
 from nova.virt.libvirt import utils as libvirt_utils
@@ -68,7 +67,10 @@ def get_info_filename(base_path):
 def is_valid_info_file(path):
     """Test if a given path matches the pattern for info files."""
 
-    digest_size = hashlib.sha1().digestsize * 2
+    if six.PY2:
+        digest_size = hashlib.sha1().digestsize * 2
+    else:
+        digest_size = hashlib.sha1().digest_size * 2
     regexp = (CONF.libvirt.image_info_filename_pattern
               % {'image': ('([0-9a-f]{%(digest_size)d}|'
                            '[0-9a-f]{%(digest_size)d}_sm|'
@@ -122,7 +124,10 @@ class ImageCacheManager(imagecache.ImageCacheManager):
         self.unexplained_images, self.originals, and self.back_swap_images.
         """
 
-        digest_size = hashlib.sha1().digestsize * 2
+        if six.PY2:
+            digest_size = hashlib.sha1().digestsize * 2
+        else:
+            digest_size = hashlib.sha1().digest_size * 2
         for ent in os.listdir(base_dir):
             path = os.path.join(base_dir, ent)
             if is_valid_info_file(path):
@@ -189,10 +194,9 @@ class ImageCacheManager(imagecache.ImageCacheManager):
                             inuse_images.append(backing_path)
 
                         if backing_path in self.unexplained_images:
-                            LOG.warning(_LW('Instance %(instance)s is using a '
-                                         'backing file %(backing)s which '
-                                         'does not appear in the image '
-                                         'service'),
+                            LOG.warning('Instance %(instance)s is using a '
+                                        'backing file %(backing)s which '
+                                        'does not appear in the image service',
                                         {'instance': ent,
                                          'backing': backing_file})
                             self.unexplained_images.remove(backing_path)
@@ -201,8 +205,7 @@ class ImageCacheManager(imagecache.ImageCacheManager):
     def _find_base_file(self, base_dir, fingerprint):
         """Find the base file matching this fingerprint.
 
-        Yields the name of the base file, a boolean which is True if the image
-        is "small", and a boolean which indicates if this is a resized image.
+        Yields the name of a base file which exists.
         Note that it is possible for more than one yield to result from this
         check.
 
@@ -211,19 +214,19 @@ class ImageCacheManager(imagecache.ImageCacheManager):
         # The original file from glance
         base_file = os.path.join(base_dir, fingerprint)
         if os.path.exists(base_file):
-            yield base_file, False, False
+            yield base_file
 
         # An older naming style which can be removed sometime after Folsom
         base_file = os.path.join(base_dir, fingerprint + '_sm')
         if os.path.exists(base_file):
-            yield base_file, True, False
+            yield base_file
 
-        # Resized images
+        # Resized images (also legacy)
         resize_re = re.compile('.*/%s_[0-9]+$' % fingerprint)
         for img in self.unexplained_images:
             m = resize_re.match(img)
             if m:
-                yield img, False, True
+                yield img
 
     @staticmethod
     def _get_age_of_file(base_file):
@@ -254,7 +257,7 @@ class ImageCacheManager(imagecache.ImageCacheManager):
             if not exists or age < maxage:
                 return
 
-            LOG.info(_LI('Removing base or swap file: %s'), base_file)
+            LOG.info('Removing base or swap file: %s', base_file)
             try:
                 os.remove(base_file)
 
@@ -272,14 +275,13 @@ class ImageCacheManager(imagecache.ImageCacheManager):
                 if os.path.exists(signature):
                     os.remove(signature)
             except OSError as e:
-                LOG.error(_LE('Failed to remove %(base_file)s, '
-                              'error was %(error)s'),
+                LOG.error('Failed to remove %(base_file)s, '
+                          'error was %(error)s',
                           {'base_file': base_file,
                            'error': e})
 
         if age < maxage:
-            LOG.info(_LI('Base or swap file too young to remove: %s'),
-                         base_file)
+            LOG.info('Base or swap file too young to remove: %s', base_file)
         else:
             _inner_remove_old_enough_file()
             if remove_lock:
@@ -311,57 +313,20 @@ class ImageCacheManager(imagecache.ImageCacheManager):
 
         self._remove_old_enough_file(base_file, maxage)
 
-    def _handle_base_image(self, img_id, base_file):
-        """Handle the checks for a single base image."""
+    def _mark_in_use(self, img_id, base_file):
+        """Mark a single base image as in use."""
 
-        image_in_use = False
-
-        LOG.info(_LI('image %(id)s at (%(base_file)s): checking'),
-                 {'id': img_id,
-                  'base_file': base_file})
+        LOG.info('image %(id)s at (%(base_file)s): checking',
+                 {'id': img_id, 'base_file': base_file})
 
         if base_file in self.unexplained_images:
             self.unexplained_images.remove(base_file)
 
-        if img_id in self.used_images:
-            local, remote, instances = self.used_images[img_id]
+        self.active_base_files.append(base_file)
 
-            if local > 0 or remote > 0:
-                image_in_use = True
-                LOG.info(_LI('image %(id)s at (%(base_file)s): '
-                             'in use: on this node %(local)d local, '
-                             '%(remote)d on other nodes sharing this instance '
-                             'storage'),
-                         {'id': img_id,
-                          'base_file': base_file,
-                          'local': local,
-                          'remote': remote})
-
-                self.active_base_files.append(base_file)
-
-                if not base_file:
-                    LOG.warning(_LW('image %(id)s at (%(base_file)s): warning '
-                                 '-- an absent base file is in use! '
-                                 'instances: %(instance_list)s'),
-                                {'id': img_id,
-                                 'base_file': base_file,
-                                 'instance_list': ' '.join(instances)})
-
-        if base_file:
-            if not image_in_use:
-                LOG.debug('image %(id)s at (%(base_file)s): image is not in '
-                          'use',
-                          {'id': img_id,
-                           'base_file': base_file})
-                self.removable_base_files.append(base_file)
-
-            else:
-                LOG.debug('image %(id)s at (%(base_file)s): image is in '
-                          'use',
-                          {'id': img_id,
-                           'base_file': base_file})
-                if os.path.exists(base_file):
-                    libvirt_utils.update_mtime(base_file)
+        LOG.debug('image %(id)s at (%(base_file)s): image is in use',
+                  {'id': img_id, 'base_file': base_file})
+        libvirt_utils.update_mtime(base_file)
 
     def _age_and_verify_swap_images(self, context, base_dir):
         LOG.debug('Verify swap images')
@@ -375,23 +340,20 @@ class ImageCacheManager(imagecache.ImageCacheManager):
 
         error_images = self.used_swap_images - self.back_swap_images
         for error_image in error_images:
-            LOG.warning(_LW('%s swap image was used by instance'
-                         ' but no back files existing!'), error_image)
+            LOG.warning('%s swap image was used by instance'
+                        ' but no back files existing!', error_image)
 
     def _age_and_verify_cached_images(self, context, all_instances, base_dir):
         LOG.debug('Verify base images')
         # Determine what images are on disk because they're in use
         for img in self.used_images:
-            fingerprint = hashlib.sha1(img).hexdigest()
+            fingerprint = hashlib.sha1(
+                    encodeutils.safe_encode(img)).hexdigest()
             LOG.debug('Image id %(id)s yields fingerprint %(fingerprint)s',
                       {'id': img,
                        'fingerprint': fingerprint})
-            for result in self._find_base_file(base_dir, fingerprint):
-                base_file, image_small, image_resized = result
-                self._handle_base_image(img, base_file)
-
-                if not image_small and not image_resized:
-                    self.originals.append(base_file)
+            for base_file in self._find_base_file(base_dir, fingerprint):
+                self._mark_in_use(img, base_file)
 
         # Elements remaining in unexplained_images might be in use
         inuse_backing_images = self._list_backing_images()
@@ -401,16 +363,16 @@ class ImageCacheManager(imagecache.ImageCacheManager):
 
         # Anything left is an unknown base image
         for img in self.unexplained_images:
-            LOG.warning(_LW('Unknown base file: %s'), img)
+            LOG.warning('Unknown base file: %s', img)
             self.removable_base_files.append(img)
 
         # Dump these lists
         if self.active_base_files:
-            LOG.info(_LI('Active base files: %s'),
+            LOG.info('Active base files: %s',
                      ' '.join(self.active_base_files))
 
         if self.removable_base_files:
-            LOG.info(_LI('Removable base files: %s'),
+            LOG.info('Removable base files: %s',
                      ' '.join(self.removable_base_files))
 
             if self.remove_unused_base_images:

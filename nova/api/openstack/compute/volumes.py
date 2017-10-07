@@ -70,7 +70,7 @@ def _translate_volume_summary_view(context, vol):
         #                   'mountpoint': '/dev/sda/
         #                    }
         #                }
-        attachment = vol['attachments'].items()[0]
+        attachment = list(vol['attachments'].items())[0]
         d['attachments'] = [_translate_attachment_detail_view(vol['id'],
             attachment[0],
             attachment[1].get('mountpoint'))]
@@ -118,7 +118,7 @@ class VolumeController(wsgi.Controller):
 
     @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
     @wsgi.response(202)
-    @extensions.expected_errors(404)
+    @extensions.expected_errors((400, 404))
     def delete(self, req, id):
         """Delete a volume."""
         context = req.environ['nova.context']
@@ -126,6 +126,8 @@ class VolumeController(wsgi.Controller):
 
         try:
             self.volume_api.delete(context, id)
+        except exception.InvalidInput as e:
+            raise exc.HTTPBadRequest(explanation=e.format_message())
         except exception.VolumeNotFound as e:
             raise exc.HTTPNotFound(explanation=e.format_message())
 
@@ -221,7 +223,7 @@ def _translate_attachment_summary_view(volume_id, instance_uuid, mountpoint):
     """Maps keys for attachment summary view."""
     d = {}
 
-    # NOTE(justinsb): We use the volume id as he id of the attachment object
+    # NOTE(justinsb): We use the volume id as the id of the attachment object
     d['id'] = volume_id
 
     d['volumeId'] = volume_id
@@ -264,14 +266,27 @@ class VolumeAttachmentController(wsgi.Controller):
         """Returns the list of volume attachments for a given instance."""
         context = req.environ['nova.context']
         context.can(va_policies.POLICY_ROOT % 'index')
-        return self._items(req, server_id,
-                           entity_maker=_translate_attachment_summary_view)
+
+        instance = common.get_instance(self.compute_api, context, server_id)
+
+        bdms = objects.BlockDeviceMappingList.get_by_instance_uuid(
+                context, instance.uuid)
+        limited_list = common.limited(bdms, req)
+
+        results = []
+        for bdm in limited_list:
+            if bdm.volume_id:
+                va = _translate_attachment_summary_view(bdm.volume_id,
+                                                        bdm.instance_uuid,
+                                                        bdm.device_name)
+                results.append(va)
+
+        return {'volumeAttachments': results}
 
     @extensions.expected_errors(404)
     def show(self, req, server_id, id):
         """Return data about the given volume attachment."""
         context = req.environ['nova.context']
-        context.can(vol_policies.BASE_POLICY_NAME)
         context.can(va_policies.POLICY_ROOT % 'show')
 
         volume_id = id
@@ -300,16 +315,18 @@ class VolumeAttachmentController(wsgi.Controller):
             instance.uuid,
             assigned_mountpoint)}
 
+    # TODO(mriedem): This API should return a 202 instead of a 200 response.
     @extensions.expected_errors((400, 404, 409))
-    @validation.schema(volumes_schema.create_volume_attachment)
+    @validation.schema(volumes_schema.create_volume_attachment, '2.0', '2.48')
+    @validation.schema(volumes_schema.create_volume_attachment_v249, '2.49')
     def create(self, req, server_id, body):
         """Attach a volume to an instance."""
         context = req.environ['nova.context']
-        context.can(vol_policies.BASE_POLICY_NAME)
         context.can(va_policies.POLICY_ROOT % 'create')
 
         volume_id = body['volumeAttachment']['volumeId']
         device = body['volumeAttachment'].get('device')
+        tag = body['volumeAttachment'].get('tag')
 
         instance = common.get_instance(self.compute_api, context, server_id)
 
@@ -320,18 +337,20 @@ class VolumeAttachmentController(wsgi.Controller):
 
         try:
             device = self.compute_api.attach_volume(context, instance,
-                                                    volume_id, device)
-        except exception.InstanceUnknownCell as e:
+                                                    volume_id, device, tag=tag)
+        except (exception.InstanceUnknownCell,
+                exception.VolumeNotFound) as e:
             raise exc.HTTPNotFound(explanation=e.format_message())
-        except exception.VolumeNotFound as e:
-            raise exc.HTTPNotFound(explanation=e.format_message())
-        except exception.InstanceIsLocked as e:
+        except (exception.InstanceIsLocked,
+                exception.DevicePathInUse) as e:
             raise exc.HTTPConflict(explanation=e.format_message())
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
                     'attach_volume', server_id)
         except (exception.InvalidVolume,
-                exception.InvalidDevicePath) as e:
+                exception.InvalidDevicePath,
+                exception.InvalidInput,
+                exception.TaggedAttachmentNotSupported) as e:
             raise exc.HTTPBadRequest(explanation=e.format_message())
 
         # The attach is async
@@ -357,17 +376,26 @@ class VolumeAttachmentController(wsgi.Controller):
     @validation.schema(volumes_schema.update_volume_attachment)
     def update(self, req, server_id, id, body):
         context = req.environ['nova.context']
-        context.can(vol_policies.BASE_POLICY_NAME)
         context.can(va_policies.POLICY_ROOT % 'update')
 
         old_volume_id = id
         try:
             old_volume = self.volume_api.get(context, old_volume_id)
-
-            new_volume_id = body['volumeAttachment']['volumeId']
-            new_volume = self.volume_api.get(context, new_volume_id)
         except exception.VolumeNotFound as e:
             raise exc.HTTPNotFound(explanation=e.format_message())
+
+        new_volume_id = body['volumeAttachment']['volumeId']
+        try:
+            new_volume = self.volume_api.get(context, new_volume_id)
+        except exception.VolumeNotFound as e:
+            # NOTE: This BadRequest is different from the above NotFound even
+            # though the same VolumeNotFound exception. This is intentional
+            # because new_volume_id is specified in a request body and if a
+            # nonexistent resource in the body (not URI) the code should be
+            # 400 Bad Request as API-WG guideline. On the other hand,
+            # old_volume_id is specified with URI. So it is valid to return
+            # NotFound response if that is not existent.
+            raise exc.HTTPBadRequest(explanation=e.format_message())
 
         instance = common.get_instance(self.compute_api, context, server_id)
 
@@ -383,7 +411,7 @@ class VolumeAttachmentController(wsgi.Controller):
                                                  new_volume)
                     found = True
                     break
-                except exception.VolumeUnattached:
+                except (exception.VolumeBDMNotFound):
                     # The volume is not attached.  Treat it as NotFound
                     # by falling through.
                     pass
@@ -405,12 +433,12 @@ class VolumeAttachmentController(wsgi.Controller):
     def delete(self, req, server_id, id):
         """Detach a volume from an instance."""
         context = req.environ['nova.context']
-        context.can(vol_policies.BASE_POLICY_NAME)
         context.can(va_policies.POLICY_ROOT % 'delete')
 
         volume_id = id
 
-        instance = common.get_instance(self.compute_api, context, server_id)
+        instance = common.get_instance(self.compute_api, context, server_id,
+                                       expected_attrs=['device_metadata'])
         if instance.vm_state in (vm_states.SHELVED,
                                  vm_states.SHELVED_OFFLOADED):
             _check_request_version(req, '2.20', 'detach_volume',
@@ -438,10 +466,6 @@ class VolumeAttachmentController(wsgi.Controller):
                     self.compute_api.detach_volume(context, instance, volume)
                     found = True
                     break
-                except exception.VolumeUnattached:
-                    # The volume is not attached.  Treat it as NotFound
-                    # by falling through.
-                    pass
                 except exception.InvalidVolume as e:
                     raise exc.HTTPBadRequest(explanation=e.format_message())
                 except exception.InstanceUnknownCell as e:
@@ -458,26 +482,6 @@ class VolumeAttachmentController(wsgi.Controller):
         if not found:
             msg = _("volume_id not found: %s") % volume_id
             raise exc.HTTPNotFound(explanation=msg)
-
-    def _items(self, req, server_id, entity_maker):
-        """Returns a list of attachments, transformed through entity_maker."""
-        context = req.environ['nova.context']
-        context.can(vol_policies.BASE_POLICY_NAME)
-
-        instance = common.get_instance(self.compute_api, context, server_id)
-
-        bdms = objects.BlockDeviceMappingList.get_by_instance_uuid(
-                context, instance.uuid)
-        limited_list = common.limited(bdms, req)
-        results = []
-
-        for bdm in limited_list:
-            if bdm.volume_id:
-                results.append(entity_maker(bdm.volume_id,
-                                            bdm.instance_uuid,
-                                            bdm.device_name))
-
-        return {'volumeAttachments': results}
 
 
 def _translate_snapshot_detail_view(context, vol):
@@ -587,39 +591,3 @@ class SnapshotController(wsgi.Controller):
 
         retval = _translate_snapshot_detail_view(context, new_snapshot)
         return {'snapshot': retval}
-
-
-class Volumes(extensions.V21APIExtensionBase):
-    """Volumes support."""
-
-    name = "Volumes"
-    alias = ALIAS
-    version = 1
-
-    def get_resources(self):
-        resources = []
-
-        res = extensions.ResourceExtension(
-            ALIAS, VolumeController(), collection_actions={'detail': 'GET'})
-        resources.append(res)
-
-        res = extensions.ResourceExtension('os-volumes_boot',
-                                           inherits='servers')
-        resources.append(res)
-
-        res = extensions.ResourceExtension('os-volume_attachments',
-                                           VolumeAttachmentController(),
-                                           parent=dict(
-                                                member_name='server',
-                                                collection_name='servers'))
-        resources.append(res)
-
-        res = extensions.ResourceExtension(
-            'os-snapshots', SnapshotController(),
-            collection_actions={'detail': 'GET'})
-        resources.append(res)
-
-        return resources
-
-    def get_controller_extensions(self):
-        return []

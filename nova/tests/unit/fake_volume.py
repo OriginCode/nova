@@ -12,13 +12,12 @@
 
 """Implementation of a fake volume API."""
 
-import uuid
-
 from oslo_log import log as logging
 from oslo_utils import timeutils
 
 import nova.conf
 from nova import exception
+from nova.tests import uuidsentinel as uuids
 
 
 LOG = logging.getLogger(__name__)
@@ -38,7 +37,7 @@ class fake_volume(object):
         if snapshot is not None:
             snapshot_id = snapshot['id']
         if volume_id is None:
-            volume_id = str(uuid.uuid4())
+            volume_id = uuids.fake1
         self.vol = {
             'created_at': timeutils.utcnow(),
             'deleted_at': None,
@@ -84,7 +83,7 @@ class fake_snapshot(object):
 
     def __init__(self, volume_id, size, name, desc, id=None):
         if id is None:
-            id = str(uuid.uuid4())
+            id = uuids.fake2
         self.snap = {
             'created_at': timeutils.utcnow(),
             'deleted_at': None,
@@ -180,29 +179,11 @@ class API(object):
         self.volume_list = [v for v in self.volume_list
                             if v['id'] != volume_id]
 
-    def check_attach(self, context, volume, instance=None):
-        if volume['status'] != 'available':
-            msg = "Status of volume '%s' must be available" % volume
-            raise exception.InvalidVolume(reason=msg)
-        if volume['attach_status'] == 'attached':
-            msg = "already attached"
-            raise exception.InvalidVolume(reason=msg)
+    def check_availability_zone(self, context, volume, instance=None):
         if instance and not CONF.cinder.cross_az_attach:
             if instance['availability_zone'] != volume['availability_zone']:
                 msg = "Instance and volume not in same availability_zone"
                 raise exception.InvalidVolume(reason=msg)
-
-    def check_detach(self, context, volume, instance=None):
-        if volume['status'] == "available":
-            msg = "already detached"
-            raise exception.InvalidVolume(reason=msg)
-
-        if volume['attach_status'] == 'detached':
-            msg = "Volume must be attached in order to detach."
-            raise exception.InvalidVolume(reason=msg)
-
-        if instance and not volume.get('attachments', {}).get(instance.uuid):
-            raise exception.VolumeUnattached(volume_id=volume['id'])
 
     def attach(self, context, volume_id, instance_uuid, mountpoint, mode='rw'):
         LOG.info('attaching volume %s', volume_id)
@@ -212,7 +193,7 @@ class API(object):
         volume['attach_time'] = timeutils.utcnow()
         volume['multiattach'] = True
         volume['attachments'] = {instance_uuid:
-                                 {'attachment_id': str(uuid.uuid4()),
+                                 {'attachment_id': uuids.fake3,
                                   'mountpoint': mountpoint}}
 
     def reset_fake_api(self, context):

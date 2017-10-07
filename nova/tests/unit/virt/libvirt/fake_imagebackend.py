@@ -14,13 +14,14 @@
 #    under the License.
 
 import collections
-import fixtures
 import functools
-import mock
 import os
-import six
+
+import fixtures
+import mock
 
 from nova.virt.libvirt import config
+from nova.virt.libvirt import driver
 from nova.virt.libvirt import imagebackend
 from nova.virt.libvirt import utils as libvirt_utils
 
@@ -49,6 +50,31 @@ class ImageBackendFixture(fixtures.Fixture):
 
     def setUp(self):
         super(ImageBackendFixture, self).setUp()
+
+        # Mock template functions passed to cache
+        self.mock_fetch_image = mock.create_autospec(libvirt_utils.fetch_image)
+        self.useFixture(fixtures.MonkeyPatch(
+            'nova.virt.libvirt.utils.fetch_image', self.mock_fetch_image))
+
+        self.mock_fetch_raw_image = \
+            mock.create_autospec(libvirt_utils.fetch_raw_image)
+        self.useFixture(fixtures.MonkeyPatch(
+            'nova.virt.libvirt.utils.fetch_raw_image',
+            self.mock_fetch_raw_image))
+
+        self.mock_create_ephemeral = \
+            mock.create_autospec(driver.LibvirtDriver._create_ephemeral)
+        self.useFixture(fixtures.MonkeyPatch(
+            'nova.virt.libvirt.driver.LibvirtDriver._create_ephemeral',
+            self.mock_create_ephemeral))
+
+        self.mock_create_swap = \
+            mock.create_autospec(driver.LibvirtDriver._create_swap)
+        self.useFixture(fixtures.MonkeyPatch(
+            'nova.virt.libvirt.driver.LibvirtDriver._create_swap',
+            self.mock_create_swap))
+
+        # Backend.backend creates all Image objects
         self.useFixture(fixtures.MonkeyPatch(
             'nova.virt.libvirt.imagebackend.Backend.backend',
             self._mock_backend))
@@ -60,7 +86,7 @@ class ImageBackendFixture(fixtures.Fixture):
         """
 
         # A disk was created iff either cache() or import_file() was called.
-        return {name: disk for name, disk in six.iteritems(self.disks)
+        return {name: disk for name, disk in self.disks.items()
                 if any([disk.cache.called, disk.import_file.called])}
 
     def _mock_disk(self):
@@ -82,7 +108,7 @@ class ImageBackendFixture(fixtures.Fixture):
 
         disk = mock.create_autospec(imagebackend.Image)
 
-        # NOTE(mdbooth): fake_cache and fake_import_file are for compatiblity
+        # NOTE(mdbooth): fake_cache and fake_import_file are for compatibility
         # with existing tests which test got_files and imported_files. They
         # should be removed when they have no remaining users.
         disk.cache.side_effect = self._fake_cache
@@ -138,7 +164,7 @@ class ImageBackendFixture(fixtures.Fixture):
             # Used directly by callers. These would have been set if called
             # the real constructor.
             setattr(disk, 'path', path)
-            setattr(disk, 'is_block_dev', False)
+            setattr(disk, 'is_block_dev', mock.sentinel.is_block_dev)
 
             # Used by tests. Note that image_init is a closure over image_type.
             setattr(disk, 'image_type', image_type)
@@ -157,6 +183,10 @@ class ImageBackendFixture(fixtures.Fixture):
         return image_init
 
     def _fake_cache(self, fetch_func, filename, size=None, *args, **kwargs):
+        # Execute the template function so we can test the arguments it was
+        # called with.
+        fetch_func(target=filename, *args, **kwargs)
+
         # For legacy tests which use got_files
         if self.got_files is not None:
             self.got_files.append({'filename': filename, 'size': size})
@@ -167,7 +197,8 @@ class ImageBackendFixture(fixtures.Fixture):
             self.imported_files.append((local_filename, remote_filename))
 
     def _fake_libvirt_info(self, mock_disk, disk_bus, disk_dev, device_type,
-                     cache_mode, extra_specs, hypervisor_version):
+                           cache_mode, extra_specs, hypervisor_version,
+                           disk_unit=None):
         # For tests in test_virt_drivers which expect libvirt_info to be
         # functional
         info = config.LibvirtConfigGuestDisk()

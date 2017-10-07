@@ -47,8 +47,9 @@ class SchedulerClient(object):
             'nova.scheduler.client.report.SchedulerReportClient'))
 
     @utils.retry_select_destinations
-    def select_destinations(self, context, spec_obj):
-        return self.queryclient.select_destinations(context, spec_obj)
+    def select_destinations(self, context, spec_obj, instance_uuids):
+        return self.queryclient.select_destinations(context, spec_obj,
+                instance_uuids)
 
     def update_aggregates(self, context, aggregates):
         self.queryclient.update_aggregates(context, aggregates)
@@ -56,8 +57,15 @@ class SchedulerClient(object):
     def delete_aggregate(self, context, aggregate):
         self.queryclient.delete_aggregate(context, aggregate)
 
-    def update_resource_stats(self, compute_node):
-        self.reportclient.update_resource_stats(compute_node)
+    def set_inventory_for_provider(self, rp_uuid, rp_name, inv_data):
+        self.reportclient.set_inventory_for_provider(
+            rp_uuid,
+            rp_name,
+            inv_data,
+        )
+
+    def update_compute_node(self, compute_node):
+        self.reportclient.update_compute_node(compute_node)
 
     def update_instance_info(self, context, host_name, instance_info):
         self.queryclient.update_instance_info(context, host_name,

@@ -85,12 +85,20 @@ class NovaProxyRequestHandlerBase(object):
             # NoVNC uses it's own convention that forward token
             # from the request to a cookie header, we should check
             # also for this behavior
-            hcookie = self.headers.getheader('cookie')
+            hcookie = self.headers.get('cookie')
             if hcookie:
                 cookie = Cookie.SimpleCookie()
-                cookie.load(hcookie)
-                if 'token' in cookie:
-                    token = cookie['token'].value
+                for hcookie_part in hcookie.split(';'):
+                    hcookie_part = hcookie_part.lstrip()
+                    try:
+                        cookie.load(hcookie_part)
+                    except Cookie.CookieError:
+                        # NOTE(stgleb): Do not print out cookie content
+                        # for security reasons.
+                        LOG.warning('Found malformed cookie')
+                    else:
+                        if 'token' in cookie:
+                            token = cookie['token'].value
 
         ctxt = context.get_admin_context()
         rpcapi = consoleauth_rpcapi.ConsoleAuthAPI()
@@ -100,16 +108,16 @@ class NovaProxyRequestHandlerBase(object):
             raise exception.InvalidToken(token=token)
 
         # Verify Origin
-        expected_origin_hostname = self.headers.getheader('Host')
+        expected_origin_hostname = self.headers.get('Host')
         if ':' in expected_origin_hostname:
             e = expected_origin_hostname
             if '[' in e and ']' in e:
                 expected_origin_hostname = e.split(']')[0][1:]
             else:
                 expected_origin_hostname = e.split(':')[0]
-        expected_origin_hostnames = CONF.console_allowed_origins
+        expected_origin_hostnames = CONF.console.allowed_origins
         expected_origin_hostnames.append(expected_origin_hostname)
-        origin_url = self.headers.getheader('Origin')
+        origin_url = self.headers.get('Origin')
         # missing origin header indicates non-browser client which is OK
         if origin_url is not None:
             origin = urlparse.urlparse(origin_url)
@@ -138,12 +146,15 @@ class NovaProxyRequestHandlerBase(object):
         if connect_info.get('internal_access_path'):
             tsock.send("CONNECT %s HTTP/1.1\r\n\r\n" %
                         connect_info['internal_access_path'])
+            end_token = "\r\n\r\n"
             while True:
                 data = tsock.recv(4096, socket.MSG_PEEK)
-                if data.find("\r\n\r\n") != -1:
+                token_loc = data.find(end_token)
+                if token_loc != -1:
                     if data.split("\r\n")[0].find("200") == -1:
                         raise exception.InvalidConnectionInfo()
-                    tsock.recv(len(data))
+                    # remove the response from recv buffer
+                    tsock.recv(token_loc + len(end_token))
                     break
 
         # Start proxying
@@ -153,7 +164,8 @@ class NovaProxyRequestHandlerBase(object):
             if tsock:
                 tsock.shutdown(socket.SHUT_RDWR)
                 tsock.close()
-                self.vmsg(_("%(host)s:%(port)s: Target closed") %
+                self.vmsg(_("%(host)s:%(port)s: "
+                          "Websocket client or target closed") %
                           {'host': host, 'port': port})
             raise
 

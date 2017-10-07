@@ -13,13 +13,13 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 import six
-import uuid
 
 import mock
 from neutronclient.common import exceptions as n_exc
 from oslo_config import cfg
 from oslo_serialization import jsonutils
 from oslo_utils import encodeutils
+from oslo_utils import uuidutils
 import webob
 
 from nova.api.openstack.compute import security_groups
@@ -55,6 +55,8 @@ class TestNeutronSecurityGroupsTestCase(test.TestCase):
 class TestNeutronSecurityGroupsV21(
         test_security_groups.TestSecurityGroupsV21,
         TestNeutronSecurityGroupsTestCase):
+    # Used to override set config in the base test in test_security_groups.
+    use_neutron = True
 
     def _create_sg_template(self, **kwargs):
         sg = test_security_groups.security_group_request_template(**kwargs)
@@ -128,6 +130,14 @@ class TestNeutronSecurityGroupsV21(
         # Enforced by Neutron server.
         pass
 
+    def test_create_security_group_over_quota_during_recheck(self):
+        # Enforced by Neutron server.
+        pass
+
+    def test_create_security_group_no_quota_recheck(self):
+        # Enforced by Neutron server.
+        pass
+
     def test_update_security_group(self):
         # Enforced by Neutron server.
         pass
@@ -137,6 +147,13 @@ class TestNeutronSecurityGroupsV21(
         req = fakes.HTTPRequest.blank('/v2/fake/os-security-groups')
         list_dict = self.controller.index(req)
         self.assertEqual(len(list_dict['security_groups']), 2)
+
+    def test_get_security_group_list_offset_and_limit(self):
+        path = '/v2/fake/os-security-groups?offset=1&limit=1'
+        self._create_sg_template().get('security_group')
+        req = fakes.HTTPRequest.blank(path)
+        list_dict = self.controller.index(req)
+        self.assertEqual(len(list_dict['security_groups']), 1)
 
     def test_get_security_group_list_all_tenants(self):
         pass
@@ -189,7 +206,7 @@ class TestNeutronSecurityGroupsV21(
         neutron = neutron_api.API()
         with mock.patch.object(nova.db, 'instance_get_by_uuid',
                                return_value=db_inst):
-            neutron.allocate_for_instance(_context, instance,
+            neutron.allocate_for_instance(_context, instance, False, None,
                                           security_groups=[sg['id']])
 
         req = fakes.HTTPRequest.blank('/v2/fake/os-security-groups/%s'
@@ -474,12 +491,21 @@ class _TestNeutronSecurityGroupRulesBase(object):
         # Enforced by neutron
         pass
 
+    def test_create_rule_over_quota_during_recheck(self):
+        # Enforced by neutron
+        pass
+
+    def test_create_rule_no_quota_recheck(self):
+        # Enforced by neutron
+        pass
+
 
 class TestNeutronSecurityGroupRulesV21(
         _TestNeutronSecurityGroupRulesBase,
         test_security_groups.TestSecurityGroupRulesV21,
         TestNeutronSecurityGroupRulesTestCase):
-    pass
+    # Used to override set config in the base test in test_security_groups.
+    use_neutron = True
 
 
 class TestNeutronSecurityGroupsOutputTest(TestNeutronSecurityGroupsTestCase):
@@ -510,8 +536,7 @@ class TestNeutronSecurityGroupsOutputTest(TestNeutronSecurityGroupsTestCase):
 
         # NOTE: This 'os-security-groups' is for enabling security_groups
         #       attribute on response body.
-        res = req.get_response(fakes.wsgi_app_v21(
-            init_only=('servers', 'os-security-groups')))
+        res = req.get_response(fakes.wsgi_app_v21())
         return res
 
     def _encode_body(self, body):
@@ -631,7 +656,7 @@ class MockClient(object):
         if not len(self._fake_security_groups):
             ret = {'name': 'default', 'description': 'default',
                    'tenant_id': 'fake_tenant', 'security_group_rules': [],
-                   'id': str(uuid.uuid4())}
+                   'id': uuidutils.generate_uuid()}
             self._fake_security_groups[ret['id']] = ret
 
     def _reset(self):
@@ -656,7 +681,7 @@ class MockClient(object):
             raise n_exc.NeutronClientException(message=msg, status_code=401)
         ret = {'name': s.get('name'), 'description': s.get('description'),
                'tenant_id': 'fake', 'security_group_rules': [],
-               'id': str(uuid.uuid4())}
+               'id': uuidutils.generate_uuid()}
 
         self._fake_security_groups[ret['id']] = ret
         return {'security_group': ret}
@@ -666,7 +691,7 @@ class MockClient(object):
         ret = {'status': 'ACTIVE', 'subnets': [], 'name': n.get('name'),
                'admin_state_up': n.get('admin_state_up', True),
                'tenant_id': 'fake_tenant',
-               'id': str(uuid.uuid4())}
+               'id': uuidutils.generate_uuid()}
         if 'port_security_enabled' in n:
             ret['port_security_enabled'] = n['port_security_enabled']
         self._fake_networks[ret['id']] = ret
@@ -681,7 +706,7 @@ class MockClient(object):
             raise n_exc.NeutronClientException(message=msg, status_code=404)
         ret = {'name': s.get('name'), 'network_id': s.get('network_id'),
                'tenant_id': 'fake_tenant', 'cidr': s.get('cidr'),
-               'id': str(uuid.uuid4()), 'gateway_ip': '10.0.0.1'}
+               'id': uuidutils.generate_uuid(), 'gateway_ip': '10.0.0.1'}
         net['subnets'].append(ret['id'])
         self._fake_networks[net['id']] = net
         self._fake_subnets[ret['id']] = ret
@@ -689,9 +714,9 @@ class MockClient(object):
 
     def create_port(self, body):
         p = body.get('port')
-        ret = {'status': 'ACTIVE', 'id': str(uuid.uuid4()),
+        ret = {'status': 'ACTIVE', 'id': uuidutils.generate_uuid(),
                'mac_address': p.get('mac_address', 'fa:16:3e:b8:f5:fb'),
-               'device_id': p.get('device_id', str(uuid.uuid4())),
+               'device_id': p.get('device_id', uuidutils.generate_uuid()),
                'admin_state_up': p.get('admin_state_up', True),
                'security_groups': p.get('security_groups', []),
                'network_id': p.get('network_id'),
@@ -731,7 +756,7 @@ class MockClient(object):
         ret = {}
         for field in fields:
             ret[field] = r.get(field)
-        ret['id'] = str(uuid.uuid4())
+        ret['id'] = uuidutils.generate_uuid()
         self._fake_security_group_rules[ret['id']] = ret
         return {'security_group_rules': [ret]}
 

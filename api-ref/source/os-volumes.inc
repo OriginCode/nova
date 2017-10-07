@@ -8,9 +8,9 @@
 
    These APIs are proxy calls to the Volume service. Nova has
    deprecated all the proxy APIs and users should use the native APIs
-   instead. These will fail with a 404 after microversion 2.35.
+   instead. These will fail with a 404 starting from microversion 2.36.
    See: `Relevant Volume APIs
-   <http://developer.openstack.org/api-ref-blockstorage-v2.html#volumes-v2-volumes>`__.
+   <https://developer.openstack.org/api-ref/block-storage/v3/index.html>`__.
 
 Manages volumes and snapshots for use with the Compute API.
 Lists, shows details, creates, and deletes volumes and snapshots.
@@ -25,6 +25,14 @@ Lists the volumes associated with the account.
 Normal response codes: 200
 
 Error response codes: unauthorized(401), forbidden(403)
+
+Request
+-------
+
+.. rest_parameters:: parameters.yaml
+
+  - limit: limit_simple
+  - offset: offset_simple
 
 Response
 --------
@@ -42,7 +50,7 @@ Response
   - displayDescription: display_description
   - displayName: display_name
   - id: volume_id_resp
-  - metadata: metadata_set_required
+  - metadata: metadata_object 
   - size: size
   - snapshotId: snapshot_id
   - status: volume_status
@@ -102,7 +110,7 @@ Response
   - displayName: display_name
   - displayDescription: display_description
   - id: volume_id_resp
-  - metadata: metadata_set_required
+  - metadata: metadata_object 
   - size: size
   - snapshotId: snapshot_id
   - status: volume_status
@@ -126,6 +134,14 @@ Normal response codes: 200
 
 Error response codes: unauthorized(401), forbidden(403)
 
+Request
+-------
+
+.. rest_parameters:: parameters.yaml
+
+  - limit: limit_simple
+  - offset: offset_simple
+
 Response
 --------
 
@@ -142,7 +158,7 @@ Response
   - displayName: display_name
   - displayDescription: display_description
   - id: volume_id_resp
-  - metadata: metadata_set_required
+  - metadata: metadata_object 
   - size: size
   - snapshotId: snapshot_id
   - status: volume_status
@@ -189,7 +205,7 @@ Response
   - displayName: display_name
   - displayDescription: display_description
   - id: volume_id_resp
-  - metadata: metadata_set_required
+  - metadata: metadata_object 
   - size: size
   - snapshotId: snapshot_id
   - status: volume_status
@@ -237,6 +253,14 @@ Normal response codes: 200
 
 Error response codes: unauthorized(401), forbidden(403)
 
+Request
+-------
+
+.. rest_parameters:: parameters.yaml
+
+  - limit: limit_simple
+  - offset: offset_simple
+
 Response
 --------
 
@@ -245,8 +269,8 @@ Response
   - snapshots: snapshots
   - id: snapshot_id
   - createdAt: created
-  - displayName: display_name
-  - displayDescription: display_description
+  - displayName: snapshot_name
+  - displayDescription: snapshot_description
   - size: size
   - status: snapshot_status
   - volumeId: volume_id
@@ -276,8 +300,8 @@ Request
 
   - snapshot: snapshot
   - volume_id: volume_id
-  - display_description: display_description_optional
-  - display_name: display_name_optional
+  - display_description: snapshot_description_optional
+  - display_name: snapshot_name_optional
   - force: force_snapshot
 
 **Example Create Snapshot**
@@ -293,8 +317,8 @@ Response
   - snapshot: snapshot
   - id: snapshot_id
   - createdAt: created
-  - displayName: display_name
-  - displayDescription: display_description
+  - displayName: snapshot_name
+  - displayDescription: snapshot_description
   - volumeId: volume_id
   - size: size
   - status: snapshot_status
@@ -315,6 +339,14 @@ Normal response codes: 200
 
 Error response codes: unauthorized(401), forbidden(403)
 
+Request
+-------
+
+.. rest_parameters:: parameters.yaml
+
+  - limit: limit_simple
+  - offset: offset_simple
+
 Response
 --------
 
@@ -323,8 +355,8 @@ Response
   - snapshots: snapshots
   - id: snapshot_id
   - createdAt: created
-  - displayName: display_name
-  - displayDescription: display_description
+  - displayName: snapshot_name
+  - displayDescription: snapshot_description
   - volumeId: volume_id
   - size: size
   - status: snapshot_status
@@ -362,8 +394,8 @@ Response
   - snapshot: snapshot
   - id: snapshot_id
   - createdAt: created
-  - displayName: display_name
-  - displayDescription: display_description
+  - displayName: snapshot_name
+  - displayDescription: snapshot_description
   - volumeId: volume_id
   - size: size
   - status: snapshot_status

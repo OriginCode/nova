@@ -82,30 +82,6 @@ class HackingTestCase(test.NoDBTestCase):
             "'nova.virt.libvirt.driver', group='libvirt')",
             "./nova/virt/libvirt/volume.py"))
 
-    def test_no_vi_headers(self):
-
-        lines = ['Line 1\n', 'Line 2\n', 'Line 3\n', 'Line 4\n', 'Line 5\n',
-                 'Line 6\n', 'Line 7\n', 'Line 8\n', 'Line 9\n', 'Line 10\n',
-                 'Line 11\n', 'Line 12\n', 'Line 13\n', 'Line14\n', 'Line15\n']
-
-        self.assertIsNone(checks.no_vi_headers(
-            "Test string foo", 1, lines))
-        self.assertEqual(len(list(checks.no_vi_headers(
-            "# vim: et tabstop=4 shiftwidth=4 softtabstop=4",
-            2, lines))), 2)
-        self.assertIsNone(checks.no_vi_headers(
-            "# vim: et tabstop=4 shiftwidth=4 softtabstop=4",
-            6, lines))
-        self.assertIsNone(checks.no_vi_headers(
-            "# vim: et tabstop=4 shiftwidth=4 softtabstop=4",
-            9, lines))
-        self.assertEqual(len(list(checks.no_vi_headers(
-            "# vim: et tabstop=4 shiftwidth=4 softtabstop=4",
-            14, lines))), 2)
-        self.assertIsNone(checks.no_vi_headers(
-            "Test end string for vi",
-            15, lines))
-
     def test_assert_true_instance(self):
         self.assertEqual(len(list(checks.assert_true_instance(
             "self.assertTrue(isinstance(e, "
@@ -158,19 +134,7 @@ class HackingTestCase(test.NoDBTestCase):
         self.assertEqual(len(list(checks.assert_equal_in(
             "self.assertEqual(False, any(a==1 for a in b))"))), 0)
 
-    def test_assert_equal_none(self):
-        self.assertEqual(len(list(checks.assert_equal_none(
-            "self.assertEqual(A, None)"))), 1)
-
-        self.assertEqual(len(list(checks.assert_equal_none(
-            "self.assertEqual(None, A)"))), 1)
-
-        self.assertEqual(
-            len(list(checks.assert_equal_none("self.assertIsNone()"))), 0)
-
     def test_assert_true_or_false_with_in_or_not_in(self):
-        self.assertEqual(len(list(checks.assert_equal_none(
-            "self.assertEqual(A, None)"))), 1)
         self.assertEqual(len(list(checks.assert_true_or_false_with_in(
             "self.assertTrue(A in B)"))), 1)
 
@@ -194,9 +158,6 @@ class HackingTestCase(test.NoDBTestCase):
 
         self.assertEqual(len(list(checks.assert_true_or_false_with_in(
             "self.assertFalse(A not in B, 'some message')"))), 1)
-
-        self.assertEqual(len(list(checks.assert_true_or_false_with_in(
-            "self.assertTrue(A in 'some string with spaces')"))), 1)
 
         self.assertEqual(len(list(checks.assert_true_or_false_with_in(
             "self.assertTrue(A in 'some string with spaces')"))), 1)
@@ -246,32 +207,6 @@ class HackingTestCase(test.NoDBTestCase):
         # Shouldn't fail since not in nova/tests/
         self.assertEqual(len(list(checks.no_setting_conf_directly_in_tests(
             "CONF.option = 1", "nova/compute/foo.py"))), 0)
-
-    def test_log_translations(self):
-        logs = ['audit', 'error', 'info', 'warning', 'critical', 'warn',
-                'exception']
-        levels = ['_LI', '_LW', '_LE', '_LC']
-        debug = "LOG.debug('OK')"
-        self.assertEqual(
-            0, len(list(checks.validate_log_translations(debug, debug, 'f'))))
-        for log in logs:
-            bad = 'LOG.%s("Bad")' % log
-            self.assertEqual(1,
-                len(list(
-                    checks.validate_log_translations(bad, bad, 'f'))))
-            ok = "LOG.%s('OK')    # noqa" % log
-            self.assertEqual(0,
-                len(list(
-                    checks.validate_log_translations(ok, ok, 'f'))))
-            ok = "LOG.%s(variable)" % log
-            self.assertEqual(0,
-                len(list(
-                    checks.validate_log_translations(ok, ok, 'f'))))
-            for level in levels:
-                ok = "LOG.%s(%s('OK'))" % (log, level)
-                self.assertEqual(0,
-                    len(list(
-                        checks.validate_log_translations(ok, ok, 'f'))))
 
     def test_no_mutable_default_args(self):
         self.assertEqual(1, len(list(checks.no_mutable_default_args(
@@ -343,7 +278,11 @@ class HackingTestCase(test.NoDBTestCase):
         lines = textwrap.dedent(code).strip().splitlines(True)
 
         checker = pep8.Checker(filename=filename, lines=lines)
-        checker.check_all()
+        # NOTE(sdague): the standard reporter has printing to stdout
+        # as a normal part of check_all, which bleeds through to the
+        # test output stream in an unhelpful way. This blocks that printing.
+        with mock.patch('pep8.StandardReport.get_file_results'):
+            checker.check_all()
         checker.report._deferred_print.sort()
         return checker.report._deferred_print
 
@@ -613,17 +552,21 @@ class HackingTestCase(test.NoDBTestCase):
         self._assert_has_no_errors(code,
                                    checks.check_config_option_in_central_place,
                                    filename="nova/conf/serial_console.py")
-        # option at a location which is not in scope right now
-        # TODO(markus_z): This is temporary until all config options are
-        # moved to /nova/conf
-        self._assert_has_no_errors(code,
-                                   checks.check_config_option_in_central_place,
-                                   filename="nova/dummy/non_existent.py")
         # option at the wrong place in the tree
         self._assert_has_errors(code,
                                 checks.check_config_option_in_central_place,
                                 filename="nova/cmd/serialproxy.py",
                                 expected_errors=errors)
+
+        # option at a location which is marked as an exception
+        # TODO(macsz) remove testing exceptions as they are removed from
+        # check_config_option_in_central_place
+        self._assert_has_no_errors(code,
+                                   checks.check_config_option_in_central_place,
+                                   filename="nova/cmd/manage.py")
+        self._assert_has_no_errors(code,
+                                   checks.check_config_option_in_central_place,
+                                   filename="nova/tests/dummy_test.py")
 
     def test_check_doubled_words(self):
         errors = [(1, 0, "N343")]
@@ -749,3 +692,93 @@ class HackingTestCase(test.NoDBTestCase):
         foo.enforce()
         """
         self._assert_has_no_errors(code, checks.check_policy_enforce)
+
+    def test_check_python3_xrange(self):
+        func = checks.check_python3_xrange
+        self.assertEqual(1, len(list(func('for i in xrange(10)'))))
+        self.assertEqual(1, len(list(func('for i in xrange    (10)'))))
+        self.assertEqual(0, len(list(func('for i in range(10)'))))
+        self.assertEqual(0, len(list(func('for i in six.moves.range(10)'))))
+
+    def test_log_context(self):
+        code = """
+                  LOG.info(_LI("Rebooting instance"),
+                            context=context, instance=instance)
+               """
+        errors = [(1, 0, 'N353')]
+        self._assert_has_errors(code, checks.check_context_log,
+                                expected_errors=errors)
+        code = """
+                  LOG.info(_LI("Rebooting instance"),
+                            context=admin_context, instance=instance)
+               """
+        errors = [(1, 0, 'N353')]
+        self._assert_has_errors(code, checks.check_context_log,
+                                expected_errors=errors)
+        code = """
+                  LOG.info(_LI("Rebooting instance"),
+                            instance=instance)
+               """
+        self._assert_has_no_errors(code, checks.check_context_log)
+
+    def test_no_assert_equal_true_false(self):
+        code = """
+                  self.assertEqual(context_is_admin, True)
+                  self.assertEqual(context_is_admin, False)
+                  self.assertEqual(True, context_is_admin)
+                  self.assertEqual(False, context_is_admin)
+                  self.assertNotEqual(context_is_admin, True)
+                  self.assertNotEqual(context_is_admin, False)
+                  self.assertNotEqual(True, context_is_admin)
+                  self.assertNotEqual(False, context_is_admin)
+               """
+        errors = [(1, 0, 'N355'), (2, 0, 'N355'), (3, 0, 'N355'),
+                  (4, 0, 'N355'), (5, 0, 'N355'), (6, 0, 'N355'),
+                  (7, 0, 'N355'), (8, 0, 'N355')]
+        self._assert_has_errors(code, checks.no_assert_equal_true_false,
+                                expected_errors=errors)
+        code = """
+                  self.assertEqual(context_is_admin, stuff)
+                  self.assertNotEqual(context_is_admin, stuff)
+               """
+        self._assert_has_no_errors(code, checks.no_assert_equal_true_false)
+
+    def test_no_assert_true_false_is_not(self):
+        code = """
+                  self.assertTrue(test is None)
+                  self.assertTrue(False is my_variable)
+                  self.assertFalse(None is test)
+                  self.assertFalse(my_variable is False)
+               """
+        errors = [(1, 0, 'N356'), (2, 0, 'N356'), (3, 0, 'N356'),
+                  (4, 0, 'N356')]
+        self._assert_has_errors(code, checks.no_assert_true_false_is_not,
+                                expected_errors=errors)
+
+    def test_check_uuid4(self):
+        code = """
+                  fake_uuid = uuid.uuid4()
+               """
+        errors = [(1, 0, 'N357')]
+        self._assert_has_errors(code, checks.check_uuid4,
+                                expected_errors=errors)
+        code = """
+                  hex_uuid = uuid.uuid4().hex
+                  int_uuid = uuid.uuid4().int
+                  urn_uuid = uuid.uuid4().urn
+                  variant_uuid = uuid.uuid4().variant
+                  version_uuid = uuid.uuid4().version
+               """
+        self._assert_has_no_errors(code, checks.check_uuid4)
+
+    def test_return_followed_by_space(self):
+        self.assertEqual(1, len(list(checks.return_followed_by_space(
+            "return(42)"))))
+        self.assertEqual(1, len(list(checks.return_followed_by_space(
+            "return(' some string ')"))))
+        self.assertEqual(0, len(list(checks.return_followed_by_space(
+            "return 42"))))
+        self.assertEqual(0, len(list(checks.return_followed_by_space(
+            "return ' some string '"))))
+        self.assertEqual(0, len(list(checks.return_followed_by_space(
+            "return (int('40') + 2)"))))

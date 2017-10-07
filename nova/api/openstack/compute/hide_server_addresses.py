@@ -15,7 +15,6 @@
 
 """Extension for hiding server addresses in certain states."""
 
-from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
 from nova.compute import vm_states
 import nova.conf
@@ -24,13 +23,11 @@ from nova.policies import hide_server_addresses as hsa_policies
 
 CONF = nova.conf.CONF
 
-ALIAS = 'os-hide-server-addresses'
-
 
 class Controller(wsgi.Controller):
     def __init__(self, *args, **kwargs):
         super(Controller, self).__init__(*args, **kwargs)
-        hidden_states = CONF.osapi_hide_server_address_states
+        hidden_states = CONF.api.hide_server_address_states
 
         # NOTE(jkoelker) _ is not considered uppercase ;)
         valid_vm_states = [getattr(vm_states, state)
@@ -66,17 +63,3 @@ class Controller(wsgi.Controller):
             if 'addresses' in server:
                 instance = req.get_db_instance(server['id'])
                 self._perhaps_hide_addresses(instance, server)
-
-
-class HideServerAddresses(extensions.V21APIExtensionBase):
-    """Support hiding server addresses in certain states."""
-
-    name = 'HideServerAddresses'
-    alias = ALIAS
-    version = 1
-
-    def get_controller_extensions(self):
-        return [extensions.ControllerExtension(self, 'servers', Controller())]
-
-    def get_resources(self):
-        return []

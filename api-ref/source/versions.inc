@@ -9,12 +9,18 @@ supports versioning. There are two kinds of versions in Nova.
 
 - ''major versions'', which have dedicated urls
 - ''microversions'', which can be requested through the use of the
-  ``X-OpenStack-Nova-API-Version`` header or since microversion 2.27
+  ``X-OpenStack-Nova-API-Version`` header, or since microversion 2.27
   the ``OpenStack-API-Version`` header may also be used.
 
-For more detail about Microversion, please reference:
+For more details about Microversions, please reference:
 `Microversions
 <http://developer.openstack.org/api-guide/compute/microversions.html>`_
+
+.. note:: The maximum microversion supported by each release varies.
+  Please reference:
+  `API Microversion History
+  <http://docs.openstack.org/developer/nova/api_microversion_history.html>`__
+  for API microversion history details.
 
 The Version APIs work differently from other APIs as they *do not*
 require authentication.
@@ -38,15 +44,12 @@ Response
 
   - versions: versions
   - id: version_id
-  - status: version_status
   - links: links
-  - version: version_max
   - min_version: version_min
+  - status: version_status
+  - updated: updated_version
+  - version: version_max
 
-.. note::
-
-   The ``updated`` parameter in the response is vestigial and provides
-   no useful information.
 
 Response Example
 ----------------
@@ -65,7 +68,7 @@ Show Details of Specific API Version
 
 .. rest_method:: GET /{api_version}
 
-This gets the details of a specific API at it's root. Nearly all this
+This gets the details of a specific API at its root. Nearly all this
 information exists at the API root, so this is mostly a redundant
 operation.
 
@@ -88,16 +91,12 @@ Response
 
   - version: version
   - id: version_id
-  - status: version_status
   - links: links
-  - version: version_max
+  - media-types: media_types
   - min_version: version_min
-
-.. note::
-
-   The ``updated`` and ``media-types`` parameters in the response are
-   vestigial and provide no useful information. They will probably be
-   deprecated and removed in the future.
+  - status: version_status
+  - updated: updated_version
+  - version: version_max
 
 
 Response Example

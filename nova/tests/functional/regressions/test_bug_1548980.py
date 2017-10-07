@@ -14,8 +14,6 @@
 
 import time
 
-from oslo_config import cfg
-
 import nova.scheduler.utils
 import nova.servicegroup
 from nova import test
@@ -25,8 +23,6 @@ from nova.tests.unit import cast_as_call
 import nova.tests.unit.image.fake
 from nova.tests.unit import policy_fixture
 
-CONF = cfg.CONF
-
 
 class TestServerGet(test.TestCase):
     REQUIRES_LOCKING = True
@@ -34,6 +30,7 @@ class TestServerGet(test.TestCase):
     def setUp(self):
         super(TestServerGet, self).setUp()
         self.useFixture(policy_fixture.RealPolicyFixture())
+        self.useFixture(nova_fixtures.NeutronFixture(self))
         api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
             api_version='v2.1'))
 
@@ -48,14 +45,13 @@ class TestServerGet(test.TestCase):
         # the image fake backend needed for image discovery
         nova.tests.unit.image.fake.stub_out_image_service(self)
 
-        self.start_service('conductor', manager=CONF.conductor.manager)
-        self.flags(scheduler_driver='chance_scheduler')
+        self.start_service('conductor')
+        self.flags(driver='chance_scheduler', group='scheduler')
         self.start_service('scheduler')
-        self.network = self.start_service('network')
         self.compute = self.start_service('compute')
         self.consoleauth = self.start_service('consoleauth')
 
-        self.useFixture(cast_as_call.CastAsCall(self.stubs))
+        self.useFixture(cast_as_call.CastAsCall(self))
         self.addCleanup(nova.tests.unit.image.fake.FakeImageService_reset)
 
         self.image_id = self.api.get_images()[0]['id']

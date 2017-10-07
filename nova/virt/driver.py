@@ -27,23 +27,11 @@ from oslo_utils import importutils
 import six
 
 import nova.conf
-from nova.i18n import _, _LE, _LI
-from nova import utils
+from nova.i18n import _
 from nova.virt import event as virtevent
 
 CONF = nova.conf.CONF
 LOG = logging.getLogger(__name__)
-
-
-def driver_dict_from_config(named_driver_config, *args, **kwargs):
-    driver_registry = dict()
-
-    for driver_str in named_driver_config:
-        driver_type, _sep, driver = driver_str.partition('=')
-        driver_class = importutils.import_class(driver)
-        driver_registry[driver_type] = driver_class(*args, **kwargs)
-
-    return driver_registry
 
 
 def get_block_device_info(instance, block_device_mapping):
@@ -139,6 +127,9 @@ class ComputeDriver(object):
         "supports_migrate_to_same_host": False,
         "supports_attach_interface": False,
         "supports_device_tagging": False,
+        "supports_tagged_attach_interface": False,
+        "supports_tagged_attach_volume": False,
+        "supports_extend_volume": False,
     }
 
     def __init__(self, virtapi):
@@ -159,11 +150,10 @@ class ComputeDriver(object):
         pass
 
     def get_info(self, instance):
-        """Get the current status of an instance, by name (not ID!)
+        """Get the current status of an instance.
 
         :param instance: nova.objects.instance.Instance object
-
-        Returns a InstanceInfo object
+        :returns: An InstanceInfo object
         """
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
@@ -214,7 +204,8 @@ class ComputeDriver(object):
         :returns: Dict of estimated overhead values.
         """
         return {'memory_mb': 0,
-                'disk_gb': 0}
+                'disk_gb': 0,
+                'vcpus': 0}
 
     def list_instances(self):
         """Return the names of all the instances known to the virtualization
@@ -296,7 +287,7 @@ class ComputeDriver(object):
         raise NotImplementedError()
 
     def destroy(self, context, instance, network_info, block_device_info=None,
-                destroy_disks=True, migrate_data=None):
+                destroy_disks=True):
         """Destroy the specified instance from the Hypervisor.
 
         If the instance is not found (for example if networking failed), this
@@ -309,7 +300,6 @@ class ComputeDriver(object):
         :param block_device_info: Information about block devices that should
                                   be detached from the instance.
         :param destroy_disks: Indicates if disks should be destroyed
-        :param migrate_data: implementation specific params
         """
         raise NotImplementedError()
 
@@ -367,7 +357,7 @@ class ComputeDriver(object):
         :param context: security context
         :param instance: nova.objects.instance.Instance
 
-        :returns an instance of console.type.ConsoleVNC
+        :returns: an instance of console.type.ConsoleVNC
         """
         raise NotImplementedError()
 
@@ -377,7 +367,7 @@ class ComputeDriver(object):
         :param context: security context
         :param instance: nova.objects.instance.Instance
 
-        :returns an instance of console.type.ConsoleSpice
+        :returns: an instance of console.type.ConsoleSpice
         """
         raise NotImplementedError()
 
@@ -387,7 +377,7 @@ class ComputeDriver(object):
         :param context: security context
         :param instance: nova.objects.instance.Instance
 
-        :returns an instance of console.type.ConsoleRDP
+        :returns: an instance of console.type.ConsoleRDP
         """
         raise NotImplementedError()
 
@@ -397,7 +387,7 @@ class ComputeDriver(object):
         :param context: security context
         :param instance: nova.objects.instance.Instance
 
-        :returns an instance of console.type.ConsoleSerial
+        :returns: an instance of console.type.ConsoleSerial
         """
         raise NotImplementedError()
 
@@ -451,7 +441,7 @@ class ComputeDriver(object):
         raise NotImplementedError()
 
     def get_host_ip_addr(self):
-        """Retrieves the IP address of the dom0
+        """Retrieves the IP address of the host running compute service
         """
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
@@ -489,16 +479,29 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
-    def attach_interface(self, instance, image_meta, vif):
+    def extend_volume(self, connection_info, instance):
+        """Extend the disk attached to the instance.
+
+        :param dict connection_info:
+            The connection for the extended volume.
+        :param nova.objects.instance.Instance instance:
+            The instance whose volume gets extended.
+
+        :return: None
+        """
+        raise NotImplementedError()
+
+    def attach_interface(self, context, instance, image_meta, vif):
         """Use hotplug to add a network interface to a running instance.
 
         The counter action to this is :func:`detach_interface`.
 
+        :param context: The request context.
         :param nova.objects.instance.Instance instance:
             The instance which will get an additional network interface.
         :param nova.objects.ImageMeta image_meta:
             The metadata of the image of the instance.
-        :param nova.network.model.NetworkInfo vif:
+        :param nova.network.model.VIF vif:
             The object which has the information about the interface to attach.
 
         :raise nova.exception.NovaException: If the attach fails.
@@ -507,14 +510,15 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
-    def detach_interface(self, instance, vif):
+    def detach_interface(self, context, instance, vif):
         """Use hotunplug to remove a network interface from a running instance.
 
         The counter action to this is :func:`attach_interface`.
 
+        :param context: The request context.
         :param nova.objects.instance.Instance instance:
             The instance which gets a network interface removed.
-        :param nova.network.model.NetworkInfo vif:
+        :param nova.network.model.VIF vif:
             The object which has the information about the interface to detach.
 
         :raise nova.exception.NovaException: If the detach fails.
@@ -557,6 +561,12 @@ class ComputeDriver(object):
         :param instance: nova.objects.instance.Instance
         :param image_id: Reference to a pre-created image that will
                          hold the snapshot.
+        :param update_task_state: Callback function to update the task_state
+            on the instance while the snapshot operation progresses. The
+            function takes a task_state argument and an optional
+            expected_task_state kwarg which defaults to
+            nova.compute.task_states.IMAGE_SNAPSHOT. See
+            nova.objects.instance.Instance.save for expected_task_state usage.
         """
         raise NotImplementedError()
 
@@ -588,12 +598,11 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
-    def confirm_migration(self, migration, instance, network_info):
+    def confirm_migration(self, context, migration, instance, network_info):
         """Confirms a resize/migration, destroying the source VM.
 
         :param instance: nova.objects.instance.Instance
         """
-        # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
     def finish_revert_migration(self, context, instance, network_info,
@@ -775,6 +784,12 @@ class ComputeDriver(object):
             soft-deleted data.
 
         :return: None
+        """
+        raise NotImplementedError()
+
+    def get_inventory(self, nodename):
+        """Return a dict, keyed by resource class, of inventory information for
+        the supplied node.
         """
         raise NotImplementedError()
 
@@ -1118,7 +1133,7 @@ class ComputeDriver(object):
             ""startup", "shutdown" and "reboot".
 
         :return: The result of the power action
-        :rtype: : str
+        :rtype: str
         """
 
         raise NotImplementedError()
@@ -1158,8 +1173,7 @@ class ComputeDriver(object):
         raise NotImplementedError()
 
     def get_host_uptime(self):
-        """Returns the result of calling the Linux command `uptime` on this
-        host.
+        """Returns the result of the time since start up of this hypervisor.
 
         :return: A text which contains the uptime of this host since the
                  last boot.
@@ -1246,6 +1260,8 @@ class ComputeDriver(object):
         """Does the driver want networks deallocated on reschedule?"""
         return False
 
+    # NOTE(vsaienko) This method is deprecated, don't use it!
+    # TODO(vsaienko) Remove this function in Ocata.
     def macs_for_instance(self, instance):
         """What MAC addresses must this instance have?
 
@@ -1440,7 +1456,7 @@ class ComputeDriver(object):
             LOG.debug("Emitting event %s", six.text_type(event))
             self._compute_event_callback(event)
         except Exception as ex:
-            LOG.error(_LE("Exception dispatching event %(event)s: %(ex)s"),
+            LOG.error("Exception dispatching event %(event)s: %(ex)s",
                       {'event': event, 'ex': ex})
 
     def delete_instance_files(self, instance):
@@ -1609,17 +1625,23 @@ def load_compute_driver(virtapi, compute_driver=None):
         compute_driver = CONF.compute_driver
 
     if not compute_driver:
-        LOG.error(_LE("Compute driver option required, but not specified"))
+        LOG.error("Compute driver option required, but not specified")
         sys.exit(1)
 
-    LOG.info(_LI("Loading compute driver '%s'"), compute_driver)
+    LOG.info("Loading compute driver '%s'", compute_driver)
     try:
         driver = importutils.import_object(
             'nova.virt.%s' % compute_driver,
             virtapi)
-        return utils.check_isinstance(driver, ComputeDriver)
+        if isinstance(driver, ComputeDriver):
+            return driver
+        raise ValueError()
     except ImportError:
-        LOG.exception(_LE("Unable to load the virtualization driver"))
+        LOG.exception(_("Unable to load the virtualization driver"))
+        sys.exit(1)
+    except ValueError:
+        LOG.exception("Compute driver '%s' from 'nova.virt' is not of type"
+                      "'%s'", compute_driver, str(ComputeDriver))
         sys.exit(1)
 
 

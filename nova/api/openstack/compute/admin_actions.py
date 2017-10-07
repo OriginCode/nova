@@ -24,8 +24,6 @@ from nova.compute import vm_states
 from nova import exception
 from nova.policies import admin_actions as aa_policies
 
-ALIAS = "os-admin-actions"
-
 # States usable in resetState action
 # NOTE: It is necessary to update the schema of nova/api/openstack/compute/
 # schemas/reset_server_state.py, when updating this state_map.
@@ -44,8 +42,8 @@ class AdminActionsController(wsgi.Controller):
         """Permit admins to reset networking on a server."""
         context = req.environ['nova.context']
         context.can(aa_policies.POLICY_ROOT % 'reset_network')
+        instance = common.get_instance(self.compute_api, context, id)
         try:
-            instance = common.get_instance(self.compute_api, context, id)
             self.compute_api.reset_network(context, instance)
         except exception.InstanceUnknownCell as e:
             raise exc.HTTPNotFound(explanation=e.format_message())
@@ -59,8 +57,8 @@ class AdminActionsController(wsgi.Controller):
         """Permit admins to inject network info into a server."""
         context = req.environ['nova.context']
         context.can(aa_policies.POLICY_ROOT % 'inject_network_info')
+        instance = common.get_instance(self.compute_api, context, id)
         try:
-            instance = common.get_instance(self.compute_api, context, id)
             self.compute_api.inject_network_info(context, instance)
         except exception.InstanceUnknownCell as e:
             raise exc.HTTPNotFound(explanation=e.format_message())
@@ -83,22 +81,3 @@ class AdminActionsController(wsgi.Controller):
         instance.vm_state = state
         instance.task_state = None
         instance.save(admin_state_reset=True)
-
-
-class AdminActions(extensions.V21APIExtensionBase):
-    """Enable admin-only server actions
-
-    Actions include: resetNetwork, injectNetworkInfo, os-resetState
-    """
-
-    name = "AdminActions"
-    alias = ALIAS
-    version = 1
-
-    def get_controller_extensions(self):
-        controller = AdminActionsController()
-        extension = extensions.ControllerExtension(self, 'servers', controller)
-        return [extension]
-
-    def get_resources(self):
-        return []

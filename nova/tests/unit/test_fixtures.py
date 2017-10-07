@@ -14,7 +14,6 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-import sqlalchemy
 import sys
 
 import fixtures as fx
@@ -22,12 +21,15 @@ import mock
 from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_utils import uuidutils
+import sqlalchemy
 import testtools
 
 from nova.compute import rpcapi as compute_rpcapi
 from nova import conductor
+from nova import context
 from nova.db.sqlalchemy import api as session
 from nova import exception
+from nova import objects
 from nova.objects import base as obj_base
 from nova.objects import service as service_obj
 from nova.tests import fixtures
@@ -315,7 +317,8 @@ class TestDatabaseAtVersionFixture(testtools.TestCase):
 
 
 class TestDefaultFlavorsFixture(testtools.TestCase):
-    def test_flavors(self):
+    @mock.patch("nova.objects.flavor.Flavor._send_notification")
+    def test_flavors(self, mock_send_notification):
         self.useFixture(conf_fixture.ConfFixture())
         self.useFixture(fixtures.Database())
         self.useFixture(fixtures.Database(database='api'))
@@ -330,7 +333,7 @@ class TestDefaultFlavorsFixture(testtools.TestCase):
 
         result = conn.execute("select * from flavors")
         rows = result.fetchall()
-        self.assertEqual(5, len(rows), "Rows %s" % rows)
+        self.assertEqual(6, len(rows), "Rows %s" % rows)
 
 
 class TestIndirectionAPIFixture(testtools.TestCase):
@@ -453,3 +456,34 @@ class TestNoopConductorFixture(testtools.TestCase):
         self.useFixture(fixtures.NoopConductorFixture())
         conductor.API().wait_until_ready()
         self.assertFalse(mock_wait.called)
+
+
+class TestSingleCellSimpleFixture(testtools.TestCase):
+    def test_single_cell(self):
+        self.useFixture(fixtures.SingleCellSimple())
+        cml = objects.CellMappingList.get_all(None)
+        self.assertEqual(1, len(cml))
+
+    def test_target_cell(self):
+        self.useFixture(fixtures.SingleCellSimple())
+        with context.target_cell(mock.sentinel.context, None) as c:
+            self.assertIs(mock.sentinel.context, c)
+
+
+class TestPlacementFixture(testtools.TestCase):
+    def test_responds_to_version(self):
+        """Ensure the Placement server responds to calls sensibly."""
+        placement_fixture = self.useFixture(fixtures.PlacementFixture())
+
+        # request the API root, which provides us the versions of the API
+        resp = placement_fixture._fake_get(None, '/')
+        self.assertEqual(200, resp.status_code)
+
+        # request a known bad url, and we should get a 404
+        resp = placement_fixture._fake_get(None, '/foo')
+        self.assertEqual(404, resp.status_code)
+
+        # unsets the token so we fake missing it
+        placement_fixture.token = None
+        resp = placement_fixture._fake_get(None, '/foo')
+        self.assertEqual(401, resp.status_code)

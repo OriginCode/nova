@@ -386,7 +386,7 @@ class Debug(Middleware):
         resp = req.get_response(self.application)
 
         print(('*' * 40) + ' RESPONSE HEADERS')
-        for (key, value) in six.iteritems(resp.headers):
+        for (key, value) in resp.headers.items():
             print(key, '=', value)
         print()
 
@@ -399,7 +399,7 @@ class Debug(Middleware):
         """Iterator that prints the contents of a wrapper string."""
         print(('*' * 40) + ' BODY')
         for part in app_iter:
-            sys.stdout.write(part)
+            sys.stdout.write(six.text_type(part))
             sys.stdout.flush()
             yield part
         print()

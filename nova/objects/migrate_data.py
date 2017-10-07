@@ -170,7 +170,7 @@ class LibvirtLiveMigrateData(LiveMigrateData):
             self.bdms.append(bdmi)
 
     def to_legacy_dict(self, pre_migration_result=False):
-        LOG.debug('Converting to legacy: %s' % self)
+        LOG.debug('Converting to legacy: %s', self)
         legacy = super(LibvirtLiveMigrateData, self).to_legacy_dict()
         keys = (set(self.fields.keys()) -
                 set(LiveMigrateData.fields.keys()) - {'bdms'})
@@ -193,11 +193,11 @@ class LibvirtLiveMigrateData(LiveMigrateData):
             legacy['pre_live_migration_result'] = live_result
             self._bdms_to_legacy(live_result)
 
-        LOG.debug('Legacy result: %s' % legacy)
+        LOG.debug('Legacy result: %s', legacy)
         return legacy
 
     def from_legacy_dict(self, legacy):
-        LOG.debug('Converting legacy dict to obj: %s' % legacy)
+        LOG.debug('Converting legacy dict to obj: %s', legacy)
         super(LibvirtLiveMigrateData, self).from_legacy_dict(legacy)
         keys = set(self.fields.keys()) - set(LiveMigrateData.fields.keys())
         for k in keys - {'bdms'}:
@@ -213,7 +213,7 @@ class LibvirtLiveMigrateData(LiveMigrateData):
             if 'serial_listen_addr' in pre_result:
                 self.serial_listen_addr = pre_result['serial_listen_addr']
             self._bdms_from_legacy(pre_result)
-        LOG.debug('Converted object: %s' % self)
+        LOG.debug('Converted object: %s', self)
 
     def is_on_shared_storage(self):
         return self.is_shared_block_storage or self.is_shared_instance_path
@@ -221,7 +221,9 @@ class LibvirtLiveMigrateData(LiveMigrateData):
 
 @obj_base.NovaObjectRegistry.register
 class XenapiLiveMigrateData(LiveMigrateData):
-    VERSION = '1.0'
+    # Version 1.0: Initial version
+    # Version 1.1: Added vif_uuid_map
+    VERSION = '1.1'
 
     fields = {
         'block_migration': fields.BooleanField(nullable=True),
@@ -230,6 +232,7 @@ class XenapiLiveMigrateData(LiveMigrateData):
         'sr_uuid_map': fields.DictOfStringsField(),
         'kernel_file': fields.StringField(),
         'ramdisk_file': fields.StringField(),
+        'vif_uuid_map': fields.DictOfStringsField(),
     }
 
     def to_legacy_dict(self, pre_migration_result=False):
@@ -244,6 +247,8 @@ class XenapiLiveMigrateData(LiveMigrateData):
         live_result = {
             'sr_uuid_map': ('sr_uuid_map' in self and self.sr_uuid_map
                             or {}),
+            'vif_uuid_map': ('vif_uuid_map' in self and self.vif_uuid_map
+                             or {}),
         }
         if pre_migration_result:
             legacy['pre_live_migration_result'] = live_result
@@ -263,6 +268,16 @@ class XenapiLiveMigrateData(LiveMigrateData):
         if 'pre_live_migration_result' in legacy:
             self.sr_uuid_map = \
                 legacy['pre_live_migration_result']['sr_uuid_map']
+            self.vif_uuid_map = \
+                legacy['pre_live_migration_result'].get('vif_uuid_map', {})
+
+    def obj_make_compatible(self, primitive, target_version):
+        super(XenapiLiveMigrateData, self).obj_make_compatible(
+            primitive, target_version)
+        target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 1):
+            if 'vif_uuid_map' in primitive:
+                del primitive['vif_uuid_map']
 
 
 @obj_base.NovaObjectRegistry.register
@@ -292,3 +307,42 @@ class HyperVLiveMigrateData(LiveMigrateData):
         super(HyperVLiveMigrateData, self).from_legacy_dict(legacy)
         if 'is_shared_instance_path' in legacy:
             self.is_shared_instance_path = legacy['is_shared_instance_path']
+
+
+@obj_base.NovaObjectRegistry.register
+class PowerVMLiveMigrateData(LiveMigrateData):
+    # Version 1.0: Initial version
+    # Version 1.1: Added the Virtual Ethernet Adapter VLAN mappings.
+    VERSION = '1.1'
+
+    fields = {
+        'host_mig_data': fields.DictOfNullableStringsField(),
+        'dest_ip': fields.StringField(),
+        'dest_user_id': fields.StringField(),
+        'dest_sys_name': fields.StringField(),
+        'public_key': fields.StringField(),
+        'dest_proc_compat': fields.StringField(),
+        'vol_data': fields.DictOfNullableStringsField(),
+        'vea_vlan_mappings': fields.DictOfNullableStringsField(),
+    }
+
+    def obj_make_compatible(self, primitive, target_version):
+        super(PowerVMLiveMigrateData, self).obj_make_compatible(
+            primitive, target_version)
+        target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 1):
+            if 'vea_vlan_mappings' in primitive:
+                del primitive['vea_vlan_mappings']
+
+    def to_legacy_dict(self, pre_migration_result=False):
+        legacy = super(PowerVMLiveMigrateData, self).to_legacy_dict()
+        for field in self.fields:
+            if self.obj_attr_is_set(field):
+                legacy[field] = getattr(self, field)
+        return legacy
+
+    def from_legacy_dict(self, legacy):
+        super(PowerVMLiveMigrateData, self).from_legacy_dict(legacy)
+        for field in self.fields:
+            if field in legacy:
+                setattr(self, field, legacy[field])

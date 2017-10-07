@@ -43,9 +43,23 @@ from nova import utils
 from nova import version
 from nova import wsgi
 
+osprofiler = importutils.try_import("osprofiler")
+osprofiler_initializer = importutils.try_import("osprofiler.initializer")
+
+
 LOG = logging.getLogger(__name__)
 
 CONF = nova.conf.CONF
+
+SERVICE_MANAGERS = {
+    'nova-compute': 'nova.compute.manager.ComputeManager',
+    'nova-console': 'nova.console.manager.ConsoleProxyManager',
+    'nova-consoleauth': 'nova.consoleauth.manager.ConsoleAuthManager',
+    'nova-conductor': 'nova.conductor.manager.ConductorManager',
+    'nova-metadata': 'nova.api.manager.MetadataManager',
+    'nova-scheduler': 'nova.scheduler.manager.SchedulerManager',
+    'nova-cells': 'nova.cells.manager.CellsManager',
+}
 
 
 def _create_service_ref(this_service, context):
@@ -70,6 +84,17 @@ def _update_service_ref(service):
         service.save()
 
 
+def setup_profiler(binary, host):
+    if osprofiler and CONF.profiler.enabled:
+        osprofiler.initializer.init_from_conf(
+            conf=CONF,
+            context=context.get_admin_context().to_dict(),
+            project="nova",
+            service=binary,
+            host=host)
+        LOG.info(_LI("OSProfiler is enabled."))
+
+
 class Service(service.Service):
     """Service object for binaries running on hosts.
 
@@ -80,8 +105,7 @@ class Service(service.Service):
 
     def __init__(self, host, binary, topic, manager, report_interval=None,
                  periodic_enable=None, periodic_fuzzy_delay=None,
-                 periodic_interval_max=None, db_allowed=True,
-                 *args, **kwargs):
+                 periodic_interval_max=None, *args, **kwargs):
         super(Service, self).__init__()
         self.host = host
         self.binary = binary
@@ -97,8 +121,10 @@ class Service(service.Service):
         self.periodic_interval_max = periodic_interval_max
         self.saved_args, self.saved_kwargs = args, kwargs
         self.backdoor_port = None
-        self.conductor_api = conductor.API(use_local=db_allowed)
-        self.conductor_api.wait_until_ready(context.get_admin_context())
+        if objects_base.NovaObject.indirection_api:
+            conductor_api = conductor.API()
+            conductor_api.wait_until_ready(context.get_admin_context())
+        setup_profiler(binary, self.host)
 
     def __repr__(self):
         return "<%(cls_name)s: host=%(host)s, binary=%(binary)s, " \
@@ -177,8 +203,7 @@ class Service(service.Service):
     @classmethod
     def create(cls, host=None, binary=None, topic=None, manager=None,
                report_interval=None, periodic_enable=None,
-               periodic_fuzzy_delay=None, periodic_interval_max=None,
-               db_allowed=True):
+               periodic_fuzzy_delay=None, periodic_interval_max=None):
         """Instantiates class and passes back application object.
 
         :param host: defaults to CONF.host
@@ -198,9 +223,7 @@ class Service(service.Service):
         if not topic:
             topic = binary.rpartition('nova-')[2]
         if not manager:
-            manager_cls = ('%s_manager' %
-                           binary.rpartition('nova-')[2])
-            manager = CONF.get(manager_cls, None)
+            manager = SERVICE_MANAGERS.get(binary)
         if report_interval is None:
             report_interval = CONF.report_interval
         if periodic_enable is None:
@@ -214,8 +237,7 @@ class Service(service.Service):
                           report_interval=report_interval,
                           periodic_enable=periodic_enable,
                           periodic_fuzzy_delay=periodic_fuzzy_delay,
-                          periodic_interval_max=periodic_interval_max,
-                          db_allowed=db_allowed)
+                          periodic_interval_max=periodic_interval_max)
 
         return service_obj
 
@@ -279,7 +301,7 @@ class WSGIService(service.Service):
 
         """
         self.name = name
-        # NOTE(danms): Name can be metadata, os_compute, or ec2, per
+        # NOTE(danms): Name can be metadata, osapi_compute, or ec2, per
         # nova.service's enabled_apis
         self.binary = 'nova-%s' % name
         self.topic = None
@@ -312,6 +334,7 @@ class WSGIService(service.Service):
         # Pull back actual port used
         self.port = self.server.port
         self.backdoor_port = None
+        setup_profiler(name, self.host)
 
     def reset(self):
         """Reset server greenpool size to default and service version cache.
@@ -332,15 +355,11 @@ class WSGIService(service.Service):
         :returns: a Manager instance, or None.
 
         """
-        fl = '%s_manager' % self.name
-        if fl not in CONF:
+        manager = SERVICE_MANAGERS.get(self.binary)
+        if manager is None:
             return None
 
-        manager_class_name = CONF.get(fl, None)
-        if not manager_class_name:
-            return None
-
-        manager_class = importutils.import_class(manager_class_name)
+        manager_class = importutils.import_class(manager)
         return manager_class()
 
     def start(self):
@@ -408,7 +427,8 @@ def serve(server, workers=None):
     if _launcher:
         raise RuntimeError(_('serve() can only be called once'))
 
-    _launcher = service.launch(CONF, server, workers=workers)
+    _launcher = service.launch(CONF, server, workers=workers,
+                               restart_method='mutate')
 
 
 def wait():

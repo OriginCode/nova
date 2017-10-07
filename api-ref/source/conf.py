@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-#
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
 # not use this file except in compliance with the License. You may obtain
 # a copy of the License at
@@ -29,8 +27,7 @@ import subprocess
 import sys
 import warnings
 
-import openstackdocstheme  # noqa
-import os_api_ref  # noqa
+import openstackdocstheme
 
 extensions = [
     'os_api_ref',
@@ -43,8 +40,6 @@ html_theme_options = {
     "sidebar_mode": "toc",
 }
 html_context = {'bug_project': 'nova', 'bug_tag': 'api-ref'}
-
-# End temporary block
 
 # If extensions (or modules to document with autodoc) are in another directory,
 # add these directories to sys.path here. If the directory is relative to the
@@ -159,8 +154,7 @@ pygments_style = 'sphinx'
 git_cmd = ["git", "log", "--pretty=format:'%ad, commit %h'", "--date=local",
     "-n1"]
 try:
-    html_last_updated_fmt = subprocess.Popen(
-        git_cmd, stdout=subprocess.PIPE).communicate()[0].decode()
+    html_last_updated_fmt = subprocess.check_output(git_cmd).decode('utf-8')
 except Exception:
     warnings.warn('Cannot get last updated time from git repository. '
                   'Not setting "html_last_updated_fmt".')

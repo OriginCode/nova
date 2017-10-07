@@ -16,6 +16,8 @@
 import functools
 import sys
 
+from os_xenapi.client import exception as xenapi_exception
+from os_xenapi.client import host_glance
 from oslo_log import log as logging
 import six
 
@@ -31,13 +33,16 @@ LOG = logging.getLogger(__name__)
 
 
 class GlanceStore(object):
-    def _call_glance_plugin(self, context, instance, session, fn, params):
+    def _call_glance_plugin(self, context, instance, session, fn, image_id,
+                            params):
         glance_api_servers = glance.get_api_servers()
+        sr_path = vm_utils.get_sr_path(session)
+        extra_headers = glance.generate_identity_headers(context)
 
         def pick_glance(kwargs):
             server = next(glance_api_servers)
             kwargs['endpoint'] = server
-            kwargs['api_version'] = 1 if CONF.glance.use_glance_v1 else 2
+            kwargs['api_version'] = 2
             # NOTE(sdague): is the return significant here at all?
             return server
 
@@ -50,30 +55,22 @@ class GlanceStore(object):
 
         cb = functools.partial(retry_cb, context, instance)
 
-        return session.call_plugin_serialized_with_retry(
-            'glance', fn, CONF.glance.num_retries, pick_glance, cb, **params)
-
-    def _make_params(self, context, session, image_id):
-        return {'image_id': image_id,
-                'sr_path': vm_utils.get_sr_path(session),
-                'extra_headers': glance.generate_identity_headers(context)}
+        return fn(session, CONF.glance.num_retries, pick_glance, cb, image_id,
+                  sr_path, extra_headers, **params)
 
     def download_image(self, context, session, instance, image_id):
-        params = self._make_params(context, session, image_id)
-        params['uuid_stack'] = vm_utils._make_uuid_stack()
-
+        params = {'uuid_stack': vm_utils._make_uuid_stack()}
         try:
             vdis = self._call_glance_plugin(context, instance, session,
-                                            'download_vhd2', params)
-        except exception.PluginRetriesExceeded:
+                                            host_glance.download_vhd, image_id,
+                                            params)
+        except xenapi_exception.PluginRetriesExceeded:
             raise exception.CouldNotFetchImage(image_id=image_id)
 
         return vdis
 
     def upload_image(self, context, session, instance, image_id, vdi_uuids):
-        params = self._make_params(context, session, image_id)
-        params['vdi_uuids'] = vdi_uuids
-
+        params = {'vdi_uuids': vdi_uuids}
         props = params['properties'] = {}
         props['auto_disk_config'] = instance['auto_disk_config']
         props['os_type'] = instance.get('os_type', None) or (
@@ -89,6 +86,6 @@ class GlanceStore(object):
 
         try:
             self._call_glance_plugin(context, instance, session,
-                                     'upload_vhd2', params)
-        except exception.PluginRetriesExceeded:
+                                     host_glance.upload_vhd, image_id, params)
+        except xenapi_exception.PluginRetriesExceeded:
             raise exception.CouldNotUploadImage(image_id=image_id)

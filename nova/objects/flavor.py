@@ -15,6 +15,7 @@
 from oslo_db import exception as db_exc
 from oslo_db.sqlalchemy import utils as sqlalchemyutils
 from oslo_log import log as logging
+import six
 from sqlalchemy import or_
 from sqlalchemy.orm import joinedload
 from sqlalchemy.sql.expression import asc
@@ -22,6 +23,7 @@ from sqlalchemy.sql import func
 from sqlalchemy.sql import text
 from sqlalchemy.sql import true
 
+import nova.conf
 from nova import db
 from nova.db.sqlalchemy import api as db_api
 from nova.db.sqlalchemy.api import require_context
@@ -29,6 +31,8 @@ from nova.db.sqlalchemy import api_models
 from nova.db.sqlalchemy import models as main_models
 from nova import exception
 from nova.i18n import _LW
+from nova.notifications.objects import base as notification
+from nova.notifications.objects import flavor as flavor_notification
 from nova import objects
 from nova.objects import base
 from nova.objects import fields
@@ -37,6 +41,8 @@ from nova.objects import fields
 LOG = logging.getLogger(__name__)
 OPTIONAL_FIELDS = ['extra_specs', 'projects']
 DEPRECATED_FIELDS = ['deleted', 'deleted_at']
+
+CONF = nova.conf.CONF
 
 
 def _dict_with_extra_specs(flavor_model):
@@ -185,9 +191,10 @@ def _flavor_destroy(context, flavor_id=None, flavorid=None):
     context.session.query(api_models.FlavorExtraSpecs).\
         filter_by(flavor_id=result.id).delete()
     context.session.delete(result)
+    return result
 
 
-@db_api.main_context_manager.reader
+@db_api.pick_context_manager_reader
 def _ensure_migrated(context):
     result = context.session.query(main_models.InstanceTypes).\
              filter_by(deleted=0).count()
@@ -203,7 +210,7 @@ class Flavor(base.NovaPersistentObject, base.NovaObject,
              base.NovaObjectDictCompat):
     # Version 1.0: Initial version
     # Version 1.1: Added save_projects(), save_extra_specs(), removed
-    #              remoteable from save()
+    #              remotable from save()
     VERSION = '1.1'
 
     fields = {
@@ -442,6 +449,7 @@ class Flavor(base.NovaPersistentObject, base.NovaObject,
                                               reason='projects modified')
         self._add_access(project_id)
         self._load_projects()
+        self._send_notification(fields.NotificationAction.UPDATE)
 
     def _remove_access(self, project_id):
         if self.in_api:
@@ -456,6 +464,7 @@ class Flavor(base.NovaPersistentObject, base.NovaObject,
                                               reason='projects modified')
         self._remove_access(project_id)
         self._load_projects()
+        self._send_notification(fields.NotificationAction.UPDATE)
 
     @staticmethod
     def _flavor_create(context, updates):
@@ -487,6 +496,7 @@ class Flavor(base.NovaPersistentObject, base.NovaObject,
         db_flavor = self._flavor_create(self._context, updates)
         self._from_db_object(self._context, self, db_flavor,
                              expected_attrs=expected_attrs)
+        self._send_notification(fields.NotificationAction.CREATE)
 
     @base.remotable
     def save_projects(self, to_add=None, to_delete=None):
@@ -572,6 +582,9 @@ class Flavor(base.NovaPersistentObject, base.NovaObject,
         if added_projects or deleted_projects:
             self.save_projects(added_projects, deleted_projects)
 
+        if added_keys or deleted_keys or added_projects or deleted_projects:
+            self._send_notification(fields.NotificationAction.UPDATE)
+
     @staticmethod
     def _flavor_destroy(context, flavor_id=None, flavorid=None):
         return _flavor_destroy(context, flavor_id=flavor_id, flavorid=flavorid)
@@ -586,11 +599,38 @@ class Flavor(base.NovaPersistentObject, base.NovaObject,
         # far more specific.
         try:
             if 'id' in self:
-                self._flavor_destroy(self._context, flavor_id=self.id)
+                db_flavor = self._flavor_destroy(self._context,
+                                                 flavor_id=self.id)
             else:
-                self._flavor_destroy(self._context, flavorid=self.flavorid)
+                db_flavor = self._flavor_destroy(self._context,
+                                                 flavorid=self.flavorid)
+            self._from_db_object(self._context, self, db_flavor)
+            self._send_notification(fields.NotificationAction.DELETE)
         except exception.FlavorNotFound:
             db.flavor_destroy(self._context, self.flavorid)
+
+    def _send_notification(self, action):
+        # NOTE(danms): Instead of making the below notification
+        # lazy-load projects (which is a problem for instance-bound
+        # flavors and compute-cell operations), just load them here.
+        if 'projects' not in self:
+            # If the flavor is deleted we can't lazy-load projects.
+            # FlavorPayload will orphan the flavor which will make the
+            # NotificationPayloadBase set projects=None in the notification
+            # payload.
+            if action != fields.NotificationAction.DELETE:
+                self._load_projects()
+        notification_type = flavor_notification.FlavorNotification
+        payload_type = flavor_notification.FlavorPayload
+
+        payload = payload_type(self)
+        notification_type(
+            publisher=notification.NotificationPublisher(
+                host=CONF.host, binary="nova-api"),
+            event_type=notification.EventType(object="flavor",
+                                              action=action),
+            priority=fields.NotificationPriority.INFO,
+            payload=payload).emit(self._context)
 
 
 @db_api.api_context_manager.reader
@@ -682,7 +722,7 @@ class FlavorList(base.ObjectListBase, base.NovaObject):
                                   expected_attrs=['extra_specs'])
 
 
-@db_api.main_context_manager.reader
+@db_api.pick_context_manager_reader
 def _get_main_db_flavor_ids(context, limit):
     # NOTE(danms): We don't need this imported at runtime, so
     # keep it separate here
@@ -692,7 +732,7 @@ def _get_main_db_flavor_ids(context, limit):
             limit(limit)]
 
 
-@db_api.main_context_manager.writer
+@db_api.pick_context_manager_writer
 def _destroy_flavor_hard(context, name):
     # NOTE(danms): We don't need this imported at runtime, so
     # keep it separate here
@@ -723,7 +763,7 @@ def migrate_flavors(ctxt, count, hard_delete=False):
             LOG.warning(_LW('Flavor id %(id)i disappeared during migration'),
                         {'id': flavor_id})
         except (exception.FlavorExists, exception.FlavorIdExists) as e:
-            LOG.error(str(e))
+            LOG.error(six.text_type(e))
 
     return count_all, count_hit
 

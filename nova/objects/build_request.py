@@ -13,12 +13,12 @@
 import functools
 import re
 
-from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import versionutils
 from oslo_versionedobjects import exception as ovoo_exc
 import six
+from sqlalchemy.sql import null
 
 from nova.db.sqlalchemy import api as db
 from nova.db.sqlalchemy import api_models
@@ -28,7 +28,6 @@ from nova import objects
 from nova.objects import base
 from nova.objects import fields
 
-CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
 
 
@@ -37,7 +36,8 @@ class BuildRequest(base.NovaObject):
     # Version 1.0: Initial version
     # Version 1.1: Added block_device_mappings
     # Version 1.2: Added save() method
-    VERSION = '1.2'
+    # Version 1.3: Added tags
+    VERSION = '1.3'
 
     fields = {
         'id': fields.IntegerField(),
@@ -50,6 +50,7 @@ class BuildRequest(base.NovaObject):
         # created_at/updated_at. There is no soft delete for this object.
         'created_at': fields.DateTimeField(nullable=True),
         'updated_at': fields.DateTimeField(nullable=True),
+        'tags': fields.ObjectField('TagList'),
     }
 
     def obj_make_compatible(self, primitive, target_version):
@@ -58,6 +59,8 @@ class BuildRequest(base.NovaObject):
         target_version = versionutils.convert_version_to_tuple(target_version)
         if target_version < (1, 1) and 'block_device_mappings' in primitive:
             del primitive['block_device_mappings']
+        elif target_version < (1, 3) and 'tags' in primitive:
+            del primitive['tags']
 
     def _load_instance(self, db_instance):
         # NOTE(alaski): Be very careful with instance loading because it
@@ -67,7 +70,7 @@ class BuildRequest(base.NovaObject):
                     jsonutils.loads(db_instance))
         except TypeError:
             LOG.debug('Failed to load instance from BuildRequest with uuid '
-                      '%s because it is None' % (self.instance_uuid))
+                      '%s because it is None', self.instance_uuid)
             raise exception.BuildRequestNotFound(uuid=self.instance_uuid)
         except ovoo_exc.IncompatibleObjectVersion as exc:
             # This should only happen if proper service upgrade strategies are
@@ -82,9 +85,13 @@ class BuildRequest(base.NovaObject):
             LOG.exception(_LE('Could not deserialize instance in '
                               'BuildRequest'))
             raise exception.BuildRequestNotFound(uuid=self.instance_uuid)
+        # NOTE(sbauza): The instance primitive should already have the deleted
+        # field being set, so when hydrating it back here, we should get the
+        # right value but in case we don't have it, let's suppose that the
+        # instance is not deleted, which is the default value for that field.
+        self.instance.obj_set_defaults('deleted')
         # NOTE(alaski): Set some fields on instance that are needed by the api,
         # not lazy-loadable, and don't change.
-        self.instance.deleted = 0
         self.instance.disable_terminate = False
         self.instance.terminated_at = None
         self.instance.host = None
@@ -101,7 +108,7 @@ class BuildRequest(base.NovaObject):
         # was never persisted.
         self.instance.created_at = self.created_at
         self.instance.updated_at = self.updated_at
-        self.instance.tags = objects.TagList([])
+        self.instance.tags = self.tags
 
     def _load_block_device_mappings(self, db_bdms):
         # 'db_bdms' is a serialized BlockDeviceMappingList object. If it's None
@@ -118,6 +125,22 @@ class BuildRequest(base.NovaObject):
         self.block_device_mappings = (
             objects.BlockDeviceMappingList.obj_from_primitive(
                 jsonutils.loads(db_bdms)))
+
+    def _load_tags(self, db_tags):
+        # 'db_tags' is a serialized TagList object. If it's None
+        # we're in a mixed version nova-api scenario and can't retrieve the
+        # actual list. Set it to an empty list here which will cause a
+        # temporary API inconsistency that will be resolved as soon as the
+        # instance is scheduled and on a compute.
+        if db_tags is None:
+            LOG.debug('Failed to load tags from BuildRequest '
+                      'for instance %s because it is None', self.instance_uuid)
+            self.tags = objects.TagList()
+            return
+
+        self.tags = (
+            objects.TagList.obj_from_primitive(
+                jsonutils.loads(db_tags)))
 
     @staticmethod
     def _from_db_object(context, req, db_req):
@@ -165,7 +188,7 @@ class BuildRequest(base.NovaObject):
 
     def _get_update_primitives(self):
         updates = self.obj_get_changes()
-        for key, value in six.iteritems(updates):
+        for key, value in updates.items():
             if isinstance(self.fields[key], fields.ObjectField):
                 updates[key] = jsonutils.dumps(value.obj_to_primitive())
         return updates
@@ -213,6 +236,23 @@ class BuildRequest(base.NovaObject):
         db_req = self._save_in_db(self._context, self.id, updates)
         self._from_db_object(self._context, self, db_req)
 
+    def get_new_instance(self, context):
+        # NOTE(danms): This is a hack to make sure that the returned
+        # instance has all dirty fields. There are probably better
+        # ways to do this, but they kinda involve o.vo internals
+        # so this is okay for the moment.
+        instance = objects.Instance(context)
+        for field in self.instance.obj_fields:
+            # NOTE(danms): Don't copy the defaulted tags field
+            # as instance.create() won't handle it properly.
+            # TODO(zhengzhenyu): Handle this when the API supports creating
+            # servers with tags.
+            if field == 'tags':
+                continue
+            if self.instance.obj_attr_is_set(field):
+                setattr(instance, field, getattr(self.instance, field))
+        return instance
+
 
 @base.NovaObjectRegistry.register
 class BuildRequestList(base.ObjectListBase, base.NovaObject):
@@ -254,6 +294,33 @@ class BuildRequestList(base.ObjectListBase, base.NovaObject):
                     for k, v in filter_val.items():
                         if (k not in instance.metadata or
                                 v != instance.metadata[k]):
+                            return False
+            elif filter_key in (
+                    'tags', 'tags-any', 'not-tags', 'not-tags-any'):
+                # Get the list of simple string tags first.
+                tags = ([tag.tag for tag in instance.tags]
+                        if instance.tags else [])
+                if filter_key == 'tags':
+                    for item in filter_val:
+                        if item not in tags:
+                            return False
+                elif filter_key == 'tags-any':
+                    found = []
+                    for item in filter_val:
+                        if item in tags:
+                            found.append(item)
+                    if not found:
+                        return False
+                elif filter_key == 'not-tags':
+                    found = []
+                    for item in filter_val:
+                        if item in tags:
+                            found.append(item)
+                    if len(found) == len(filter_val):
+                        return False
+                elif filter_key == 'not-tags-any':
+                    for item in filter_val:
+                        if item in tags:
                             return False
             elif isinstance(filter_val, (list, tuple, set, frozenset)):
                 if not filter_val:
@@ -324,8 +391,6 @@ class BuildRequestList(base.ObjectListBase, base.NovaObject):
         build_requests = cls.get_all(context)
 
         # Fortunately some filters do not apply here.
-        # 'tags' can not be applied at boot time so will not be set for an
-        # instance here.
         # 'changes-since' works off of the updated_at field which has not yet
         # been set at the point in the boot process where build_request still
         # exists. So it can be ignored.
@@ -339,7 +404,8 @@ class BuildRequestList(base.ObjectListBase, base.NovaObject):
         exact_match_filter_names = ['project_id', 'user_id', 'image_ref',
                                     'vm_state', 'instance_type_id', 'uuid',
                                     'metadata', 'host', 'task_state',
-                                    'system_metadata']
+                                    'system_metadata', 'tags', 'tags-any',
+                                    'not-tags', 'not-tags-any']
         exact_filters = {}
         regex_filters = {}
         for key, value in filters.items():
@@ -391,3 +457,52 @@ class BuildRequestList(base.ObjectListBase, base.NovaObject):
 
         return cls(context,
                    objects=sorted_build_reqs[marker_index:limit_index])
+
+
+@db.api_context_manager.reader
+def _get_build_requests_with_no_instance_uuid(context, limit):
+    """Returns up to $limit build_requests where instance_uuid is null"""
+    # build_requests don't use the SoftDeleteMixin so we don't have to filter
+    # on the deleted column.
+    return context.session.query(api_models.BuildRequest).\
+        filter_by(instance_uuid=null()).\
+        limit(limit).\
+        all()
+
+
+@db.api_context_manager.writer
+def _destroy_in_db(context, id):
+    return context.session.query(api_models.BuildRequest).filter_by(
+        id=id).delete()
+
+
+def delete_build_requests_with_no_instance_uuid(context, count):
+    """Online data migration which cleans up failed build requests from Mitaka
+
+    build_requests were initially a mirror of instances and had similar fields
+    to satisfy listing/showing instances while they were building. In Mitaka
+    if an instance failed to build we'd delete the instance but didn't delete
+    the associated BuildRequest. In the Newton release we changed the schema
+    on the build_requests table to just store a serialized Instance object and
+    added an instance_uuid field which is expected to not be None as seen how
+    it's used in _from_db_object. However, failed build requests created before
+    that schema migration won't have the instance_uuid set and fail to load
+    as an object when calling BuildRequestList.get_all(). So we need to perform
+    a cleanup routine here where we search for build requests which do not have
+    the instance_uuid field set and delete them.
+
+    :param context: The auth context used to query the database.
+    :type context: nova.context.RequestContext
+    :param count: The max number of build requests to delete.
+    :type count: int
+    :returns: 2-item tuple of
+        (number of orphaned build requests read from DB, number deleted)
+    """
+    orphaned_build_requests = (
+        _get_build_requests_with_no_instance_uuid(context, count))
+    done = 0
+    for orphan_buildreq in orphaned_build_requests:
+        result = _destroy_in_db(context, orphan_buildreq.id)
+        if result:
+            done += 1
+    return len(orphaned_build_requests), done

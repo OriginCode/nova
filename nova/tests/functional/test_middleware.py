@@ -1,5 +1,3 @@
-# -*- encoding: utf-8 -*-
-#
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
 #    a copy of the License at
@@ -89,6 +87,30 @@ class TestCORSMiddleware(api_sample_base.ApiSampleTestBaseV21):
 
     def test_invalid_cors_get_request(self):
         response = self._do_get('servers',
+                                headers={
+                                    'Origin': 'http://invalid.example.com',
+                                    'Access-Control-Request-Method': 'GET'
+                                })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn('Access-Control-Allow-Origin', response.headers)
+
+    def test_valid_cors_get_versions_request(self):
+        response = self._do_get('',
+                                strip_version=True,
+                                headers={
+                                    'Origin': 'http://valid.example.com',
+                                    'Access-Control-Request-Method': 'GET'
+                                })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('Access-Control-Allow-Origin', response.headers)
+        self.assertEqual('http://valid.example.com',
+                         response.headers['Access-Control-Allow-Origin'])
+
+    def test_invalid_cors_get_versions_request(self):
+        response = self._do_get('',
+                                strip_version=True,
                                 headers={
                                     'Origin': 'http://invalid.example.com',
                                     'Access-Control-Request-Method': 'GET'

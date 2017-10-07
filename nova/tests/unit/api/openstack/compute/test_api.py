@@ -14,7 +14,7 @@
 #    under the License.
 
 from oslo_serialization import jsonutils
-import six
+from oslo_utils import encodeutils
 import webob.dec
 import webob.exc
 
@@ -27,12 +27,9 @@ from nova.tests.unit.api.openstack import fakes
 
 class APITest(test.NoDBTestCase):
 
-    def setUp(self):
-        super(APITest, self).setUp()
-
     @property
     def wsgi_app(self):
-        return fakes.wsgi_app_v21(init_only=('versions',))
+        return fakes.wsgi_app_v21()
 
     def _wsgi_app(self, inner_app):
         return openstack_api.FaultWrapper(inner_app)
@@ -69,7 +66,8 @@ class APITest(test.NoDBTestCase):
         # Consider changing `api.openstack.wsgi.Resource._process_stack`
         # to encode header values in ASCII rather than UTF-8.
         # https://tools.ietf.org/html/rfc7230#section-3.2.4
-        self.assertEqual(res.headers.get('Content-Type').decode(), ctype)
+        content_type = res.headers.get('Content-Type')
+        self.assertEqual(ctype, encodeutils.safe_decode(content_type))
 
         jsonutils.loads(res.body)
 
@@ -140,7 +138,7 @@ class APITest(test.NoDBTestCase):
         self.assertEqual(resp.status_int, exception_type.code, resp.text)
 
         if hasattr(exception_type, 'headers'):
-            for (key, value) in six.iteritems(exception_type.headers):
+            for (key, value) in exception_type.headers.items():
                 self.assertIn(key, resp.headers)
                 self.assertEqual(resp.headers[key], str(value))
 

@@ -24,13 +24,14 @@ from lxml import etree
 from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_service import loopingcall
+from oslo_utils import encodeutils
 from oslo_utils import strutils
 from oslo_utils import units
 from oslo_vmware import rw_handles
-import six
+
 
 from nova import exception
-from nova.i18n import _, _LI
+from nova.i18n import _
 from nova import image
 from nova.objects import fields
 from nova.virt.vmwareapi import constants
@@ -172,7 +173,7 @@ class VMwareImage(object):
             'hw_vif_model': 'vif_model'
         }
 
-        for k, v in six.iteritems(props_map):
+        for k, v in props_map.items():
             if properties.obj_attr_is_set(k):
                 props[v] = properties.get(k)
 
@@ -357,18 +358,18 @@ def fetch_image_stream_optimized(context, instance, session, vm_name,
 
     imported_vm_ref = write_handle.get_imported_vm()
 
-    LOG.info(_LI("Downloaded image file data %(image_ref)s"),
+    LOG.info("Downloaded image file data %(image_ref)s",
              {'image_ref': instance.image_ref}, instance=instance)
     vmdk = vm_util.get_vmdk_info(session, imported_vm_ref, vm_name)
     session._call_method(session.vim, "UnregisterVM", imported_vm_ref)
-    LOG.info(_LI("The imported VM was unregistered"), instance=instance)
+    LOG.info("The imported VM was unregistered", instance=instance)
     return vmdk.capacity_in_bytes
 
 
 def get_vmdk_name_from_ovf(xmlstr):
     """Parse the OVA descriptor to extract the vmdk name."""
 
-    ovf = etree.fromstring(xmlstr)
+    ovf = etree.fromstring(encodeutils.safe_encode(xmlstr))
     nsovf = "{%s}" % ovf.nsmap["ovf"]
 
     disk = ovf.find("./%sDiskSection/%sDisk" % (nsovf, nsovf))
@@ -419,15 +420,15 @@ def fetch_image_ova(context, instance, session, vm_name, ds_name,
                     vm_import_spec,
                     file_size)
                 image_transfer(extracted, write_handle)
-                LOG.info(_LI("Downloaded OVA image file %(image_ref)s"),
-                    {'image_ref': instance.image_ref}, instance=instance)
+                LOG.info("Downloaded OVA image file %(image_ref)s",
+                         {'image_ref': instance.image_ref}, instance=instance)
                 imported_vm_ref = write_handle.get_imported_vm()
                 vmdk = vm_util.get_vmdk_info(session,
                                              imported_vm_ref,
                                              vm_name)
                 session._call_method(session.vim, "UnregisterVM",
                                      imported_vm_ref)
-                LOG.info(_LI("The imported VM was unregistered"),
+                LOG.info("The imported VM was unregistered",
                          instance=instance)
                 return vmdk.capacity_in_bytes
         raise exception.ImageUnacceptable(

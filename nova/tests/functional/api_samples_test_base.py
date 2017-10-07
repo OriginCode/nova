@@ -342,7 +342,8 @@ class ApiSampleTestBase(integrated_helpers._IntegratedTestBase):
         regexes.update(subs)
         subs = regexes
         self.subs = subs
-        self.assertEqual(exp_code, response.status_code)
+        message = response.text if response.status_code >= 400 else None
+        self.assertEqual(exp_code, response.status_code, message)
         response_data = response.content
         response_data = pretty_data(response_data)
         if not os.path.exists(self._get_template(name,
@@ -372,7 +373,7 @@ class ApiSampleTestBase(integrated_helpers._IntegratedTestBase):
         except NoMatch as e:
             raise NoMatch("\nFailed to match Template to Response: \n%s\n"
                           "Template: %s\n\n"
-                          "Respones: %s\n\n" %
+                          "Response: %s\n\n" %
                           (e,
                            pp.pformat(template_data),
                            pp.pformat(response_data)))
@@ -395,7 +396,9 @@ class ApiSampleTestBase(integrated_helpers._IntegratedTestBase):
         except NoMatch as e:
             raise NoMatch("\nFailed to match Template to Sample: \n%s\n"
                           "Template: %s\n\n"
-                          "Sample: %s\n\n" %
+                          "Sample: %s\n\n"
+                          "Hint: does your test need to override "
+                          "ApiSampleTestBase.generalize_subs()?" %
                           (e,
                            pp.pformat(template_data),
                            pp.pformat(sample_data)))
@@ -410,6 +413,8 @@ class ApiSampleTestBase(integrated_helpers._IntegratedTestBase):
         text = r'(\\"|[^"])*'
         isotime_re = '\d{4}-[0,1]\d-[0-3]\dT\d{2}:\d{2}:\d{2}Z'
         strtime_re = '\d{4}-[0,1]\d-[0-3]\dT\d{2}:\d{2}:\d{2}\.\d{6}'
+        strtime_url_re = ('\d{4}-[0,1]\d-[0-3]\d'
+                          '\+\d{2}\%3A\d{2}\%3A\d{2}\.\d{6}')
         xmltime_re = ('\d{4}-[0,1]\d-[0-3]\d '
                       '\d{2}:\d{2}:\d{2}'
                       '(\.\d{6})?(\+00:00)?')
@@ -419,6 +424,7 @@ class ApiSampleTestBase(integrated_helpers._IntegratedTestBase):
         return {
             'isotime': isotime_re,
             'strtime': strtime_re,
+            'strtime_url': strtime_url_re,
             'strtime_or_none': r'None|%s' % strtime_re,
             'xmltime': xmltime_re,
             'password': '[0-9a-zA-Z]{1,12}',
@@ -479,9 +485,13 @@ class ApiSampleTestBase(integrated_helpers._IntegratedTestBase):
         return self._get_response(url, 'OPTIONS', strip_version=strip_version,
                                   headers=headers)
 
-    def _do_get(self, url, strip_version=False, headers=None):
-        return self._get_response(url, 'GET', strip_version=strip_version,
-                                  headers=headers)
+    def _do_get(self, url, strip_version=False, headers=None,
+                return_json_body=False):
+        response = self._get_response(url, 'GET', strip_version=strip_version,
+                                      headers=headers)
+        if return_json_body and hasattr(response, 'content'):
+            return jsonutils.loads(response.content)
+        return response
 
     def _do_post(self, url, name, subs, method='POST', headers=None):
         self.subs = subs

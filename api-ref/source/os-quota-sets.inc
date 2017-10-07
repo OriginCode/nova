@@ -1,5 +1,7 @@
 .. -*- rst -*-
 
+.. _os-quota-sets:
+
 ============================
  Quota sets (os-quota-sets)
 ============================
@@ -15,11 +17,12 @@ Show A Quota
 
 Show the quota for a project or a project and a user.
 
-To show a quota for a project and a user, specify the ``user_id`` query parameter.
-
 Normal response codes: 200
 
-Error response codes: unauthorized(401), forbidden(403)
+Error response codes: badRequest(400), unauthorized(401), forbidden(403)
+
+- 400 - BadRequest - the tenant_id is not valid in your cloud, perhaps
+  because it was typoed.
 
 Request
 -------
@@ -50,6 +53,7 @@ Response
   - security_groups: security_groups_quota
   - server_groups: server_groups
   - server_group_members: server_group_members
+  - networks: networks_quota_set_optional
 
 **Example Show A Quota: JSON response**
 
@@ -63,21 +67,17 @@ Update Quotas
 
 Update the quotas for a project or a project and a user.
 
-Users can force the update even if the quota has already been used and the
-
-reserved quota exceeds the new quota.
-
-To force the update, specify the ``"force": True`` attribute in the request
-
-body, the default value is ``false``.
-
-To update a quota for a project and a user, specify the ``user_id`` query
-
-parameter.
+Users can force the update even if the quota has already been used and
+the reserved quota exceeds the new quota. To force the update, specify
+the ``"force": True`` attribute in the request body, the default value
+is ``false``.
 
 Normal response codes: 200
 
 Error response codes: badRequest(400), unauthorized(401), forbidden(403)
+
+- 400 - BadRequest - the tenant_id is not valid in your cloud, perhaps
+  because it was typoed.
 
 Request
 -------
@@ -102,6 +102,7 @@ Request
   - security_groups: security_groups_quota_optional
   - server_groups: server_groups_quota_optional
   - server_group_members: server_group_members_quota_optional
+  - networks: networks_quota_set_optional
 
 **Example Update Quotas: JSON request**
 
@@ -133,6 +134,7 @@ Response
   - security_groups: security_groups_quota
   - server_groups: server_groups
   - server_group_members: server_group_members
+  - networks: networks_quota_set_optional
 
 **Example Update Quotas: JSON response**
 
@@ -158,11 +160,12 @@ Request
 .. rest_parameters:: parameters.yaml
 
   - tenant_id: tenant_id
-
   - user_id: user_id_query_quota_delete
 
 Response
 --------
+
+There is no body content for the response of a successful DELETE operation.
 
 List Default Quotas For Tenant
 ==============================
@@ -173,7 +176,7 @@ Lists the default quotas for a project.
 
 Normal response codes: 200
 
-Error response codes: unauthorized(401), forbidden(403)
+Error response codes: badrequest(400), unauthorized(401), forbidden(403)
 
 Request
 -------
@@ -203,6 +206,7 @@ Response
   - security_groups: security_groups_quota
   - server_groups: server_groups
   - server_group_members: server_group_members
+  - networks: networks_quota_set_optional
 
 **Example List Default Quotas For Tenant: JSON response**
 
@@ -220,7 +224,10 @@ To show a quota for a project and a user, specify the ``user_id`` query paramete
 
 Normal response codes: 200
 
-Error response codes: unauthorized(401), forbidden(403)
+Error response codes: badrequest(400), unauthorized(401), forbidden(403)
+
+- 400 - BadRequest - the {tenant_id} is not valid in your cloud, perhaps
+  because it was typoed.
 
 Request
 -------
@@ -251,6 +258,7 @@ Response
   - security_groups: security_groups_quota_details
   - server_groups: server_groups_quota_details
   - server_group_members: server_group_members_quota_details
+  - networks: networks_quota_set_optional
 
 **Example Show A Quota: JSON response**
 

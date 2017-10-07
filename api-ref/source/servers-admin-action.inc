@@ -7,53 +7,9 @@
 Enables administrators to perform an action on a server. Specify the
 action in the request body.
 
-You can change the administrative password for, create a back up of, and
-inject network information into a server.
+You can inject network information into, migrate, live-migrate,
+reset networking on, and reset the state of a server.
 
-You can migrate, live-migrate, reset networking on, and reset the state
-of a server.
-
-Create Server Back Up (createBackup Action)
-===========================================
-
-.. rest_method:: POST /servers/{server_id}/action
-
-Creates a back up of a server.
-
-Specify the ``createBackup`` action in the request body.
-
-Policy defaults enable only users with the administrative role or the
-owner of the server to perform this operation. Cloud providers can
-change these permissions through the ``policy.json`` file.
-
-Normal response codes: 202
-
-Error response codes: badRequest(400), unauthorized(401), forbidden(403),
-itemNotFound(404), conflict(409)
-
-Request
--------
-
-.. rest_parameters:: parameters.yaml
-
-
-  - server_id: server_id
-  - createBackup: createBackup
-  - name: backup_name
-  - backup_type: backup_type
-  - rotation: backup_rotation
-  - metadata: metadata
-
-**Example Create Server Back Up (Createbackup Action): JSON request**
-
-.. literalinclude:: ../../doc/api_samples/os-create-backup/create-backup-req.json
-   :language: javascript
-
-Response
---------
-
-On success a header 'Location' : <image location URL> and no body
-will be returned.
 
 Inject Network Information (injectNetworkInfo Action)
 =====================================================
@@ -81,11 +37,10 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-
-  - server_id: server_id
+  - server_id: server_id_path
   - injectNetworkInfo: injectNetworkInfo
 
-**Example Inject Network Information (injectNetworkInfo Action): JSON request**
+**Example Inject Network Information (injectNetworkInfo Action)**
 
 .. literalinclude:: ../../doc/api_samples/os-admin-actions/admin-actions-inject-network-info.json
    :language: javascript
@@ -93,7 +48,8 @@ Request
 Response
 --------
 
-On success no body is returned.
+If successful, this method does not return content in the response body.
+
 
 Migrate Server (migrate Action)
 ===============================
@@ -118,11 +74,10 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-
-  - server_id: server_id
+  - server_id: server_id_path
   - migrate: migrate
 
-**Example Migrate Server (migrate Action): JSON request**
+**Example Migrate Server (migrate Action)**
 
 .. literalinclude:: ../../doc/api_samples/os-migrate-server/migrate-server.json
    :language: javascript
@@ -130,7 +85,8 @@ Request
 Response
 --------
 
-On success no body is returned.
+If successful, this method does not return content in the response body.
+
 
 Live-Migrate Server (os-migrateLive Action)
 ===========================================
@@ -141,8 +97,8 @@ Live-migrates a server to a new host without rebooting.
 
 Specify the ``os-migrateLive`` action in the request body.
 
-Use the ``host`` parameter to specify the destination host. If you
-omit this parameter, the scheduler chooses a host. If a scheduled host
+Use the ``host`` parameter to specify the destination host. If
+this param is ``null``, the scheduler chooses a host. If a scheduled host
 is not suitable to do migration, the scheduler tries up to
 ``migrate_max_retries`` rescheduling attempts.
 
@@ -170,15 +126,15 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-
-  - server_id: server_id
+  - server_id: server_id_path
+  - os-migrateLive: os-migrateLive
   - host: host_migration
   - block_migration: block_migration
   - block_migration: block_migration_2_25
   - disk_over_commit: disk_over_commit
   - force: force_live_migrate
 
-**Example Live-Migrate Server (os-migrateLive Action): JSON request**
+**Example Live-Migrate Server (os-migrateLive Action)**
 
 .. literalinclude:: ../../doc/api_samples/os-migrate-server/v2.30/live-migrate-server.json
    :language: javascript
@@ -186,7 +142,8 @@ Request
 Response
 --------
 
-On success no body is returned.
+If successful, this method does not return content in the response body.
+
 
 Reset Networking On A Server (resetNetwork Action)
 ==================================================
@@ -216,11 +173,10 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-
-  - server_id: server_id
+  - server_id: server_id_path
   - resetNetwork: resetNetwork
 
-**Example Reset Networking On A Server (resetNetwork Action): JSON request**
+**Example Reset Networking On A Server (resetNetwork Action)**
 
 .. literalinclude:: ../../doc/api_samples/os-admin-actions/admin-actions-reset-network.json
    :language: javascript
@@ -228,7 +184,8 @@ Request
 Response
 --------
 
-On success no body is returned.
+If successful, this method does not return content in the response body.
+
 
 Reset Server State (os-resetState Action)
 =========================================
@@ -252,12 +209,11 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-
-  - server_id: server_id
+  - server_id: server_id_path
   - os-resetState: os-resetState
   - os-resetState.state: os-resetState_state
 
-**Example Reset Server State (os-resetState Action): JSON request**
+**Example Reset Server State (os-resetState Action)**
 
 .. literalinclude:: ../../doc/api_samples/os-admin-actions/admin-actions-reset-server-state.json
    :language: javascript
@@ -265,4 +221,4 @@ Request
 Response
 --------
 
-On success no body is returned.
+If successful, this method does not return content in the response body.

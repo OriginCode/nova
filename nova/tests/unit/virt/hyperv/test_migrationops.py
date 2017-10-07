@@ -61,6 +61,11 @@ class MigrationOpsTestCase(test_base.HyperVBaseTestCase):
         check_shared_storage.return_value = shared_storage
         self._migrationops._pathutils.exists.return_value = True
 
+        fake_disk_files = [os.path.join(instance_path, disk_name)
+                           for disk_name in
+                           ['root.vhd', 'configdrive.vhd', 'configdrive.iso',
+                            'eph0.vhd', 'eph1.vhdx']]
+
         expected_get_dir = [mock.call(mock.sentinel.instance_name),
                             mock.call(mock.sentinel.instance_name,
                                       mock.sentinel.dest_path)]
@@ -69,7 +74,7 @@ class MigrationOpsTestCase(test_base.HyperVBaseTestCase):
 
         self._migrationops._migrate_disk_files(
             instance_name=mock.sentinel.instance_name,
-            disk_files=[self._FAKE_DISK],
+            disk_files=fake_disk_files,
             dest=mock.sentinel.dest_path)
 
         self._migrationops._pathutils.exists.assert_called_once_with(
@@ -94,8 +99,11 @@ class MigrationOpsTestCase(test_base.HyperVBaseTestCase):
 
         self._migrationops._pathutils.get_instance_dir.assert_has_calls(
             expected_get_dir)
-        self._migrationops._pathutils.copy.assert_called_once_with(
-            self._FAKE_DISK, fake_dest_path)
+        self._migrationops._pathutils.copy.assert_has_calls(
+            mock.call(fake_disk_file, fake_dest_path)
+            for fake_disk_file in fake_disk_files)
+        self.assertEqual(len(fake_disk_files),
+                         self._migrationops._pathutils.copy.call_count)
         self._migrationops._pathutils.move_folder_files.assert_has_calls(
             expected_move_calls)
 
@@ -193,7 +201,8 @@ class MigrationOpsTestCase(test_base.HyperVBaseTestCase):
 
         self._migrationops.migrate_disk_and_power_off(
             self.context, instance, mock.sentinel.FAKE_DEST, flavor,
-            network_info, None, self._FAKE_TIMEOUT, self._FAKE_RETRY_INTERVAL)
+            network_info, mock.sentinel.bdi,
+            self._FAKE_TIMEOUT, self._FAKE_RETRY_INTERVAL)
 
         mock_check_flavor.assert_called_once_with(instance, flavor)
         self._migrationops._vmops.power_off.assert_called_once_with(
@@ -202,11 +211,12 @@ class MigrationOpsTestCase(test_base.HyperVBaseTestCase):
         mock_migrate_disk_files.assert_called_once_with(
             instance.name, disk_files, mock.sentinel.FAKE_DEST)
         self._migrationops._vmops.destroy.assert_called_once_with(
-            instance, destroy_disks=False)
+            instance, network_info, mock.sentinel.bdi, destroy_disks=False)
 
     def test_confirm_migration(self):
         mock_instance = fake_instance.fake_instance_obj(self.context)
         self._migrationops.confirm_migration(
+            context=self.context,
             migration=mock.sentinel.migration, instance=mock_instance,
             network_info=mock.sentinel.network_info)
         get_instance_migr_revert_dir = (
@@ -264,11 +274,15 @@ class MigrationOpsTestCase(test_base.HyperVBaseTestCase):
             mock_instance.uuid, test.MatchType(objects.ImageMeta))
         self._migrationops._vmops.create_instance.assert_called_once_with(
             mock_instance, mock.sentinel.network_info, root_device,
-            block_device_info, get_image_vm_gen.return_value)
+            block_device_info, get_image_vm_gen.return_value,
+            mock_image.return_value)
         mock_check_attach_config_drive.assert_called_once_with(
             mock_instance, get_image_vm_gen.return_value)
+        self._migrationops._vmops.set_boot_order.assert_called_once_with(
+            mock_instance.name, get_image_vm_gen.return_value,
+            block_device_info)
         self._migrationops._vmops.power_on.assert_called_once_with(
-            mock_instance)
+            mock_instance, network_info=mock.sentinel.network_info)
 
     def test_finish_revert_migration_boot_from_volume(self):
         self._check_finish_revert_migration(disk_type=constants.VOLUME)
@@ -425,11 +439,15 @@ class MigrationOpsTestCase(test_base.HyperVBaseTestCase):
                                                  mock.sentinel.image_meta)
         self._migrationops._vmops.create_instance.assert_called_once_with(
             mock_instance, mock.sentinel.network_info, root_device,
-            block_device_info, get_image_vm_gen.return_value)
+            block_device_info, get_image_vm_gen.return_value,
+            mock.sentinel.image_meta)
         mock_check_attach_config_drive.assert_called_once_with(
             mock_instance, get_image_vm_gen.return_value)
+        self._migrationops._vmops.set_boot_order.assert_called_once_with(
+            mock_instance.name, get_image_vm_gen.return_value,
+            block_device_info)
         self._migrationops._vmops.power_on.assert_called_once_with(
-            mock_instance)
+            mock_instance, network_info=mock.sentinel.network_info)
 
     def test_finish_migration(self):
         self._check_finish_migration(disk_type=constants.DISK)

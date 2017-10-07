@@ -20,8 +20,8 @@ versioned object model os_vif.objects.*
 
 import sys
 
-import os_vif
 from os_vif import objects
+from os_vif.objects import fields as os_vif_fields
 from oslo_config import cfg
 from oslo_log import log as logging
 
@@ -32,9 +32,6 @@ from nova.network import model
 
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
-
-# Ensure os-vif objects are registered and plugins loaded
-os_vif.initialize()
 
 
 def _get_vif_name(vif):
@@ -80,6 +77,26 @@ def _is_firewall_required(vif):
     if CONF.firewall_driver != "nova.virt.firewall.NoopFirewallDriver":
         return True
     return False
+
+
+def _set_vhostuser_settings(vif, obj):
+    """Set vhostuser socket mode and path
+
+    :param vif: the nova.network.model.VIF instance
+    :param obj: a os_vif.objects.vif.VIFVHostUser instance
+
+    :raises: exception.VifDetailsMissingVhostuserSockPath
+    """
+
+    obj.mode = vif['details'].get(
+        model.VIF_DETAILS_VHOSTUSER_MODE, 'server')
+    path = vif['details'].get(
+        model.VIF_DETAILS_VHOSTUSER_SOCKET, None)
+    if path:
+        obj.path = path
+    else:
+        raise exception.VifDetailsMissingVhostuserSockPath(
+            vif_id=vif['id'])
 
 
 def nova_to_osvif_instance(instance):
@@ -211,6 +228,8 @@ def _nova_to_osvif_network(network):
     if network['label'] is not None:
         netobj.label = network['label']
 
+    if network.get_meta("mtu") is not None:
+        netobj.mtu = network.get_meta("mtu")
     if network.get_meta("multi_host") is not None:
         netobj.multi_host = network.get_meta("multi_host")
     if network.get_meta("should_create_bridge") is not None:
@@ -259,9 +278,24 @@ def _nova_to_osvif_vif_bridge(vif):
 
 # VIF_TYPE_OVS = 'ovs'
 def _nova_to_osvif_vif_ovs(vif):
+    vnic_type = vif.get('vnic_type', model.VNIC_TYPE_NORMAL)
     profile = objects.vif.VIFPortProfileOpenVSwitch(
         interface_id=vif.get('ovs_interfaceid') or vif['id'])
-    if _is_firewall_required(vif) or vif.is_hybrid_plug_enabled():
+    if vnic_type == model.VNIC_TYPE_DIRECT:
+        profile = objects.vif.VIFPortProfileOVSRepresentor(
+            interface_id=vif.get('ovs_interfaceid') or vif['id'],
+            representor_name=_get_vif_name(vif),
+            representor_address=vif["profile"]['pci_slot'])
+        obj = _get_vif_instance(
+            vif,
+            objects.vif.VIFHostDevice,
+            port_profile=profile,
+            plugin="ovs",
+            dev_address=vif["profile"]['pci_slot'],
+            dev_type=os_vif_fields.VIFHostDeviceDevType.ETHERNET)
+        if vif["network"]["bridge"] is not None:
+            obj.network.bridge = vif["network"]["bridge"]
+    elif _is_firewall_required(vif) or vif.is_hybrid_plug_enabled():
         obj = _get_vif_instance(
             vif,
             objects.vif.VIFBridge,
@@ -279,6 +313,93 @@ def _nova_to_osvif_vif_ovs(vif):
         if vif["network"]["bridge"] is not None:
             obj.bridge_name = vif["network"]["bridge"]
     return obj
+
+
+# VIF_TYPE_AGILIO_OVS = 'agilio_ovs'
+def _nova_to_osvif_vif_agilio_ovs(vif):
+    vnic_type = vif.get('vnic_type', model.VNIC_TYPE_NORMAL)
+    # In practice, vif_name gets its value from vif["devname"], passed by
+    # the mechanism driver.
+    vif_name = _get_vif_name(vif)
+    agilio_vnic_types = [model.VNIC_TYPE_DIRECT,
+                         model.VNIC_TYPE_VIRTIO_FORWARDER]
+    if vnic_type in agilio_vnic_types:
+        # Note: passing representor_name asks os-vif to rename the
+        # representor, setting this to vif_name is helpful for tracing.
+        # VIF.port_profile.representor_address is used by the os-vif plugin's
+        # plug/unplug, this should be the same as VIF.dev_address in the
+        # VNIC_TYPE_DIRECT case.
+        profile = objects.vif.VIFPortProfileOVSRepresentor(
+            interface_id=vif.get('ovs_interfaceid') or vif['id'],
+            representor_name=vif_name,
+            representor_address=vif["profile"]["pci_slot"])
+    if vnic_type == model.VNIC_TYPE_DIRECT:
+        # VIF.dev_address is used by the hypervisor to plug the instance into
+        # the PCI device.
+        obj = _get_vif_instance(
+            vif,
+            objects.vif.VIFHostDevice,
+            port_profile=profile,
+            plugin="agilio_ovs",
+            dev_address=vif["profile"]["pci_slot"],
+            dev_type=objects.fields.VIFHostDeviceDevType.ETHERNET)
+        if vif["network"]["bridge"] is not None:
+            obj.network.bridge = vif["network"]["bridge"]
+    elif vnic_type == model.VNIC_TYPE_VIRTIO_FORWARDER:
+        obj = _get_vif_instance(vif, objects.vif.VIFVHostUser,
+                                port_profile=profile, plugin="agilio_ovs",
+                                vif_name=vif_name)
+        _set_vhostuser_settings(vif, obj)
+        if vif["network"]["bridge"] is not None:
+            obj.network.bridge = vif["network"]["bridge"]
+    else:
+        LOG.debug("agilio_ovs falling through to ovs %s", vif)
+        obj = _nova_to_osvif_vif_ovs(vif)
+    return obj
+
+
+# VIF_TYPE_VHOST_USER = 'vhostuser'
+def _nova_to_osvif_vif_vhostuser(vif):
+    if vif['details'].get(model.VIF_DETAILS_VHOSTUSER_FP_PLUG, False):
+        if vif['details'].get(model.VIF_DETAILS_VHOSTUSER_OVS_PLUG, False):
+            profile = objects.vif.VIFPortProfileFPOpenVSwitch(
+                    interface_id=vif.get('ovs_interfaceid') or vif['id'])
+            if _is_firewall_required(vif) or vif.is_hybrid_plug_enabled():
+                profile.bridge_name = _get_hybrid_bridge_name(vif)
+                profile.hybrid_plug = True
+            else:
+                profile.hybrid_plug = False
+                if vif["network"]["bridge"] is not None:
+                    profile.bridge_name = vif["network"]["bridge"]
+        else:
+            profile = objects.vif.VIFPortProfileFPBridge()
+            if vif["network"]["bridge"] is not None:
+                profile.bridge_name = vif["network"]["bridge"]
+        obj = _get_vif_instance(vif, objects.vif.VIFVHostUser,
+                        plugin="vhostuser_fp",
+                        vif_name=_get_vif_name(vif),
+                        port_profile=profile)
+        _set_vhostuser_settings(vif, obj)
+        return obj
+    elif vif['details'].get(model.VIF_DETAILS_VHOSTUSER_OVS_PLUG, False):
+        profile = objects.vif.VIFPortProfileOpenVSwitch(
+            interface_id=vif.get('ovs_interfaceid') or vif['id'])
+        vif_name = ('vhu' + vif['id'])[:model.NIC_NAME_LEN]
+        obj = _get_vif_instance(vif, objects.vif.VIFVHostUser,
+                                port_profile=profile, plugin="ovs",
+                                vif_name=vif_name)
+        if vif["network"]["bridge"] is not None:
+            obj.bridge_name = vif["network"]["bridge"]
+        _set_vhostuser_settings(vif, obj)
+        return obj
+    elif vif['details'].get(model.VIF_DETAILS_VHOSTUSER_VROUTER_PLUG, False):
+        obj = _get_vif_instance(vif, objects.vif.VIFVHostUser,
+                                plugin="contrail_vrouter",
+                                vif_name=_get_vif_name(vif))
+        _set_vhostuser_settings(vif, obj)
+        return obj
+    else:
+        raise NotImplementedError()
 
 
 # VIF_TYPE_IVS = 'ivs'
@@ -318,11 +439,6 @@ def _nova_to_osvif_vif_ib_hostdev(vif):
 
 # VIF_TYPE_MIDONET = 'midonet'
 def _nova_to_osvif_vif_midonet(vif):
-    raise NotImplementedError()
-
-
-# VIF_TYPE_VHOSTUSER = 'vhostuser'
-def _nova_to_osvif_vif_vhostuser(vif):
     raise NotImplementedError()
 
 

@@ -70,13 +70,13 @@ class KeypairsTestV21(test.TestCase):
     wsgi_api_version = os_wsgi.DEFAULT_API_VERSION
 
     def _setup_app_and_controller(self):
-        self.app_server = fakes.wsgi_app_v21(init_only=('os-keypairs',
-                                                        'servers'))
+        self.app_server = fakes.wsgi_app_v21()
         self.controller = keypairs_v21.KeypairController()
 
     def setUp(self):
         super(KeypairsTestV21, self).setUp()
         fakes.stub_out_networking(self)
+        fakes.stub_out_secgroup_api(self)
 
         self.stub_out("nova.db.key_pair_get_all_by_user",
                       db_key_pair_get_all_by_user)
@@ -181,13 +181,10 @@ class KeypairsTestV21(test.TestCase):
         self.assertNotIn('private_key', res_dict['keypair'])
         self._assert_keypair_type(res_dict)
 
-    def test_keypair_import_quota_limit(self):
-
-        def fake_quotas_count(self, context, resource, *args, **kwargs):
-            return 100
-
-        self.stubs.Set(QUOTAS, "count", fake_quotas_count)
-
+    @mock.patch('nova.objects.Quotas.check_deltas')
+    def test_keypair_import_quota_limit(self, mock_check):
+        mock_check.side_effect = exception.OverQuota(overs='key_pairs',
+                                                     usages={'key_pairs': 100})
         body = {
             'keypair': {
                 'name': 'create_test',
@@ -207,13 +204,10 @@ class KeypairsTestV21(test.TestCase):
                                self.controller.create, self.req, body=body)
         self.assertIn('Quota exceeded, too many key pairs.', ex.explanation)
 
-    def test_keypair_create_quota_limit(self):
-
-        def fake_quotas_count(self, context, resource, *args, **kwargs):
-            return 100
-
-        self.stubs.Set(QUOTAS, "count", fake_quotas_count)
-
+    @mock.patch('nova.objects.Quotas.check_deltas')
+    def test_keypair_create_quota_limit(self, mock_check):
+        mock_check.side_effect = exception.OverQuota(overs='key_pairs',
+                                                     usages={'key_pairs': 100})
         body = {
             'keypair': {
                 'name': 'create_test',
@@ -223,6 +217,50 @@ class KeypairsTestV21(test.TestCase):
         ex = self.assertRaises(webob.exc.HTTPForbidden,
                                self.controller.create, self.req, body=body)
         self.assertIn('Quota exceeded, too many key pairs.', ex.explanation)
+
+    @mock.patch('nova.objects.Quotas.check_deltas')
+    def test_keypair_create_over_quota_during_recheck(self, mock_check):
+        # Simulate a race where the first check passes and the recheck fails.
+        # First check occurs in compute/api.
+        exc = exception.OverQuota(overs='key_pairs', usages={'key_pairs': 100})
+        mock_check.side_effect = [None, exc]
+        body = {
+            'keypair': {
+                'name': 'create_test',
+            },
+        }
+
+        self.assertRaises(webob.exc.HTTPForbidden,
+                          self.controller.create, self.req, body=body)
+
+        ctxt = self.req.environ['nova.context']
+        self.assertEqual(2, mock_check.call_count)
+        call1 = mock.call(ctxt, {'key_pairs': 1}, ctxt.user_id)
+        call2 = mock.call(ctxt, {'key_pairs': 0}, ctxt.user_id)
+        mock_check.assert_has_calls([call1, call2])
+
+        # Verify we removed the key pair that was added after the first
+        # quota check passed.
+        key_pairs = objects.KeyPairList.get_by_user(ctxt, ctxt.user_id)
+        names = [key_pair.name for key_pair in key_pairs]
+        self.assertNotIn('create_test', names)
+
+    @mock.patch('nova.objects.Quotas.check_deltas')
+    def test_keypair_create_no_quota_recheck(self, mock_check):
+        # Disable recheck_quota.
+        self.flags(recheck_quota=False, group='quota')
+
+        body = {
+            'keypair': {
+                'name': 'create_test',
+            },
+        }
+        self.controller.create(self.req, body=body)
+
+        ctxt = self.req.environ['nova.context']
+        # check_deltas should have been called only once.
+        mock_check.assert_called_once_with(ctxt, {'key_pairs': 1},
+                                           ctxt.user_id)
 
     def test_keypair_create_duplicate(self):
         self.stub_out("nova.objects.KeyPair.create",
@@ -326,7 +364,7 @@ class KeypairsTestV21(test.TestCase):
                                                'imageRef': FAKE_UUID}})
         res = req.get_response(self.app_server)
         self.assertEqual(400, res.status_code)
-        self.assertIn('keypair_name', res.body)
+        self.assertIn(b'keypair_name', res.body)
 
     @mock.patch.object(compute_api.API, 'create')
     def test_create_server_keypair_name_with_leading_trailing_compat_mode(
@@ -365,7 +403,6 @@ class KeypairPolicyTestV21(test.NoDBTestCase):
 
         self.stub_out("nova.objects.keypair.KeyPair._get_from_db",
                       _db_key_pair_get)
-        self.stub_out("nova.db.key_pair_destroy", db_key_pair_destroy)
 
         self.req = fakes.HTTPRequest.blank('')
 
@@ -376,7 +413,8 @@ class KeypairPolicyTestV21(test.NoDBTestCase):
                           self.KeyPairController.index,
                           self.req)
 
-    def test_keypair_list_pass_policy(self):
+    @mock.patch('nova.objects.KeyPairList.get_by_user')
+    def test_keypair_list_pass_policy(self, mock_get):
         rules = {self.policy_path + ':index': ''}
         policy.set_rules(oslo_policy.Rules.from_dict(rules))
         res = self.KeyPairController.index(self.req)
@@ -427,7 +465,8 @@ class KeypairPolicyTestV21(test.NoDBTestCase):
                           self.KeyPairController.delete,
                           self.req, 'FAKE')
 
-    def test_keypair_delete_pass_policy(self):
+    @mock.patch('nova.objects.KeyPair.destroy_by_name')
+    def test_keypair_delete_pass_policy(self, mock_destroy):
         rules = {self.policy_path + ':delete': ''}
         policy.set_rules(oslo_policy.Rules.from_dict(rules))
         self.KeyPairController.delete(self.req, 'FAKE')
@@ -560,13 +599,23 @@ class KeypairsTestV210(KeypairsTestV22):
                           self.controller.create,
                           req, body=body)
 
+    def test_keypair_list_other_user_invalid_in_old_microversion(self):
+        req = fakes.HTTPRequest.blank(self.base_url +
+                                      '/os-keypairs?user_id=foo',
+                                      version="2.9",
+                                      use_admin_context=True)
+        with mock.patch.object(self.controller.api, 'get_key_pairs') as mock_g:
+            self.controller.index(req)
+            userid = mock_g.call_args_list[0][0][1]
+            self.assertEqual('fake_user', userid)
+
 
 class KeypairsTestV235(test.TestCase):
     base_url = '/v2/fake'
     wsgi_api_version = '2.35'
 
     def _setup_app_and_controller(self):
-        self.app_server = fakes.wsgi_app_v21(init_only=('os-keypairs'))
+        self.app_server = fakes.wsgi_app_v21()
         self.controller = keypairs_v21.KeypairController()
 
     def setUp(self):
@@ -599,3 +648,26 @@ class KeypairsTestV235(test.TestCase):
             version=self.wsgi_api_version, use_admin_context=True)
 
         self.assertRaises(webob.exc.HTTPBadRequest, self.controller.index, req)
+
+    def test_keypair_list_limit_and_marker_invalid_limit(self):
+        req = fakes.HTTPRequest.blank(
+            self.base_url + '/os-keypairs?limit=abc&marker=fake_marker',
+            version=self.wsgi_api_version, use_admin_context=True)
+
+        self.assertRaises(exception.ValidationError, self.controller.index,
+                          req)
+
+    @mock.patch("nova.db.key_pair_get_all_by_user")
+    def test_keypair_list_limit_and_marker_invalid_in_old_microversion(
+            self, mock_kp_get):
+        mock_kp_get.side_effect = db_key_pair_get_all_by_user
+
+        req = fakes.HTTPRequest.blank(
+            self.base_url + '/os-keypairs?limit=3&marker=fake_marker',
+            version="2.30", use_admin_context=True)
+
+        self.controller.index(req)
+
+        mock_kp_get.assert_called_once_with(
+            req.environ['nova.context'], 'fake_user',
+            limit=None, marker=None)

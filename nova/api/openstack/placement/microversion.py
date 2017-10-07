@@ -17,6 +17,7 @@
 # the code now used in microversion_parse library.
 
 import collections
+import inspect
 
 import microversion_parse
 import webob
@@ -29,10 +30,24 @@ from nova.i18n import _
 
 SERVICE_TYPE = 'placement'
 MICROVERSION_ENVIRON = '%s.microversion' % SERVICE_TYPE
+VERSIONED_METHODS = collections.defaultdict(list)
 
 # The Canonical Version List
 VERSIONS = [
     '1.0',
+    '1.1',  # initial support for aggregate.get_aggregates and set_aggregates
+    '1.2',  # Adds /resource_classes resource endpoint
+    '1.3',  # Adds 'member_of' query parameter to get resource providers
+            # that are members of any of the listed aggregates
+    '1.4',  # Adds resources query string parameter in GET /resource_providers
+    '1.5',  # Adds DELETE /resource_providers/{uuid}/inventories
+    '1.6',  # Adds /traits and /resource_providers{uuid}/traits resource
+            # endpoints
+    '1.7',  # PUT /resource_classes/{name} is bodiless create or update
+    '1.8',  # Adds 'project_id' and 'user_id' required request parameters to
+            # PUT /allocations
+    '1.9',  # Adds GET /usages
+    '1.10',  # Adds GET /allocation_candidates resource endpoint
 ]
 
 
@@ -64,6 +79,28 @@ def parse_version_string(version_string):
     except (ValueError, TypeError) as exc:
         raise TypeError('invalid version string: %s; %s' % (
             version_string, exc))
+
+
+def raise_http_status_code_if_not_version(req, status_code, min_version,
+                                          max_version=None):
+    """Utility to raise a http status code if the wanted microversion does not
+       match.
+
+    :param req: The HTTP request for the placement api
+    :param status_code: HTTP status code (integer value) to be raised
+    :param min_version: Minimum placement microversion level
+    :param max_version: Maximum placement microversion level
+    :returns: None
+    :raises: HTTP status code if the specified microversion does not match
+    :raises: KeyError if status_code is not a valid HTTP status code
+    """
+    if not isinstance(min_version, tuple):
+        min_version = parse_version_string(min_version)
+    if max_version and not isinstance(max_version, tuple):
+        max_version = parse_version_string(max_version)
+    want_version = req.environ[MICROVERSION_ENVIRON]
+    if not want_version.matches(min_version, max_version):
+        raise webob.exc.status_map[status_code]
 
 
 class MicroversionMiddleware(object):
@@ -154,3 +191,84 @@ def extract_version(headers):
     if (str(request_version) in VERSIONS and request_version.matches()):
         return request_version
     raise ValueError('Unacceptable version header: %s' % version_string)
+
+
+# From twisted
+# https://github.com/twisted/twisted/blob/trunk/twisted/python/deprecate.py
+def _fully_qualified_name(obj):
+    """Return the fully qualified name of a module, class, method or function.
+
+    Classes and functions need to be module level ones to be correctly
+    qualified.
+    """
+    try:
+        name = obj.__qualname__
+    except AttributeError:
+        name = obj.__name__
+
+    if inspect.isclass(obj) or inspect.isfunction(obj):
+        moduleName = obj.__module__
+        return "%s.%s" % (moduleName, name)
+    elif inspect.ismethod(obj):
+        try:
+            cls = obj.im_class
+        except AttributeError:
+            # Python 3 eliminates im_class, substitutes __module__ and
+            # __qualname__ to provide similar information.
+            return "%s.%s" % (obj.__module__, obj.__qualname__)
+        else:
+            className = _fully_qualified_name(cls)
+            return "%s.%s" % (className, name)
+    return name
+
+
+def _find_method(f, version):
+    """Look in VERSIONED_METHODS for method with right name matching version.
+
+    If no match is found raise a 404.
+    """
+    qualified_name = _fully_qualified_name(f)
+    # A KeyError shouldn't be possible here, but let's be robust
+    # just in case.
+    method_list = VERSIONED_METHODS.get(qualified_name, [])
+    for min_version, max_version, func in method_list:
+        if min_version <= version <= max_version:
+            return func
+
+    raise webob.exc.HTTPNotFound()
+
+
+def version_handler(min_ver, max_ver=None):
+    """Decorator for versioning API methods.
+
+    Add as a decorator to a placement API handler to constrain
+    the microversions at which it will run. Add after the
+    ``wsgify`` decorator.
+
+    This does not check for version intersections. That's the
+    domain of tests.
+
+    :param min_ver: A string of two numerals, X.Y indicating the
+                    minimum version allowed for the decorated method.
+    :param min_ver: A string of two numerals, X.Y, indicating the
+                    maximum version allowed for the decorated method.
+    """
+    def decorator(f):
+        min_version = parse_version_string(min_ver)
+        if max_ver:
+            max_version = parse_version_string(max_ver)
+        else:
+            max_version = parse_version_string(max_version_string())
+        qualified_name = _fully_qualified_name(f)
+        VERSIONED_METHODS[qualified_name].append(
+            (min_version, max_version, f))
+
+        def decorated_func(req, *args, **kwargs):
+            version = req.environ[MICROVERSION_ENVIRON]
+            return _find_method(f, version)(req, *args, **kwargs)
+
+        # Sort highest min version to beginning of list.
+        VERSIONED_METHODS[qualified_name].sort(key=lambda x: x[0],
+                                               reverse=True)
+        return decorated_func
+    return decorator

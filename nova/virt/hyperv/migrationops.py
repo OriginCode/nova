@@ -24,7 +24,7 @@ from oslo_utils import excutils
 from oslo_utils import units
 
 from nova import exception
-from nova.i18n import _, _LW, _LE
+from nova.i18n import _
 from nova import objects
 from nova.virt import configdrive
 from nova.virt.hyperv import block_device_manager
@@ -72,12 +72,10 @@ class MigrationOps(object):
             self._pathutils.makedirs(dest_path)
 
             for disk_file in disk_files:
-                # Skip the config drive as the instance is already configured
-                if os.path.basename(disk_file).lower() != 'configdrive.vhd':
-                    LOG.debug('Copying disk "%(disk_file)s" to '
-                              '"%(dest_path)s"',
-                              {'disk_file': disk_file, 'dest_path': dest_path})
-                    self._pathutils.copy(disk_file, dest_path)
+                LOG.debug('Copying disk "%(disk_file)s" to '
+                          '"%(dest_path)s"',
+                          {'disk_file': disk_file, 'dest_path': dest_path})
+                self._pathutils.copy(disk_file, dest_path)
 
             self._pathutils.move_folder_files(instance_path, revert_path)
 
@@ -100,7 +98,7 @@ class MigrationOps(object):
         except Exception as ex:
             # Log and ignore this exception
             LOG.exception(ex)
-            LOG.error(_LE("Cannot cleanup migration files"))
+            LOG.error("Cannot cleanup migration files")
 
     def _check_target_flavor(self, instance, flavor):
         new_root_gb = flavor.root_gb
@@ -131,12 +129,13 @@ class MigrationOps(object):
         if disk_files:
             self._migrate_disk_files(instance.name, disk_files, dest)
 
-        self._vmops.destroy(instance, destroy_disks=False)
+        self._vmops.destroy(instance, network_info,
+                            block_device_info, destroy_disks=False)
 
         # disk_info is not used
         return ""
 
-    def confirm_migration(self, migration, instance, network_info):
+    def confirm_migration(self, context, migration, instance, network_info):
         LOG.debug("confirm_migration called", instance=instance)
 
         self._pathutils.get_instance_migr_revert_dir(instance.name,
@@ -186,12 +185,12 @@ class MigrationOps(object):
         self._check_ephemeral_disks(instance, ephemerals)
 
         self._vmops.create_instance(instance, network_info, root_device,
-                                    block_device_info, vm_gen)
+                                    block_device_info, vm_gen, image_meta)
 
         self._check_and_attach_config_drive(instance, vm_gen)
-
+        self._vmops.set_boot_order(instance_name, vm_gen, block_device_info)
         if power_on:
-            self._vmops.power_on(instance)
+            self._vmops.power_on(instance, network_info=network_info)
 
     def _merge_base_vhd(self, diff_vhd_path, base_vhd_path):
         base_vhd_copy_path = os.path.join(os.path.dirname(diff_vhd_path),
@@ -295,12 +294,12 @@ class MigrationOps(object):
         self._check_ephemeral_disks(instance, ephemerals, resize_instance)
 
         self._vmops.create_instance(instance, network_info, root_device,
-                                    block_device_info, vm_gen)
+                                    block_device_info, vm_gen, image_meta)
 
         self._check_and_attach_config_drive(instance, vm_gen)
-
+        self._vmops.set_boot_order(instance_name, vm_gen, block_device_info)
         if power_on:
-            self._vmops.power_on(instance)
+            self._vmops.power_on(instance, network_info=network_info)
 
     def _check_ephemeral_disks(self, instance, ephemerals,
                                resize_instance=False):
@@ -316,8 +315,8 @@ class MigrationOps(object):
         elif sum(eph['size'] for eph in ephemerals) != new_eph_gb:
             # New ephemeral size is different from the original ephemeral size
             # and there are multiple ephemerals.
-            LOG.warning(_LW("Cannot resize multiple ephemeral disks for "
-                            "instance."), instance=instance)
+            LOG.warning("Cannot resize multiple ephemeral disks for instance.",
+                        instance=instance)
 
         for index, eph in enumerate(ephemerals):
             eph_name = "eph%s" % index

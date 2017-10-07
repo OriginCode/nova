@@ -17,6 +17,7 @@
 """
 Management class for basic VM operations.
 """
+import contextlib
 import functools
 import os
 import time
@@ -30,7 +31,6 @@ from oslo_log import log as logging
 from oslo_service import loopingcall
 from oslo_utils import excutils
 from oslo_utils import fileutils
-from oslo_utils import importutils
 from oslo_utils import units
 from oslo_utils import uuidutils
 
@@ -38,8 +38,9 @@ from nova.api.metadata import base as instance_metadata
 from nova.compute import vm_states
 import nova.conf
 from nova import exception
-from nova.i18n import _, _LI, _LE, _LW
+from nova.i18n import _
 from nova import objects
+from nova.objects import fields
 from nova import utils
 from nova.virt import configdrive
 from nova.virt import hardware
@@ -48,6 +49,7 @@ from nova.virt.hyperv import constants
 from nova.virt.hyperv import imagecache
 from nova.virt.hyperv import pathutils
 from nova.virt.hyperv import serialconsoleops
+from nova.virt.hyperv import vif as vif_utils
 from nova.virt.hyperv import volumeops
 
 LOG = logging.getLogger(__name__)
@@ -79,17 +81,6 @@ def check_admin_permissions(function):
         return function(self, *args, **kwds)
     return wrapper
 
-NEUTRON_VIF_DRIVER = 'nova.virt.hyperv.vif.HyperVNeutronVIFDriver'
-NOVA_VIF_DRIVER = 'nova.virt.hyperv.vif.HyperVNovaNetworkVIFDriver'
-
-
-def get_network_driver():
-    """"Return the correct network module"""
-    if nova.network.is_neutron():
-        return NEUTRON_VIF_DRIVER
-    else:
-        return NOVA_VIF_DRIVER
-
 
 class VMOps(object):
     # The console log is stored in two files, each should have at most half of
@@ -97,7 +88,8 @@ class VMOps(object):
     _MAX_CONSOLE_LOG_FILE_SIZE = units.Mi / 2
     _ROOT_DISK_CTRL_ADDR = 0
 
-    def __init__(self):
+    def __init__(self, virtapi=None):
+        self._virtapi = virtapi
         self._vmutils = utilsfactory.get_vmutils()
         self._metricsutils = utilsfactory.get_metricsutils()
         self._vhdutils = utilsfactory.get_vhdutils()
@@ -108,12 +100,7 @@ class VMOps(object):
         self._serial_console_ops = serialconsoleops.SerialConsoleOps()
         self._block_dev_man = (
             block_device_manager.BlockDeviceInfoManager())
-        self._vif_driver = None
-        self._load_vif_driver_class()
-
-    def _load_vif_driver_class(self):
-        class_name = get_network_driver()
-        self._vif_driver = importutils.import_object(class_name)
+        self._vif_driver = vif_utils.HyperVVIFDriver()
 
     def list_instance_uuids(self):
         instance_uuids = []
@@ -268,11 +255,20 @@ class VMOps(object):
             instance.device_metadata = objects.InstanceDeviceMetadata(
                 devices=metadata)
 
+    def set_boot_order(self, instance_name, vm_gen, block_device_info):
+        boot_order = self._block_dev_man.get_boot_order(
+            vm_gen, block_device_info)
+        LOG.debug("Setting boot order for instance: %(instance_name)s: "
+                  "%(boot_order)s", {'instance_name': instance_name,
+                                     'boot_order': boot_order})
+
+        self._vmutils.set_boot_order(instance_name, boot_order)
+
     @check_admin_permissions
     def spawn(self, context, instance, image_meta, injected_files,
               admin_password, network_info, block_device_info=None):
         """Create a new VM and start it."""
-        LOG.info(_LI("Spawning new instance"), instance=instance)
+        LOG.info("Spawning new instance", instance=instance)
 
         instance_name = instance.name
         if self._vmutils.vm_exists(instance_name):
@@ -290,8 +286,11 @@ class VMOps(object):
         self._create_ephemerals(instance, block_device_info['ephemerals'])
 
         try:
-            self.create_instance(instance, network_info, root_device,
-                                 block_device_info, vm_gen)
+            with self.wait_vif_plug_events(instance, network_info):
+                # waiting will occur after the instance is created.
+                self.create_instance(instance, network_info, root_device,
+                                     block_device_info, vm_gen, image_meta)
+
             self._save_device_metadata(context, instance, block_device_info)
 
             if configdrive.required_by(instance):
@@ -302,25 +301,93 @@ class VMOps(object):
                                                              network_info)
 
                 self.attach_config_drive(instance, configdrive_path, vm_gen)
-
-            self.power_on(instance)
+            self.set_boot_order(instance.name, vm_gen, block_device_info)
+            self.power_on(instance, network_info=network_info)
         except Exception:
             with excutils.save_and_reraise_exception():
                 self.destroy(instance)
 
+    @contextlib.contextmanager
+    def wait_vif_plug_events(self, instance, network_info):
+        timeout = CONF.vif_plugging_timeout
+        events = self._get_neutron_events(network_info)
+
+        try:
+            with self._virtapi.wait_for_instance_event(
+                    instance, events, deadline=timeout,
+                    error_callback=self._neutron_failed_callback):
+                yield
+        except etimeout.Timeout:
+            # We never heard from Neutron
+            LOG.warning('Timeout waiting for vif plugging callback for '
+                        'instance.', instance=instance)
+            if CONF.vif_plugging_is_fatal:
+                raise exception.VirtualInterfaceCreateException()
+
+    def _neutron_failed_callback(self, event_name, instance):
+        LOG.error('Neutron Reported failure on event %s',
+                  event_name, instance=instance)
+        if CONF.vif_plugging_is_fatal:
+            raise exception.VirtualInterfaceCreateException()
+
+    def _get_neutron_events(self, network_info):
+        # NOTE(danms): We need to collect any VIFs that are currently
+        # down that we expect a down->up event for. Anything that is
+        # already up will not undergo that transition, and for
+        # anything that might be stale (cache-wise) assume it's
+        # already up so we don't block on it.
+        if utils.is_neutron() and CONF.vif_plugging_timeout:
+            return [('network-vif-plugged', vif['id'])
+                    for vif in network_info if vif.get('active') is False]
+        else:
+            return []
+
     def create_instance(self, instance, network_info, root_device,
-                        block_device_info, vm_gen):
+                        block_device_info, vm_gen, image_meta):
         instance_name = instance.name
         instance_path = os.path.join(CONF.instances_path, instance_name)
+        secure_boot_enabled = self._requires_secure_boot(instance, image_meta,
+                                                         vm_gen)
+
+        memory_per_numa_node, cpus_per_numa_node = (
+            self._get_instance_vnuma_config(instance, image_meta))
+
+        if memory_per_numa_node:
+            LOG.debug("Instance requires vNUMA topology. Host's NUMA spanning "
+                      "has to be disabled in order for the instance to "
+                      "benefit from it.", instance=instance)
+            if CONF.hyperv.dynamic_memory_ratio > 1.0:
+                LOG.warning(
+                    "Instance vNUMA topology requested, but dynamic memory "
+                    "ratio is higher than 1.0 in nova.conf. Ignoring dynamic "
+                    "memory ratio option.", instance=instance)
+            dynamic_memory_ratio = 1.0
+            vnuma_enabled = True
+        else:
+            dynamic_memory_ratio = CONF.hyperv.dynamic_memory_ratio
+            vnuma_enabled = False
+
+        if instance.pci_requests.requests:
+            # NOTE(claudiub): if the instance requires PCI devices, its
+            # host shutdown action MUST be shutdown.
+            host_shutdown_action = os_win_const.HOST_SHUTDOWN_ACTION_SHUTDOWN
+        else:
+            host_shutdown_action = None
 
         self._vmutils.create_vm(instance_name,
-                                instance.flavor.memory_mb,
-                                instance.flavor.vcpus,
-                                CONF.hyperv.limit_cpu_features,
-                                CONF.hyperv.dynamic_memory_ratio,
+                                vnuma_enabled,
                                 vm_gen,
                                 instance_path,
                                 [instance.uuid])
+
+        self._vmutils.update_vm(instance_name,
+                                instance.flavor.memory_mb,
+                                memory_per_numa_node,
+                                instance.flavor.vcpus,
+                                cpus_per_numa_node,
+                                CONF.hyperv.limit_cpu_features,
+                                dynamic_memory_ratio,
+                                host_shutdown_action=host_shutdown_action)
 
         self._configure_remotefx(instance, vm_gen)
 
@@ -345,10 +412,67 @@ class VMOps(object):
             self._vmutils.create_nic(instance_name,
                                      vif['id'],
                                      vif['address'])
-            self._vif_driver.plug(instance, vif)
 
         if CONF.hyperv.enable_instance_metrics_collection:
             self._metricsutils.enable_vm_metrics_collection(instance_name)
+
+        self._set_instance_disk_qos_specs(instance)
+
+        if secure_boot_enabled:
+            certificate_required = self._requires_certificate(image_meta)
+            self._vmutils.enable_secure_boot(
+                instance.name, msft_ca_required=certificate_required)
+
+        self._attach_pci_devices(instance)
+
+    def _attach_pci_devices(self, instance):
+        for pci_request in instance.pci_requests.requests:
+            spec = pci_request.spec[0]
+            for counter in range(pci_request.count):
+                self._vmutils.add_pci_device(instance.name,
+                                             spec['vendor_id'],
+                                             spec['product_id'])
+
+    def _get_instance_vnuma_config(self, instance, image_meta):
+        """Returns the appropriate NUMA configuration for Hyper-V instances,
+        given the desired instance NUMA topology.
+
+        :param instance: instance containing the flavor and it's extra_specs,
+                         where the NUMA topology is defined.
+        :param image_meta: image's metadata, containing properties related to
+                           the instance's NUMA topology.
+        :returns: memory amount and number of vCPUs per NUMA node or
+                  (None, None), if instance NUMA topology was not requested.
+        :raises exception.InstanceUnacceptable:
+            If the given instance NUMA topology is not possible on Hyper-V.
+        """
+        instance_topology = hardware.numa_get_constraints(instance.flavor,
+                                                          image_meta)
+        if not instance_topology:
+            # instance NUMA topology was not requested.
+            return None, None
+
+        memory_per_numa_node = instance_topology.cells[0].memory
+        cpus_per_numa_node = len(instance_topology.cells[0].cpuset)
+
+        # validate that the requested NUMA topology is not asymetric.
+        # e.g.: it should be like: (X cpus, X cpus, Y cpus), where X == Y.
+        # same with memory.
+        for cell in instance_topology.cells:
+            if len(cell.cpuset) != cpus_per_numa_node:
+                reason = _("Hyper-V does not support NUMA topologies with "
+                           "uneven number of processors. (%(a)s != %(b)s)") % {
+                    'a': len(cell.cpuset), 'b': cpus_per_numa_node}
+                raise exception.InstanceUnacceptable(reason=reason,
+                                                     instance_id=instance.uuid)
+            if cell.memory != memory_per_numa_node:
+                reason = _("Hyper-V does not support NUMA topologies with "
+                           "uneven amounts of memory. (%(a)s != %(b)s)") % {
+                    'a': cell.memory, 'b': memory_per_numa_node}
+                raise exception.InstanceUnacceptable(reason=reason,
+                                                     instance_id=instance.uuid)
+
+        return memory_per_numa_node, cpus_per_numa_node
 
     def _configure_remotefx(self, instance, vm_gen):
         extra_specs = instance.flavor.extra_specs
@@ -425,8 +549,8 @@ class VMOps(object):
         image_prop_vm = image_meta.properties.get('hw_machine_type',
                                                   default_vm_gen)
         if image_prop_vm not in self._hostutils.get_supported_vm_types():
-            reason = _LE('Requested VM Generation %s is not supported on '
-                         'this OS.') % image_prop_vm
+            reason = _('Requested VM Generation %s is not supported on '
+                       'this OS.') % image_prop_vm
             raise exception.InstanceUnacceptable(instance_id=instance_id,
                                                  reason=reason)
 
@@ -436,10 +560,67 @@ class VMOps(object):
         if (vm_gen != constants.VM_GEN_1 and root_vhd_path and
                 self._vhdutils.get_vhd_format(
                     root_vhd_path) == constants.DISK_FORMAT_VHD):
-            reason = _LE('Requested VM Generation %s, but provided VHD '
-                         'instead of VHDX.') % vm_gen
+            reason = _('Requested VM Generation %s, but provided VHD '
+                       'instead of VHDX.') % vm_gen
             raise exception.InstanceUnacceptable(instance_id=instance_id,
                                                  reason=reason)
+
+    def _requires_certificate(self, image_meta):
+        os_type = image_meta.properties.get('os_type')
+        if os_type == fields.OSType.WINDOWS:
+            return False
+        return True
+
+    def _requires_secure_boot(self, instance, image_meta, vm_gen):
+        """Checks whether the given instance requires Secure Boot.
+
+        Secure Boot feature will be enabled by setting the "os_secure_boot"
+        image property or the "os:secure_boot" flavor extra spec to required.
+
+        :raises exception.InstanceUnacceptable: if the given image_meta has
+            no os_type property set, or if the image property value and the
+            flavor extra spec value are conflicting, or if Secure Boot is
+            required, but the instance's VM generation is 1.
+        """
+        img_secure_boot = image_meta.properties.get('os_secure_boot')
+        flavor_secure_boot = instance.flavor.extra_specs.get(
+            constants.FLAVOR_SPEC_SECURE_BOOT)
+
+        requires_sb = False
+        conflicting_values = False
+
+        if flavor_secure_boot == fields.SecureBoot.REQUIRED:
+            requires_sb = True
+            if img_secure_boot == fields.SecureBoot.DISABLED:
+                conflicting_values = True
+        elif img_secure_boot == fields.SecureBoot.REQUIRED:
+            requires_sb = True
+            if flavor_secure_boot == fields.SecureBoot.DISABLED:
+                conflicting_values = True
+
+        if conflicting_values:
+            reason = _(
+                "Conflicting image metadata property and flavor extra_specs "
+                "values: os_secure_boot (%(image_secure_boot)s) / "
+                "os:secure_boot (%(flavor_secure_boot)s)") % {
+                    'image_secure_boot': img_secure_boot,
+                    'flavor_secure_boot': flavor_secure_boot}
+            raise exception.InstanceUnacceptable(instance_id=instance.uuid,
+                                                 reason=reason)
+
+        if requires_sb:
+            if vm_gen != constants.VM_GEN_2:
+                reason = _('Secure boot requires generation 2 VM.')
+                raise exception.InstanceUnacceptable(instance_id=instance.uuid,
+                                                     reason=reason)
+
+            os_type = image_meta.properties.get('os_type')
+            if not os_type:
+                reason = _('For secure boot, os_type must be specified in '
+                           'image properties.')
+                raise exception.InstanceUnacceptable(instance_id=instance.uuid,
+                                                     reason=reason)
+        return requires_sb
 
     def _create_config_drive(self, context, instance, injected_files,
                              admin_password, network_info, rescue=False):
@@ -447,7 +628,7 @@ class VMOps(object):
             raise exception.ConfigDriveUnsupportedFormat(
                 format=CONF.config_drive_format)
 
-        LOG.info(_LI('Using config drive for instance'), instance=instance)
+        LOG.info('Using config drive for instance', instance=instance)
 
         extra_md = {}
         if admin_password and CONF.hyperv.config_drive_inject_password:
@@ -459,7 +640,7 @@ class VMOps(object):
 
         configdrive_path_iso = self._pathutils.get_configdrive_path(
             instance.name, constants.DVD_FORMAT, rescue=rescue)
-        LOG.info(_LI('Creating config drive at %(path)s'),
+        LOG.info('Creating config drive at %(path)s',
                  {'path': configdrive_path_iso}, instance=instance)
 
         with configdrive.ConfigDriveBuilder(instance_md=inst_md) as cdb:
@@ -467,9 +648,8 @@ class VMOps(object):
                 cdb.make_drive(configdrive_path_iso)
             except processutils.ProcessExecutionError as e:
                 with excutils.save_and_reraise_exception():
-                    LOG.error(_LE('Creating config drive failed with '
-                                  'error: %s'),
-                              e, instance=instance)
+                    LOG.error('Creating config drive failed with '
+                              'error: %s', e, instance=instance)
 
         if not CONF.hyperv.config_drive_cdrom:
             configdrive_path = self._pathutils.get_configdrive_path(
@@ -512,7 +692,15 @@ class VMOps(object):
             if delete:
                 self._pathutils.remove(configdrive_path)
 
+    @serialconsoleops.instance_synchronized
     def _delete_disk_files(self, instance_name):
+        # We want to avoid the situation in which serial console workers
+        # are started while we perform this operation, preventing us from
+        # deleting the instance log files (bug #1556189). This can happen
+        # due to delayed instance lifecycle events.
+        #
+        # The unsynchronized method is being used to avoid a deadlock.
+        self._serial_console_ops.stop_console_handler_unsync(instance_name)
         self._pathutils.get_instance_dir(instance_name,
                                          create_dir=False,
                                          remove_dir=True)
@@ -520,18 +708,14 @@ class VMOps(object):
     def destroy(self, instance, network_info=None, block_device_info=None,
                 destroy_disks=True):
         instance_name = instance.name
-        LOG.info(_LI("Got request to destroy instance"), instance=instance)
+        LOG.info("Got request to destroy instance", instance=instance)
         try:
             if self._vmutils.vm_exists(instance_name):
 
                 # Stop the VM first.
                 self._vmutils.stop_vm_jobs(instance_name)
                 self.power_off(instance)
-
-                if network_info:
-                    for vif in network_info:
-                        self._vif_driver.unplug(instance, vif)
-
+                self.unplug_vifs(instance, network_info)
                 self._vmutils.destroy_vm(instance_name)
                 self._volumeops.disconnect_volumes(block_device_info)
             else:
@@ -541,7 +725,7 @@ class VMOps(object):
                 self._delete_disk_files(instance_name)
         except Exception:
             with excutils.save_and_reraise_exception():
-                LOG.exception(_LE('Failed to destroy instance: %s'),
+                LOG.exception(_('Failed to destroy instance: %s'),
                               instance_name)
 
     def reboot(self, instance, network_info, reboot_type):
@@ -550,7 +734,7 @@ class VMOps(object):
 
         if reboot_type == REBOOT_TYPE_SOFT:
             if self._soft_shutdown(instance):
-                self.power_on(instance)
+                self.power_on(instance, network_info=network_info)
                 return
 
         self._set_vm_state(instance,
@@ -577,7 +761,7 @@ class VMOps(object):
                           timeout, instance=instance)
                 self._vmutils.soft_shutdown_vm(instance.name)
                 if self._wait_for_power_off(instance.name, wait_time):
-                    LOG.info(_LI("Soft shutdown succeeded."),
+                    LOG.info("Soft shutdown succeeded.",
                              instance=instance)
                     return True
             except os_win_exc.HyperVException as e:
@@ -588,7 +772,7 @@ class VMOps(object):
 
             timeout -= retry_interval
 
-        LOG.warning(_LW("Timed out while waiting for soft shutdown."),
+        LOG.warning("Timed out while waiting for soft shutdown.",
                     instance=instance)
         return False
 
@@ -643,7 +827,7 @@ class VMOps(object):
             LOG.debug("Instance not found. Skipping power off",
                       instance=instance)
 
-    def power_on(self, instance, block_device_info=None):
+    def power_on(self, instance, block_device_info=None, network_info=None):
         """Power on the specified instance."""
         LOG.debug("Power on instance", instance=instance)
 
@@ -652,6 +836,7 @@ class VMOps(object):
                                                            block_device_info)
 
         self._set_vm_state(instance, os_win_const.HYPERV_VM_STATE_ENABLED)
+        self.plug_vifs(instance, network_info)
 
     def _set_vm_state(self, instance, req_state):
         instance_name = instance.name
@@ -664,8 +849,8 @@ class VMOps(object):
                                              'req_state': req_state})
         except Exception:
             with excutils.save_and_reraise_exception():
-                LOG.error(_LE("Failed to change vm state of %(instance_name)s"
-                              " to %(req_state)s"),
+                LOG.error("Failed to change vm state of %(instance_name)s"
+                          " to %(req_state)s",
                           {'instance_name': instance_name,
                            'req_state': req_state})
 
@@ -705,7 +890,7 @@ class VMOps(object):
     def resume_state_on_host_boot(self, context, instance, network_info,
                                   block_device_info=None):
         """Resume guest state when a host is booted."""
-        self.power_on(instance, block_device_info)
+        self.power_on(instance, block_device_info, network_info)
 
     def _create_vm_com_port_pipes(self, instance, serial_ports):
         for port_number, port_type in serial_ports.items():
@@ -719,6 +904,16 @@ class VMOps(object):
             vm_name, remote_server=dest_host)
         for path in dvd_disk_paths:
             self._pathutils.copyfile(path, dest_path)
+
+    def plug_vifs(self, instance, network_info):
+        if network_info:
+            for vif in network_info:
+                self._vif_driver.plug(instance, vif)
+
+    def unplug_vifs(self, instance, network_info):
+        if network_info:
+            for vif in network_info:
+                self._vif_driver.unplug(instance, vif)
 
     def _check_hotplug_available(self, instance):
         """Check whether attaching an interface is possible for the given
@@ -778,9 +973,9 @@ class VMOps(object):
                                   image_meta, rescue_password)
         except Exception as exc:
             with excutils.save_and_reraise_exception():
-                err_msg = _LE("Instance rescue failed. Exception: %(exc)s. "
-                              "Attempting to unrescue the instance.")
-                LOG.error(err_msg, {'exc': exc}, instance=instance)
+                LOG.error("Instance rescue failed. Exception: %(exc)s. "
+                          "Attempting to unrescue the instance.",
+                          {'exc': exc}, instance=instance)
                 self.unrescue_instance(instance)
 
     def _rescue_instance(self, context, instance, network_info, image_meta,
@@ -869,3 +1064,35 @@ class VMOps(object):
             self.attach_config_drive(instance, configdrive_path, vm_gen)
 
         self.power_on(instance)
+
+    def _set_instance_disk_qos_specs(self, instance):
+        quota_specs = self._get_scoped_flavor_extra_specs(instance, 'quota')
+
+        disk_total_bytes_sec = int(
+            quota_specs.get('disk_total_bytes_sec') or 0)
+        disk_total_iops_sec = int(
+            quota_specs.get('disk_total_iops_sec') or
+            self._volumeops.bytes_per_sec_to_iops(disk_total_bytes_sec))
+
+        if disk_total_iops_sec:
+            local_disks = self._get_instance_local_disks(instance.name)
+            for disk_path in local_disks:
+                self._vmutils.set_disk_qos_specs(disk_path,
+                                                 disk_total_iops_sec)
+
+    def _get_instance_local_disks(self, instance_name):
+        instance_path = self._pathutils.get_instance_dir(instance_name)
+        instance_disks = self._vmutils.get_vm_storage_paths(instance_name)[0]
+        local_disks = [disk_path for disk_path in instance_disks
+                       if instance_path in disk_path]
+        return local_disks
+
+    def _get_scoped_flavor_extra_specs(self, instance, scope):
+        extra_specs = instance.flavor.extra_specs or {}
+        filtered_specs = {}
+        for spec, value in extra_specs.items():
+            if ':' in spec:
+                _scope, key = spec.split(':')
+                if _scope == scope:
+                    filtered_specs[key] = value
+        return filtered_specs

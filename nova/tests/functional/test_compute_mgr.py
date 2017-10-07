@@ -29,9 +29,8 @@ class ComputeManagerTestCase(test.TestCase):
     def setUp(self):
         super(ComputeManagerTestCase, self).setUp()
         self.useFixture(fixtures.SpawnIsSynchronousFixture())
-        self.useFixture(cast_as_call.CastAsCall(self.stubs))
-        self.conductor = self.start_service('conductor',
-                                            manager=CONF.conductor.manager)
+        self.useFixture(cast_as_call.CastAsCall(self))
+        self.conductor = self.start_service('conductor')
         self.start_service('scheduler')
         self.compute = self.start_service('compute')
         self.context = context.RequestContext('fake', 'fake')
@@ -46,7 +45,7 @@ class ComputeManagerTestCase(test.TestCase):
         last exception. The fault message field is limited in size and a long
         message with a traceback displaces the original error message.
         """
-        self.flags(scheduler_max_attempts=3)
+        self.flags(max_attempts=3, group='scheduler')
         flavor = objects.Flavor(
                 id=1, name='flavor1', memory_mb=256, vcpus=1, root_gb=1,
                 ephemeral_gb=1, flavorid='1', swap=0, rxtx_factor=1.0,
@@ -57,13 +56,17 @@ class ComputeManagerTestCase(test.TestCase):
                                     project_id='fake')
         instance.create()
 
+        # Amongst others, mock the resource tracker, otherwise it will
+        # not have been sufficiently initialized and will raise a KeyError
+        # on the self.compute_nodes dict after the TestingException.
         @mock.patch.object(self.conductor.manager.compute_task_mgr,
                            '_cleanup_allocated_networks')
         @mock.patch.object(self.compute.manager.network_api,
                            'cleanup_instance_network_on_host')
         @mock.patch('nova.compute.utils.notify_about_instance_usage')
+        @mock.patch.object(self.compute.manager, '_get_resource_tracker')
         @mock.patch.object(self.compute.manager.driver, 'spawn')
-        def _test(mock_spawn, mock_notify, mock_cinoh, mock_can):
+        def _test(mock_spawn, mock_grt, mock_notify, mock_cinoh, mock_can):
             mock_spawn.side_effect = test.TestingException('Preserve this')
             # Simulate that we're on the last retry attempt
             filter_properties = {'retry': {'num_attempts': 3}}

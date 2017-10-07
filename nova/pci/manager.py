@@ -64,7 +64,7 @@ class PciDevTracker(object):
         super(PciDevTracker, self).__init__()
         self.stale = {}
         self.node_id = node_id
-        self.dev_filter = whitelist.Whitelist(CONF.pci_passthrough_whitelist)
+        self.dev_filter = whitelist.Whitelist(CONF.pci.passthrough_whitelist)
         self.stats = stats.PciDeviceStats(dev_filter=self.dev_filter)
         self._context = context
         if node_id:
@@ -261,10 +261,27 @@ class PciDevTracker(object):
                          is allocated to
         """
         for pci_dev in self.pci_devs:
-            # find the matching pci device in the pci resource tracker
-            # pci device. Once found one free it.
-            if dev == pci_dev and dev.instance_uuid == instance['uuid']:
+            # Find the matching pci device in the pci resource tracker.
+            # Once found, free it.
+            if dev.id == pci_dev.id and dev.instance_uuid == instance['uuid']:
+                self._remove_device_from_pci_mapping(
+                    instance['uuid'], pci_dev, self.allocations)
+                self._remove_device_from_pci_mapping(
+                    instance['uuid'], pci_dev, self.claims)
                 self._free_device(pci_dev)
+                break
+
+    def _remove_device_from_pci_mapping(
+            self, instance_uuid, pci_device, pci_mapping):
+        """Remove a PCI device from allocations or claims.
+
+        If there are no more PCI devices, pop the uuid.
+        """
+        pci_devices = pci_mapping.get(instance_uuid, [])
+        if pci_device in pci_devices:
+            pci_devices.remove(pci_device)
+            if len(pci_devices) == 0:
+                pci_mapping.pop(instance_uuid, None)
 
     def _free_device(self, dev, instance=None):
         freed_devs = dev.free(instance)
@@ -336,5 +353,7 @@ def get_instance_pci_devs(inst, request_id=None):
       soft_reboot and hard_boot of 'xen' instances.
     """
     pci_devices = inst.pci_devices
+    if pci_devices is None:
+        return []
     return [device for device in pci_devices if
                    device.request_id == request_id or request_id == 'all']

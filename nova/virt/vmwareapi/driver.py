@@ -30,10 +30,11 @@ from oslo_vmware import pbm
 from oslo_vmware import vim
 from oslo_vmware import vim_util
 
+from nova.compute import power_state
 from nova.compute import task_states
 import nova.conf
 from nova import exception
-from nova.i18n import _, _LI, _LE, _LW
+from nova.i18n import _
 from nova.virt import driver
 from nova.virt.vmwareapi import constants
 from nova.virt.vmwareapi import error_util
@@ -127,15 +128,22 @@ class VMwareVCDriver(driver.ComputeDriver):
 
     def _check_min_version(self):
         min_version = v_utils.convert_version_to_int(constants.MIN_VC_VERSION)
+        next_min_ver = v_utils.convert_version_to_int(
+            constants.NEXT_MIN_VC_VERSION)
         vc_version = vim_util.get_vc_version(self._session)
-        LOG.info(_LI("VMware vCenter version: %s"), vc_version)
-        if min_version > v_utils.convert_version_to_int(vc_version):
-            # TODO(garyk): enforce this from M
-            LOG.warning(_LW('Running Nova with a VMware vCenter version less '
-                            'than %(version)s is deprecated. The required '
-                            'minimum version of vCenter will be raised to '
-                            '%(version)s in the 13.0.0 release.'),
-                        {'version': constants.MIN_VC_VERSION})
+        LOG.info("VMware vCenter version: %s", vc_version)
+        if v_utils.convert_version_to_int(vc_version) < min_version:
+            raise exception.NovaException(
+                _('Detected vCenter version %(version)s. Nova requires VMware '
+                  'vCenter version %(min_version)s or greater.') % {
+                      'version': vc_version,
+                      'min_version': constants.MIN_VC_VERSION})
+        elif v_utils.convert_version_to_int(vc_version) < next_min_ver:
+            LOG.warning('Running Nova with a VMware vCenter version less '
+                        'than %(version)s is deprecated. The required '
+                        'minimum version of vCenter will be raised to '
+                        '%(version)s in the 16.0.0 release.',
+                        {'version': constants.NEXT_MIN_VC_VERSION})
 
     @property
     def need_legacy_block_device_info(self):
@@ -158,8 +166,7 @@ class VMwareVCDriver(driver.ComputeDriver):
                             CONF.vmware.pbm_default_policy):
                 raise error_util.PbmDefaultPolicyDoesNotExist()
             if CONF.vmware.datastore_regex:
-                LOG.warning(_LW(
-                    "datastore_regex is ignored when PBM is enabled"))
+                LOG.warning("datastore_regex is ignored when PBM is enabled")
                 self._datastore_regex = None
 
     def init_host(self, host):
@@ -194,8 +201,8 @@ class VMwareVCDriver(driver.ComputeDriver):
         # Check if the instance is running already and avoid doing
         # anything if it is.
         state = vm_util.get_vm_state(self._session, instance)
-        ignored_states = ['poweredon', 'suspended']
-        if state.lower() in ignored_states:
+        ignored_states = [power_state.RUNNING, power_state.SUSPENDED]
+        if state in ignored_states:
             return
         # Instance is not up and could be in an unknown state.
         # Be as absolute as possible about getting it back into
@@ -222,7 +229,7 @@ class VMwareVCDriver(driver.ComputeDriver):
         return self._vmops.migrate_disk_and_power_off(context, instance,
                                                       dest, flavor)
 
-    def confirm_migration(self, migration, instance, network_info):
+    def confirm_migration(self, context, migration, instance, network_info):
         """Confirms a resize, destroying the source VM."""
         self._vmops.confirm_migration(migration, instance, network_info)
 
@@ -357,19 +364,19 @@ class VMwareVCDriver(driver.ComputeDriver):
                     self.detach_volume(connection_info, instance,
                                        disk.get('device_name'))
                 except exception.DiskNotFound:
-                    LOG.warning(_LW('The volume %s does not exist!'),
+                    LOG.warning('The volume %s does not exist!',
                                 disk.get('device_name'),
                                 instance=instance)
                 except Exception as e:
                     with excutils.save_and_reraise_exception():
-                        LOG.error(_LE("Failed to detach %(device_name)s. "
-                                      "Exception: %(exc)s"),
+                        LOG.error("Failed to detach %(device_name)s. "
+                                  "Exception: %(exc)s",
                                   {'device_name': disk.get('device_name'),
                                    'exc': e},
                                   instance=instance)
 
     def destroy(self, context, instance, network_info, block_device_info=None,
-                destroy_disks=True, migrate_data=None):
+                destroy_disks=True):
         """Destroy VM instance."""
 
         # Destroy gets triggered when Resource Claim in resource_tracker
@@ -388,8 +395,8 @@ class VMwareVCDriver(driver.ComputeDriver):
             try:
                 self._detach_instance_volumes(instance, block_device_info)
             except vexc.ManagedObjectNotFoundException:
-                LOG.warning(_LW('Instance does not exists. Proceeding to '
-                                'delete instance properties on datastore'),
+                LOG.warning('Instance does not exists. Proceeding to '
+                            'delete instance properties on datastore',
                             instance=instance)
         self._vmops.destroy(instance, destroy_disks)
 
@@ -485,13 +492,13 @@ class VMwareVCDriver(driver.ComputeDriver):
         """Efficient override of base instance_exists method."""
         return self._vmops.instance_exists(instance)
 
-    def attach_interface(self, instance, image_meta, vif):
+    def attach_interface(self, context, instance, image_meta, vif):
         """Attach an interface to the instance."""
-        self._vmops.attach_interface(instance, image_meta, vif)
+        self._vmops.attach_interface(context, instance, image_meta, vif)
 
-    def detach_interface(self, instance, vif):
+    def detach_interface(self, context, instance, vif):
         """Detach an interface from the instance."""
-        self._vmops.detach_interface(instance, vif)
+        self._vmops.detach_interface(context, instance, vif)
 
 
 class VMwareAPISession(api.VMwareAPISession):
@@ -515,7 +522,6 @@ class VMwareAPISession(api.VMwareAPISession):
                 task_poll_interval=CONF.vmware.task_poll_interval,
                 scheme=scheme,
                 create_session=True,
-                wsdl_loc=CONF.vmware.wsdl_location,
                 cacert=cacert,
                 insecure=insecure)
 

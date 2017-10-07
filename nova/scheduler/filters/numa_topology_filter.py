@@ -46,18 +46,29 @@ class NUMATopologyFilter(filters.BaseHostFilter):
         if fields.CPUThreadAllocationPolicy.REQUIRE not in cpu_thread_policy:
             return True
 
-        for cell in host_topology.cells:
-            # the presence of siblings indicates hyperthreading (HT)
-            if not cell.siblings:
-                LOG.debug("%(host_state)s fails CPU policy requirements. "
-                          "Host does not have hyperthreading or "
-                          "hyperthreading is disabled, but 'require' threads "
-                          "policy was requested.", {'host_state': host_state})
-                return False
+        # the presence of siblings in at least one cell indicates
+        # hyperthreading (HT)
+        has_hyperthreading = any(cell.siblings for cell in host_topology.cells)
+
+        if not has_hyperthreading:
+            LOG.debug("%(host_state)s fails CPU policy requirements. "
+                      "Host does not have hyperthreading or "
+                      "hyperthreading is disabled, but 'require' threads "
+                      "policy was requested.", {'host_state': host_state})
+            return False
 
         return True
 
     def host_passes(self, host_state, spec_obj):
+        # TODO(stephenfin): The 'numa_fit_instance_to_host' function has the
+        # unfortunate side effect of modifying 'spec_obj.numa_topology' - an
+        # InstanceNUMATopology object - by populating the 'cpu_pinning' field.
+        # This is rather rude and said function should be reworked to avoid
+        # doing this. That's a large, non-backportable cleanup however, so for
+        # now we just duplicate spec_obj to prevent changes propagating to
+        # future filter calls.
+        spec_obj = spec_obj.obj_clone()
+
         ram_ratio = host_state.ram_allocation_ratio
         cpu_ratio = host_state.cpu_allocation_ratio
         extra_specs = spec_obj.flavor.extra_specs

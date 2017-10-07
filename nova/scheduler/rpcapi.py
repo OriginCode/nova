@@ -20,11 +20,14 @@ import oslo_messaging as messaging
 
 import nova.conf
 from nova.objects import base as objects_base
+from nova import profiler
 from nova import rpc
 
 CONF = nova.conf.CONF
+RPC_TOPIC = "scheduler"
 
 
+@profiler.trace_cls("rpc")
 class SchedulerAPI(object):
     '''Client side of the scheduler rpc API.
 
@@ -88,10 +91,12 @@ class SchedulerAPI(object):
         * 4.3 - Modify select_destinations() signature by providing a
                 RequestSpec obj
 
-        ... Mitaka supports message version 4.3. So, any changes to
-        existing methods in 4.x after that point should be done such
+        ... Mitaka, Newton, and Ocata support message version 4.3. So, any
+        changes to existing methods in 4.x after that point should be done such
         that they can handle the version_cap being set to 4.3.
 
+        * 4.4 - Modify select_destinations() signature by providing the
+                instance_uuids for the request.
     '''
 
     VERSION_ALIASES = {
@@ -102,20 +107,26 @@ class SchedulerAPI(object):
         'kilo': '4.2',
         'liberty': '4.2',
         'mitaka': '4.3',
+        'newton': '4.3',
+        'ocata': '4.3',
     }
 
     def __init__(self):
         super(SchedulerAPI, self).__init__()
-        target = messaging.Target(topic=CONF.scheduler_topic, version='4.0')
+        target = messaging.Target(topic=RPC_TOPIC, version='4.0')
         version_cap = self.VERSION_ALIASES.get(CONF.upgrade_levels.scheduler,
                                                CONF.upgrade_levels.scheduler)
         serializer = objects_base.NovaObjectSerializer()
         self.client = rpc.get_client(target, version_cap=version_cap,
                                      serializer=serializer)
 
-    def select_destinations(self, ctxt, spec_obj):
-        version = '4.3'
-        msg_args = {'spec_obj': spec_obj}
+    def select_destinations(self, ctxt, spec_obj, instance_uuids):
+        version = '4.4'
+        msg_args = {'instance_uuids': instance_uuids,
+                    'spec_obj': spec_obj}
+        if not self.client.can_send_version(version):
+            del msg_args['instance_uuids']
+            version = '4.3'
         if not self.client.can_send_version(version):
             del msg_args['spec_obj']
             msg_args['request_spec'] = spec_obj.to_legacy_request_spec_dict()

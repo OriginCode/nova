@@ -13,6 +13,7 @@
 """Unit tests for the utility functions used by the placement API."""
 
 
+import fixtures
 from oslo_middleware import request_id
 import webob
 
@@ -72,11 +73,86 @@ class TestCheckAccept(test.NoDBTestCase):
         self.assertTrue(self.handler(req))
 
 
+class TestExtractJSON(test.NoDBTestCase):
+
+    # Although the intent of this test class is not to test that
+    # schemas work, we may as well use a real one to ensure that
+    # behaviors are what we expect.
+    schema = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "uuid": {"type": "string", "format": "uuid"}
+        },
+        "required": ["name"],
+        "additionalProperties": False
+    }
+
+    def test_not_json(self):
+        error = self.assertRaises(webob.exc.HTTPBadRequest,
+                                  util.extract_json,
+                                  'I am a string',
+                                  self.schema)
+        self.assertIn('Malformed JSON', str(error))
+
+    def test_malformed_json(self):
+        error = self.assertRaises(webob.exc.HTTPBadRequest,
+                                  util.extract_json,
+                                  '{"my bytes got left behind":}',
+                                  self.schema)
+        self.assertIn('Malformed JSON', str(error))
+
+    def test_schema_mismatch(self):
+        error = self.assertRaises(webob.exc.HTTPBadRequest,
+                                  util.extract_json,
+                                  '{"a": "b"}',
+                                  self.schema)
+        self.assertIn('JSON does not validate', str(error))
+
+    def test_type_invalid(self):
+        error = self.assertRaises(webob.exc.HTTPBadRequest,
+                                  util.extract_json,
+                                  '{"name": 1}',
+                                  self.schema)
+        self.assertIn('JSON does not validate', str(error))
+
+    def test_format_checker(self):
+        error = self.assertRaises(webob.exc.HTTPBadRequest,
+                                  util.extract_json,
+                                  '{"name": "hello", "uuid": "not a uuid"}',
+                                  self.schema)
+        self.assertIn('JSON does not validate', str(error))
+
+    def test_no_additional_properties(self):
+        error = self.assertRaises(webob.exc.HTTPBadRequest,
+                                  util.extract_json,
+                                  '{"name": "hello", "cow": "moo"}',
+                                  self.schema)
+        self.assertIn('JSON does not validate', str(error))
+
+    def test_valid(self):
+        data = util.extract_json(
+            '{"name": "cow", '
+            '"uuid": "%s"}' % uuidsentinel.rp_uuid,
+            self.schema)
+        self.assertEqual('cow', data['name'])
+        self.assertEqual(uuidsentinel.rp_uuid, data['uuid'])
+
+
 class TestJSONErrorFormatter(test.NoDBTestCase):
 
     def setUp(self):
         super(TestJSONErrorFormatter, self).setUp()
         self.environ = {}
+        # TODO(jaypipes): Remove this when we get more than a single version
+        # in the placement API. The fact that we only had a single version was
+        # masking a bug in the utils code.
+        _versions = [
+            '1.0',
+            '1.1',
+        ]
+        mod_str = 'nova.api.openstack.placement.microversion.VERSIONS'
+        self.useFixture(fixtures.MonkeyPatch(mod_str, _versions))
 
     def test_status_to_int_code(self):
         body = ''
@@ -188,6 +264,9 @@ class TestPlacementURLs(test.NoDBTestCase):
         self.resource_provider = objects.ResourceProvider(
             name=uuidsentinel.rp_name,
             uuid=uuidsentinel.rp_uuid)
+        self.resource_class = objects.ResourceClass(
+            name='CUSTOM_BAREMETAL_GOLD',
+            id=1000)
 
     def test_resource_provider_url(self):
         environ = {}
@@ -218,3 +297,69 @@ class TestPlacementURLs(test.NoDBTestCase):
                         % (uuidsentinel.rp_uuid, resource_class))
         self.assertEqual(expected_url, util.inventory_url(
             environ, self.resource_provider, resource_class))
+
+    def test_resource_class_url(self):
+        environ = {}
+        expected_url = '/resource_classes/CUSTOM_BAREMETAL_GOLD'
+        self.assertEqual(expected_url, util.resource_class_url(
+            environ, self.resource_class))
+
+    def test_resource_class_url_prefix(self):
+        # SCRIPT_NAME represents the mount point of a WSGI
+        # application when it is hosted at a path/prefix.
+        environ = {'SCRIPT_NAME': '/placement'}
+        expected_url = '/placement/resource_classes/CUSTOM_BAREMETAL_GOLD'
+        self.assertEqual(expected_url, util.resource_class_url(
+            environ, self.resource_class))
+
+
+class TestNormalizeResourceQsParam(test.NoDBTestCase):
+
+    def test_success(self):
+        qs = "VCPU:1"
+        resources = util.normalize_resources_qs_param(qs)
+        expected = {
+            'VCPU': 1,
+        }
+        self.assertEqual(expected, resources)
+
+        qs = "VCPU:1,MEMORY_MB:1024,DISK_GB:100"
+        resources = util.normalize_resources_qs_param(qs)
+        expected = {
+            'VCPU': 1,
+            'MEMORY_MB': 1024,
+            'DISK_GB': 100,
+        }
+        self.assertEqual(expected, resources)
+
+    def test_400_empty_string(self):
+        qs = ""
+        self.assertRaises(
+            webob.exc.HTTPBadRequest,
+            util.normalize_resources_qs_param,
+            qs,
+        )
+
+    def test_400_bad_int(self):
+        qs = "VCPU:foo"
+        self.assertRaises(
+            webob.exc.HTTPBadRequest,
+            util.normalize_resources_qs_param,
+            qs,
+        )
+
+    def test_400_no_amount(self):
+        qs = "VCPU"
+        self.assertRaises(
+            webob.exc.HTTPBadRequest,
+            util.normalize_resources_qs_param,
+            qs,
+        )
+
+    def test_400_zero_amount(self):
+        qs = "VCPU:0"
+        self.assertRaises(
+            webob.exc.HTTPBadRequest,
+            util.normalize_resources_qs_param,
+            qs,
+        )

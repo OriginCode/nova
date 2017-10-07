@@ -52,9 +52,9 @@ class CellsUtilsTestCase(test.NoDBTestCase):
             instances = [fake_instance.fake_db_instance() for i in range(3)]
             return instances
 
-        self.stubs.Set(objects.InstanceList, 'get_by_filters',
+        self.stub_out('nova.objects.InstanceList.get_by_filters',
                 instance_get_all_by_filters)
-        self.stubs.Set(random, 'shuffle', random_shuffle)
+        self.stub_out('random.shuffle', random_shuffle)
 
         instances = cells_utils.get_instances_to_sync(fake_context)
         self.assertTrue(inspect.isgenerator(instances))
@@ -147,7 +147,7 @@ class CellsUtilsTestCase(test.NoDBTestCase):
         cell = cells_utils.PATH_CELL_SEP.join(path)
         item = 'host_5'
         together = cells_utils.cell_with_item(cell, item)
-        self.assertEqual(cells_utils._CELL_ITEM_SEP.join([cell, item]),
+        self.assertEqual(cells_utils.CELL_ITEM_SEP.join([cell, item]),
                          together)
 
         # Test normal usage

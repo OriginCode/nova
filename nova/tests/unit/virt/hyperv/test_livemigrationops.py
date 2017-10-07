@@ -74,7 +74,6 @@ class LiveMigrationOpsTestCase(test_base.HyperVBaseTestCase):
                               migrate_data)
             mock_recover.assert_called_once_with(self.context, mock_instance,
                                                  fake_dest,
-                                                 mock.sentinel.block_migr,
                                                  migrate_data)
         else:
             self._livemigrops.live_migration(context=self.context,
@@ -135,8 +134,7 @@ class LiveMigrationOpsTestCase(test_base.HyperVBaseTestCase):
 
     @mock.patch('nova.virt.hyperv.volumeops.VolumeOps.get_disk_path_mapping')
     @mock.patch('nova.virt.hyperv.imagecache.ImageCache.get_cached_image')
-    @mock.patch('nova.virt.hyperv.volumeops.VolumeOps'
-                '.initialize_volumes_connection')
+    @mock.patch('nova.virt.hyperv.volumeops.VolumeOps.connect_volumes')
     def _test_pre_live_migration(self, mock_initialize_connection,
                                  mock_get_cached_image,
                                  mock_get_disk_path_mapping,
@@ -220,3 +218,12 @@ class LiveMigrationOpsTestCase(test_base.HyperVBaseTestCase):
         self.assertEqual(mock_migr_data_cls.return_value, migr_data)
         self.assertEqual(mock_check_shared_inst_dir.return_value,
                          migr_data.is_shared_instance_path)
+
+    @mock.patch('nova.virt.hyperv.vmops.VMOps.plug_vifs')
+    def test_post_live_migration_at_destination(self, mock_plug_vifs):
+        self._livemigrops.post_live_migration_at_destination(
+            self.context, mock.sentinel.instance,
+            network_info=mock.sentinel.NET_INFO,
+            block_migration=mock.sentinel.BLOCK_INFO)
+        mock_plug_vifs.assert_called_once_with(mock.sentinel.instance,
+                                               mock.sentinel.NET_INFO)

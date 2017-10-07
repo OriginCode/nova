@@ -32,6 +32,17 @@ from nova import exception
 from nova.i18n import _
 
 
+@jsonschema.FormatChecker.cls_checks('regex')
+def _validate_regex_format(instance):
+    if not isinstance(instance, six.text_type):
+        return False
+    try:
+        re.compile(instance)
+    except re.error:
+        return False
+    return True
+
+
 @jsonschema.FormatChecker.cls_checks('date-time')
 def _validate_datetime_format(instance):
     try:
@@ -241,7 +252,9 @@ class _SchemaValidator(object):
     validator = None
     validator_org = jsonschema.Draft4Validator
 
-    def __init__(self, schema, relax_additional_properties=False):
+    def __init__(self, schema, relax_additional_properties=False,
+                 is_body=True):
+        self.is_body = is_body
         validators = {
             'minimum': self._validate_minimum,
             'maximum': self._validate_maximum,
@@ -262,13 +275,28 @@ class _SchemaValidator(object):
             if isinstance(ex.cause, exception.InvalidName):
                 detail = ex.cause.format_message()
             elif len(ex.path) > 0:
-                # NOTE: For whole OpenStack message consistency, this error
-                #       message has been written as the similar format of WSME.
-                detail = _("Invalid input for field/attribute %(path)s."
-                           " Value: %(value)s. %(message)s") % {
-                               'path': ex.path.pop(), 'value': ex.instance,
-                               'message': ex.message
-                           }
+                if self.is_body:
+                    # NOTE: For whole OpenStack message consistency, this error
+                    #       message has been written as the similar format of
+                    #       WSME.
+                    detail = _("Invalid input for field/attribute %(path)s. "
+                               "Value: %(value)s. %(message)s") % {
+                        'path': ex.path.pop(),
+                        'value': ex.instance,
+                        'message': ex.message}
+                else:
+                    # NOTE: Use 'ex.path.popleft()' instead of 'ex.path.pop()',
+                    #       due to the structure of query parameters is a dict
+                    #       with key as name and value is list. So the first
+                    #       item in the 'ex.path' is the key, and second item
+                    #       is the index of list in the value. We need the
+                    #       key as the parameter name in the error message.
+                    #       So pop the first value out of 'ex.path'.
+                    detail = _("Invalid input for query parameters %(path)s. "
+                               "Value: %(value)s. %(message)s") % {
+                        'path': ex.path.popleft(),
+                        'value': ex.instance,
+                        'message': ex.message}
             else:
                 detail = ex.message
             raise exception.ValidationError(detail=detail)

@@ -15,12 +15,11 @@
 #    under the License.
 
 import functools
-import math
-import time
 
 import microversion_parse
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
+from oslo_utils import encodeutils
 from oslo_utils import strutils
 import six
 import webob
@@ -30,8 +29,6 @@ from nova.api.openstack import versioned_method
 from nova import exception
 from nova import i18n
 from nova.i18n import _
-from nova.i18n import _LE
-from nova.i18n import _LI
 from nova import utils
 from nova import wsgi
 
@@ -42,11 +39,6 @@ _SUPPORTED_CONTENT_TYPES = (
     'application/json',
     'application/vnd.openstack.compute+json',
 )
-
-_MEDIA_TYPE_MAP = {
-    'application/vnd.openstack.compute+json': 'json',
-    'application/json': 'json',
-}
 
 # These are typically automatically created by routes as either defaults
 # collection or member methods.
@@ -81,10 +73,6 @@ ENV_LEGACY_V2 = 'openstack.legacy_v2'
 
 def get_supported_content_types():
     return _SUPPORTED_CONTENT_TYPES
-
-
-def get_media_map():
-    return dict(_MEDIA_TYPE_MAP.items())
 
 
 # NOTE(rlrossit): This function allows a get on both a dict-like and an
@@ -158,18 +146,6 @@ class Request(wsgi.Request):
 
     def get_db_flavor(self, flavorid):
         return self.get_db_item('flavors', flavorid)
-
-    def cache_db_compute_nodes(self, compute_nodes):
-        self.cache_db_items('compute_nodes', compute_nodes, 'id')
-
-    def cache_db_compute_node(self, compute_node):
-        self.cache_db_items('compute_nodes', [compute_node], 'id')
-
-    def get_db_compute_nodes(self):
-        return self.get_db_items('compute_nodes')
-
-    def get_db_compute_node(self, id):
-        return self.get_db_item('compute_nodes', id)
 
     def best_match_content_type(self):
         """Determine the requested response content-type."""
@@ -431,14 +407,14 @@ class ResourceExceptionHandler(object):
                     explanation=ex_value.format_message()))
         elif isinstance(ex_value, TypeError):
             exc_info = (ex_type, ex_value, ex_traceback)
-            LOG.error(_LE('Exception handling resource: %s'), ex_value,
+            LOG.error('Exception handling resource: %s', ex_value,
                       exc_info=exc_info)
             raise Fault(webob.exc.HTTPBadRequest())
         elif isinstance(ex_value, Fault):
-            LOG.info(_LI("Fault thrown: %s"), ex_value)
+            LOG.info("Fault thrown: %s", ex_value)
             raise ex_value
         elif isinstance(ex_value, webob.exc.HTTPException):
-            LOG.info(_LI("HTTP exception thrown: %s"), ex_value)
+            LOG.info("HTTP exception thrown: %s", ex_value)
             raise Fault(ex_value)
 
         # We didn't handle the exception
@@ -637,13 +613,7 @@ class Resource(wsgi.Application):
 
         # Now, deserialize the request body...
         try:
-            contents = {}
-            if self._should_have_body(request):
-                # allow empty body with PUT and POST
-                if request.content_length == 0:
-                    contents = {'body': None}
-                else:
-                    contents = self.deserialize(body)
+            contents = self._get_request_content(body, request)
         except exception.MalformedRequestBody:
             msg = _("Malformed request body")
             return Fault(webob.exc.HTTPBadRequest(explanation=msg))
@@ -693,8 +663,13 @@ class Resource(wsgi.Application):
 
         if hasattr(response, 'headers'):
             for hdr, val in list(response.headers.items()):
-                # Headers must be utf-8 strings
-                response.headers[hdr] = utils.utf8(val)
+                if six.PY2:
+                    # In Py2.X Headers must be byte strings
+                    response.headers[hdr] = utils.utf8(val)
+                else:
+                    # In Py3.X Headers must be utf-8 strings
+                    response.headers[hdr] = encodeutils.safe_decode(
+                            utils.utf8(val))
 
             if not request.api_version_request.is_null():
                 response.headers[API_VERSION_REQUEST_HEADER] = \
@@ -705,6 +680,16 @@ class Resource(wsgi.Application):
                 response.headers.add('Vary', LEGACY_API_VERSION_REQUEST_HEADER)
 
         return response
+
+    def _get_request_content(self, body, request):
+        contents = {}
+        if self._should_have_body(request):
+            # allow empty body with PUT and POST
+            if request.content_length == 0 or request.content_length is None:
+                contents = {'body': None}
+            else:
+                contents = self.deserialize(body)
+        return contents
 
     def get_method(self, request, action, content_type, body):
         meth, extensions = self._get_method(request,
@@ -1070,46 +1055,3 @@ class Fault(webob.exc.HTTPException):
 
     def __str__(self):
         return self.wrapped_exc.__str__()
-
-
-class RateLimitFault(webob.exc.HTTPException):
-    """Rate-limited request response."""
-
-    def __init__(self, message, details, retry_time):
-        """Initialize new `RateLimitFault` with relevant information."""
-        hdrs = RateLimitFault._retry_after(retry_time)
-        self.wrapped_exc = webob.exc.HTTPTooManyRequests(headers=hdrs)
-        self.content = {
-            "overLimit": {
-                "code": self.wrapped_exc.status_int,
-                "message": message,
-                "details": details,
-                "retryAfter": hdrs['Retry-After'],
-            },
-        }
-
-    @staticmethod
-    def _retry_after(retry_time):
-        delay = int(math.ceil(retry_time - time.time()))
-        retry_after = delay if delay > 0 else 0
-        headers = {'Retry-After': '%d' % retry_after}
-        return headers
-
-    @webob.dec.wsgify(RequestClass=Request)
-    def __call__(self, request):
-        """Return the wrapped exception with a serialized body conforming
-        to our error format.
-        """
-        user_locale = request.best_match_language()
-
-        self.content['overLimit']['message'] = \
-            i18n.translate(self.content['overLimit']['message'], user_locale)
-        self.content['overLimit']['details'] = \
-            i18n.translate(self.content['overLimit']['details'], user_locale)
-
-        content = JSONDictSerializer().serialize(self.content)
-        self.wrapped_exc.charset = 'UTF-8'
-        self.wrapped_exc.content_type = "application/json"
-        self.wrapped_exc.text = content
-
-        return self.wrapped_exc

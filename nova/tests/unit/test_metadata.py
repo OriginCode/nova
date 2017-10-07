@@ -16,22 +16,25 @@
 
 """Tests for metadata service."""
 
-import base64
 import copy
 import hashlib
 import hmac
 import os
 import re
-import requests
 
 try:
     import cPickle as pickle
 except ImportError:
     import pickle
 
+from keystoneauth1 import exceptions as ks_exceptions
+from keystoneauth1 import session
 import mock
 from oslo_config import cfg
+from oslo_serialization import base64
 from oslo_serialization import jsonutils
+from oslo_utils import encodeutils
+import requests
 import six
 import webob
 
@@ -42,19 +45,17 @@ from nova.api.metadata import vendordata
 from nova.api.metadata import vendordata_dynamic
 from nova import block_device
 from nova.compute import flavors
-from nova.conductor import api as conductor_api
 from nova import context
 from nova import exception
-from nova.network import api as network_api
 from nova.network import model as network_model
 from nova.network.neutronv2 import api as neutronapi
-from nova.network.security_group import openstack_driver
 from nova import objects
 from nova.objects import virt_device_metadata as metadata_obj
 from nova import test
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit import fake_block_device
 from nova.tests.unit import fake_network
+from nova.tests.unit import test_identity
 from nova.tests import uuidsentinel as uuids
 from nova import utils
 from nova.virt import netutils
@@ -62,7 +63,7 @@ from nova.virt import netutils
 CONF = cfg.CONF
 
 USER_DATA_STRING = (b"This is an encoded string")
-ENCODE_USER_DATA_STRING = base64.b64encode(USER_DATA_STRING)
+ENCODE_USER_DATA_STRING = base64.encode_as_text(USER_DATA_STRING)
 FAKE_SEED = '7qtD24mpMR2'
 
 
@@ -93,7 +94,7 @@ def fake_inst_obj(context):
         default_swap_device=None,
         system_metadata={},
         security_groups=objects.SecurityGroupList(),
-        availability_zone=None)
+        availability_zone='fake-az')
     inst.keypairs = objects.KeyPairList(objects=[
             fake_keypair_obj(inst.key_name, inst.key_data)])
 
@@ -111,10 +112,6 @@ def fake_keypair_obj(name, data):
                            public_key=data)
 
 
-def return_non_existing_address(*args, **kwarg):
-    raise exception.NotFound()
-
-
 def fake_InstanceMetadata(testcase, inst_data, address=None,
                           sgroups=None, content=None, extra_md=None,
                           vd_driver=None, network_info=None,
@@ -124,13 +121,7 @@ def fake_InstanceMetadata(testcase, inst_data, address=None,
     if sgroups is None:
         sgroups = [{'name': 'default'}]
 
-    def sg_get(*args, **kwargs):
-        return sgroups
-
-    secgroup_api = openstack_driver.get_openstack_security_group_driver()
-    testcase.stub_out('%(module)s.%(class)s.get_instance_security_groups' %
-                      {'module': secgroup_api.__module__,
-                       'class': secgroup_api.__class__.__name__}, sg_get)
+    fakes.stub_out_secgroup_api(testcase, security_groups=sgroups)
     return base.InstanceMetadata(inst_data, address=address,
         content=content, extra_md=extra_md,
         vd_driver=vd_driver, network_info=network_info,
@@ -174,19 +165,16 @@ def fake_request(testcase, mdinst, relpath, address="127.0.0.1",
     return response
 
 
-class FakeDeviceMetadata(metadata_obj.DeviceMetadata):
-    pass
-
-
-class FakeDeviceBus(metadata_obj.DeviceBus):
-    pass
-
-
 def fake_metadata_objects():
     nic_obj = metadata_obj.NetworkInterfaceMetadata(
         bus=metadata_obj.PCIDeviceBus(address='0000:00:01.0'),
         mac='00:00:00:00:00:00',
         tags=['foo']
+    )
+    nic_vlans_obj = metadata_obj.NetworkInterfaceMetadata(
+        bus=metadata_obj.PCIDeviceBus(address='0000:80:01.0'),
+        mac='e3:a0:d0:12:c5:10',
+        vlan=1000,
     )
     ide_disk_obj = metadata_obj.DiskMetadata(
         bus=metadata_obj.IDEDeviceBus(address='0:0'),
@@ -206,26 +194,33 @@ def fake_metadata_objects():
         path='/dev/sda',
         tags=['baz'],
     )
-    fake_device_obj = FakeDeviceMetadata()
+    fake_device_obj = metadata_obj.DeviceMetadata()
     device_with_fake_bus_obj = metadata_obj.NetworkInterfaceMetadata(
-        bus=FakeDeviceBus(),
+        bus=metadata_obj.DeviceBus(),
         mac='00:00:00:00:00:00',
         tags=['foo']
     )
     mdlist = metadata_obj.InstanceDeviceMetadata(
         instance_uuid='b65cee2f-8c69-4aeb-be2f-f79742548fc2',
         devices=[nic_obj, ide_disk_obj, scsi_disk_obj, usb_disk_obj,
-                          fake_device_obj, device_with_fake_bus_obj])
+                 fake_device_obj, device_with_fake_bus_obj, nic_vlans_obj])
     return mdlist
 
 
-def fake_metadata_dicts():
+def fake_metadata_dicts(include_vlan=False):
     nic_meta = {
         'type': 'nic',
         'bus': 'pci',
         'address': '0000:00:01.0',
         'mac': '00:00:00:00:00:00',
         'tags': ['foo'],
+    }
+    vlan_nic_meta = {
+        'type': 'nic',
+        'bus': 'pci',
+        'address': '0000:80:01.0',
+        'mac': 'e3:a0:d0:12:c5:10',
+        'vlan': 1000,
     }
     ide_disk_meta = {
         'type': 'disk',
@@ -244,7 +239,10 @@ def fake_metadata_dicts():
     usb_disk_meta['bus'] = 'usb'
     usb_disk_meta['address'] = '05c8:021e'
 
-    return [nic_meta, ide_disk_meta, scsi_disk_meta, usb_disk_meta]
+    dicts = [nic_meta, ide_disk_meta, scsi_disk_meta, usb_disk_meta]
+    if include_vlan:
+        dicts += [vlan_nic_meta]
+    return dicts
 
 
 class MetadataTestCase(test.TestCase):
@@ -252,10 +250,10 @@ class MetadataTestCase(test.TestCase):
         super(MetadataTestCase, self).setUp()
         self.context = context.RequestContext('fake', 'fake')
         self.instance = fake_inst_obj(self.context)
-        self.flags(use_local=True, group='conductor')
         self.keypair = fake_keypair_obj(self.instance.key_name,
                                         self.instance.key_data)
         fake_network.stub_out_nw_api_get_instance_nw_info(self)
+        fakes.stub_out_secgroup_api(self)
 
     def test_can_pickle_metadata(self):
         # Make sure that InstanceMetadata is possible to pickle. This is
@@ -265,10 +263,10 @@ class MetadataTestCase(test.TestCase):
 
     def test_user_data(self):
         inst = self.instance.obj_clone()
-        inst['user_data'] = base64.b64encode("happy")
+        inst['user_data'] = base64.encode_as_text("happy")
         md = fake_InstanceMetadata(self, inst)
         self.assertEqual(
-            md.get_ec2_metadata(version='2009-04-04')['user-data'], "happy")
+            md.get_ec2_metadata(version='2009-04-04')['user-data'], b"happy")
 
     def test_no_user_data(self):
         inst = self.instance.obj_clone()
@@ -351,8 +349,6 @@ class MetadataTestCase(test.TestCase):
                     'swap': '/dev/sdc',
                     'ebs0': '/dev/sdh'}
 
-        conductor_api.LocalAPI()
-
         self.assertEqual(base._format_instance_mapping(self.context,
                          instance_ref0), block_device._DEFAULT_MAPPINGS)
         self.assertEqual(base._format_instance_mapping(self.context,
@@ -392,6 +388,35 @@ class MetadataTestCase(test.TestCase):
         md = fake_InstanceMetadata(self, inst)
         self.assertRaises(base.InvalidMetadataPath,
             md.lookup, "/2009-04-04/meta-data/kernel-id")
+
+    def test_instance_is_sanitized(self):
+        inst = self.instance.obj_clone()
+        # The instance already has some fake device_metadata stored on it,
+        # and we want to test to see it gets lazy-loaded, so save off the
+        # original attribute value and delete the attribute from the instance,
+        # then we can assert it gets loaded up later.
+        original_device_meta = inst.device_metadata
+        delattr(inst, 'device_metadata')
+
+        def fake_obj_load_attr(attrname):
+            if attrname == 'device_metadata':
+                inst.device_metadata = original_device_meta
+            elif attrname == 'ec2_ids':
+                inst.ec2_ids = objects.EC2Ids()
+            else:
+                self.fail('Unexpected instance lazy-load: %s' % attrname)
+
+        inst._will_not_pass = True
+        with mock.patch.object(
+                inst, 'obj_load_attr',
+                side_effect=fake_obj_load_attr) as mock_obj_load_attr:
+            md = fake_InstanceMetadata(self, inst)
+        self.assertFalse(hasattr(md.instance, '_will_not_pass'))
+        self.assertEqual(2, mock_obj_load_attr.call_count)
+        mock_obj_load_attr.assert_has_calls(
+            [mock.call('device_metadata'), mock.call('ec2_ids')],
+            any_order=True)
+        self.assertIs(original_device_meta, inst.device_metadata)
 
     def test_check_version(self):
         inst = self.instance.obj_clone()
@@ -451,6 +476,11 @@ class MetadataTestCase(test.TestCase):
             'openstack/2016-10-06/vendor_data.json',
             'openstack/2016-10-06/network_data.json',
             'openstack/2016-10-06/vendor_data2.json',
+            'openstack/2017-02-22/meta_data.json',
+            'openstack/2017-02-22/user_data',
+            'openstack/2017-02-22/vendor_data.json',
+            'openstack/2017-02-22/network_data.json',
+            'openstack/2017-02-22/vendor_data2.json',
             'openstack/latest/meta_data.json',
             'openstack/latest/user_data',
             'openstack/latest/vendor_data.json',
@@ -496,11 +526,12 @@ class MetadataTestCase(test.TestCase):
         data = md.get_ec2_metadata(version='2009-04-04')
         self.assertEqual(data['meta-data']['local-ipv4'], expected_local)
 
-    @mock.patch.object(base64, 'b64encode', lambda data: FAKE_SEED)
+    @mock.patch('oslo_serialization.base64.encode_as_text',
+                return_value=FAKE_SEED)
     @mock.patch('nova.cells.rpcapi.CellsAPI.get_keypair_at_top')
     @mock.patch.object(jsonutils, 'dump_as_bytes')
     def _test_as_json_with_options(self, mock_json_dump_as_bytes,
-                          mock_cells_keypair,
+                          mock_cells_keypair, mock_base64,
                           is_cells=False, os_version=base.GRIZZLY):
         if is_cells:
             self.flags(enable=True, group='cells')
@@ -537,8 +568,8 @@ class MetadataTestCase(test.TestCase):
         if md._check_os_version(base.LIBERTY, os_version):
             expected_metadata['project_id'] = instance.project_id
         if md._check_os_version(base.NEWTON_ONE, os_version):
-            expected_metadata['devices'] = fake_metadata_dicts()
-
+            expose_vlan = md._check_os_version(base.OCATA, os_version)
+            expected_metadata['devices'] = fake_metadata_dicts(expose_vlan)
         mock_cells_keypair.return_value = keypair
         md._metadata_as_json(os_version, 'non useless path parameter')
         if instance.key_name:
@@ -559,6 +590,24 @@ class MetadataTestCase(test.TestCase):
         for os_version in base.OPENSTACK_VERSIONS:
             self._test_as_json_with_options(is_cells=True,
                                             os_version=os_version)
+
+    @mock.patch('nova.cells.rpcapi.CellsAPI.get_keypair_at_top',
+                side_effect=exception.KeypairNotFound(
+                name='key', user_id='fake_user'))
+    @mock.patch.object(objects.Instance, 'get_by_uuid')
+    def test_as_json_deleted_keypair_in_cells_mode(self,
+                                                   mock_get_keypair_at_top,
+                                                   mock_inst_get_by_uuid):
+        self.flags(enable=True, group='cells')
+        self.flags(cell_type='compute', group='cells')
+
+        instance = self.instance.obj_clone()
+        delattr(instance, 'keypairs')
+        md = fake_InstanceMetadata(self, instance)
+        meta = md._metadata_as_json(base.OPENSTACK_VERSIONS[-1], path=None)
+        meta = jsonutils.loads(meta)
+        self.assertNotIn('keys', meta)
+        self.assertNotIn('public_keys', meta)
 
     @mock.patch.object(objects.Instance, 'get_by_uuid')
     def test_metadata_as_json_deleted_keypair(self, mock_inst_get_by_uuid):
@@ -581,7 +630,6 @@ class OpenStackMetadataTestCase(test.TestCase):
         super(OpenStackMetadataTestCase, self).setUp()
         self.context = context.RequestContext('fake', 'fake')
         self.instance = fake_inst_obj(self.context)
-        self.flags(use_local=True, group='conductor')
         fake_network.stub_out_nw_api_get_instance_nw_info(self)
 
     def test_empty_device_metadata(self):
@@ -603,7 +651,7 @@ class OpenStackMetadataTestCase(test.TestCase):
         mdinst = fake_InstanceMetadata(self, inst)
         mdjson = mdinst.lookup("/openstack/latest/meta_data.json")
         mddict = jsonutils.loads(mdjson)
-        self.assertEqual(fake_metadata_dicts(), mddict['devices'])
+        self.assertEqual(fake_metadata_dicts(True), mddict['devices'])
 
     def test_top_level_listing(self):
         # request for /openstack/<version>/ should show metadata.json
@@ -718,7 +766,7 @@ class OpenStackMetadataTestCase(test.TestCase):
         mdjson = mdinst.lookup("/openstack/2012-08-10/meta_data.json")
         mddict = jsonutils.loads(mdjson)
 
-        for key, val in six.iteritems(extra):
+        for key, val in extra.items():
             self.assertEqual(mddict[key], val)
 
     def test_password(self):
@@ -758,7 +806,8 @@ class OpenStackMetadataTestCase(test.TestCase):
         mddict = jsonutils.loads(mdjson)
 
         self.assertIn("random_seed", mddict)
-        self.assertEqual(len(base64.b64decode(mddict["random_seed"])), 512)
+        self.assertEqual(len(base64.decode_as_bytes(mddict["random_seed"])),
+                         512)
 
         # verify that older version do not have it
         mdjson = mdinst.lookup("/openstack/2012-08-10/meta_data.json")
@@ -804,6 +853,9 @@ class OpenStackMetadataTestCase(test.TestCase):
         # verify that 2016-10-06 has the vendor_data2.json file
         result = mdinst.lookup("/openstack/2016-10-06")
         self.assertIn('vendor_data2.json', result)
+        # assert that we never created a ksa session for dynamic vendordata if
+        # we didn't make a request
+        self.assertIsNone(mdinst.vendordata_providers['DynamicJSON'].session)
 
     def test_vendor_data_response(self):
         inst = self.instance.obj_clone()
@@ -837,8 +889,10 @@ class OpenStackMetadataTestCase(test.TestCase):
 
     def _test_vendordata2_response_inner(self, request_mock, response_code,
                                          include_rest_result=True):
-        request_mock.return_value.status_code = response_code
-        request_mock.return_value.text = '{"color": "blue"}'
+        fake_response = test_identity.FakeResponse(response_code)
+        if include_rest_result:
+            fake_response.content = '{"color": "blue"}'
+        request_mock.return_value = fake_response
 
         with utils.tempdir() as tmpdir:
             jsonfile = os.path.join(tmpdir, 'test.json')
@@ -849,7 +903,8 @@ class OpenStackMetadataTestCase(test.TestCase):
             self.flags(vendordata_providers=['StaticJSON', 'DynamicJSON'],
                        vendordata_jsonfile_path=jsonfile,
                        vendordata_dynamic_targets=[
-                           'web@http://fake.com/foobar']
+                           'web@http://fake.com/foobar'],
+                       group='api'
                        )
 
             inst = self.instance.obj_clone()
@@ -869,7 +924,18 @@ class OpenStackMetadataTestCase(test.TestCase):
 
             # verify the new format as well
             vdpath = "/openstack/2016-10-06/vendor_data2.json"
-            vd = jsonutils.loads(mdinst.lookup(vdpath))
+            with mock.patch(
+                    'nova.api.metadata.vendordata_dynamic.LOG.warning') as wrn:
+                vd = jsonutils.loads(mdinst.lookup(vdpath))
+                # We don't have vendordata_dynamic_auth credentials configured
+                # so we expect to see a warning logged about making an insecure
+                # connection.
+                warning_calls = wrn.call_args_list
+                self.assertEqual(1, len(warning_calls))
+                # Verify the warning message is the one we expect which is the
+                # first and only arg to the first and only call to the warning.
+                self.assertIn('Passing insecure dynamic vendordata requests',
+                              six.text_type(warning_calls[0][0]))
             self.assertEqual('10.0.0.1', vd['static'].get('ldap'))
             self.assertEqual('10.0.0.2', vd['static'].get('ad'))
 
@@ -878,23 +944,25 @@ class OpenStackMetadataTestCase(test.TestCase):
             else:
                 self.assertEqual({}, vd['web'])
 
-    @mock.patch.object(requests, 'request')
+    @mock.patch.object(session.Session, 'request')
     def test_vendor_data_response_vendordata2_ok(self, request_mock):
         self._test_vendordata2_response_inner(request_mock,
                                               requests.codes.OK)
 
-    @mock.patch.object(requests, 'request')
+    @mock.patch.object(session.Session, 'request')
     def test_vendor_data_response_vendordata2_created(self, request_mock):
         self._test_vendordata2_response_inner(request_mock,
                                               requests.codes.CREATED)
 
-    @mock.patch.object(requests, 'request')
+    @mock.patch.object(session.Session, 'request')
     def test_vendor_data_response_vendordata2_accepted(self, request_mock):
         self._test_vendordata2_response_inner(request_mock,
                                               requests.codes.ACCEPTED)
 
-    @mock.patch.object(requests, 'request')
+    @mock.patch.object(session.Session, 'request')
     def test_vendor_data_response_vendordata2_no_content(self, request_mock):
+        # Make it a failure if no content was returned and we don't handle it.
+        self.flags(vendordata_dynamic_failure_fatal=True, group='api')
         self._test_vendordata2_response_inner(request_mock,
                                               requests.codes.NO_CONTENT,
                                               include_rest_result=False)
@@ -912,7 +980,8 @@ class OpenStackMetadataTestCase(test.TestCase):
             self.flags(vendordata_providers=['StaticJSON', 'DynamicJSON'],
                        vendordata_jsonfile_path=jsonfile,
                        vendordata_dynamic_targets=[
-                           'web@http://fake.com/foobar']
+                           'web@http://fake.com/foobar'],
+                       group='api'
                        )
 
             inst = self.instance.obj_clone()
@@ -929,34 +998,44 @@ class OpenStackMetadataTestCase(test.TestCase):
             self.assertTrue(log_mock.called)
 
     @mock.patch.object(vendordata_dynamic.LOG, 'warning')
-    @mock.patch.object(requests, 'request')
+    @mock.patch.object(session.Session, 'request')
     def test_vendor_data_response_vendordata2_type_error(self, request_mock,
                                                          log_mock):
         self._test_vendordata2_response_inner_exceptional(
                 request_mock, log_mock, TypeError)
 
     @mock.patch.object(vendordata_dynamic.LOG, 'warning')
-    @mock.patch.object(requests, 'request')
+    @mock.patch.object(session.Session, 'request')
     def test_vendor_data_response_vendordata2_value_error(self, request_mock,
                                                           log_mock):
         self._test_vendordata2_response_inner_exceptional(
                 request_mock, log_mock, ValueError)
 
     @mock.patch.object(vendordata_dynamic.LOG, 'warning')
-    @mock.patch.object(requests, 'request')
+    @mock.patch.object(session.Session, 'request')
     def test_vendor_data_response_vendordata2_request_error(self,
                                                             request_mock,
                                                             log_mock):
         self._test_vendordata2_response_inner_exceptional(
-                request_mock, log_mock, requests.exceptions.RequestException)
+                request_mock, log_mock, ks_exceptions.BadRequest)
 
     @mock.patch.object(vendordata_dynamic.LOG, 'warning')
-    @mock.patch.object(requests, 'request')
+    @mock.patch.object(session.Session, 'request')
     def test_vendor_data_response_vendordata2_ssl_error(self,
                                                         request_mock,
                                                         log_mock):
         self._test_vendordata2_response_inner_exceptional(
-                request_mock, log_mock, requests.exceptions.SSLError)
+                request_mock, log_mock, ks_exceptions.SSLError)
+
+    @mock.patch.object(vendordata_dynamic.LOG, 'warning')
+    @mock.patch.object(session.Session, 'request')
+    def test_vendor_data_response_vendordata2_ssl_error_fatal(self,
+                                                              request_mock,
+                                                              log_mock):
+        self.flags(vendordata_dynamic_failure_fatal=True, group='api')
+        self.assertRaises(ks_exceptions.SSLError,
+                          self._test_vendordata2_response_inner_exceptional,
+                          request_mock, log_mock, ks_exceptions.SSLError)
 
     def test_network_data_presence(self):
         inst = self.instance.obj_clone()
@@ -1005,7 +1084,6 @@ class MetadataHandlerTestCase(test.TestCase):
         fake_network.stub_out_nw_api_get_instance_nw_info(self)
         self.context = context.RequestContext('fake', 'fake')
         self.instance = fake_inst_obj(self.context)
-        self.flags(use_local=True, group='conductor')
         self.mdinst = fake_InstanceMetadata(self, self.instance,
             address=None, sgroups=None)
 
@@ -1021,15 +1099,15 @@ class MetadataHandlerTestCase(test.TestCase):
 
         response = fake_request(self, CallableMD(), "/bar")
         self.assertEqual(response.status_int, 200)
-        self.assertEqual(response.body, "foo")
+        self.assertEqual(response.text, "foo")
 
     def test_root(self):
         expected = "\n".join(base.VERSIONS) + "\nlatest"
         response = fake_request(self, self.mdinst, "/")
-        self.assertEqual(response.body, expected)
+        self.assertEqual(response.text, expected)
 
         response = fake_request(self, self.mdinst, "/foo/../")
-        self.assertEqual(response.body, expected)
+        self.assertEqual(response.text, expected)
 
     def test_root_metadata_proxy_enabled(self):
         self.flags(service_metadata_proxy=True,
@@ -1037,16 +1115,16 @@ class MetadataHandlerTestCase(test.TestCase):
 
         expected = "\n".join(base.VERSIONS) + "\nlatest"
         response = fake_request(self, self.mdinst, "/")
-        self.assertEqual(response.body, expected)
+        self.assertEqual(response.text, expected)
 
         response = fake_request(self, self.mdinst, "/foo/../")
-        self.assertEqual(response.body, expected)
+        self.assertEqual(response.text, expected)
 
     def test_version_root(self):
         response = fake_request(self, self.mdinst, "/2009-04-04")
         response_ctype = response.headers['Content-Type']
         self.assertTrue(response_ctype.startswith("text/plain"))
-        self.assertEqual(response.body, 'meta-data/\nuser-data')
+        self.assertEqual(response.text, 'meta-data/\nuser-data')
 
         response = fake_request(self, self.mdinst, "/9999-99-99")
         self.assertEqual(response.status_int, 404)
@@ -1063,9 +1141,10 @@ class MetadataHandlerTestCase(test.TestCase):
         response_ctype = response.headers['Content-Type']
         self.assertTrue(response_ctype.startswith("application/json"))
 
-    def test_user_data_non_existing_fixed_address(self):
-        self.stub_out('nova.network.api.API.get_fixed_ip_by_address',
-                      return_non_existing_address)
+    @mock.patch('nova.network.API')
+    def test_user_data_non_existing_fixed_address(self, mock_network_api):
+        mock_network_api.return_value.get_fixed_ip_by_address.side_effect = (
+            exception.NotFound())
         response = fake_request(None, self.mdinst, "/2009-04-04/user-data",
                                 "127.1.1.1")
         self.assertEqual(response.status_int, 404)
@@ -1090,7 +1169,7 @@ class MetadataHandlerTestCase(test.TestCase):
                 raise Exception("Expected addr of %s, got %s" %
                                 (expected_addr, address))
 
-        self.flags(use_forwarded_for=True)
+        self.flags(use_forwarded_for=True, group='api')
         response = fake_request(self, self.mdinst,
                                 relpath="/2009-04-04/user-data",
                                 address="168.168.168.1",
@@ -1101,7 +1180,7 @@ class MetadataHandlerTestCase(test.TestCase):
         response_ctype = response.headers['Content-Type']
         self.assertTrue(response_ctype.startswith("text/plain"))
         self.assertEqual(response.body,
-                         base64.b64decode(self.instance['user_data']))
+                         base64.decode_as_bytes(self.instance['user_data']))
 
         response = fake_request(self, self.mdinst,
                                 relpath="/2009-04-04/user-data",
@@ -1129,18 +1208,19 @@ class MetadataHandlerTestCase(test.TestCase):
     def _fake_x_get_metadata(self, self_app, instance_id, remote_address):
         if remote_address is None:
             raise Exception('Expected X-Forwared-For header')
-        elif instance_id == self.expected_instance_id:
+
+        if encodeutils.to_utf8(instance_id) == self.expected_instance_id:
             return self.mdinst
-        else:
-            # raise the exception to aid with 500 response code test
-            raise Exception("Expected instance_id of %s, got %s" %
-                            (self.expected_instance_id, instance_id))
+
+        # raise the exception to aid with 500 response code test
+        raise Exception("Expected instance_id of %r, got %r" %
+                        (self.expected_instance_id, instance_id))
 
     def test_user_data_with_neutron_instance_id(self):
-        self.expected_instance_id = 'a-b-c-d'
+        self.expected_instance_id = b'a-b-c-d'
 
         signed = hmac.new(
-            CONF.neutron.metadata_proxy_shared_secret,
+            encodeutils.to_utf8(CONF.neutron.metadata_proxy_shared_secret),
             self.expected_instance_id,
             hashlib.sha256).hexdigest()
 
@@ -1171,7 +1251,7 @@ class MetadataHandlerTestCase(test.TestCase):
         response_ctype = response.headers['Content-Type']
         self.assertTrue(response_ctype.startswith("text/plain"))
         self.assertEqual(response.body,
-                         base64.b64decode(self.instance['user_data']))
+                         base64.decode_as_bytes(self.instance['user_data']))
 
         # mismatched signature
         response = fake_request(
@@ -1225,8 +1305,8 @@ class MetadataHandlerTestCase(test.TestCase):
 
         # unexpected Instance-ID
         signed = hmac.new(
-            CONF.neutron.metadata_proxy_shared_secret,
-           'z-z-z-z',
+            encodeutils.to_utf8(CONF.neutron.metadata_proxy_shared_secret),
+           b'z-z-z-z',
            hashlib.sha256).hexdigest()
 
         response = fake_request(
@@ -1246,7 +1326,7 @@ class MetadataHandlerTestCase(test.TestCase):
             # available at relpath.
             response = fake_request(self, self.mdinst,
                                     relpath=relpath)
-            for item in response.body.split('\n'):
+            for item in response.text.split('\n'):
                 if 'public-keys' in relpath:
                     # meta-data/public-keys/0=keyname refers to
                     # meta-data/public-keys/0
@@ -1263,10 +1343,10 @@ class MetadataHandlerTestCase(test.TestCase):
         _test_metadata_path('/2009-04-04/meta-data')
 
     def _metadata_handler_with_instance_id(self, hnd):
-        expected_instance_id = 'a-b-c-d'
+        expected_instance_id = b'a-b-c-d'
 
         signed = hmac.new(
-            CONF.neutron.metadata_proxy_shared_secret,
+            encodeutils.to_utf8(CONF.neutron.metadata_proxy_shared_secret),
             expected_instance_id,
             hashlib.sha256).hexdigest()
 
@@ -1283,14 +1363,14 @@ class MetadataHandlerTestCase(test.TestCase):
                      'X-Instance-ID-Signature': signed})
 
         self.assertEqual(200, response.status_int)
-        self.assertEqual(base64.b64decode(self.instance['user_data']),
+        self.assertEqual(base64.decode_as_bytes(self.instance['user_data']),
                          response.body)
 
     @mock.patch.object(base, 'get_metadata_by_instance_id')
     def test_metadata_handler_with_instance_id(self, get_by_uuid):
         # test twice to ensure that the cache works
         get_by_uuid.return_value = self.mdinst
-        self.flags(metadata_cache_expiration=15)
+        self.flags(metadata_cache_expiration=15, group='api')
         hnd = handler.MetadataRequestHandler()
         self._metadata_handler_with_instance_id(hnd)
         self._metadata_handler_with_instance_id(hnd)
@@ -1300,7 +1380,7 @@ class MetadataHandlerTestCase(test.TestCase):
     def test_metadata_handler_with_instance_id_no_cache(self, get_by_uuid):
         # test twice to ensure that disabling the cache works
         get_by_uuid.return_value = self.mdinst
-        self.flags(metadata_cache_expiration=0)
+        self.flags(metadata_cache_expiration=0, group='api')
         hnd = handler.MetadataRequestHandler()
         self._metadata_handler_with_instance_id(hnd)
         self._metadata_handler_with_instance_id(hnd)
@@ -1314,14 +1394,14 @@ class MetadataHandlerTestCase(test.TestCase):
             relpath="/2009-04-04/user-data",
             address="192.192.192.2")
         self.assertEqual(200, response.status_int)
-        self.assertEqual(base64.b64decode(self.instance.user_data),
+        self.assertEqual(base64.decode_as_bytes(self.instance.user_data),
                          response.body)
 
     @mock.patch.object(base, 'get_metadata_by_address')
     def test_metadata_handler_with_remote_address(self, get_by_uuid):
         # test twice to ensure that the cache works
         get_by_uuid.return_value = self.mdinst
-        self.flags(metadata_cache_expiration=15)
+        self.flags(metadata_cache_expiration=15, group='api')
         hnd = handler.MetadataRequestHandler()
         self._metadata_handler_with_remote_address(hnd)
         self._metadata_handler_with_remote_address(hnd)
@@ -1331,7 +1411,7 @@ class MetadataHandlerTestCase(test.TestCase):
     def test_metadata_handler_with_remote_address_no_cache(self, get_by_uuid):
         # test twice to ensure that disabling the cache works
         get_by_uuid.return_value = self.mdinst
-        self.flags(metadata_cache_expiration=0)
+        self.flags(metadata_cache_expiration=0, group='api')
         hnd = handler.MetadataRequestHandler()
         self._metadata_handler_with_remote_address(hnd)
         self._metadata_handler_with_remote_address(hnd)
@@ -1342,7 +1422,7 @@ class MetadataHandlerTestCase(test.TestCase):
 
         self.flags(service_metadata_proxy=True, group='neutron')
 
-        self.expected_instance_id = 'a-b-c-d'
+        self.expected_instance_id = b'a-b-c-d'
 
         # with X-Metadata-Provider
         proxy_lb_id = 'edge-x'
@@ -1368,7 +1448,7 @@ class MetadataHandlerTestCase(test.TestCase):
 
         self.flags(service_metadata_proxy=True, group='neutron')
 
-        self.expected_instance_id = 'a-b-c-d'
+        self.expected_instance_id = b'a-b-c-d'
 
         # with X-Metadata-Provider
         proxy_lb_id = 'edge-x'
@@ -1406,14 +1486,14 @@ class MetadataHandlerTestCase(test.TestCase):
             metadata_proxy_shared_secret=shared_secret,
             service_metadata_proxy=True, group='neutron')
 
-        self.expected_instance_id = 'a-b-c-d'
+        self.expected_instance_id = b'a-b-c-d'
 
         # with X-Metadata-Provider
         proxy_lb_id = 'edge-x'
 
         signature = hmac.new(
-            shared_secret,
-            proxy_lb_id,
+            encodeutils.to_utf8(shared_secret),
+            encodeutils.to_utf8(proxy_lb_id),
             hashlib.sha256).hexdigest()
 
         mock_client = mock_get_client()
@@ -1442,14 +1522,14 @@ class MetadataHandlerTestCase(test.TestCase):
             metadata_proxy_shared_secret=shared_secret,
             service_metadata_proxy=True, group='neutron')
 
-        self.expected_instance_id = 'a-b-c-d'
+        self.expected_instance_id = b'a-b-c-d'
 
         # with X-Metadata-Provider
         proxy_lb_id = 'edge-x'
 
         signature = hmac.new(
-            bad_secret,
-            proxy_lb_id,
+            encodeutils.to_utf8(bad_secret),
+            encodeutils.to_utf8(proxy_lb_id),
             hashlib.sha256).hexdigest()
 
         mock_client = mock_get_client()
@@ -1469,7 +1549,7 @@ class MetadataHandlerTestCase(test.TestCase):
         self.assertEqual(403, response.status_int)
 
     @mock.patch.object(context, 'get_admin_context')
-    @mock.patch.object(network_api, 'API')
+    @mock.patch('nova.network.API')
     def test_get_metadata_by_address(self, mock_net_api, mock_get_context):
         mock_get_context.return_value = 'CONTEXT'
         api = mock.Mock()
@@ -1490,13 +1570,14 @@ class MetadataHandlerTestCase(test.TestCase):
     def test_get_metadata_by_instance_id(self, mock_uuid, mock_context):
         inst = objects.Instance()
         mock_uuid.return_value = inst
+        ctxt = context.RequestContext()
 
         with mock.patch.object(base, 'InstanceMetadata') as imd:
-            base.get_metadata_by_instance_id('foo', 'bar', ctxt='CONTEXT')
+            base.get_metadata_by_instance_id('foo', 'bar', ctxt=ctxt)
 
         self.assertFalse(mock_context.called, "get_admin_context() should not"
                          "have been called, the context was given")
-        mock_uuid.assert_called_once_with('CONTEXT', 'foo',
+        mock_uuid.assert_called_once_with(ctxt, 'foo',
             expected_attrs=['ec2_ids', 'flavor', 'info_cache', 'metadata',
                             'system_metadata', 'security_groups', 'keypairs',
                             'device_metadata'])
@@ -1508,16 +1589,34 @@ class MetadataHandlerTestCase(test.TestCase):
             mock_uuid, mock_context):
         inst = objects.Instance()
         mock_uuid.return_value = inst
-        mock_context.return_value = 'CONTEXT'
+        mock_context.return_value = context.RequestContext()
 
         with mock.patch.object(base, 'InstanceMetadata') as imd:
             base.get_metadata_by_instance_id('foo', 'bar')
 
         mock_context.assert_called_once_with()
-        mock_uuid.assert_called_once_with('CONTEXT', 'foo',
+        mock_uuid.assert_called_once_with(mock_context.return_value, 'foo',
             expected_attrs=['ec2_ids', 'flavor', 'info_cache', 'metadata',
                             'system_metadata', 'security_groups', 'keypairs',
                             'device_metadata'])
+        imd.assert_called_once_with(inst, 'bar')
+
+    @mock.patch.object(objects.Instance, 'get_by_uuid')
+    @mock.patch.object(objects.InstanceMapping, 'get_by_instance_uuid')
+    def test_get_metadata_by_instance_id_with_cell_mapping(self, mock_get_im,
+                                                           mock_get_inst):
+        ctxt = context.RequestContext()
+        inst = objects.Instance()
+        im = objects.InstanceMapping(cell_mapping=objects.CellMapping())
+        mock_get_inst.return_value = inst
+        mock_get_im.return_value = im
+
+        with mock.patch.object(base, 'InstanceMetadata') as imd:
+            with mock.patch('nova.context.target_cell') as mock_tc:
+                base.get_metadata_by_instance_id('foo', 'bar', ctxt=ctxt)
+                mock_tc.assert_called_once_with(ctxt, im.cell_mapping)
+
+        mock_get_im.assert_called_once_with(ctxt, 'foo')
         imd.assert_called_once_with(inst, 'bar')
 
 
@@ -1527,10 +1626,8 @@ class MetadataPasswordTestCase(test.TestCase):
         fake_network.stub_out_nw_api_get_instance_nw_info(self)
         self.context = context.RequestContext('fake', 'fake')
         self.instance = fake_inst_obj(self.context)
-        self.flags(use_local=True, group='conductor')
         self.mdinst = fake_InstanceMetadata(self, self.instance,
             address=None, sgroups=None)
-        self.flags(use_local=True, group='conductor')
 
     def test_get_password(self):
         request = webob.Request.blank('')
@@ -1544,11 +1641,13 @@ class MetadataPasswordTestCase(test.TestCase):
         self.assertRaises(webob.exc.HTTPBadRequest,
                           password.handle_password, request, self.mdinst)
 
+    @mock.patch('nova.objects.InstanceMapping.get_by_instance_uuid')
     @mock.patch('nova.objects.Instance.get_by_uuid')
-    def _try_set_password(self, get_by_uuid, val='bar'):
+    def _try_set_password(self, get_by_uuid, get_mapping, val=b'bar'):
         request = webob.Request.blank('')
         request.method = 'POST'
         request.body = val
+        get_mapping.return_value = objects.InstanceMapping(cell_mapping=None)
         get_by_uuid.return_value = self.instance
 
         with mock.patch.object(self.instance, 'save') as save:
@@ -1556,6 +1655,7 @@ class MetadataPasswordTestCase(test.TestCase):
             save.assert_called_once_with()
 
         self.assertIn('password_0', self.instance.system_metadata)
+        get_mapping.assert_called_once_with(mock.ANY, self.instance.uuid)
 
     def test_set_password(self):
         self.mdinst.password = ''
@@ -1570,4 +1670,4 @@ class MetadataPasswordTestCase(test.TestCase):
         self.mdinst.password = ''
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self._try_set_password,
-                          val=('a' * (password.MAX_SIZE + 1)))
+                          val=(b'a' * (password.MAX_SIZE + 1)))

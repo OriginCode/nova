@@ -36,14 +36,12 @@ from nova import rpc
 
 CONF = nova.conf.CONF
 
-ALIAS = "os-cells"
-
 
 def _filter_keys(item, keys):
     """Filters all model attributes except for keys
     item is a dict
     """
-    return {k: v for k, v in six.iteritems(item) if k in keys}
+    return {k: v for k, v in item.items() if k in keys}
 
 
 def _fixup_cell_info(cell_info, keys):
@@ -303,32 +301,3 @@ class CellsController(wsgi.Controller):
             deleted = strutils.bool_from_string(deleted, strict=True)
         self.cells_rpcapi.sync_instances(context, project_id=project_id,
                 updated_since=updated_since, deleted=deleted)
-
-
-class Cells(extensions.V21APIExtensionBase):
-    """Enables cells-related functionality such as adding neighbor cells,
-    listing neighbor cells, and getting the capabilities of the local cell.
-    """
-
-    name = "Cells"
-    alias = ALIAS
-    version = 1
-
-    def get_resources(self):
-        coll_actions = {
-                'detail': 'GET',
-                'info': 'GET',
-                'sync_instances': 'POST',
-                'capacities': 'GET',
-                }
-        memb_actions = {
-                'capacities': 'GET',
-                }
-
-        res = extensions.ResourceExtension(ALIAS, CellsController(),
-                                           collection_actions=coll_actions,
-                                           member_actions=memb_actions)
-        return [res]
-
-    def get_controller_extensions(self):
-        return []

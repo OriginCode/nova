@@ -18,16 +18,30 @@ from oslo_config import cfg
 cells_group = cfg.OptGroup('cells',
                             title='Cells Options',
                             help="""
-Cells options allow you to use cells functionality in openstack
-deployment.
+DEPRECATED: Cells options allow you to use cells v1 functionality in an
+OpenStack deployment.
+
+Note that the options in this group are only for cells v1 functionality, which
+is considered experimental and not recommended for new deployments. Cells v1
+is being replaced with cells v2, which starting in the 15.0.0 Ocata release is
+required and all Nova deployments will be at least a cells v2 cell of one.
 
 """)
 
 cells_opts = [
     cfg.BoolOpt('enable',
-                default=False,
-                help="""
-Enable cell functionality
+        default=False,
+        deprecated_for_removal=True,
+        deprecated_since='16.0.0',
+        deprecated_reason='Cells v1 is being replaced with Cells v2.',
+        help="""
+Enable cell v1 functionality.
+
+Note that cells v1 is considered experimental and not recommended for new
+Nova deployments. Cells v1 is being replaced by cells v2 which starting in
+the 15.0.0 Ocata release, all Nova deployments are at least a cells v2 cell
+of one. Setting this option, or any other options in the [cells] group, is
+not required for cells v2.
 
 When this functionality is enabled, it lets you to scale an OpenStack
 Compute cloud in a more distributed fashion without having to use
@@ -44,26 +58,14 @@ Related options:
 * name: A unique cell name must be given when this functionality
   is enabled.
 * cell_type: Cell type should be defined for all cells.
-
-"""),
-    cfg.StrOpt('topic',
-                default='cells',
-                help="""
-Topic
-
-This is the message queue topic that cells nodes listen on. It is
-used when the cells service is started up to configure the queue,
-and whenever an RPC call to the scheduler is made.
-
-Possible values:
-
-* cells: This is the recommended and the default value.
-
 """),
     cfg.StrOpt('name',
-                default='nova',
-                help="""
-Name of the current cell
+        default='nova',
+        deprecated_for_removal=True,
+        deprecated_since='16.0.0',
+        deprecated_reason='Cells v1 is being replaced with Cells v2.',
+        help="""
+Name of the current cell.
 
 This value must be unique for each cell. Name of a cell is used as
 its id, leaving this option unset or setting the same name for
@@ -73,12 +75,14 @@ Related options:
 
 * enabled: This option is meaningful only when cells service
   is enabled
-
 """),
     cfg.ListOpt('capabilities',
-                default=['hypervisor=xenserver;kvm', 'os=linux;windows'],
-                help="""
-Cell capabilities
+        default=['hypervisor=xenserver;kvm', 'os=linux;windows'],
+        deprecated_for_removal=True,
+        deprecated_since='16.0.0',
+        deprecated_reason='Cells v1 is being replaced with Cells v2.',
+        help="""
+Cell capabilities.
 
 List of arbitrary key=value pairs defining capabilities of the
 current cell to be sent to the parent cells. These capabilities
@@ -88,13 +92,15 @@ Possible values:
 
 * key=value pairs list for example;
   ``hypervisor=xenserver;kvm,os=linux;windows``
-
 """),
     cfg.IntOpt('call_timeout',
-                min=0,
-                default=60,
-                help="""
-Call timeout
+        default=60,
+        deprecated_for_removal=True,
+        deprecated_since='16.0.0',
+        deprecated_reason='Cells v1 is being replaced with Cells v2.',
+        min=0,
+        help="""
+Call timeout.
 
 Cell messaging module waits for response(s) to be put into the
 eventlet queue. This option defines the seconds waited for
@@ -102,46 +108,59 @@ response from a call to a cell.
 
 Possible values:
 
-* Time in seconds.
-
+* An integer, corresponding to the interval time in seconds.
 """),
     cfg.FloatOpt('reserve_percent',
-                 default=10.0,
-                 help="""
+        default=10.0,
+        deprecated_for_removal=True,
+        deprecated_since='16.0.0',
+        deprecated_reason='Cells v1 is being replaced with Cells v2.',
+        help="""
 Reserve percentage
 
 Percentage of cell capacity to hold in reserve, so the minimum
 amount of free resource is considered to be;
-  min_free = total * (reserve_percent / 100.0)
+
+    min_free = total * (reserve_percent / 100.0)
+
 This option affects both memory and disk utilization.
+
 The primary purpose of this reserve is to ensure some space is
 available for users who want to resize their instance to be larger.
 Note that currently once the capacity expands into this reserve
 space this option is ignored.
 
+Possible values:
+
+* An integer or float, corresponding to the percentage of cell capacity to
+  be held in reserve.
 """),
     cfg.StrOpt('cell_type',
-               default='compute',
-               choices=('api', 'compute'),
-               help="""
-Type of cell
+        default='compute',
+        choices=('api', 'compute'),
+        deprecated_for_removal=True,
+        deprecated_since='16.0.0',
+        deprecated_reason='Cells v1 is being replaced with Cells v2.',
+        help="""
+Type of cell.
 
 When cells feature is enabled the hosts in the OpenStack Compute
 cloud are partitioned into groups. Cells are configured as a tree.
 The top-level cell's cell_type must be set to ``api``. All other
 cells are defined as a ``compute cell`` by default.
 
-Related options:
+Related option:
 
-* compute_api_class: This option must be set to cells api driver
-  for the top-level cell (nova.compute.cells_api.ComputeCellsAPI)
 * quota_driver: Disable quota checking for the child cells.
   (nova.quota.NoopQuotaDriver)
 """),
-    cfg.IntOpt("mute_child_interval",
-               default=300,
-               help="""
-Mute child interval
+    cfg.IntOpt('mute_child_interval',
+        default=300,
+        deprecated_for_removal=True,
+        deprecated_since='16.0.0',
+        deprecated_reason='Cells v1 is being replaced with Cells v2.',
+        help="""
+Mute child interval.
 
 Number of seconds after which a lack of capability and capacity
 update the child cell is to be treated as a mute cell. Then the
@@ -149,25 +168,29 @@ child cell will be weighed as recommend highly that it be skipped.
 
 Possible values:
 
-* Time in seconds.
-
+* An integer, corresponding to the interval time in seconds.
 """),
     cfg.IntOpt('bandwidth_update_interval',
-                default=600,
-                help="""
-Bandwidth update interval
+        default=600,
+        deprecated_for_removal=True,
+        deprecated_since='16.0.0',
+        deprecated_reason='Cells v1 is being replaced with Cells v2.',
+        help="""
+Bandwidth update interval.
 
 Seconds between bandwidth usage cache updates for cells.
 
 Possible values:
 
-* Time in seconds.
-
+* An integer, corresponding to the interval time in seconds.
 """),
     cfg.IntOpt('instance_update_sync_database_limit',
-            default=100,
-            help="""
-Instance update sync database limit
+        default=100,
+        deprecated_for_removal=True,
+        deprecated_since='16.0.0',
+        deprecated_reason='Cells v1 is being replaced with Cells v2.',
+        help="""
+Instance update sync database limit.
 
 Number of instances to pull from the database at one time for
 a sync. If there are more instances to update the results will
@@ -175,16 +198,18 @@ be paged through.
 
 Possible values:
 
-* Number of instances.
-
+* An integer, corresponding to a number of instances.
 """),
 ]
 
 mute_weigher_opts = [
-        cfg.FloatOpt('mute_weight_multiplier',
-                default=-10000.0,
-                help="""
-Mute weight multiplier
+    cfg.FloatOpt('mute_weight_multiplier',
+        default=-10000.0,
+        deprecated_for_removal=True,
+        deprecated_since='16.0.0',
+        deprecated_reason='Cells v1 is being replaced with Cells v2.',
+        help="""
+Mute weight multiplier.
 
 Multiplier used to weigh mute children. Mute children cells are
 recommended to be skipped so their weight is multiplied by this
@@ -193,15 +218,17 @@ negative value.
 Possible values:
 
 * Negative numeric number
-
 """),
 ]
 
 ram_weigher_opts = [
-        cfg.FloatOpt('ram_weight_multiplier',
-                     default=10.0,
-                     help="""
-Ram weight multiplier
+    cfg.FloatOpt('ram_weight_multiplier',
+        default=10.0,
+        deprecated_for_removal=True,
+        deprecated_since='16.0.0',
+        deprecated_reason='Cells v1 is being replaced with Cells v2.',
+        help="""
+Ram weight multiplier.
 
 Multiplier used for weighing ram. Negative numbers indicate that
 Compute should stack VMs on one host instead of spreading out new
@@ -210,14 +237,16 @@ VMs to more hosts in the cell.
 Possible values:
 
 * Numeric multiplier
-
 """),
 ]
 
 weigher_opts = [
     cfg.FloatOpt('offset_weight_multiplier',
-                 default=1.0,
-                 help="""
+        default=1.0,
+        deprecated_for_removal=True,
+        deprecated_since='16.0.0',
+        deprecated_reason='Cells v1 is being replaced with Cells v2.',
+        help="""
 Offset weight multiplier
 
 Multiplier used to weigh offset weigher. Cells with higher
@@ -229,27 +258,16 @@ cells based on the setting.
 Possible values:
 
 * Numeric multiplier
-
 """),
 ]
 
 cell_manager_opts = [
-        cfg.StrOpt('driver',
-                default='nova.cells.rpc_driver.CellsRPCDriver',
-                deprecated_for_removal=True,
-                deprecated_reason='The only available driver '
-                                  'is the RPC driver.',
-                help="""Cells communication driver
-
-Driver for cell<->cell communication via RPC. This is used to
-setup the RPC consumers as well as to send a message to another cell.
-'nova.cells.rpc_driver.CellsRPCDriver' starts up 2 separate servers
-for handling inter-cell communication via RPC.
-
-"""),
-        cfg.IntOpt("instance_updated_at_threshold",
-                default=3600,
-                help="""
+    cfg.IntOpt('instance_updated_at_threshold',
+        default=3600,
+        deprecated_for_removal=True,
+        deprecated_since='16.0.0',
+        deprecated_reason='Cells v1 is being replaced with Cells v2.',
+        help="""
 Instance updated at threshold
 
 Number of seconds after an instance was updated or deleted to
@@ -266,11 +284,13 @@ Related options:
 
 * This value is used with the ``instance_update_num_instances``
   value in a periodic task run.
-
 """),
-        cfg.IntOpt("instance_update_num_instances",
-                default=1,
-                help="""
+    cfg.IntOpt("instance_update_num_instances",
+        default=1,
+        deprecated_for_removal=True,
+        deprecated_since='16.0.0',
+        deprecated_reason='Cells v1 is being replaced with Cells v2.',
+        help="""
 Instance update num instances
 
 On every run of the periodic task, nova cells manager will attempt to
@@ -287,14 +307,16 @@ Related options:
 
 * This value is used with the ``instance_updated_at_threshold``
   value in a periodic task run.
-
 """)
 ]
 
 cell_messaging_opts = [
     cfg.IntOpt('max_hop_count',
-            default=10,
-            help="""
+        default=10,
+        deprecated_for_removal=True,
+        deprecated_since='16.0.0',
+        deprecated_reason='Cells v1 is being replaced with Cells v2.',
+        help="""
 Maximum hop count
 
 When processing a targeted message, if the local cell is not the
@@ -305,25 +327,29 @@ defines the maximum hop counts until reaching the target.
 Possible values:
 
 * Positive integer value
-
 """),
     cfg.StrOpt('scheduler',
-            default='nova.cells.scheduler.CellsScheduler',
-            help="""
-Cells scheduler
+        default='nova.cells.scheduler.CellsScheduler',
+        deprecated_for_removal=True,
+        deprecated_since='16.0.0',
+        deprecated_reason='Cells v1 is being replaced with Cells v2.',
+        help="""
+Cells scheduler.
 
 The class of the driver used by the cells scheduler. This should be
 the full Python path to the class to be used. If nothing is specified
 in this option, the CellsScheduler is used.
-
 """)
 ]
 
 cell_rpc_driver_opts = [
-        cfg.StrOpt('rpc_driver_queue_base',
-                   default='cells.intercell',
-                   help="""
-RPC driver queue base
+    cfg.StrOpt('rpc_driver_queue_base',
+        default='cells.intercell',
+        deprecated_for_removal=True,
+        deprecated_since='16.0.0',
+        deprecated_reason='Cells v1 is being replaced with Cells v2.',
+        help="""
+RPC driver queue base.
 
 When sending a message to another cell by JSON-ifying the message
 and making an RPC cast to 'process_message', a base queue is used.
@@ -333,15 +359,17 @@ between cells. Various topics by message type will be appended to this.
 Possible values:
 
 * The base queue name to be used when communicating between cells.
-
 """)
 ]
 
 cell_scheduler_opts = [
-        cfg.ListOpt('scheduler_filter_classes',
-                default=['nova.cells.filters.all_filters'],
-                help="""
-Scheduler filter classes
+    cfg.ListOpt('scheduler_filter_classes',
+        default=['nova.cells.filters.all_filters'],
+        deprecated_for_removal=True,
+        deprecated_since='16.0.0',
+        deprecated_reason='Cells v1 is being replaced with Cells v2.',
+        help="""
+Scheduler filter classes.
 
 Filter classes the cells scheduler should use. An entry of
 "nova.cells.filters.all_filters" maps to all cells filters
@@ -369,10 +397,13 @@ As an admin user, you can also add a filter that directs builds
 to a particular cell.
 
 """),
-        cfg.ListOpt('scheduler_weight_classes',
-                default=['nova.cells.weights.all_weighers'],
-                help="""
-Scheduler weight classes
+    cfg.ListOpt('scheduler_weight_classes',
+        default=['nova.cells.weights.all_weighers'],
+        deprecated_for_removal=True,
+        deprecated_since='16.0.0',
+        deprecated_reason='Cells v1 is being replaced with Cells v2.',
+        help="""
+Scheduler weight classes.
 
 Weigher classes the cells scheduler should use. An entry of
 "nova.cells.weights.all_weighers" maps to all cell weighers
@@ -400,12 +431,14 @@ it is unlikely to be picked but it could be picked if other cells
 have a lower weight, like if they're full. And when the weight_offset
 is set to a very high value (for example, '999999999999999'), it is
 likely to be picked if another cell do not have a higher weight.
-
 """),
-        cfg.IntOpt('scheduler_retries',
-                default=10,
-                help="""
-Scheduler retries
+    cfg.IntOpt('scheduler_retries',
+        default=10,
+        deprecated_for_removal=True,
+        deprecated_since='16.0.0',
+        deprecated_reason='Cells v1 is being replaced with Cells v2.',
+        help="""
+Scheduler retries.
 
 How many retries when no cells are available. Specifies how many
 times the scheduler tries to launch a new instance when no cells
@@ -419,12 +452,14 @@ Related options:
 
 * This value is used with the ``scheduler_retry_delay`` value
   while retrying to find a suitable cell.
-
 """),
-        cfg.IntOpt('scheduler_retry_delay',
-                default=2,
-                help="""
-Scheduler retry delay
+    cfg.IntOpt('scheduler_retry_delay',
+        default=2,
+        deprecated_for_removal=True,
+        deprecated_since='16.0.0',
+        deprecated_reason='Cells v1 is being replaced with Cells v2.',
+        help="""
+Scheduler retry delay.
 
 Specifies the delay (in seconds) between scheduling retries when no
 cell can be found to place the new instance on. When the instance
@@ -440,15 +475,17 @@ Related options:
 
 * This value is used with the ``scheduler_retries`` value
   while retrying to find a suitable cell.
-
 """)
 ]
 
 cell_state_manager_opts = [
-        cfg.IntOpt('db_check_interval',
-               default=60,
-               help="""
-DB check interval
+    cfg.IntOpt('db_check_interval',
+        default=60,
+        deprecated_for_removal=True,
+        deprecated_since='16.0.0',
+        deprecated_reason='Cells v1 is being replaced with Cells v2.',
+        help="""
+DB check interval.
 
 Cell state manager updates cell status for all cells from the DB
 only after this particular interval time is passed. Otherwise cached
@@ -460,9 +497,12 @@ Possible values:
 * Interval time, in seconds.
 
 """),
-        cfg.StrOpt('cells_config',
-               help="""
-Optional cells configuration
+    cfg.StrOpt('cells_config',
+        deprecated_for_removal=True,
+        deprecated_since='16.0.0',
+        deprecated_reason='Cells v1 is being replaced with Cells v2.',
+        help="""
+Optional cells configuration.
 
 Configuration file from which to read cells configuration. If given,
 overrides reading cells from the database.

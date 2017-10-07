@@ -11,9 +11,9 @@
 
    These APIs are proxy calls to the Network service. Nova has
    deprecated all the proxy APIs and users should use the native APIs
-   instead. These will fail with a 404 after microversion 2.35.
+   instead. These will fail with a 404 starting from microversion 2.36.
    See: `Relevant Network APIs
-   <http://developer.openstack.org/api-ref/networking/v2-ext/index.html#security-groups-security-groups>`__.
+   <https://developer.openstack.org/api-ref/networking/v2/#security-groups-security-groups>`__.
 
 Lists, shows information for, creates, updates and deletes security groups.
 
@@ -28,14 +28,22 @@ Normal response codes: 200
 
 Error response codes: unauthorized(401), forbidden(403), itemNotFound(404)
 
+Request
+-------
+
+.. rest_parameters:: parameters.yaml
+
+  - limit: limit_simple
+  - offset: offset_simple
+
 Response
 --------
 
 .. rest_parameters:: parameters.yaml
 
-  - security_groups: security_groups
+  - security_groups: security_groups_obj
   - description: description
-  - id: id
+  - id: security_group_id_body
   - name: name
   - rules: rules
   - tenant_id: tenant_id_body
@@ -78,7 +86,7 @@ Response
 
   - security_group: security_group
   - description: description
-  - id: id
+  - id: security_group_id_body
   - name: name
   - rules: rules
   - tenant_id: tenant_id_body
@@ -114,7 +122,7 @@ Response
 
   - security_group: security_group
   - description: description
-  - id: id
+  - id: security_group_id_body
   - name: name
   - rules: rules
   - tenant_id: tenant_id_body
@@ -157,7 +165,7 @@ Response
 
   - security_group: security_group
   - description: description
-  - id: id
+  - id: security_group_id_body
   - name: name
   - rules: rules
   - tenant_id: tenant_id_body

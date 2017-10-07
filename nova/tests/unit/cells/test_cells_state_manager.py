@@ -112,11 +112,11 @@ def _fake_cell_get_all(context):
     return []
 
 
-def _fake_instance_type_all(context):
+def _fake_instance_type_all(*args):
     def _type(mem, root, eph):
-        return {'root_gb': root,
-                'ephemeral_gb': eph,
-                'memory_mb': mem}
+        return objects.Flavor(root_gb=root,
+                              ephemeral_gb=eph,
+                              memory_mb=mem)
 
     return [_type(*fake) for fake in FAKE_ITYPES]
 
@@ -126,11 +126,12 @@ class TestCellsStateManager(test.NoDBTestCase):
     def setUp(self):
         super(TestCellsStateManager, self).setUp()
 
-        self.stubs.Set(objects.ComputeNodeList, 'get_all',
-                       _fake_compute_node_get_all)
-        self.stubs.Set(objects.ServiceList, 'get_by_binary',
-                       _fake_service_get_all_by_binary)
-        self.stub_out('nova.db.flavor_get_all', _fake_instance_type_all)
+        self.stub_out('nova.objects.ComputeNodeList.get_all',
+                      _fake_compute_node_get_all)
+        self.stub_out('nova.objects.ServiceList.get_by_binary',
+                      _fake_service_get_all_by_binary)
+        self.stub_out('nova.objects.FlavorList.get_all',
+                      _fake_instance_type_all)
         self.stub_out('nova.db.cell_get_all', _fake_cell_get_all)
 
     def test_cells_config_not_found(self):
@@ -233,8 +234,8 @@ class TestCellsStateManagerNToOne(TestCellsStateManager):
     def setUp(self):
         super(TestCellsStateManagerNToOne, self).setUp()
 
-        self.stubs.Set(objects.ComputeNodeList, 'get_all',
-                       _fake_compute_node_n_to_one_get_all)
+        self.stub_out('nova.objects.ComputeNodeList.get_all',
+                      _fake_compute_node_n_to_one_get_all)
 
     def test_capacity_part_reserve(self):
         # utilize half the cell's free capacity
@@ -268,7 +269,8 @@ class TestCellsStateManagerNodeDown(test.NoDBTestCase):
                        _fake_compute_node_get_all)
         self.stub_out('nova.objects.ServiceList.get_by_binary',
                _fake_service_get_all_by_binary_nodedown)
-        self.stub_out('nova.db.flavor_get_all', _fake_instance_type_all)
+        self.stub_out('nova.objects.FlavorList.get_all',
+                      _fake_instance_type_all)
         self.stub_out('nova.db.cell_get_all', _fake_cell_get_all)
 
     def test_capacity_no_reserve_nodedown(self):
@@ -315,19 +317,15 @@ class TestCellsGetCapacity(TestCellsStateManager):
         other_cell = models.Cell(name="other_cell_name")
         cell.capacities = self.capacities
         other_cell.capacities = self.capacities
-        self.stubs.Set(self.state_manager, 'child_cells',
-                        {"cell_name": cell,
-                        "other_cell_name": other_cell})
+        self.state_manager.child_cells = {"cell_name": cell,
+                                          "other_cell_name": other_cell}
+        self.state_manager.my_cell_state.capacities = self.capacities
 
     def test_get_cell_capacity_for_all_cells(self):
-        self.stubs.Set(self.state_manager.my_cell_state, 'capacities',
-                                                        self.capacities)
         capacities = self.state_manager.get_capacities()
         self.assertEqual({"ram_free": 3702}, capacities)
 
     def test_get_cell_capacity_for_the_parent_cell(self):
-        self.stubs.Set(self.state_manager.my_cell_state, 'capacities',
-                                                        self.capacities)
         capacities = self.state_manager.\
                      get_capacities(self.state_manager.my_cell_state.name)
         self.assertEqual({"ram_free": 3702}, capacities)

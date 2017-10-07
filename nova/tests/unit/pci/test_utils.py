@@ -30,7 +30,8 @@ class PciDeviceMatchTestCase(test.NoDBTestCase):
     def setUp(self):
         super(PciDeviceMatchTestCase, self).setUp()
         self.fake_pci_1 = {'vendor_id': 'v1',
-                           'device_id': 'd1'}
+                           'device_id': 'd1',
+                           'capabilities_network': ['cap1', 'cap2', 'cap3']}
 
     def test_single_spec_match(self):
         self.assertTrue(utils.pci_device_prop_match(
@@ -52,6 +53,24 @@ class PciDeviceMatchTestCase(test.NoDBTestCase):
         self.assertFalse(utils.pci_device_prop_match(
             self.fake_pci_1,
             [{'vendor_id': 'v1', 'device_id': 'd1', 'wrong_key': 'k1'}]))
+
+    def test_spec_list(self):
+        self.assertTrue(utils.pci_device_prop_match(
+            self.fake_pci_1, [{'vendor_id': 'v1', 'device_id': 'd1',
+                               'capabilities_network': ['cap1', 'cap2',
+                                                        'cap3']}]))
+        self.assertTrue(utils.pci_device_prop_match(
+            self.fake_pci_1, [{'vendor_id': 'v1', 'device_id': 'd1',
+                               'capabilities_network': ['cap3', 'cap1']}]))
+
+    def test_spec_list_no_matching(self):
+        self.assertFalse(utils.pci_device_prop_match(
+            self.fake_pci_1, [{'vendor_id': 'v1', 'device_id': 'd1',
+                               'capabilities_network': ['cap1', 'cap33']}]))
+
+    def test_spec_list_wrong_type(self):
+        self.assertFalse(utils.pci_device_prop_match(
+            self.fake_pci_1, [{'vendor_id': 'v1', 'device_id': ['d1']}]))
 
 
 class PciDeviceAddressParserTestCase(test.NoDBTestCase):
@@ -83,12 +102,16 @@ class GetFunctionByIfnameTestCase(test.NoDBTestCase):
     @mock.patch('os.path.isdir', return_value=True)
     @mock.patch.object(os, 'readlink')
     def test_physical_function(self, mock_readlink, *args):
+        ifname = 'eth0'
+        totalvf_path = "/sys/class/net/%s/device/%s" % (ifname,
+                                                        utils._SRIOV_TOTALVFS)
         mock_readlink.return_value = '../../../0000:00:00.1'
         with mock.patch.object(
-            builtins, 'open', mock.mock_open(read_data='4')):
+            builtins, 'open', mock.mock_open(read_data='4')) as mock_open:
             address, physical_function = utils.get_function_by_ifname('eth0')
             self.assertEqual(address, '0000:00:00.1')
             self.assertTrue(physical_function)
+            mock_open.assert_called_once_with(totalvf_path)
 
     @mock.patch('os.path.isdir', return_value=False)
     def test_exception(self, *args):
@@ -242,3 +265,46 @@ class GetVfNumByPciAddressTestCase(test.NoDBTestCase):
             utils.get_vf_num_by_pci_address,
             self.pci_address
         )
+
+
+class GetNetNameByVfPciAddressTestCase(test.NoDBTestCase):
+
+    def setUp(self):
+        super(GetNetNameByVfPciAddressTestCase, self).setUp()
+        self._get_mac = mock.patch.object(utils, 'get_mac_by_pci_address')
+        self.mock_get_mac = self._get_mac.start()
+        self._get_ifname = mock.patch.object(
+            utils, 'get_ifname_by_pci_address')
+        self.mock_get_ifname = self._get_ifname.start()
+        self.addCleanup(self._get_mac.stop)
+        self.addCleanup(self._get_ifname.stop)
+
+        self.mac = 'ca:fe:ca:fe:ca:fe'
+        self.if_name = 'enp7s0f0'
+        self.pci_address = '0000:07:02.1'
+
+    def test_correct_behaviour(self):
+        ref_net_name = 'net_enp7s0f0_ca_fe_ca_fe_ca_fe'
+        self.mock_get_mac.return_value = self.mac
+        self.mock_get_ifname.return_value = self.if_name
+        net_name = utils.get_net_name_by_vf_pci_address(self.pci_address)
+        self.assertEqual(ref_net_name, net_name)
+        self.mock_get_mac.called_once_with(self.pci_address)
+        self.mock_get_ifname.called_once_with(self.pci_address)
+
+    def test_wrong_mac(self):
+        self.mock_get_mac.side_effect = (
+            exception.PciDeviceNotFoundById(self.pci_address))
+        net_name = utils.get_net_name_by_vf_pci_address(self.pci_address)
+        self.assertIsNone(net_name)
+        self.mock_get_mac.called_once_with(self.pci_address)
+        self.mock_get_ifname.assert_not_called()
+
+    def test_wrong_ifname(self):
+        self.mock_get_mac.return_value = self.mac
+        self.mock_get_ifname.side_effect = (
+            exception.PciDeviceNotFoundById(self.pci_address))
+        net_name = utils.get_net_name_by_vf_pci_address(self.pci_address)
+        self.assertIsNone(net_name)
+        self.mock_get_mac.called_once_with(self.pci_address)
+        self.mock_get_ifname.called_once_with(self.pci_address)

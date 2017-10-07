@@ -17,36 +17,16 @@ from oslo_db import exception as db_exc
 from oslo_db.sqlalchemy import utils as oslodbutils
 from oslo_log import log as logging
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.ext.compiler import compiles
 from sqlalchemy import MetaData
-from sqlalchemy.sql.expression import UpdateBase
 from sqlalchemy import Table
 from sqlalchemy.types import NullType
 
 from nova.db.sqlalchemy import api as db
 from nova import exception
-from nova.i18n import _, _LE
+from nova.i18n import _
 
 
 LOG = logging.getLogger(__name__)
-
-
-class DeleteFromSelect(UpdateBase):
-    def __init__(self, table, select, column):
-        self.table = table
-        self.select = select
-        self.column = column
-
-
-# NOTE(guochbo): some versions of MySQL doesn't yet support subquery with
-# 'LIMIT & IN/ALL/ANY/SOME' We need work around this with nesting select .
-@compiles(DeleteFromSelect)
-def visit_delete_from_select(element, compiler, **kw):
-    return "DELETE FROM %s WHERE %s in (SELECT T1.%s FROM (%s) as T1)" % (
-        compiler.process(element.table, asfrom=True),
-        compiler.process(element.column),
-        element.column.name,
-        compiler.process(element.select))
 
 
 def check_shadow_table(migrate_engine, table_name):
@@ -129,8 +109,8 @@ def create_shadow_table(migrate_engine, table_name=None, table=None,
         # which raises unwrapped OperationalError, so we should catch it until
         # oslo.db would wraps all such exceptions
         LOG.info(repr(shadow_table))
-        LOG.exception(_LE('Exception while creating table.'))
+        LOG.exception('Exception while creating table.')
         raise exception.ShadowTableExists(name=shadow_table_name)
     except Exception:
         LOG.info(repr(shadow_table))
-        LOG.exception(_LE('Exception while creating table.'))
+        LOG.exception('Exception while creating table.')

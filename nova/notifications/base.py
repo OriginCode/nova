@@ -69,10 +69,10 @@ def notify_decorator(name, fn):
                 common_context.get_current() or
                 nova.context.RequestContext())
 
-        notifier = rpc.get_notifier('api',
-                                    publisher_id=(CONF.default_publisher_id
-                                                  or CONF.host))
-        method = getattr(notifier, CONF.default_notification_level.lower(),
+        notifier = rpc.get_notifier('api', publisher_id=(
+            CONF.notifications.default_publisher_id or CONF.host))
+        method = getattr(notifier,
+                         CONF.notifications.default_level.lower(),
                          notifier.info)
         method(ctxt, name, body)
 
@@ -83,7 +83,7 @@ def notify_decorator(name, fn):
 def send_api_fault(url, status, exception):
     """Send an api.fault notification."""
 
-    if not CONF.notify_api_faults:
+    if not CONF.notifications.notify_on_api_faults:
         return
 
     payload = {'url': url, 'exception': six.text_type(exception),
@@ -101,7 +101,7 @@ def send_update(context, old_instance, new_instance, service="compute",
     in that instance
     """
 
-    if not CONF.notify_on_state_change:
+    if not CONF.notifications.notify_on_state_change:
         # skip all this if updates are disabled
         return
 
@@ -117,7 +117,7 @@ def send_update(context, old_instance, new_instance, service="compute",
     if old_vm_state != new_vm_state:
         # yes, the vm state is changing:
         update_with_state_change = True
-    elif (CONF.notify_on_state_change == "vm_and_task_state" and
+    elif (CONF.notifications.notify_on_state_change == "vm_and_task_state" and
           old_task_state != new_task_state):
         # yes, the task state is changing:
         update_with_state_change = True
@@ -134,7 +134,7 @@ def send_update(context, old_instance, new_instance, service="compute",
             old_display_name = None
             if new_instance["display_name"] != old_instance["display_name"]:
                 old_display_name = old_instance["display_name"]
-            _send_instance_update_notification(context, new_instance,
+            send_instance_update_notification(context, new_instance,
                     service=service, host=host,
                     old_display_name=old_display_name)
         except exception.InstanceNotFound:
@@ -153,7 +153,7 @@ def send_update_with_states(context, instance, old_vm_state, new_vm_state,
     are any, in the instance
     """
 
-    if not CONF.notify_on_state_change:
+    if not CONF.notifications.notify_on_state_change:
         # skip all this if updates are disabled
         return
 
@@ -168,15 +168,15 @@ def send_update_with_states(context, instance, old_vm_state, new_vm_state,
         if old_vm_state != new_vm_state:
             # yes, the vm state is changing:
             fire_update = True
-        elif (CONF.notify_on_state_change == "vm_and_task_state" and
-              old_task_state != new_task_state):
+        elif (CONF.notifications.notify_on_state_change == "vm_and_task_state"
+              and old_task_state != new_task_state):
             # yes, the task state is changing:
             fire_update = True
 
     if fire_update:
         # send either a state change or a regular notification
         try:
-            _send_instance_update_notification(context, instance,
+            send_instance_update_notification(context, instance,
                     old_vm_state=old_vm_state, old_task_state=old_task_state,
                     new_vm_state=new_vm_state, new_task_state=new_task_state,
                     service=service, host=host)
@@ -217,7 +217,8 @@ def _compute_states_payload(instance, old_vm_state=None,
     return states_payload
 
 
-def _send_instance_update_notification(context, instance, old_vm_state=None,
+@rpc.if_notifications_enabled
+def send_instance_update_notification(context, instance, old_vm_state=None,
             old_task_state=None, new_vm_state=None, new_task_state=None,
             service="compute", host=None, old_display_name=None):
     """Send 'compute.instance.update' notification to inform observers
@@ -234,8 +235,8 @@ def _send_instance_update_notification(context, instance, old_vm_state=None,
 
     # add audit fields:
     (audit_start, audit_end) = audit_period_bounds(current_period=True)
-    payload["audit_period_beginning"] = audit_start
-    payload["audit_period_ending"] = audit_end
+    payload["audit_period_beginning"] = null_safe_isotime(audit_start)
+    payload["audit_period_ending"] = null_safe_isotime(audit_end)
 
     # add bw usage info:
     bw = bandwidth_usage(instance, audit_start)
@@ -251,17 +252,14 @@ def _send_instance_update_notification(context, instance, old_vm_state=None,
     _send_versioned_instance_update(context, instance, payload, host, service)
 
 
-def _map_service_to_binary(service):
-    if service == 'api':
-        binary = 'nova-api'
-    elif service == 'compute':
-        binary = 'nova-compute'
-    else:
-        binary = service
-    return binary
-
-
+@rpc.if_notifications_enabled
 def _send_versioned_instance_update(context, instance, payload, host, service):
+
+    def _map_legacy_service_to_binary(legacy_service):
+        if not legacy_service.startswith('nova-'):
+            return 'nova-' + service
+        else:
+            return service
 
     state_update = instance_notification.InstanceStateUpdatePayload(
         old_state=payload.get('old_state'),
@@ -279,17 +277,11 @@ def _send_versioned_instance_update(context, instance, payload, host, service):
                     out_bytes=bw['bw_out'])
                  for label, bw in payload['bandwidth'].items()]
 
-    network_info = instance.info_cache.network_info
-    flavor = instance_notification.FlavorPayload(instance=instance)
-
     versioned_payload = instance_notification.InstanceUpdatePayload(
         instance=instance,
         state_update=state_update,
         audit_period=audit_period,
         bandwidth=bandwidth,
-        ip_addresses=instance_notification.IpPayload.from_network_info(
-            network_info),
-        flavor=flavor,
         old_display_name=payload.get('old_display_name'))
 
     notification = instance_notification.InstanceUpdateNotification(
@@ -299,7 +291,7 @@ def _send_versioned_instance_update(context, instance, payload, host, service):
             action=fields.NotificationAction.UPDATE),
         publisher=notification_base.NotificationPublisher(
                 host=host or CONF.host,
-                binary=_map_service_to_binary(service)),
+                binary=_map_legacy_service_to_binary(service)),
         payload=versioned_payload)
     notification.emit(context)
 
@@ -384,11 +376,22 @@ def image_meta(system_metadata):
     system metadata.
     """
     image_meta = {}
-    for md_key, md_value in six.iteritems(system_metadata):
+    for md_key, md_value in system_metadata.items():
         if md_key.startswith('image_'):
             image_meta[md_key[6:]] = md_value
 
     return image_meta
+
+
+def null_safe_str(s):
+    return str(s) if s else ''
+
+
+def null_safe_isotime(s):
+    if isinstance(s, datetime.datetime):
+        return utils.strtime(s)
+    else:
+        return str(s) if s else ''
 
 
 def info_from_instance(context, instance, network_info,
@@ -407,19 +410,6 @@ def info_from_instance(context, instance, network_info,
         modifications.
 
     """
-
-    def null_safe_str(s):
-        return str(s) if s else ''
-
-    def null_safe_int(s):
-        return int(s) if s else ''
-
-    def null_safe_isotime(s):
-        if isinstance(s, datetime.datetime):
-            return utils.strtime(s)
-        else:
-            return str(s) if s else ''
-
     image_ref_url = glance.generate_image_url(instance.image_ref)
 
     instance_type = instance.get_flavor()
@@ -477,7 +467,11 @@ def info_from_instance(context, instance, network_info,
         # Status properties
         state=instance.vm_state,
         state_description=null_safe_str(instance.task_state),
-        progress=null_safe_int(instance.progress),
+        # NOTE(gibi): It might seems wrong to default the progress to an empty
+        # string but this is how legacy work and this code only used by the
+        # legacy notification so try to keep the compatibility here but also
+        # keep it contained.
+        progress=int(instance.progress) if instance.progress else '',
 
         # accessIPs
         access_ip_v4=instance.access_ip_v4,

@@ -21,8 +21,6 @@ from nova import compute
 from nova import exception
 from nova.policies import suspend_server as ss_policies
 
-ALIAS = "os-suspend-server"
-
 
 class SuspendServerController(wsgi.Controller):
     def __init__(self, *args, **kwargs):
@@ -35,8 +33,8 @@ class SuspendServerController(wsgi.Controller):
     def _suspend(self, req, id, body):
         """Permit admins to suspend the server."""
         context = req.environ['nova.context']
+        server = common.get_instance(self.compute_api, context, id)
         try:
-            server = common.get_instance(self.compute_api, context, id)
             context.can(ss_policies.POLICY_ROOT % 'suspend',
                         target={'user_id': server.user_id,
                                 'project_id': server.project_id})
@@ -56,8 +54,8 @@ class SuspendServerController(wsgi.Controller):
         """Permit admins to resume the server from suspend."""
         context = req.environ['nova.context']
         context.can(ss_policies.POLICY_ROOT % 'resume')
+        server = common.get_instance(self.compute_api, context, id)
         try:
-            server = common.get_instance(self.compute_api, context, id)
             self.compute_api.resume(context, server)
         except exception.InstanceUnknownCell as e:
             raise exc.HTTPNotFound(explanation=e.format_message())
@@ -66,19 +64,3 @@ class SuspendServerController(wsgi.Controller):
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
                     'resume', id)
-
-
-class SuspendServer(extensions.V21APIExtensionBase):
-    """Enable suspend/resume server actions."""
-
-    name = "SuspendServer"
-    alias = ALIAS
-    version = 1
-
-    def get_controller_extensions(self):
-        controller = SuspendServerController()
-        extension = extensions.ControllerExtension(self, 'servers', controller)
-        return [extension]
-
-    def get_resources(self):
-        return []

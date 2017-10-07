@@ -17,11 +17,11 @@ import datetime
 
 import mock
 from oslo_serialization import jsonutils
+import six
 
 from nova.api.openstack import compute
 from nova.compute import api as compute_api
 from nova.compute import flavors
-from nova import objects
 from nova import test
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit import fake_instance
@@ -44,10 +44,10 @@ class DiskConfigTestCaseV21(test.TestCase):
 
     def setUp(self):
         super(DiskConfigTestCaseV21, self).setUp()
+        fakes.stub_out_nw_api(self)
+        fakes.stub_out_secgroup_api(self)
         self._set_up_app()
         self._setup_fake_image_service()
-
-        fakes.stub_out_nw_api(self)
 
         FAKE_INSTANCES = [
             fakes.stub_instance(1,
@@ -81,13 +81,13 @@ class DiskConfigTestCaseV21(test.TestCase):
         self.stub_out('nova.db.instance_get_all_by_filters',
                       fake_instance_get_all)
 
-        self.stubs.Set(objects.Instance, 'save',
-                       lambda *args, **kwargs: None)
+        self.stub_out('nova.objects.Instance.save',
+                      lambda *args, **kwargs: None)
 
         def fake_rebuild(*args, **kwargs):
             pass
 
-        self.stubs.Set(compute_api.API, 'rebuild', fake_rebuild)
+        self.stub_out('nova.compute.api.API.rebuild', fake_rebuild)
 
         def fake_instance_create(context, inst_, session=None):
             inst = fake_instance.fake_db_instance(**{
@@ -132,9 +132,14 @@ class DiskConfigTestCaseV21(test.TestCase):
         self.app = compute.APIRouterV21()
 
     def _get_expected_msg_for_invalid_disk_config(self):
-        return ('{{"badRequest": {{"message": "Invalid input for'
-                ' field/attribute {0}. Value: {1}. u\'{1}\' is'
-                ' not one of [\'AUTO\', \'MANUAL\']", "code": 400}}}}')
+        if six.PY3:
+            return ('{{"badRequest": {{"message": "Invalid input for'
+                    ' field/attribute {0}. Value: {1}. \'{1}\' is'
+                    ' not one of [\'AUTO\', \'MANUAL\']", "code": 400}}}}')
+        else:
+            return ('{{"badRequest": {{"message": "Invalid input for'
+                    ' field/attribute {0}. Value: {1}. u\'{1}\' is'
+                    ' not one of [\'AUTO\', \'MANUAL\']", "code": 400}}}}')
 
     def _setup_fake_image_service(self):
         self.image_service = nova.tests.unit.image.fake.stub_out_image_service(
@@ -360,8 +365,8 @@ class DiskConfigTestCaseV21(test.TestCase):
         expected_msg = self._get_expected_msg_for_invalid_disk_config()
         expected_msg = expected_msg.format(API_DISK_CONFIG, 'server_test')
 
-        self.assertEqual(jsonutils.loads(expected_msg),
-                         jsonutils.loads(res.body))
+        self.assertJsonEqual(jsonutils.loads(expected_msg),
+                             jsonutils.loads(res.body))
 
     @mock.patch('nova.api.openstack.common.get_instance')
     def _test_rebuild_server_disk_config(self, uuid, disk_config,
@@ -409,7 +414,7 @@ class DiskConfigTestCaseV21(test.TestCase):
             self.assertTrue(kwargs['auto_disk_config'])
             return old_create(*args, **kwargs)
 
-        self.stubs.Set(compute_api.API, 'create', create)
+        self.stub_out('nova.compute.api.API.create', create)
 
         req.body = jsonutils.dump_as_bytes(body)
         res = req.get_response(self.app)
@@ -437,7 +442,7 @@ class DiskConfigTestCaseV21(test.TestCase):
             self.assertIn('auto_disk_config', kwargs)
             self.assertTrue(kwargs['auto_disk_config'])
 
-        self.stubs.Set(compute_api.API, 'rebuild', rebuild)
+        self.stub_out('nova.compute.api.API.rebuild', rebuild)
 
         req.body = jsonutils.dump_as_bytes(body)
         res = req.get_response(self.app)
@@ -458,7 +463,7 @@ class DiskConfigTestCaseV21(test.TestCase):
             self.assertIn('auto_disk_config', kwargs)
             self.assertTrue(kwargs['auto_disk_config'])
 
-        self.stubs.Set(compute_api.API, 'resize', resize)
+        self.stub_out('nova.compute.api.API.resize', resize)
 
         req.body = jsonutils.dump_as_bytes(body)
         req.get_response(self.app)

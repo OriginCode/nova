@@ -18,14 +18,16 @@
 """
 
 from collections import deque
+
 from lxml import etree
 from oslo_log import log as logging
 
 from nova.compute import power_state
-from nova.i18n import _LI
-from nova.i18n import _LW
+import nova.conf
 
 LOG = logging.getLogger(__name__)
+
+CONF = nova.conf.CONF
 
 # TODO(berrange): hack to avoid a "import libvirt" in this file.
 # Remove this and similar hacks in guest.py, driver.py, host.py
@@ -50,9 +52,28 @@ def graphics_listen_addrs(migrate_data):
 def serial_listen_addr(migrate_data):
     """Returns listen address serial from a LibvirtLiveMigrateData"""
     listen_addr = None
+    # NOTE (markus_z/dansmith): Our own from_legacy_dict() code can return
+    # an object with nothing set here. That can happen based on the
+    # compute RPC version pin. Until we can bump that major (which we
+    # can do just before Ocata releases), we may still get a legacy
+    # dict over the wire, converted to an object, and thus is may be unset
+    # here.
     if migrate_data.obj_attr_is_set('serial_listen_addr'):
-        listen_addr = str(migrate_data.serial_listen_addr)
+        # NOTE (markus_z): The value of 'serial_listen_addr' is either
+        # an IP address (as string type) or None. There's no need of a
+        # conversion, in fact, doing a string conversion of None leads to
+        # 'None', which is an invalid (string type) value here.
+        listen_addr = migrate_data.serial_listen_addr
     return listen_addr
+
+
+# TODO(sahid): remove me for Q*
+def serial_listen_ports(migrate_data):
+    """Returns ports serial from a LibvirtLiveMigrateData"""
+    ports = []
+    if migrate_data.obj_attr_is_set('serial_listen_ports'):
+        ports = migrate_data.serial_listen_ports
+    return ports
 
 
 def get_updated_guest_xml(guest, migrate_data, get_volume_config):
@@ -81,12 +102,31 @@ def _update_graphics_xml(xml_doc, migrate_data):
 
 def _update_serial_xml(xml_doc, migrate_data):
     listen_addr = serial_listen_addr(migrate_data)
-    for dev in xml_doc.findall("./devices/serial[@type='tcp']/source"):
-        if dev.get('host') is not None:
-            dev.set('host', listen_addr)
-    for dev in xml_doc.findall("./devices/console[@type='tcp']/source"):
-        if dev.get('host') is not None:
-            dev.set('host', listen_addr)
+    listen_ports = serial_listen_ports(migrate_data)
+
+    def set_listen_addr_and_port(source, listen_addr, serial_listen_ports):
+        # The XML nodes can be empty, which would make checks like
+        # "if source.get('host'):" different to an explicit check for
+        # None. That's why we have to check for None in this method.
+        if source.get('host') is not None:
+            source.set('host', listen_addr)
+        device = source.getparent()
+        target = device.find("target")
+        if target is not None and source.get('service') is not None:
+            port_index = int(target.get('port'))
+            # NOTE (markus_z): Previous releases might not give us the
+            # ports yet, that's why we have this check here.
+            if len(serial_listen_ports) > port_index:
+                source.set('service', str(serial_listen_ports[port_index]))
+
+    # This updates all "LibvirtConfigGuestSerial" devices
+    for source in xml_doc.findall("./devices/serial[@type='tcp']/source"):
+        set_listen_addr_and_port(source, listen_addr, listen_ports)
+
+    # This updates all "LibvirtConfigGuestConsole" devices
+    for source in xml_doc.findall("./devices/console[@type='tcp']/source"):
+        set_listen_addr_and_port(source, listen_addr, listen_ports)
+
     return xml_doc
 
 
@@ -198,7 +238,7 @@ def find_job_type(guest, instance):
                       instance=instance)
             return libvirt.VIR_DOMAIN_JOB_COMPLETED
         else:
-            LOG.info(_LI("Error %(ex)s, migration failed"),
+            LOG.info("Error %(ex)s, migration failed",
                      {"ex": ex}, instance=instance)
             return libvirt.VIR_DOMAIN_JOB_FAILED
 
@@ -229,15 +269,14 @@ def should_abort(instance, now,
 
     if (progress_timeout != 0 and
             (now - progress_time) > progress_timeout):
-        LOG.warning(_LW("Live migration stuck for %d sec"),
+        LOG.warning("Live migration stuck for %d sec",
                     (now - progress_time), instance=instance)
         return True
 
     if (completion_timeout != 0 and
             elapsed > completion_timeout):
-        LOG.warning(
-            _LW("Live migration not completed after %d sec"),
-            completion_timeout, instance=instance)
+        LOG.warning("Live migration not completed after %d sec",
+                    completion_timeout, instance=instance)
         return True
 
     return False
@@ -317,8 +356,8 @@ def update_downtime(guest, instance,
                   instance=instance)
         return olddowntime
 
-    LOG.info(_LI("Increasing downtime to %(downtime)d ms "
-                 "after %(waittime)d sec elapsed time"),
+    LOG.info("Increasing downtime to %(downtime)d ms "
+             "after %(waittime)d sec elapsed time",
              {"downtime": thisstep[1],
               "waittime": thisstep[0]},
              instance=instance)
@@ -326,8 +365,7 @@ def update_downtime(guest, instance,
     try:
         guest.migrate_configure_max_downtime(thisstep[1])
     except libvirt.libvirtError as e:
-        LOG.warning(_LW("Unable to increase max downtime to %(time)d"
-                        "ms: %(e)s"),
+        LOG.warning("Unable to increase max downtime to %(time)d ms: %(e)s",
                     {"time": thisstep[1], "e": e}, instance=instance)
     return thisstep[1]
 
@@ -362,14 +400,13 @@ def trigger_postcopy_switch(guest, instance, migration):
     try:
         guest.migrate_start_postcopy()
     except libvirt.libvirtError as e:
-        LOG.warning(_LW("Failed to switch to post-copy live "
-                        "migration: %s"),
+        LOG.warning("Failed to switch to post-copy live migration: %s",
                     e, instance=instance)
     else:
         # NOTE(ltomas): Change the migration status to indicate that
         # it is in post-copy active mode, i.e., the VM at
         # destination is the active one
-        LOG.info(_LI("Switching to post-copy migration mode"),
+        LOG.info("Switching to post-copy migration mode",
                  instance=instance)
         migration.status = 'running (post-copy)'
         migration.save()
@@ -401,8 +438,8 @@ def run_tasks(guest, instance, active_migrations, on_migration_failure,
         task = tasks.popleft()
         if task == 'force-complete':
             if migration.status == 'running (post-copy)':
-                LOG.warning(_LW("Live-migration %s already switched "
-                                "to post-copy mode."),
+                LOG.warning("Live-migration %s already switched "
+                            "to post-copy mode.",
                             instance=instance)
             elif is_post_copy_enabled:
                 trigger_postcopy_switch(guest, instance, migration)
@@ -411,11 +448,11 @@ def run_tasks(guest, instance, active_migrations, on_migration_failure,
                     guest.pause()
                     on_migration_failure.append("unpause")
                 except Exception as e:
-                    LOG.warning(_LW("Failed to pause instance during "
-                                    "live-migration %s"),
+                    LOG.warning("Failed to pause instance during "
+                                "live-migration %s",
                                 e, instance=instance)
         else:
-            LOG.warning(_LW("Unknown migration task '%(task)s'"),
+            LOG.warning("Unknown migration task '%(task)s'",
                         {"task": task}, instance=instance)
 
 
@@ -446,9 +483,49 @@ def run_recover_tasks(host, guest, instance, on_migration_failure):
                 if state == power_state.PAUSED:
                     guest.resume()
             except Exception as e:
-                LOG.warning(_LW("Failed to resume paused instance "
-                                "before live-migration rollback %s"),
+                LOG.warning("Failed to resume paused instance "
+                            "before live-migration rollback %s",
                             e, instance=instance)
         else:
-            LOG.warning(_LW("Unknown migration task '%(task)s'"),
+            LOG.warning("Unknown migration task '%(task)s'",
                         {"task": task}, instance=instance)
+
+
+def downtime_steps(data_gb):
+    '''Calculate downtime value steps and time between increases.
+
+    :param data_gb: total GB of RAM and disk to transfer
+
+    This looks at the total downtime steps and upper bound
+    downtime value and uses a linear function.
+
+    For example, with 10 steps, 30 second step delay, 3 GB
+    of RAM and 400ms target maximum downtime, the downtime will
+    be increased every 90 seconds in the following progression:
+
+    -   0 seconds -> set downtime to  40ms
+    -  90 seconds -> set downtime to  76ms
+    - 180 seconds -> set downtime to 112ms
+    - 270 seconds -> set downtime to 148ms
+    - 360 seconds -> set downtime to 184ms
+    - 450 seconds -> set downtime to 220ms
+    - 540 seconds -> set downtime to 256ms
+    - 630 seconds -> set downtime to 292ms
+    - 720 seconds -> set downtime to 328ms
+    - 810 seconds -> set downtime to 364ms
+    - 900 seconds -> set downtime to 400ms
+
+    This allows the guest a good chance to complete migration
+    with a small downtime value.
+    '''
+    downtime = CONF.libvirt.live_migration_downtime
+    steps = CONF.libvirt.live_migration_downtime_steps
+    delay = CONF.libvirt.live_migration_downtime_delay
+
+    delay = int(delay * data_gb)
+
+    base = downtime / steps
+    offset = (downtime - base) / steps
+
+    for i in range(steps + 1):
+        yield (int(delay * i), int(base + offset * i))

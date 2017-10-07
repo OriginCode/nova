@@ -19,16 +19,47 @@ from nova.policies import base
 
 
 BASE_POLICY_NAME = 'os_compute_api:os-services'
-POLICY_ROOT = 'os_compute_api:os-services:%s'
 
 
 services_policies = [
-    policy.RuleDefault(
-        name=BASE_POLICY_NAME,
-        check_str=base.RULE_ADMIN_API),
-    policy.RuleDefault(
-        name=POLICY_ROOT % 'discoverable',
-        check_str=base.RULE_ANY),
+    policy.DocumentedRuleDefault(
+        BASE_POLICY_NAME,
+        base.RULE_ADMIN_API,
+        "List all running Compute services in a region, enables or disable "
+        "scheduling for a Compute service, logs disabled Compute service "
+        "information, set or unset forced_down flag for the compute service "
+        "and delete a Compute service",
+        [
+            {
+                'method': 'GET',
+                'path': '/os-services'
+            },
+            {
+                'method': 'PUT',
+                'path': '/os-services/enable'
+            },
+            {
+                'method': 'PUT',
+                'path': '/os-services/disable'
+            },
+            {
+                'method': 'PUT',
+                'path': '/os-services/disable-log-reason'
+            },
+            {
+                'method': 'PUT',
+                'path': '/os-services/force-down'
+            },
+            {
+                # Added in microversion 2.53.
+                'method': 'PUT',
+                'path': '/os-services/{service_id}'
+            },
+            {
+                'method': 'DELETE',
+                'path': '/os-services/{service_id}'
+            }
+        ]),
 ]
 
 

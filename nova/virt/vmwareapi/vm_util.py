@@ -29,11 +29,11 @@ from oslo_vmware import exceptions as vexc
 from oslo_vmware.objects import datastore as ds_obj
 from oslo_vmware import pbm
 from oslo_vmware import vim_util as vutil
-import six
+
 
 import nova.conf
 from nova import exception
-from nova.i18n import _, _LE, _LI, _LW
+from nova.i18n import _
 from nova.network import model as network_model
 from nova.virt.vmwareapi import constants
 from nova.virt.vmwareapi import vim_util
@@ -206,7 +206,8 @@ def get_vm_create_spec(client_factory, instance, data_store_name,
     config_spec.version = extra_specs.hw_version
 
     # Allow nested hypervisor instances to host 64 bit VMs.
-    if os_type in ("vmkernel5Guest", "vmkernel6Guest", "windowsHyperVGuest"):
+    if os_type in ("vmkernel5Guest", "vmkernel6Guest", "vmkernel65Guest",
+                   "windowsHyperVGuest"):
         config_spec.nestedHVEnabled = "True"
 
     # Append the profile spec
@@ -591,7 +592,7 @@ def get_vm_extra_config_spec(client_factory, extra_opts):
     config_spec = client_factory.create('ns0:VirtualMachineConfigSpec')
     # add the key value pairs
     extra_config = []
-    for key, value in six.iteritems(extra_opts):
+    for key, value in extra_opts.items():
         opt = client_factory.create('ns0:OptionValue')
         opt.key = key
         opt.value = value
@@ -678,7 +679,7 @@ scsi_controller_classes = {
     'ParaVirtualSCSIController': constants.ADAPTER_TYPE_PARAVIRTUAL,
     'VirtualLsiLogicController': constants.DEFAULT_ADAPTER_TYPE,
     'VirtualLsiLogicSASController': constants.ADAPTER_TYPE_LSILOGICSAS,
-    'VirtualBusLogicController': constants.ADAPTER_TYPE_PARAVIRTUAL,
+    'VirtualBusLogicController': constants.ADAPTER_TYPE_BUSLOGIC,
 }
 
 
@@ -1152,7 +1153,7 @@ def get_vm_state(session, instance):
     vm_ref = get_vm_ref(session, instance)
     vm_state = session._call_method(vutil, "get_object_property",
                                     vm_ref, "runtime.powerState")
-    return vm_state
+    return constants.POWER_STATES[vm_state]
 
 
 def get_stats_from_cluster(session, cluster):
@@ -1279,7 +1280,7 @@ def get_all_cluster_mors(session):
             return results.objects
 
     except Exception as excep:
-        LOG.warning(_LW("Failed to get cluster references %s"), excep)
+        LOG.warning("Failed to get cluster references %s", excep)
 
 
 def get_cluster_ref_by_name(session, cluster_name):
@@ -1326,10 +1327,10 @@ def create_vm(session, instance, vm_folder, config_spec, res_pool_ref):
         # Consequently, a value which we don't recognise may in fact be valid.
         with excutils.save_and_reraise_exception():
             if config_spec.guestId not in constants.VALID_OS_TYPES:
-                LOG.warning(_LW('vmware_ostype from image is not recognised: '
-                                '\'%(ostype)s\'. An invalid os type may be '
-                                'one cause of this instance creation failure'),
-                         {'ostype': config_spec.guestId})
+                LOG.warning('vmware_ostype from image is not recognised: '
+                            '\'%(ostype)s\'. An invalid os type may be '
+                            'one cause of this instance creation failure',
+                            {'ostype': config_spec.guestId})
     LOG.debug("Created VM on the ESX host", instance=instance)
     return task_info.result
 
@@ -1343,9 +1344,9 @@ def destroy_vm(session, instance, vm_ref=None):
         destroy_task = session._call_method(session.vim, "Destroy_Task",
                                             vm_ref)
         session._wait_for_task(destroy_task)
-        LOG.info(_LI("Destroyed the VM"), instance=instance)
+        LOG.info("Destroyed the VM", instance=instance)
     except Exception:
-        LOG.exception(_LE('Destroy VM failed'), instance=instance)
+        LOG.exception(_('Destroy VM failed'), instance=instance)
 
 
 def create_virtual_disk(session, dc_ref, adapter_type, disk_type,
@@ -1605,7 +1606,7 @@ def create_folder(session, parent_folder_ref, name):
     try:
         folder = session._call_method(session.vim, "CreateFolder",
                                       parent_folder_ref, name=name)
-        LOG.info(_LI("Created folder: %(name)s in parent %(parent)s."),
+        LOG.info("Created folder: %(name)s in parent %(parent)s.",
                  {'name': name, 'parent': parent_folder_ref.value})
     except vexc.DuplicateName as e:
         LOG.debug("Folder already exists: %(name)s. Parent ref: %(parent)s.",

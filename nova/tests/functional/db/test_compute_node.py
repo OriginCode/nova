@@ -12,60 +12,97 @@
 
 from nova import context
 from nova import objects
-from nova.objects import fields
+from nova.objects import fields as obj_fields
 from nova import test
 from nova.tests import uuidsentinel
 
+_HOSTNAME = 'fake-host'
+_NODENAME = 'fake-node'
+
+_VIRT_DRIVER_AVAIL_RESOURCES = {
+    'vcpus': 4,
+    'memory_mb': 512,
+    'local_gb': 6,
+    'vcpus_used': 0,
+    'memory_mb_used': 0,
+    'local_gb_used': 0,
+    'hypervisor_type': 'fake',
+    'hypervisor_version': 0,
+    'hypervisor_hostname': _NODENAME,
+    'cpu_info': '',
+    'numa_topology': None,
+}
+
+fake_compute_obj = objects.ComputeNode(
+    host=_HOSTNAME,
+    vcpus=_VIRT_DRIVER_AVAIL_RESOURCES['vcpus'],
+    memory_mb=_VIRT_DRIVER_AVAIL_RESOURCES['memory_mb'],
+    local_gb=_VIRT_DRIVER_AVAIL_RESOURCES['local_gb'],
+    vcpus_used=_VIRT_DRIVER_AVAIL_RESOURCES['vcpus_used'],
+    memory_mb_used=_VIRT_DRIVER_AVAIL_RESOURCES['memory_mb_used'],
+    local_gb_used=_VIRT_DRIVER_AVAIL_RESOURCES['local_gb_used'],
+    hypervisor_type='fake',
+    hypervisor_version=0,
+    hypervisor_hostname=_HOSTNAME,
+    free_ram_mb=(_VIRT_DRIVER_AVAIL_RESOURCES['memory_mb'] -
+                 _VIRT_DRIVER_AVAIL_RESOURCES['memory_mb_used']),
+    free_disk_gb=(_VIRT_DRIVER_AVAIL_RESOURCES['local_gb'] -
+                  _VIRT_DRIVER_AVAIL_RESOURCES['local_gb_used']),
+    current_workload=0,
+    running_vms=0,
+    cpu_info='{}',
+    disk_available_least=0,
+    host_ip='1.1.1.1',
+    supported_hv_specs=[
+        objects.HVSpec.from_list([
+            obj_fields.Architecture.I686,
+            obj_fields.HVType.KVM,
+            obj_fields.VMMode.HVM])
+    ],
+    metrics=None,
+    pci_device_pools=None,
+    extra_resources=None,
+    stats={},
+    numa_topology=None,
+    cpu_allocation_ratio=16.0,
+    ram_allocation_ratio=1.5,
+    disk_allocation_ratio=1.0,
+    )
+
 
 class ComputeNodeTestCase(test.TestCase):
+
     def setUp(self):
         super(ComputeNodeTestCase, self).setUp()
         self.context = context.RequestContext('fake-user', 'fake-project')
-        self.cn = objects.ComputeNode(context=self.context,
-                                      uuid=uuidsentinel.compute_node,
-                                      memory_mb=512, local_gb=1000, vcpus=8,
-                                      vcpus_used=0, local_gb_used=0,
-                                      memory_mb_used=0, free_ram_mb=0,
-                                      free_disk_gb=0, hypervisor_type='danvm',
-                                      hypervisor_version=1, cpu_info='barf',
-                                      cpu_allocation_ratio=1.0, host='foo',
-                                      ram_allocation_ratio=1.0,
-                                      disk_allocation_ratio=1.0)
 
-    def test_create_inventory(self):
-        self.cn.create_inventory()
-        objs = objects.InventoryList.get_all_by_resource_provider_uuid(
-            self.context, self.cn.uuid)
-        for obj in objs:
-            if obj.resource_class == fields.ResourceClass.VCPU:
-                self.assertEqual(8, obj.total)
-            elif obj.resource_class == fields.ResourceClass.MEMORY_MB:
-                self.assertEqual(512, obj.total)
-            elif obj.resource_class == fields.ResourceClass.DISK_GB:
-                self.assertEqual(1000, obj.total)
+    def test_get_all_by_uuids(self):
+        cn1 = fake_compute_obj.obj_clone()
+        cn1._context = self.context
+        cn1.create()
+        cn2 = fake_compute_obj.obj_clone()
+        cn2._context = self.context
+        # Two compute nodes can't have the same tuple (host, node, deleted)
+        cn2.host = _HOSTNAME + '2'
+        cn2.create()
 
-    def test_update_inventory(self):
-        self.cn.create_inventory()
-        self.cn.memory_mb = 1024
-        self.cn.local_gb = 2000
-        self.cn.vcpus = 16
-        self.cn.update_inventory()
-        objs = objects.InventoryList.get_all_by_resource_provider_uuid(
-            self.context, self.cn.uuid)
-        for obj in objs:
-            if obj.resource_class == fields.ResourceClass.VCPU:
-                self.assertEqual(16, obj.total)
-            elif obj.resource_class == fields.ResourceClass.MEMORY_MB:
-                self.assertEqual(1024, obj.total)
-            elif obj.resource_class == fields.ResourceClass.DISK_GB:
-                self.assertEqual(2000, obj.total)
+        cns = objects.ComputeNodeList.get_all_by_uuids(self.context, [])
+        self.assertEqual(0, len(cns))
 
-    def test_recreate_rp(self):
-        self.cn.create_inventory()
-        rp = self.cn._ensure_resource_provider()
-        self.assertEqual('compute-%s-%s' % ('foo', self.cn.uuid),
-                         rp.name)
-        self.cn.host = 'bar'
-        rp = self.cn._ensure_resource_provider()
-        self.assertEqual('compute-%s-%s' % ('bar', self.cn.uuid),
-                         rp.name)
+        # Ensure that asking for one compute node when there are multiple only
+        # returns the one we want.
+        cns = objects.ComputeNodeList.get_all_by_uuids(self.context,
+                                                       [cn1.uuid])
+        self.assertEqual(1, len(cns))
+
+        cns = objects.ComputeNodeList.get_all_by_uuids(self.context,
+                                                       [cn1.uuid, cn2.uuid])
+        self.assertEqual(2, len(cns))
+
+        # Ensure that asking for a non-existing UUID along with
+        # existing UUIDs doesn't limit the return of the existing
+        # compute nodes...
+        cns = objects.ComputeNodeList.get_all_by_uuids(self.context,
+                                                       [cn1.uuid, cn2.uuid,
+                                                        uuidsentinel.noexists])
+        self.assertEqual(2, len(cns))

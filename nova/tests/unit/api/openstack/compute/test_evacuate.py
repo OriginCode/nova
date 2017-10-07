@@ -12,8 +12,6 @@
 #   License for the specific language governing permissions and limitations
 #   under the License.
 
-import uuid
-
 import mock
 import testtools
 import webob
@@ -26,6 +24,7 @@ from nova import exception
 from nova import test
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit import fake_instance
+from nova.tests import uuidsentinel as uuids
 
 
 CONF = nova.conf.CONF
@@ -48,6 +47,8 @@ def fake_compute_api_get(self, context, instance_id, **kwargs):
 def fake_service_get_by_compute_host(self, context, host):
     if host == 'bad-host':
         raise exception.ComputeHostNotFound(host=host)
+    elif host == 'unmapped-host':
+        raise exception.HostMappingNotFound(name=host)
     else:
         return {
             'host_name': host,
@@ -62,12 +63,13 @@ class EvacuateTestV21(test.NoDBTestCase):
 
     def setUp(self):
         super(EvacuateTestV21, self).setUp()
-        self.stubs.Set(compute_api.API, 'get', fake_compute_api_get)
-        self.stubs.Set(compute_api.HostAPI, 'service_get_by_compute_host',
-                       fake_service_get_by_compute_host)
-        self.UUID = uuid.uuid4()
+        self.stub_out('nova.compute.api.API.get', fake_compute_api_get)
+        self.stub_out('nova.compute.api.HostAPI.service_get_by_compute_host',
+                      fake_service_get_by_compute_host)
+        self.UUID = uuids.fake
         for _method in self._methods:
-            self.stubs.Set(compute_api.API, _method, fake_compute_api)
+            self.stub_out('nova.compute.api.API.%s' % _method,
+                          fake_compute_api)
         self._set_up_controller()
         self.admin_req = fakes.HTTPRequest.blank('', use_admin_context=True)
         self.req = fakes.HTTPRequest.blank('')
@@ -110,7 +112,7 @@ class EvacuateTestV21(test.NoDBTestCase):
         def fake_evacuate(*args, **kwargs):
             raise exception.ComputeServiceInUse("Service still in use")
 
-        self.stubs.Set(compute_api.API, 'evacuate', fake_evacuate)
+        self.stub_out('nova.compute.api.API.evacuate', fake_evacuate)
         self._check_evacuate_failure(webob.exc.HTTPBadRequest,
                                      {'host': 'my-host',
                                       'onSharedStorage': 'False',
@@ -151,6 +153,12 @@ class EvacuateTestV21(test.NoDBTestCase):
     def test_evacuate_instance_with_bad_target(self):
         self._check_evacuate_failure(webob.exc.HTTPNotFound,
                                      {'host': 'bad-host',
+                                      'onSharedStorage': 'False',
+                                      'adminPass': 'MyNewPass'})
+
+    def test_evacuate_instance_with_unmapped_target(self):
+        self._check_evacuate_failure(webob.exc.HTTPNotFound,
+                                     {'host': 'unmapped-host',
                                       'onSharedStorage': 'False',
                                       'adminPass': 'MyNewPass'})
 
@@ -221,7 +229,7 @@ class EvacuateTestV21(test.NoDBTestCase):
     @mock.patch('nova.objects.Instance.save')
     def _test_evacuate_enable_instance_password_conf(self, mock_save,
                                                      enable_pass):
-        self.flags(enable_instance_password=enable_pass)
+        self.flags(enable_instance_password=enable_pass, group='api')
 
         res = self._get_evacuate_response({'host': 'underscore_hostname',
                                            'onSharedStorage': 'False'})
@@ -427,7 +435,7 @@ class EvacuateTestV229(EvacuateTestV214):
         force = mock_evacuate.call_args_list[0][0][5]
         self.assertEqual(CONF.password_length, len(admin_pass))
         self.assertIsNone(on_shared_storage)
-        self.assertEqual(False, force)
+        self.assertFalse(force)
 
     def test_evacuate_with_valid_instance(self):
         admin_pass = 'MyNewPass'
@@ -441,7 +449,7 @@ class EvacuateTestV229(EvacuateTestV214):
         self._get_evacuate_response({'host': 'my-host',
                                      'force': 'true'})
         force = mock_evacuate.call_args_list[0][0][5]
-        self.assertEqual(True, force)
+        self.assertTrue(force)
 
     def test_forced_evacuate_with_no_host_provided(self):
         self._check_evacuate_failure(webob.exc.HTTPBadRequest,

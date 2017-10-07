@@ -14,7 +14,6 @@
 #    under the License.
 
 import copy
-import uuid
 
 import mock
 from oslo_policy import policy as oslo_policy
@@ -31,6 +30,7 @@ from nova import policy
 from nova import test
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit import fake_server_actions
+from nova.tests import uuidsentinel as uuids
 
 FAKE_UUID = fake_server_actions.FAKE_UUID
 FAKE_REQUEST_ID = fake_server_actions.FAKE_REQUEST_ID1
@@ -89,21 +89,21 @@ class InstanceActionsPolicyTestV21(test.NoDBTestCase):
                      'project_id:%(project_id)s'}
         policy.set_rules(oslo_policy.Rules.from_dict(rules))
 
-    @mock.patch('nova.objects.instance.Instance.get_by_uuid')
+    @mock.patch('nova.api.openstack.common.get_instance')
     def test_list_actions_restricted_by_project(self, mock_instance_get):
         self._set_policy_rules()
         req = self._get_http_req('os-instance-actions')
         mock_instance_get.return_value = self._get_instance_other_project(req)
         self.assertRaises(exception.Forbidden, self.controller.index, req,
-                          str(uuid.uuid4()))
+                          uuids.fake)
 
-    @mock.patch('nova.objects.instance.Instance.get_by_uuid')
+    @mock.patch('nova.api.openstack.common.get_instance')
     def test_get_action_restricted_by_project(self, mock_instance_get):
         self._set_policy_rules()
         req = self._get_http_req('os-instance-actions/1')
         mock_instance_get.return_value = self._get_instance_other_project(req)
         self.assertRaises(exception.Forbidden, self.controller.show, req,
-                          str(uuid.uuid4()), '1')
+                          uuids.fake, '1')
 
 
 class InstanceActionsTestV21(test.NoDBTestCase):

@@ -23,6 +23,23 @@ import six
 
 from nova import db
 from nova.i18n import _
+from nova.objects import tag
+
+
+def single_param(schema):
+    """Macro function for use in JSONSchema to support query parameters that
+    should have only one value.
+    """
+    ret = multi_params(schema)
+    ret['maxItems'] = 1
+    return ret
+
+
+def multi_params(schema):
+    """Macro function for use in JSONSchema to support query parameters that
+    may have multiple values.
+    """
+    return {'type': 'array', 'items': schema}
 
 
 class ValidationRegex(object):
@@ -184,15 +201,21 @@ none = {
 
 positive_integer = {
     'type': ['integer', 'string'],
-    'pattern': '^[0-9]*$', 'minimum': 1
+    'pattern': '^[0-9]*$', 'minimum': 1, 'minLength': 1
 }
 
 
 non_negative_integer = {
     'type': ['integer', 'string'],
-    'pattern': '^[0-9]*$', 'minimum': 0
+    'pattern': '^[0-9]*$', 'minimum': 0, 'minLength': 1
 }
 
+# This only be used by nova-network specific APIs. It will be removed when
+# those API removed.
+positive_integer_with_empty_str = {
+    'type': ['integer', 'string'],
+    'pattern': '^[0-9]*$', 'minimum': 1,
+}
 
 hostname = {
     'type': 'string', 'minLength': 1, 'maxLength': 255,
@@ -394,4 +417,15 @@ personality = {
         },
         'additionalProperties': False,
     }
+}
+
+tag = {
+    "type": "string",
+    "minLength": 1, "maxLength": tag.MAX_TAG_LENGTH,
+    "pattern": "^[^,/]*$"
+}
+
+pagination_parameters = {
+    'limit': multi_params(non_negative_integer),
+    'marker': multi_params({'type': 'string'})
 }

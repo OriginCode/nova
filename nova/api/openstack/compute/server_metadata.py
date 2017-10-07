@@ -13,7 +13,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import six
+
 from webob import exc
 
 from nova.api.openstack import common
@@ -25,8 +25,6 @@ from nova import compute
 from nova import exception
 from nova.i18n import _
 from nova.policies import server_metadata as sm_policies
-
-ALIAS = 'server-metadata'
 
 
 class ServerMetadataController(wsgi.Controller):
@@ -47,7 +45,7 @@ class ServerMetadataController(wsgi.Controller):
             msg = _('Server does not exist')
             raise exc.HTTPNotFound(explanation=msg)
         meta_dict = {}
-        for key, value in six.iteritems(meta):
+        for key, value in meta.items():
             meta_dict[key] = value
         return meta_dict
 
@@ -105,8 +103,8 @@ class ServerMetadataController(wsgi.Controller):
 
     def _update_instance_metadata(self, context, server_id, metadata,
                                   delete=False):
+        server = common.get_instance(self.compute_api, context, server_id)
         try:
-            server = common.get_instance(self.compute_api, context, server_id)
             return self.compute_api.update_instance_metadata(context,
                                                              server,
                                                              metadata,
@@ -163,36 +161,3 @@ class ServerMetadataController(wsgi.Controller):
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
                     'delete metadata', server_id)
-
-
-class ServerMetadata(extensions.V21APIExtensionBase):
-    """Server Metadata API."""
-    name = "ServerMetadata"
-    alias = ALIAS
-    version = 1
-
-    def get_resources(self):
-        parent = {'member_name': 'server',
-                  'collection_name': 'servers'}
-        resources = [extensions.ResourceExtension('metadata',
-                                                  ServerMetadataController(),
-                                                  member_name='server_meta',
-                                                  parent=parent,
-                                                  custom_routes_fn=
-                                                  self.server_metadata_map
-                                                  )]
-        return resources
-
-    def get_controller_extensions(self):
-        return []
-
-    def server_metadata_map(self, mapper, wsgi_resource):
-        mapper.connect("metadata",
-                       "/{project_id}/servers/{server_id}/metadata",
-                       controller=wsgi_resource,
-                       action='update_all', conditions={"method": ['PUT']})
-        # Also connect the non project_id routes
-        mapper.connect("metadata",
-                       "/servers/{server_id}/metadata",
-                       controller=wsgi_resource,
-                       action='update_all', conditions={"method": ['PUT']})

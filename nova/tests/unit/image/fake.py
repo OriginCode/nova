@@ -18,13 +18,13 @@
 
 import copy
 import datetime
-import uuid
 
 from oslo_log import log as logging
+from oslo_utils import uuidutils
 
-from nova.compute import arch
 import nova.conf
 from nova import exception
+from nova.objects import fields as obj_fields
 from nova.tests import fixtures as nova_fixtures
 
 CONF = nova.conf.CONF
@@ -52,9 +52,10 @@ class _FakeImageService(object):
                  'container_format': 'raw',
                  'disk_format': 'raw',
                  'size': '25165824',
-                 'properties': {'kernel_id': CONF.null_kernel,
-                                'ramdisk_id': CONF.null_kernel,
-                                'architecture': arch.X86_64}}
+                 'properties': {
+                    'kernel_id': CONF.null_kernel,
+                    'ramdisk_id': CONF.null_kernel,
+                    'architecture': obj_fields.Architecture.X86_64}}
 
         image2 = {'id': 'a2459075-d96c-40d5-893e-577ff92e721c',
                  'name': 'fakeimage123456',
@@ -124,10 +125,11 @@ class _FakeImageService(object):
                  'container_format': 'ova',
                  'disk_format': 'vhd',
                  'size': '49163826',
-                 'properties': {'kernel_id': CONF.null_kernel,
-                                'ramdisk_id': CONF.null_kernel,
-                                'architecture': arch.X86_64,
-                                'auto_disk_config': 'False'}}
+                 'properties': {
+                    'kernel_id': CONF.null_kernel,
+                    'ramdisk_id': CONF.null_kernel,
+                    'architecture': obj_fields.Architecture.X86_64,
+                    'auto_disk_config': 'False'}}
 
         image7 = {'id': AUTO_DISK_CONFIG_ENABLED_IMAGE_UUID,
                  'name': 'fakeimage7',
@@ -140,10 +142,11 @@ class _FakeImageService(object):
                  'container_format': 'ova',
                  'disk_format': 'vhd',
                  'size': '74185822',
-                 'properties': {'kernel_id': CONF.null_kernel,
-                                'ramdisk_id': CONF.null_kernel,
-                                'architecture': arch.X86_64,
-                                'auto_disk_config': 'True'}}
+                 'properties': {
+                    'kernel_id': CONF.null_kernel,
+                    'ramdisk_id': CONF.null_kernel,
+                    'architecture': obj_fields.Architecture.X86_64,
+                    'auto_disk_config': 'True'}}
 
         self.create(None, image1)
         self.create(None, image2)
@@ -158,7 +161,7 @@ class _FakeImageService(object):
     # TODO(bcwaldon): implement optional kwargs such as limit, sort_dir
     def detail(self, context, **kwargs):
         """Return list of detailed image information."""
-        return copy.deepcopy(self.images.values())
+        return copy.deepcopy(list(self.images.values()))
 
     def download(self, context, image_id, dst_path=None, data=None):
         self.show(context, image_id)
@@ -188,11 +191,24 @@ class _FakeImageService(object):
         :raises: Duplicate if the image already exist.
 
         """
-        image_id = str(metadata.get('id', uuid.uuid4()))
+        image_id = str(metadata.get('id', uuidutils.generate_uuid()))
         metadata['id'] = image_id
         if image_id in self.images:
             raise exception.CouldNotUploadImage(image_id=image_id)
-        self.images[image_id] = copy.deepcopy(metadata)
+        image_meta = copy.deepcopy(metadata)
+        # Glance sets the size value when an image is created, so we
+        # need to do that here to fake things out if it's not provided
+        # by the caller. This is needed to avoid a KeyError in the
+        # image-size API.
+        if 'size' not in image_meta:
+            image_meta['size'] = None
+        # Similarly, Glance provides the status on the image once it's created
+        # and this is checked in the compute API when booting a server from
+        # this image, so we just fake it out to be 'active' even though this
+        # is mostly a lie on a newly created image.
+        if 'status' not in metadata:
+            image_meta['status'] = 'active'
+        self.images[image_id] = image_meta
         if data:
             self._imagedata[image_id] = data.read()
         return self.images[image_id]

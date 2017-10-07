@@ -298,7 +298,7 @@ class IptablesManager(object):
             elif ip_version == 6:
                 tables = self.ipv6
 
-            for table, chains in six.iteritems(builtin_chains[ip_version]):
+            for table, chains in builtin_chains[ip_version].items():
                 for chain in chains:
                     tables[table].add_chain(chain)
                     tables[table].add_rule(chain, '-j $%s' % (chain,),
@@ -365,13 +365,13 @@ class IptablesManager(object):
                                                 run_as_root=True,
                                                 attempts=5)
             all_lines = all_tables.split('\n')
-            for table_name, table in six.iteritems(tables):
+            for table_name, table in tables.items():
                 start, end = self._find_table(all_lines, table_name)
                 all_lines[start:end] = self._modify_rules(
                         all_lines[start:end], table, table_name)
                 table.dirty = False
             self.execute('%s-restore' % (cmd,), '-c', run_as_root=True,
-                         process_input='\n'.join(all_lines),
+                         process_input=six.b('\n'.join(all_lines)),
                          attempts=5)
         LOG.debug("IPTablesManager.apply completed with success")
 
@@ -1311,13 +1311,22 @@ def delete_ivs_vif_port(dev):
                   run_as_root=True)
 
 
-def create_tap_dev(dev, mac_address=None):
+def create_tap_dev(dev, mac_address=None, multiqueue=False):
     if not device_exists(dev):
         try:
             # First, try with 'ip'
-            utils.execute('ip', 'tuntap', 'add', dev, 'mode', 'tap',
-                          run_as_root=True, check_exit_code=[0, 2, 254])
+            cmd = ('ip', 'tuntap', 'add', dev, 'mode', 'tap')
+            if multiqueue:
+                cmd = cmd + ('multi_queue', )
+            utils.execute(*cmd, run_as_root=True, check_exit_code=[0, 2, 254])
         except processutils.ProcessExecutionError:
+            if multiqueue:
+                LOG.warning(
+                    _LW('Failed to create a tap device with ip tuntap. '
+                        'tunctl does not support creation of multi-queue '
+                        'enabled devices, skipping fallback.'))
+                raise
+
             # Second option: tunctl
             utils.execute('tunctl', '-b', '-t', dev, run_as_root=True)
         if mac_address:
@@ -1894,7 +1903,11 @@ def set_vf_interface_vlan(pci_addr, mac_addr, vlan=0):
                   run_as_root=True,
                   check_exit_code=exit_code)
     # Bring up/down the VF's interface
+    # TODO(edand): The mac is assigned as a workaround for the following issue
+    #              https://bugzilla.redhat.com/show_bug.cgi?id=1372944
+    #              once resolved it will be removed
     utils.execute('ip', 'link', 'set', vf_ifname,
+                  'address', mac_addr,
                   port_state,
                   run_as_root=True,
                   check_exit_code=exit_code)

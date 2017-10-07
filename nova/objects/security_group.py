@@ -12,7 +12,12 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from oslo_utils import uuidutils
+from oslo_utils import versionutils
+
 from nova import db
+from nova.db.sqlalchemy import api as db_api
+from nova.db.sqlalchemy import models
 from nova import objects
 from nova.objects import base
 from nova.objects import fields
@@ -22,7 +27,8 @@ from nova.objects import fields
 class SecurityGroup(base.NovaPersistentObject, base.NovaObject):
     # Version 1.0: Initial version
     # Version 1.1: String attributes updated to support unicode
-    VERSION = '1.1'
+    # Version 1.2: Added uuid field for Neutron security groups.
+    VERSION = '1.2'
 
     fields = {
         'id': fields.IntegerField(),
@@ -30,13 +36,21 @@ class SecurityGroup(base.NovaPersistentObject, base.NovaObject):
         'description': fields.StringField(),
         'user_id': fields.StringField(),
         'project_id': fields.StringField(),
+        # The uuid field is only used for Neutron security groups and is not
+        # persisted to the Nova database.
+        'uuid': fields.UUIDField()
         }
+
+    def obj_make_compatible(self, primitive, target_version):
+        target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 2) and 'uuid' in primitive:
+            del primitive['uuid']
 
     @staticmethod
     def _from_db_object(context, secgroup, db_secgroup):
-        # NOTE(danms): These are identical right now
         for field in secgroup.fields:
-            setattr(secgroup, field, db_secgroup[field])
+            if field is not 'uuid':
+                setattr(secgroup, field, db_secgroup[field])
         secgroup._context = context
         secgroup.obj_reset_changes()
         return secgroup
@@ -60,6 +74,11 @@ class SecurityGroup(base.NovaPersistentObject, base.NovaObject):
     @base.remotable
     def save(self):
         updates = self.obj_get_changes()
+        # We don't store uuid in the Nova database so remove it if someone
+        # mistakenly tried to save a neutron security group object. We only
+        # need the uuid in the object for obj_to_primitive() calls where this
+        # object is serialized and stored in the RequestSpec object.
+        updates.pop('uuid', None)
         if updates:
             db_secgroup = db.security_group_update(self._context, self.id,
                                                    updates)
@@ -71,12 +90,17 @@ class SecurityGroup(base.NovaPersistentObject, base.NovaObject):
         self._from_db_object(self._context, self,
                              db.security_group_get(self._context, self.id))
 
+    @property
+    def identifier(self):
+        return self.uuid if 'uuid' in self else self.name
+
 
 @base.NovaObjectRegistry.register
 class SecurityGroupList(base.ObjectListBase, base.NovaObject):
     # Version 1.0: Initial version
     #              SecurityGroup <= version 1.1
-    VERSION = '1.0'
+    # Version 1.1: Added get_counts() for quotas
+    VERSION = '1.1'
 
     fields = {
         'objects': fields.ListOfObjectsField('SecurityGroup'),
@@ -86,6 +110,19 @@ class SecurityGroupList(base.ObjectListBase, base.NovaObject):
         super(SecurityGroupList, self).__init__(*args, **kwargs)
         self.objects = []
         self.obj_reset_changes()
+
+    @staticmethod
+    @db_api.pick_context_manager_reader
+    def _get_counts_from_db(context, project_id, user_id=None):
+        query = context.session.query(models.SecurityGroup.id).\
+                filter_by(deleted=0).\
+                filter_by(project_id=project_id)
+        counts = {}
+        counts['project'] = {'security_groups': query.count()}
+        if user_id:
+            query = query.filter_by(user_id=user_id)
+            counts['user'] = {'security_groups': query.count()}
+        return counts
 
     @base.remotable_classmethod
     def get_all(cls, context):
@@ -105,9 +142,24 @@ class SecurityGroupList(base.ObjectListBase, base.NovaObject):
         return base.obj_make_list(context, cls(context),
                                   objects.SecurityGroup, groups)
 
+    @base.remotable_classmethod
+    def get_counts(cls, context, project_id, user_id=None):
+        """Get the counts of SecurityGroup objects in the database.
+
+        :param context: The request context for database access
+        :param project_id: The project_id to count across
+        :param user_id: The user_id to count across
+        :returns: A dict containing the project-scoped counts and user-scoped
+                  counts if user_id is specified. For example:
+
+                    {'project': {'security_groups': <count across project>},
+                     'user': {'security_groups': <count across user>}}
+        """
+        return cls._get_counts_from_db(context, project_id, user_id=user_id)
+
 
 def make_secgroup_list(security_groups):
-    """A helper to make security group objects from a list of names.
+    """A helper to make security group objects from a list of names or uuids.
 
     Note that this does not make them save-able or have the rest of the
     attributes they would normally have, but provides a quick way to fill,
@@ -115,8 +167,14 @@ def make_secgroup_list(security_groups):
     """
     secgroups = objects.SecurityGroupList()
     secgroups.objects = []
-    for name in security_groups:
+    for sg in security_groups:
         secgroup = objects.SecurityGroup()
-        secgroup.name = name
+        if uuidutils.is_uuid_like(sg):
+            # This is a neutron security group uuid so store in the uuid field.
+            secgroup.uuid = sg
+        else:
+            # This is either a nova-network security group name, or it's the
+            # special 'default' security group in the case of neutron.
+            secgroup.name = sg
         secgroups.objects.append(secgroup)
     return secgroups

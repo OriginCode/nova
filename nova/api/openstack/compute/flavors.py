@@ -23,6 +23,7 @@ from nova.api.openstack import wsgi
 from nova.compute import flavors
 from nova import exception
 from nova.i18n import _
+from nova import objects
 from nova import utils
 
 ALIAS = 'flavors'
@@ -31,7 +32,7 @@ ALIAS = 'flavors'
 class FlavorsController(wsgi.Controller):
     """Flavor controller for the OpenStack API."""
 
-    _view_builder_class = flavors_view.ViewBuilderV21
+    _view_builder_class = flavors_view.ViewBuilder
 
     @extensions.expected_errors(400)
     def index(self, req):
@@ -105,7 +106,7 @@ class FlavorsController(wsgi.Controller):
                 raise webob.exc.HTTPBadRequest(explanation=msg)
 
         try:
-            limited_flavors = flavors.get_all_flavors_sorted_list(context,
+            limited_flavors = objects.FlavorList.get_all(context,
                 filters=filters, sort_key=sort_key, sort_dir=sort_dir,
                 limit=limit, marker=marker)
         except exception.MarkerNotFound:
@@ -113,26 +114,3 @@ class FlavorsController(wsgi.Controller):
             raise webob.exc.HTTPBadRequest(explanation=msg)
 
         return limited_flavors
-
-
-class Flavors(extensions.V21APIExtensionBase):
-    """Flavors Extension."""
-    name = "Flavors"
-    alias = ALIAS
-    version = 1
-
-    def get_resources(self):
-        collection_actions = {'detail': 'GET'}
-        member_actions = {'action': 'POST'}
-
-        resources = [
-            extensions.ResourceExtension(ALIAS,
-                                         FlavorsController(),
-                                         member_name='flavor',
-                                         collection_actions=collection_actions,
-                                         member_actions=member_actions)
-            ]
-        return resources
-
-    def get_controller_extensions(self):
-        return []

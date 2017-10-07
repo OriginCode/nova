@@ -15,19 +15,27 @@
 
 from oslo_config import cfg
 
+api_group = cfg.OptGroup('api',
+    title='API options',
+    help="""
+Options under this group are used to define Nova API.
+""")
+
 auth_opts = [
     cfg.StrOpt("auth_strategy",
-            default="keystone",
-            choices=("keystone", "noauth2"),
-            help="""
+        default="keystone",
+        choices=("keystone", "noauth2"),
+        deprecated_group="DEFAULT",
+        help="""
 This determines the strategy to use for authentication: keystone or noauth2.
 'noauth2' is designed for testing only, as it does no actual credential
 checking. 'noauth2' provides administrative credentials only if 'admin' is
 specified as the username.
 """),
     cfg.BoolOpt("use_forwarded_for",
-            default=False,
-            help="""
+        default=False,
+        deprecated_group="DEFAULT",
+        help="""
 When True, the 'X-Forwarded-For' header is treated as the canonical remote
 address. When False (the default), the 'remote_address' header is used.
 
@@ -37,9 +45,10 @@ You should only enable this if you have an HTML sanitizing proxy.
 
 metadata_opts = [
     cfg.StrOpt("config_drive_skip_versions",
-            default=("1.0 2007-01-19 2007-03-01 2007-08-29 2007-10-10 "
-                     "2007-12-15 2008-02-01 2008-09-01"),
-            help="""
+        default=("1.0 2007-01-19 2007-03-01 2007-08-29 2007-10-10 "
+                 "2007-12-15 2008-02-01 2008-09-01"),
+        deprecated_group="DEFAULT",
+        help="""
 When gathering the existing metadata for a config drive, the EC2-style
 metadata is returned for all versions that don't appear in this option.
 As of the Liberty release, the available versions are:
@@ -61,21 +70,10 @@ Possible values:
 
 * Any string that represents zero or more versions, separated by spaces.
 """),
-    cfg.StrOpt("vendordata_driver",
-            default="nova.api.metadata.vendordata_json.JsonFileVendorData",
-            deprecated_for_removal=True,
-            help="""
-When returning instance metadata, this is the class that is used
-for getting vendor metadata when that class isn't specified in the individual
-request. The value should be the full dot-separated path to the class to use.
-
-Possible values:
-
-* Any valid dot-separated class path that can be imported.
-"""),
     cfg.ListOpt('vendordata_providers',
-                default=[],
-                help="""
+        default=[],
+        deprecated_group="DEFAULT",
+        help="""
 A list of vendordata providers.
 
 vendordata providers are how deployers can provide metadata via configdrive
@@ -105,10 +103,12 @@ Related options:
 * vendordata_dynamic_ssl_certfile
 * vendordata_dynamic_connect_timeout
 * vendordata_dynamic_read_timeout
+* vendordata_dynamic_failure_fatal
 """),
     cfg.ListOpt('vendordata_dynamic_targets',
-                default=[],
-                help="""
+        default=[],
+        deprecated_group="DEFAULT",
+        help="""
 A list of targets for the dynamic vendordata provider. These targets are of
 the form <name>@<url>.
 
@@ -117,8 +117,9 @@ services and querying them for information about the instance. This behaviour
 is documented in the vendordata.rst file in the nova developer reference.
 """),
     cfg.StrOpt('vendordata_dynamic_ssl_certfile',
-               default='',
-               help="""
+        default='',
+        deprecated_group="DEFAULT",
+        help="""
 Path to an optional certificate file or CA bundle to verify dynamic
 vendordata REST services ssl certificates against.
 
@@ -132,11 +133,13 @@ Related options:
 * vendordata_dynamic_targets
 * vendordata_dynamic_connect_timeout
 * vendordata_dynamic_read_timeout
+* vendordata_dynamic_failure_fatal
 """),
     cfg.IntOpt('vendordata_dynamic_connect_timeout',
-               default=5,
-               min=3,
-               help="""
+        default=5,
+        min=3,
+        deprecated_group="DEFAULT",
+        help="""
 Maximum wait time for an external REST service to connect.
 
 Possible values:
@@ -151,11 +154,13 @@ Related options:
 * vendordata_dynamic_targets
 * vendordata_dynamic_ssl_certfile
 * vendordata_dynamic_read_timeout
+* vendordata_dynamic_failure_fatal
 """),
     cfg.IntOpt('vendordata_dynamic_read_timeout',
-               default=5,
-               min=0,
-               help="""
+        default=5,
+        min=0,
+        deprecated_group="DEFAULT",
+        help="""
 Maximum wait time for an external REST service to return data once connected.
 
 Possible values:
@@ -169,11 +174,26 @@ Related options:
 * vendordata_dynamic_targets
 * vendordata_dynamic_ssl_certfile
 * vendordata_dynamic_connect_timeout
+* vendordata_dynamic_failure_fatal
+"""),
+    cfg.BoolOpt('vendordata_dynamic_failure_fatal',
+        default=False,
+        help="""
+Should failures to fetch dynamic vendordata be fatal to instance boot?
+
+Related options:
+
+* vendordata_providers
+* vendordata_dynamic_targets
+* vendordata_dynamic_ssl_certfile
+* vendordata_dynamic_connect_timeout
+* vendordata_dynamic_read_timeout
 """),
     cfg.IntOpt("metadata_cache_expiration",
-            default=15,
-            min=0,
-            help="""
+        default=15,
+        min=0,
+        deprecated_group="DEFAULT",
+        help="""
 This option is the time (in seconds) to cache metadata. When set to 0,
 metadata caching is disabled entirely; this is generally not recommended for
 performance reasons. Increasing this setting should improve response times
@@ -184,6 +204,7 @@ usage, and result in longer times for host metadata changes to take effect.
 
 file_opts = [
     cfg.StrOpt("vendordata_jsonfile_path",
+        deprecated_group="DEFAULT",
         help="""
 Cloud providers may store custom data in vendor data file that will then be
 available to the instances via the metadata service, and to the rendering of
@@ -199,15 +220,19 @@ Possible values:
 ]
 
 osapi_opts = [
-    cfg.IntOpt("osapi_max_limit",
-            default=1000,
-            min=0,
-            help="""
+    cfg.IntOpt("max_limit",
+        default=1000,
+        min=0,
+        deprecated_group="DEFAULT",
+        deprecated_name="osapi_max_limit",
+        help="""
 As a query can potentially return many thousands of items, you can limit the
 maximum number of items in a single response by setting this option.
 """),
-    cfg.StrOpt("osapi_compute_link_prefix",
-            help="""
+    cfg.StrOpt("compute_link_prefix",
+        deprecated_group="DEFAULT",
+        deprecated_name="osapi_compute_link_prefix",
+        help="""
 This string is prepended to the normal URL that is returned in links to the
 OpenStack Compute API. If it is empty (the default), the URLs are returned
 unchanged.
@@ -216,8 +241,10 @@ Possible values:
 
 * Any string, including an empty string (the default).
 """),
-    cfg.StrOpt("osapi_glance_link_prefix",
-            help="""
+    cfg.StrOpt("glance_link_prefix",
+        deprecated_group="DEFAULT",
+        deprecated_name="osapi_glance_link_prefix",
+        help="""
 This string is prepended to the normal URL that is returned in links to
 Glance resources. If it is empty (the default), the URLs are returned
 unchanged.
@@ -231,6 +258,15 @@ Possible values:
 allow_instance_snapshots_opts = [
     cfg.BoolOpt("allow_instance_snapshots",
         default=True,
+        deprecated_group="DEFAULT",
+        deprecated_for_removal=True,
+        deprecated_since="16.0.0",
+        deprecated_reason="This option disables the createImage server action "
+                          "API in a non-discoverable way and is thus a "
+                          "barrier to interoperability. Also, it is not used "
+                          "for other APIs that create snapshots like shelve "
+                          "or createBackup. Disabling snapshots should be "
+                          "done via policy if so desired.",
         help="""
 Operators can turn off the ability for a user to take snapshots of their
 instances by setting this option to False. When disabled, any attempt to
@@ -243,8 +279,10 @@ take a snapshot will result in a HTTP 400 response ("Bad Request").
 # is not likely to be changed, I'm copy/pasting it here.
 BUILDING = "building"  # VM only exists in DB
 osapi_hide_opts = [
-    cfg.ListOpt("osapi_hide_server_address_states",
+    cfg.ListOpt("hide_server_address_states",
         default=[BUILDING],
+        deprecated_group="DEFAULT",
+        deprecated_name="osapi_hide_server_address_states",
         help="""
 This option is a list of all instance states for which network address
 information should not be returned from the API.
@@ -272,26 +310,15 @@ Possible values:
 fping_path_opts = [
     cfg.StrOpt("fping_path",
         default="/usr/sbin/fping",
+        deprecated_group="DEFAULT",
         help="The full path to the fping binary.")
 ]
 
 os_network_opts = [
-    cfg.BoolOpt("enable_network_quota",
-            deprecated_for_removal=True,
-            deprecated_reason="""
-CRUD operations on tenant networks are only available when using nova-network
-and nova-network is itself deprecated.""",
-            default=False,
-            help="""
-This option is used to enable or disable quota checking for tenant networks.
-
-Related options:
-
-* quota_networks
-"""),
     cfg.BoolOpt("use_neutron_default_nets",
-            default=False,
-            help="""
+        default=False,
+        deprecated_group="DEFAULT",
+        help="""
 When True, the TenantNetworkController will query the Neutron API to get the
 default networks to use.
 
@@ -300,8 +327,9 @@ Related options:
 * neutron_default_tenant_id
 """),
     cfg.StrOpt("neutron_default_tenant_id",
-            default="default",
-            help="""
+        default="default",
+        deprecated_group="DEFAULT",
+        help="""
 Tenant ID for getting the default network from Neutron API (also referred in
 some places as the 'project ID') to use.
 
@@ -309,14 +337,57 @@ Related options:
 
 * use_neutron_default_nets
 """),
-    cfg.IntOpt("quota_networks",
-            deprecated_for_removal=True,
-            deprecated_reason="""
+]
+
+enable_inst_pw_opts = [
+    cfg.BoolOpt("enable_instance_password",
+        default=True,
+        deprecated_group="DEFAULT",
+        help="""
+Enables returning of the instance password by the relevant server API calls
+such as create, rebuild, evacuate, or rescue. If the hypervisor does not
+support password injection, then the password returned will not be correct,
+so if your hypervisor does not support password injection, set this to False.
+""")
+]
+
+deprecated_opts = [
+    cfg.StrOpt("vendordata_driver",
+        default="nova.api.metadata.vendordata_json.JsonFileVendorData",
+        deprecated_for_removal=True,
+        deprecated_since="13.0.0",
+        help="""
+When returning instance metadata, this is the class that is used
+for getting vendor metadata when that class isn't specified in the individual
+request. The value should be the full dot-separated path to the class to use.
+
+Possible values:
+
+* Any valid dot-separated class path that can be imported.
+"""),
+    cfg.BoolOpt("enable_network_quota",
+        deprecated_for_removal=True,
+        deprecated_since="14.0.0",
+        deprecated_reason="""
 CRUD operations on tenant networks are only available when using nova-network
 and nova-network is itself deprecated.""",
-            default=3,
-            min=0,
-            help="""
+        default=False,
+        help="""
+This option is used to enable or disable quota checking for tenant networks.
+
+Related options:
+
+* quota_networks
+"""),
+    cfg.IntOpt("quota_networks",
+        deprecated_for_removal=True,
+        deprecated_since="14.0.0",
+        deprecated_reason="""
+CRUD operations on tenant networks are only available when using nova-network
+and nova-network is itself deprecated.""",
+        default=3,
+        min=0,
+        help="""
 This option controls the number of private networks that can be created per
 project (or per tenant).
 
@@ -326,17 +397,7 @@ Related options:
 """),
 ]
 
-enable_inst_pw_opts = [
-    cfg.BoolOpt("enable_instance_password",
-        default=True,
-        help="""
-Enables returning of the instance password by the relevant server API calls
-such as create, rebuild, evacuate, or rescue. If the hypervisor does not
-support password injection, then the password returned will not be correct,
-so if your hypervisor does not support password injection, set this to False.
-""")
-]
-ALL_OPTS = (auth_opts +
+API_OPTS = (auth_opts +
             metadata_opts +
             file_opts +
             osapi_opts +
@@ -348,9 +409,11 @@ ALL_OPTS = (auth_opts +
 
 
 def register_opts(conf):
-    conf.register_opts(ALL_OPTS)
+    conf.register_group(api_group)
+    conf.register_opts(API_OPTS, group=api_group)
+    conf.register_opts(deprecated_opts)
 
 
 def list_opts():
-    # TODO(macsz) add opt group
-    return {"DEFAULT": ALL_OPTS}
+    return {api_group: API_OPTS,
+            'DEFAULT': deprecated_opts}

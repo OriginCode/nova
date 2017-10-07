@@ -27,7 +27,6 @@ from oslo_log import log as logging
 import six
 
 from nova import exception
-from nova.i18n import _, _LE
 from nova.virt import driver
 from nova.virt.hyperv import eventhandler
 from nova.virt.hyperv import hostops
@@ -96,7 +95,7 @@ class HyperVDriver(driver.ComputeDriver):
     capabilities = {
         "has_imagecache": True,
         "supports_recreate": False,
-        "supports_migrate_to_same_host": True,
+        "supports_migrate_to_same_host": False,
         "supports_attach_interface": True,
         "supports_device_tagging": True,
     }
@@ -110,7 +109,7 @@ class HyperVDriver(driver.ComputeDriver):
 
         self._hostops = hostops.HostOps()
         self._volumeops = volumeops.VolumeOps()
-        self._vmops = vmops.VMOps()
+        self._vmops = vmops.VMOps(virtapi)
         self._snapshotops = snapshotops.SnapshotOps()
         self._livemigrationops = livemigrationops.LiveMigrationOps()
         self._migrationops = migrationops.MigrationOps()
@@ -123,10 +122,10 @@ class HyperVDriver(driver.ComputeDriver):
             # the version is of Windows is older than Windows Server 2012 R2.
             # Log an error, letting users know that this version is not
             # supported any longer.
-            LOG.error(_LE('You are running nova-compute on an unsupported '
-                          'version of Windows (older than Windows / Hyper-V '
-                          'Server 2012). The support for this version of '
-                          'Windows has been removed in Mitaka.'))
+            LOG.error('You are running nova-compute on an unsupported '
+                      'version of Windows (older than Windows / Hyper-V '
+                      'Server 2012). The support for this version of '
+                      'Windows has been removed in Mitaka.')
             raise exception.HypervisorTooOld(version='6.2')
 
     @property
@@ -158,14 +157,14 @@ class HyperVDriver(driver.ComputeDriver):
         self._vmops.reboot(instance, network_info, reboot_type)
 
     def destroy(self, context, instance, network_info, block_device_info=None,
-                destroy_disks=True, migrate_data=None):
+                destroy_disks=True):
         self._vmops.destroy(instance, network_info, block_device_info,
                             destroy_disks)
 
     def cleanup(self, context, instance, network_info, block_device_info=None,
                 destroy_disks=True, migrate_data=None, destroy_vifs=True):
         """Cleanup after instance being destroyed by Hypervisor."""
-        pass
+        self.unplug_vifs(instance, network_info)
 
     def get_info(self, instance):
         return self._vmops.get_info(instance)
@@ -181,7 +180,7 @@ class HyperVDriver(driver.ComputeDriver):
                                              instance.name)
 
     def get_volume_connector(self, instance):
-        return self._volumeops.get_volume_connector(instance)
+        return self._volumeops.get_volume_connector()
 
     def get_available_resource(self, nodename):
         return self._hostops.get_available_resource()
@@ -213,7 +212,7 @@ class HyperVDriver(driver.ComputeDriver):
 
     def power_on(self, context, instance, network_info,
                  block_device_info=None):
-        self._vmops.power_on(instance, block_device_info)
+        self._vmops.power_on(instance, block_device_info, network_info)
 
     def resume_state_on_host_boot(self, context, instance, network_info,
                                   block_device_info=None):
@@ -282,13 +281,11 @@ class HyperVDriver(driver.ComputeDriver):
 
     def plug_vifs(self, instance, network_info):
         """Plug VIFs into networks."""
-        msg = _("VIF plugging is not supported by the Hyper-V driver.")
-        raise NotImplementedError(msg)
+        self._vmops.plug_vifs(instance, network_info)
 
     def unplug_vifs(self, instance, network_info):
         """Unplug VIFs from networks."""
-        msg = _("VIF unplugging is not supported by the Hyper-V driver.")
-        raise NotImplementedError(msg)
+        self._vmops.unplug_vifs(instance, network_info)
 
     def ensure_filtering_rules_for_instance(self, instance, network_info):
         LOG.debug("ensure_filtering_rules_for_instance called",
@@ -309,8 +306,9 @@ class HyperVDriver(driver.ComputeDriver):
                                                              timeout,
                                                              retry_interval)
 
-    def confirm_migration(self, migration, instance, network_info):
-        self._migrationops.confirm_migration(migration, instance, network_info)
+    def confirm_migration(self, context, migration, instance, network_info):
+        self._migrationops.confirm_migration(context, migration,
+                                             instance, network_info)
 
     def finish_revert_migration(self, context, instance, network_info,
                                 block_device_info=None, power_on=True):
@@ -344,10 +342,10 @@ class HyperVDriver(driver.ComputeDriver):
     def manage_image_cache(self, context, all_instances):
         self._imagecache.update(context, all_instances)
 
-    def attach_interface(self, instance, image_meta, vif):
+    def attach_interface(self, context, instance, image_meta, vif):
         return self._vmops.attach_interface(instance, vif)
 
-    def detach_interface(self, instance, vif):
+    def detach_interface(self, context, instance, vif):
         return self._vmops.detach_interface(instance, vif)
 
     def rescue(self, context, instance, network_info, image_meta,

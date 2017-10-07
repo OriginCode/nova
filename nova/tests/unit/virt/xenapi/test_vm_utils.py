@@ -14,11 +14,11 @@
 #    under the License.
 
 import contextlib
-import uuid
 
 from eventlet import greenthread
 import mock
 from mox3 import mox
+import os_xenapi
 from oslo_concurrency import lockutils
 from oslo_concurrency import processutils
 from oslo_config import fixture as config_fixture
@@ -30,11 +30,11 @@ import six
 
 from nova.compute import flavors
 from nova.compute import power_state
-from nova.compute import vm_mode
 import nova.conf
 from nova import context
 from nova import exception
 from nova import objects
+from nova.objects import fields as obj_fields
 from nova import test
 from nova.tests.unit import fake_flavor
 from nova.tests.unit import fake_instance
@@ -249,7 +249,11 @@ class FetchVhdImageTestCase(VMUtilsTestBase):
         self.mox.StubOutWithMock(
                 self.session, 'call_plugin_serialized_with_retry')
         func = self.session.call_plugin_serialized_with_retry(
-                'glance', 'download_vhd2', 0, mox.IgnoreArg(), mox.IgnoreArg(),
+                'glance.py',
+                'download_vhd2',
+                0,
+                mox.IgnoreArg(),
+                mox.IgnoreArg(),
                 extra_headers={'X-Auth-Token': 'auth_token',
                                'X-Roles': '',
                                'X-Tenant-Id': None,
@@ -264,33 +268,7 @@ class FetchVhdImageTestCase(VMUtilsTestBase):
         else:
             func.AndReturn({'root': {'uuid': 'vdi'}})
 
-    def _stub_bittorrent_download_vhd(self, raise_exc=None):
-        self.mox.StubOutWithMock(
-                self.session, 'call_plugin_serialized')
-        func = self.session.call_plugin_serialized(
-            'bittorrent', 'download_vhd',
-            image_id='image_id',
-            uuid_stack=["uuid_stack"],
-            sr_path='sr_path',
-            torrent_download_stall_cutoff=600,
-            torrent_listen_port_start=6881,
-            torrent_listen_port_end=6891,
-            torrent_max_last_accessed=86400,
-            torrent_max_seeder_processes_per_host=1,
-            torrent_seed_chance=1.0,
-            torrent_seed_duration=3600,
-            torrent_url='http://foo/image_id.torrent'
-        )
-        if raise_exc:
-            func.AndRaise(raise_exc)
-        else:
-            func.AndReturn({'root': {'uuid': 'vdi'}})
-
     def test_fetch_vhd_image_works_with_glance(self):
-        self.mox.StubOutWithMock(vm_utils, '_image_uses_bittorrent')
-        vm_utils._image_uses_bittorrent(
-            self.context, self.instance).AndReturn(False)
-
         self._stub_glance_download_vhd()
 
         self.mox.StubOutWithMock(vm_utils, 'safe_find_sr')
@@ -310,37 +288,7 @@ class FetchVhdImageTestCase(VMUtilsTestBase):
 
         self.mox.VerifyAll()
 
-    def test_fetch_vhd_image_works_with_bittorrent(self):
-        self.flags(torrent_base_url='http://foo', group='xenserver')
-
-        self.mox.StubOutWithMock(vm_utils, '_image_uses_bittorrent')
-        vm_utils._image_uses_bittorrent(
-            self.context, self.instance).AndReturn(True)
-
-        self._stub_bittorrent_download_vhd()
-
-        self.mox.StubOutWithMock(vm_utils, 'safe_find_sr')
-        vm_utils.safe_find_sr(self.session).AndReturn("sr")
-
-        self.mox.StubOutWithMock(vm_utils, '_scan_sr')
-        vm_utils._scan_sr(self.session, "sr")
-
-        self.mox.StubOutWithMock(vm_utils, '_check_vdi_size')
-        vm_utils._check_vdi_size(self.context, self.session, self.instance,
-                                 "vdi")
-
-        self.mox.ReplayAll()
-
-        self.assertEqual("vdi", vm_utils._fetch_vhd_image(self.context,
-            self.session, self.instance, 'image_id')['root']['uuid'])
-
-        self.mox.VerifyAll()
-
     def test_fetch_vhd_image_cleans_up_vdi_on_fail(self):
-        self.mox.StubOutWithMock(vm_utils, '_image_uses_bittorrent')
-        vm_utils._image_uses_bittorrent(
-            self.context, self.instance).AndReturn(False)
-
         self._stub_glance_download_vhd()
 
         self.mox.StubOutWithMock(vm_utils, 'safe_find_sr')
@@ -369,44 +317,7 @@ class FetchVhdImageTestCase(VMUtilsTestBase):
 
         self.mox.VerifyAll()
 
-    def test_fallback_to_default_handler(self):
-        self.flags(torrent_base_url='http://foo', group='xenserver')
-
-        self.mox.StubOutWithMock(vm_utils, '_image_uses_bittorrent')
-        vm_utils._image_uses_bittorrent(
-            self.context, self.instance).AndReturn(True)
-
-        self._stub_bittorrent_download_vhd(raise_exc=RuntimeError)
-
-        vm_utils._make_uuid_stack().AndReturn(["uuid_stack"])
-        vm_utils.get_sr_path(self.session).AndReturn('sr_path')
-
-        self._stub_glance_download_vhd()
-
-        self.mox.StubOutWithMock(vm_utils, 'safe_find_sr')
-        vm_utils.safe_find_sr(self.session).AndReturn("sr")
-
-        self.mox.StubOutWithMock(vm_utils, '_scan_sr')
-        vm_utils._scan_sr(self.session, "sr")
-
-        self.mox.StubOutWithMock(vm_utils, '_check_vdi_size')
-        vm_utils._check_vdi_size(self.context, self.session, self.instance,
-                                 "vdi")
-
-        self.mox.ReplayAll()
-
-        self.assertEqual("vdi", vm_utils._fetch_vhd_image(self.context,
-            self.session, self.instance, 'image_id')['root']['uuid'])
-
-        self.mox.VerifyAll()
-
-    def test_default_handler_does_not_fallback_to_itself(self):
-        self.flags(torrent_base_url='http://foo', group='xenserver')
-
-        self.mox.StubOutWithMock(vm_utils, '_image_uses_bittorrent')
-        vm_utils._image_uses_bittorrent(
-            self.context, self.instance).AndReturn(False)
-
+    def test_fetch_vhd_image_download_exception(self):
         self._stub_glance_download_vhd(raise_exc=RuntimeError)
 
         self.mox.ReplayAll()
@@ -558,7 +469,7 @@ class CheckVDISizeTestCase(VMUtilsTestBase):
         super(CheckVDISizeTestCase, self).setUp()
         self.context = 'fakecontext'
         self.session = 'fakesession'
-        self.instance = objects.Instance(uuid=str(uuid.uuid4()))
+        self.instance = objects.Instance(uuid=uuids.fake)
         self.flavor = objects.Flavor()
         self.vdi_uuid = 'fakeuuid'
 
@@ -724,47 +635,6 @@ class CreateCachedImageTestCase(VMUtilsTestBase):
                                     vm_utils.ImageType.DISK_VHD))
 
 
-class BittorrentTestCase(VMUtilsTestBase):
-    def setUp(self):
-        super(BittorrentTestCase, self).setUp()
-        self.context = context.get_admin_context()
-
-    def test_image_uses_bittorrent(self):
-        instance = {'system_metadata': {'image_bittorrent': True}}
-        self.flags(torrent_images='some', group='xenserver')
-        self.assertTrue(vm_utils._image_uses_bittorrent(self.context,
-                                                        instance))
-
-    def _test_create_image(self, cache_type):
-        instance = {'system_metadata': {'image_cache_in_nova': True}}
-        self.flags(cache_images=cache_type, group='xenserver')
-
-        was = {'called': None}
-
-        def fake_create_cached_image(*args):
-            was['called'] = 'some'
-            return (False, {})
-        self.stubs.Set(vm_utils, '_create_cached_image',
-                       fake_create_cached_image)
-
-        def fake_fetch_image(*args):
-            was['called'] = 'none'
-            return {}
-        self.stubs.Set(vm_utils, '_fetch_image',
-                       fake_fetch_image)
-
-        vm_utils.create_image(self.context, None, instance,
-                              'foo', 'bar', 'baz')
-
-        self.assertEqual(was['called'], cache_type)
-
-    def test_create_image_cached(self):
-        self._test_create_image('some')
-
-    def test_create_image_uncached(self):
-        self._test_create_image('none')
-
-
 class ShutdownTestCase(VMUtilsTestBase):
 
     def test_hardshutdown_should_return_true_when_vm_is_shutdown(self):
@@ -879,6 +749,7 @@ class UnplugVbdTestCase(VMUtilsTestBase):
 
     def test_unplug_vbd_raises_unexpected_error(self):
         session = stubs.get_fake_session()
+        session.XenAPI.Failure = fake.Failure
         vbd_ref = "vbd_ref"
         vm_ref = 'vm_ref'
         session.call_xenapi.side_effect = test.TestingException()
@@ -971,15 +842,12 @@ class VDIOtherConfigTestCase(VMUtilsTestBase):
 
         self.assertEqual(expected, self.session.args[0]['other_config'])
 
-    def test_create_image(self):
+    @mock.patch.object(vm_utils, '_fetch_image',
+                       return_value={'root': {'uuid': 'fake-uuid'}})
+    def test_create_image(self, mock_vm_utils):
         # Other images are registered implicitly when they are dropped into
         # the SR by a dom0 plugin or some other process
         self.flags(cache_images='none', group='xenserver')
-
-        def fake_fetch_image(*args):
-            return {'root': {'uuid': 'fake-uuid'}}
-
-        self.stubs.Set(vm_utils, '_fetch_image', fake_fetch_image)
 
         other_config = {}
 
@@ -999,24 +867,23 @@ class VDIOtherConfigTestCase(VMUtilsTestBase):
 
         self.assertEqual(expected, other_config)
 
-    def test_import_migrated_vhds(self):
+    @mock.patch.object(os_xenapi.client.vm_management, 'receive_vhd')
+    @mock.patch.object(vm_utils, 'scan_default_sr')
+    @mock.patch.object(vm_utils, 'get_sr_path')
+    def test_import_migrated_vhds(self, mock_sr_path, mock_scan_sr,
+                                  mock_recv_vhd):
         # Migrated images should preserve the `other_config`
         other_config = {}
 
         def VDI_add_to_other_config(ref, key, value):
             other_config[key] = value
 
-        def call_plugin_serialized(*args, **kwargs):
-            return {'root': {'uuid': 'aaaa-bbbb-cccc-dddd'}}
-
         # Stubbing on the session object and not class so we don't pollute
         # other tests
         self.session.VDI_add_to_other_config = VDI_add_to_other_config
         self.session.VDI_get_other_config = lambda vdi: {}
-        self.session.call_plugin_serialized = call_plugin_serialized
 
-        self.stubs.Set(vm_utils, 'get_sr_path', lambda *a, **k: None)
-        self.stubs.Set(vm_utils, 'scan_default_sr', lambda *a, **k: None)
+        mock_sr_path.return_value = {'root': {'uuid': 'aaaa-bbbb-cccc-dddd'}}
 
         vm_utils._import_migrated_vhds(self.session, self.fake_instance,
                                        "disk_label", "root", "vdi_label")
@@ -1025,6 +892,11 @@ class VDIOtherConfigTestCase(VMUtilsTestBase):
                     'nova_instance_uuid': 'aaaa-bbbb-cccc-dddd'}
 
         self.assertEqual(expected, other_config)
+        mock_scan_sr.assert_called_once_with(self.session)
+        mock_recv_vhd.assert_called_with(
+            self.session, "disk_label",
+            {'root': {'uuid': 'aaaa-bbbb-cccc-dddd'}}, mock.ANY)
+        mock_sr_path.assert_called_once_with(self.session)
 
 
 class GenerateDiskTestCase(VMUtilsTestBase):
@@ -1354,7 +1226,7 @@ class CreateKernelRamdiskTestCase(VMUtilsTestBase):
         self.instance = {"kernel_id": None, "ramdisk_id": None}
         self.name_label = "name"
         self.mox.StubOutWithMock(self.session, "call_plugin")
-        self.mox.StubOutWithMock(uuid, "uuid4")
+        self.mox.StubOutWithMock(uuidutils, "generate_uuid")
         self.mox.StubOutWithMock(vm_utils, "_fetch_disk_image")
 
     def test_create_kernel_and_ramdisk_no_create(self):
@@ -1363,7 +1235,9 @@ class CreateKernelRamdiskTestCase(VMUtilsTestBase):
                     self.session, self.instance, self.name_label)
         self.assertEqual((None, None), result)
 
-    def test_create_kernel_and_ramdisk_create_both_cached(self):
+    @mock.patch.object(os_xenapi.client.disk_management,
+                       'create_kernel_ramdisk')
+    def test_create_kernel_and_ramdisk_create_both_cached(self, mock_ramdisk):
         kernel_id = "kernel"
         ramdisk_id = "ramdisk"
         self.instance["kernel_id"] = kernel_id
@@ -1372,32 +1246,31 @@ class CreateKernelRamdiskTestCase(VMUtilsTestBase):
         args_kernel = {}
         args_kernel['cached-image'] = kernel_id
         args_kernel['new-image-uuid'] = "fake_uuid1"
-        uuid.uuid4().AndReturn("fake_uuid1")
-        self.session.call_plugin('kernel', 'create_kernel_ramdisk',
-                                  args_kernel).AndReturn("k")
+        uuidutils.generate_uuid().AndReturn("fake_uuid1")
+        mock_ramdisk.side_effect = ["k", "r"]
 
         args_ramdisk = {}
         args_ramdisk['cached-image'] = ramdisk_id
         args_ramdisk['new-image-uuid'] = "fake_uuid2"
-        uuid.uuid4().AndReturn("fake_uuid2")
-        self.session.call_plugin('kernel', 'create_kernel_ramdisk',
-                                  args_ramdisk).AndReturn("r")
+        uuidutils.generate_uuid().AndReturn("fake_uuid2")
 
         self.mox.ReplayAll()
         result = vm_utils.create_kernel_and_ramdisk(self.context,
                     self.session, self.instance, self.name_label)
         self.assertEqual(("k", "r"), result)
 
-    def test_create_kernel_and_ramdisk_create_kernel_not_cached(self):
+    @mock.patch.object(os_xenapi.client.disk_management,
+                       'create_kernel_ramdisk')
+    def test_create_kernel_and_ramdisk_create_kernel_not_cached(self,
+                                                                mock_ramdisk):
         kernel_id = "kernel"
         self.instance["kernel_id"] = kernel_id
 
         args_kernel = {}
         args_kernel['cached-image'] = kernel_id
         args_kernel['new-image-uuid'] = "fake_uuid1"
-        uuid.uuid4().AndReturn("fake_uuid1")
-        self.session.call_plugin('kernel', 'create_kernel_ramdisk',
-                                  args_kernel).AndReturn("")
+        uuidutils.generate_uuid().AndReturn("fake_uuid1")
+        mock_ramdisk.return_value = ""
 
         kernel = {"kernel": {"file": "k"}}
         vm_utils._fetch_disk_image(self.context, self.session, self.instance,
@@ -1418,9 +1291,7 @@ class CreateKernelRamdiskTestCase(VMUtilsTestBase):
         self.flags(cache_images=cache_images, group='xenserver')
 
         if cache_images == 'all':
-            uuid.uuid4().AndReturn("fake_uuid1")
-            self.session.call_plugin('kernel', 'create_kernel_ramdisk',
-                                     args_kernel).AndReturn("cached_image")
+            uuidutils.generate_uuid().AndReturn("fake_uuid1")
         else:
             kernel = {"kernel": {"file": "new_image", "uuid": None}}
             vm_utils._fetch_disk_image(self.context, self.session,
@@ -1442,8 +1313,13 @@ class CreateKernelRamdiskTestCase(VMUtilsTestBase):
             self.assertEqual(result, {"kernel":
                                       {"file": "new_image", "uuid": None}})
 
-    def test_create_kernel_image_cached_config(self):
+    @mock.patch.object(os_xenapi.client.disk_management,
+                       'create_kernel_ramdisk')
+    def test_create_kernel_image_cached_config(self, mock_ramdisk):
+        mock_ramdisk.return_value = "cached_image"
         self._test_create_kernel_image('all')
+        mock_ramdisk.assert_called_once_with(self.session, "kernel",
+                                             "fake_uuid1")
 
     def test_create_kernel_image_uncached_config(self):
         self._test_create_kernel_image('none')
@@ -1466,6 +1342,7 @@ class ScanSrTestCase(VMUtilsTestBase):
 
     def test_scan_sr_unknown_error_fails_once(self):
         session = mock.Mock()
+        session.XenAPI.Failure = fake.Failure
         session.call_xenapi.side_effect = test.TestingException
         self.assertRaises(test.TestingException,
                           vm_utils._scan_sr, session, "sr_ref")
@@ -1573,8 +1450,7 @@ class CreateVmTestCase(VMUtilsTestBase):
     def test_invalid_cpu_mask_raises(self, mock_extract):
         self.flags(vcpu_pin_set="asdf")
         session = mock.Mock()
-        instance = objects.Instance(uuid=str(uuid.uuid4()),
-                                    system_metadata={})
+        instance = objects.Instance(uuid=uuids.fake, system_metadata={})
         with mock.patch.object(instance, 'get_flavor') as get:
             get.return_value = objects.Flavor._from_db_object(
                 None, objects.Flavor(), test_flavor.fake_flavor)
@@ -1585,7 +1461,7 @@ class CreateVmTestCase(VMUtilsTestBase):
 
     def test_destroy_vm(self, mock_extract):
         session = mock.Mock()
-        instance = objects.Instance(uuid=str(uuid.uuid4()))
+        instance = objects.Instance(uuid=uuids.fake)
 
         vm_utils.destroy_vm(session, instance, "vm_ref")
 
@@ -1596,7 +1472,7 @@ class CreateVmTestCase(VMUtilsTestBase):
         exc = test.TestingException()
         session.XenAPI.Failure = test.TestingException
         session.VM.destroy.side_effect = exc
-        instance = objects.Instance(uuid=str(uuid.uuid4()))
+        instance = objects.Instance(uuid=uuids.fake)
 
         vm_utils.destroy_vm(session, instance, "vm_ref")
 
@@ -1609,37 +1485,37 @@ class DetermineVmModeTestCase(VMUtilsTestBase):
 
     def test_determine_vm_mode_returns_xen_mode(self):
         instance = self._fake_object({"vm_mode": "xen"})
-        self.assertEqual(vm_mode.XEN,
+        self.assertEqual(obj_fields.VMMode.XEN,
             vm_utils.determine_vm_mode(instance, None))
 
     def test_determine_vm_mode_returns_hvm_mode(self):
         instance = self._fake_object({"vm_mode": "hvm"})
-        self.assertEqual(vm_mode.HVM,
+        self.assertEqual(obj_fields.VMMode.HVM,
             vm_utils.determine_vm_mode(instance, None))
 
     def test_determine_vm_mode_returns_xen_for_linux(self):
         instance = self._fake_object({"vm_mode": None, "os_type": "linux"})
-        self.assertEqual(vm_mode.XEN,
+        self.assertEqual(obj_fields.VMMode.XEN,
             vm_utils.determine_vm_mode(instance, None))
 
     def test_determine_vm_mode_returns_hvm_for_windows(self):
         instance = self._fake_object({"vm_mode": None, "os_type": "windows"})
-        self.assertEqual(vm_mode.HVM,
+        self.assertEqual(obj_fields.VMMode.HVM,
             vm_utils.determine_vm_mode(instance, None))
 
     def test_determine_vm_mode_returns_hvm_by_default(self):
         instance = self._fake_object({"vm_mode": None, "os_type": None})
-        self.assertEqual(vm_mode.HVM,
+        self.assertEqual(obj_fields.VMMode.HVM,
             vm_utils.determine_vm_mode(instance, None))
 
     def test_determine_vm_mode_returns_xen_for_VHD(self):
         instance = self._fake_object({"vm_mode": None, "os_type": None})
-        self.assertEqual(vm_mode.XEN,
+        self.assertEqual(obj_fields.VMMode.XEN,
             vm_utils.determine_vm_mode(instance, vm_utils.ImageType.DISK_VHD))
 
     def test_determine_vm_mode_returns_xen_for_DISK(self):
         instance = self._fake_object({"vm_mode": None, "os_type": None})
-        self.assertEqual(vm_mode.XEN,
+        self.assertEqual(obj_fields.VMMode.XEN,
             vm_utils.determine_vm_mode(instance, vm_utils.ImageType.DISK))
 
 
@@ -1988,7 +1864,7 @@ class ImportMigratedDisksTestCase(VMUtilsTestBase):
     @mock.patch.object(vm_utils, '_import_migrated_vhds')
     def test_import_migrate_ephemeral_disks(self, mock_migrate):
         mock_migrate.return_value = "foo"
-        instance = objects.Instance(id=1, uuid=uuidutils.generate_uuid())
+        instance = objects.Instance(id=1, uuid=uuids.fake)
         instance.old_flavor = objects.Flavor(ephemeral_gb=4000)
 
         result = vm_utils._import_migrate_ephemeral_disks("s", instance)
@@ -2010,21 +1886,21 @@ class ImportMigratedDisksTestCase(VMUtilsTestBase):
     def test_import_migrate_ephemeral_disks_use_old_flavor(self,
             mock_get_sizes):
         mock_get_sizes.return_value = []
-        instance = objects.Instance(id=1, uuid=uuidutils.generate_uuid(),
-                ephemeral_gb=2000)
+        instance = objects.Instance(id=1, uuid=uuids.fake, ephemeral_gb=2000)
         instance.old_flavor = objects.Flavor(ephemeral_gb=4000)
 
         vm_utils._import_migrate_ephemeral_disks("s", instance)
         mock_get_sizes.assert_called_once_with(4000)
 
+    @mock.patch.object(os_xenapi.client.vm_management, 'receive_vhd')
     @mock.patch.object(vm_utils, '_set_vdi_info')
     @mock.patch.object(vm_utils, 'scan_default_sr')
     @mock.patch.object(vm_utils, 'get_sr_path')
     def test_import_migrated_vhds(self, mock_get_sr_path, mock_scan_sr,
-                                  mock_set_info):
+                                  mock_set_info, mock_recv_vhd):
         session = mock.Mock()
         instance = {"uuid": "uuid"}
-        session.call_plugin_serialized.return_value = {"root": {"uuid": "a"}}
+        mock_recv_vhd.return_value = {"root": {"uuid": "a"}}
         session.call_xenapi.return_value = "vdi_ref"
         mock_get_sr_path.return_value = "sr_path"
 
@@ -2034,9 +1910,8 @@ class ImportMigratedDisksTestCase(VMUtilsTestBase):
         expected = {'uuid': "a", 'ref': "vdi_ref"}
         self.assertEqual(expected, result)
         mock_get_sr_path.assert_called_once_with(session)
-        session.call_plugin_serialized.assert_called_once_with('migration',
-                'move_vhds_into_sr', instance_uuid='chain_label',
-                sr_path='sr_path', uuid_stack=mock.ANY)
+        mock_recv_vhd.assert_called_once_with(session, 'chain_label',
+                                              'sr_path', mock.ANY)
         mock_scan_sr.assert_called_once_with(session)
         session.call_xenapi.assert_called_once_with('VDI.get_by_uuid', 'a')
         mock_set_info.assert_called_once_with(session, 'vdi_ref', 'disk_type',
@@ -2055,36 +1930,45 @@ class ImportMigratedDisksTestCase(VMUtilsTestBase):
 class MigrateVHDTestCase(VMUtilsTestBase):
     def _assert_transfer_called(self, session, label):
         session.call_plugin_serialized.assert_called_once_with(
-                'migration', 'transfer_vhd', instance_uuid=label, host="dest",
-                vdi_uuid="vdi_uuid", sr_path="sr_path", seq_num=2)
+            'migration.py', 'transfer_vhd', instance_uuid=label, host="dest",
+            vdi_uuid="vdi_uuid", sr_path="sr_path", seq_num=2)
 
-    def test_migrate_vhd_root(self):
+    @mock.patch.object(os_xenapi.client.vm_management, 'transfer_vhd')
+    def test_migrate_vhd_root(self, mock_trans_vhd):
         session = mock.Mock()
         instance = {"uuid": "a"}
 
         vm_utils.migrate_vhd(session, instance, "vdi_uuid", "dest",
                              "sr_path", 2)
 
-        self._assert_transfer_called(session, "a")
+        mock_trans_vhd.assert_called_once_with(session, "a",
+                                               "dest", "vdi_uuid", "sr_path",
+                                               2)
 
-    def test_migrate_vhd_ephemeral(self):
+    @mock.patch.object(os_xenapi.client.vm_management, 'transfer_vhd')
+    def test_migrate_vhd_ephemeral(self, mock_trans_vhd):
         session = mock.Mock()
         instance = {"uuid": "a"}
 
         vm_utils.migrate_vhd(session, instance, "vdi_uuid", "dest",
                              "sr_path", 2, 2)
 
-        self._assert_transfer_called(session, "a_ephemeral_2")
+        mock_trans_vhd.assert_called_once_with(session, "a_ephemeral_2",
+                                               "dest", "vdi_uuid", "sr_path",
+                                               2)
 
-    def test_migrate_vhd_converts_exceptions(self):
+    @mock.patch.object(os_xenapi.client.vm_management, 'transfer_vhd')
+    def test_migrate_vhd_converts_exceptions(self, mock_trans_vhd):
         session = mock.Mock()
         session.XenAPI.Failure = test.TestingException
-        session.call_plugin_serialized.side_effect = test.TestingException()
+        mock_trans_vhd.side_effect = test.TestingException()
         instance = {"uuid": "a"}
 
         self.assertRaises(exception.MigrationError, vm_utils.migrate_vhd,
                           session, instance, "vdi_uuid", "dest", "sr_path", 2)
-        self._assert_transfer_called(session, "a")
+        mock_trans_vhd.assert_called_once_with(session, "a",
+                                               "dest", "vdi_uuid", "sr_path",
+                                               2)
 
 
 class StripBaseMirrorTestCase(VMUtilsTestBase):
@@ -2421,9 +2305,6 @@ class ResizeFunctionTestCase(test.NoDBTestCase):
 
     def test_empty(self):
         self._test_is_resize("", "")
-
-    def test_bad_version(self):
-        self._test_is_resize("XenServer", "asdf")
 
 
 class VMInfoTests(VMUtilsTestBase):

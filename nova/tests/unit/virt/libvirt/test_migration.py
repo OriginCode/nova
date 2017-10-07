@@ -29,10 +29,6 @@ from nova.virt.libvirt import guest as libvirt_guest
 from nova.virt.libvirt import host
 from nova.virt.libvirt import migration
 
-libvirt_guest.libvirt = fakelibvirt
-host.libvirt = fakelibvirt
-migration.libvirt = fakelibvirt
-
 
 class UtilityMigrationTestCase(test.NoDBTestCase):
 
@@ -48,7 +44,7 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
     def test_graphics_listen_addrs_empty(self):
         data = objects.LibvirtLiveMigrateData()
         addrs = migration.graphics_listen_addrs(data)
-        self.assertIsNone(None, addrs)
+        self.assertIsNone(addrs)
 
     def test_graphics_listen_addrs_spice(self):
         data = objects.LibvirtLiveMigrateData(
@@ -77,6 +73,23 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
         addr = migration.serial_listen_addr(data)
         self.assertIsNone(addr)
 
+    def test_serial_listen_addr_None(self):
+        data = objects.LibvirtLiveMigrateData()
+        data.serial_listen_addr = None
+        addr = migration.serial_listen_addr(data)
+        self.assertIsNone(addr)
+
+    def test_serial_listen_ports(self):
+        data = objects.LibvirtLiveMigrateData(
+            serial_listen_ports=[1, 2, 3])
+        ports = migration.serial_listen_ports(data)
+        self.assertEqual([1, 2, 3], ports)
+
+    def test_serial_listen_ports_emtpy(self):
+        data = objects.LibvirtLiveMigrateData()
+        ports = migration.serial_listen_ports(data)
+        self.assertEqual([], ports)
+
     @mock.patch('lxml.etree.tostring')
     @mock.patch.object(migration, '_update_perf_events_xml')
     @mock.patch.object(migration, '_update_graphics_xml')
@@ -99,26 +112,60 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
 
     def test_update_serial_xml_serial(self):
         data = objects.LibvirtLiveMigrateData(
-            serial_listen_addr='127.0.0.100')
+            serial_listen_addr='127.0.0.100',
+            serial_listen_ports=[2001])
         xml = """<domain>
   <devices>
     <serial type="tcp">
-      <source host="127.0.0.1"/>
+      <source host="127.0.0.1" service="2000"/>
+      <target type="serial" port="0"/>
     </serial>
   </devices>
 </domain>"""
         doc = etree.fromstring(xml)
         res = etree.tostring(migration._update_serial_xml(doc, data))
-        new_xml = xml.replace("127.0.0.1", "127.0.0.100")
+        new_xml = xml.replace("127.0.0.1", "127.0.0.100").replace(
+            "2000", "2001")
         self.assertThat(res, matchers.XMLMatches(new_xml))
 
     def test_update_serial_xml_console(self):
         data = objects.LibvirtLiveMigrateData(
-            serial_listen_addr='127.0.0.100')
+            serial_listen_addr='127.0.0.100',
+            serial_listen_ports=[299, 300])
         xml = """<domain>
   <devices>
     <console type="tcp">
-      <source host="127.0.0.1"/>
+      <source host="127.0.0.1" service="2001"/>
+      <target type="serial" port="0"/>
+    </console>
+    <console type="tcp">
+      <source host="127.0.0.1" service="2002"/>
+      <target type="serial" port="1"/>
+    </console>
+  </devices>
+</domain>"""
+        doc = etree.fromstring(xml)
+        res = etree.tostring(migration._update_serial_xml(doc, data))
+        new_xml = xml.replace("127.0.0.1", "127.0.0.100").replace(
+            "2001", "299").replace("2002", "300")
+
+        self.assertThat(res, matchers.XMLMatches(new_xml))
+
+    def test_update_serial_xml_without_ports(self):
+        # This test is for backwards compatibility when we don't
+        # get the serial ports from the target node.
+        data = objects.LibvirtLiveMigrateData(
+            serial_listen_addr='127.0.0.100',
+            serial_listen_ports=[])
+        xml = """<domain>
+  <devices>
+    <console type="tcp">
+      <source host="127.0.0.1" service="2001"/>
+      <target type="serial" port="0"/>
+    </console>
+    <console type="tcp">
+      <source host="127.0.0.1" service="2002"/>
+      <target type="serial" port="1"/>
     </console>
   </devices>
 </domain>"""
@@ -260,6 +307,8 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
 class MigrationMonitorTestCase(test.NoDBTestCase):
     def setUp(self):
         super(MigrationMonitorTestCase, self).setUp()
+
+        self.useFixture(fakelibvirt.FakeLibvirtFixture())
 
         flavor = objects.Flavor(memory_mb=2048,
                                 swap=0,
@@ -679,3 +728,24 @@ class MigrationMonitorTestCase(test.NoDBTestCase):
                                     self.instance, tasks)
 
         self.assertFalse(mock_resume.called)
+
+    def test_live_migration_downtime_steps(self):
+        self.flags(live_migration_downtime=400, group='libvirt')
+        self.flags(live_migration_downtime_steps=10, group='libvirt')
+        self.flags(live_migration_downtime_delay=30, group='libvirt')
+
+        steps = migration.downtime_steps(3.0)
+
+        self.assertEqual([
+            (0, 40),
+            (90, 76),
+            (180, 112),
+            (270, 148),
+            (360, 184),
+            (450, 220),
+            (540, 256),
+            (630, 292),
+            (720, 328),
+            (810, 364),
+            (900, 400),
+        ], list(steps))

@@ -22,16 +22,14 @@ import errno
 import os
 import re
 
-from lxml import etree
 from oslo_concurrency import processutils
 from oslo_log import log as logging
 
-from nova.compute import arch
-from nova.compute import vm_mode
 import nova.conf
 from nova.i18n import _
-from nova.i18n import _LI
+from nova.objects import fields as obj_fields
 from nova import utils
+from nova.virt.disk import api as disk
 from nova.virt import images
 from nova.virt.libvirt import config as vconfig
 from nova.virt.libvirt.volume import remotefs
@@ -98,6 +96,33 @@ def create_cow_image(backing_file, path, size=None):
     execute(*cmd)
 
 
+def create_ploop_image(disk_format, path, size, fs_type):
+    """Create ploop image
+
+    :param disk_format: Disk image format (as known by ploop)
+    :param path: Desired location of the ploop image
+    :param size: Desired size of ploop image. May be given as an int or
+                 a string. If given as an int, it will be interpreted
+                 as bytes. If it's a string, it should consist of a number
+                 with an optional suffix ('K' for Kibibytes,
+                 M for Mebibytes, 'G' for Gibibytes, 'T' for Tebibytes).
+                 If no suffix is given, it will be interpreted as bytes.
+    :param fs_type: Filesystem type
+    """
+    if not fs_type:
+        fs_type = CONF.default_ephemeral_format or \
+                  disk.FS_FORMAT_EXT4
+    execute('mkdir', '-p', path)
+    disk_path = os.path.join(path, 'root.hds')
+    execute('ploop', 'init', '-s', size, '-f', disk_format, '-t', fs_type,
+            disk_path, run_as_root=True, check_exit_code=True)
+    # Add read access for all users, because "ploop init" creates
+    # disk with rw rights only for root. OpenStack user should have access
+    # to the disk to request info via "qemu-img info"
+    execute('chmod', '-R', 'a+r', path,
+            run_as_root=True, check_exit_code=True)
+
+
 def pick_disk_driver_name(hypervisor_version, is_block_dev=False):
     """Pick the libvirt primary backend driver name
 
@@ -140,7 +165,7 @@ def pick_disk_driver_name(hypervisor_version, is_block_dev=False):
                     else:
                         return "tap"
                 else:
-                    LOG.info(_LI("tap-ctl check: %s"), out)
+                    LOG.info("tap-ctl check: %s", out)
             except OSError as exc:
                 if exc.errno == errno.ENOENT:
                     LOG.debug("tap-ctl tool is not installed")
@@ -245,7 +270,16 @@ def update_mtime(path):
 
     :param path: File bump the mtime on
     """
-    execute('touch', '-c', path, run_as_root=True)
+    try:
+        execute('touch', '-c', path, run_as_root=True)
+    except processutils.ProcessExecutionError as exc:
+        # touch can intermittently fail when launching several instances with
+        # the same base image and using shared storage, so log the exception
+        # but don't fail. Ideally we'd know if we were on shared storage and
+        # would re-raise the error if we are not on shared storage.
+        LOG.warning("Failed to update mtime on path %(path)s. "
+                    "Error: %(error)s",
+                    {'path': path, "error": exc})
 
 
 def _id_map_to_config(id_map):
@@ -333,37 +367,33 @@ def path_exists(path):
     return os.path.exists(path)
 
 
-def find_disk(virt_dom):
+def find_disk(guest):
     """Find root device path for instance
 
     May be file or device
     """
-    xml_desc = virt_dom.XMLDesc(0)
-    domain = etree.fromstring(xml_desc)
-    os_type = domain.find('os/type').text
-    driver = None
-    if CONF.libvirt.virt_type == 'lxc':
-        filesystem = domain.find('devices/filesystem')
-        driver = filesystem.find('driver')
+    guest_config = guest.get_config()
 
-        source = filesystem.find('source')
-        disk_path = source.get('dir')
+    disk_format = None
+    if guest_config.virt_type == 'lxc':
+        filesystem = next(d for d in guest_config.devices
+                          if isinstance(d, vconfig.LibvirtConfigGuestFilesys))
+        disk_path = filesystem.source_dir
         disk_path = disk_path[0:disk_path.rfind('rootfs')]
         disk_path = os.path.join(disk_path, 'disk')
-    elif CONF.libvirt.virt_type == 'parallels' and os_type == vm_mode.EXE:
-        filesystem = domain.find('devices/filesystem')
-        driver = filesystem.find('driver')
-
-        source = filesystem.find('source')
-        disk_path = source.get('file')
+    elif (guest_config.virt_type == 'parallels' and
+          guest_config.os_type == obj_fields.VMMode.EXE):
+        filesystem = next(d for d in guest_config.devices
+                          if isinstance(d, vconfig.LibvirtConfigGuestFilesys))
+        disk_format = filesystem.driver_type
+        disk_path = filesystem.source_file
     else:
-        disk = domain.find('devices/disk')
-        driver = disk.find('driver')
-
-        source = disk.find('source')
-        disk_path = source.get('file') or source.get('dev')
-        if not disk_path and CONF.libvirt.images_type == 'rbd':
-            disk_path = source.get('name')
+        disk = next(d for d in guest_config.devices
+                    if isinstance(d, vconfig.LibvirtConfigGuestDisk))
+        disk_format = disk.driver_format
+        disk_path = disk.source_path if disk.source_type != 'mount' else None
+        if not disk_path and disk.source_protocol == 'rbd':
+            disk_path = disk.source_name
             if disk_path:
                 disk_path = 'rbd:' + disk_path
 
@@ -371,15 +401,11 @@ def find_disk(virt_dom):
         raise RuntimeError(_("Can't retrieve root device path "
                              "from instance libvirt configuration"))
 
-    if driver is not None:
-        format = driver.get('type')
-        # This is a legacy quirk of libvirt/xen. Everything else should
-        # report the on-disk format in type.
-        if format == 'aio':
-            format = 'raw'
-    else:
-        format = None
-    return (disk_path, format)
+    # This is a legacy quirk of libvirt/xen. Everything else should
+    # report the on-disk format in type.
+    if disk_format == 'aio':
+        disk_format = 'raw'
+    return (disk_path, disk_format)
 
 
 def get_disk_type_from_path(path):
@@ -488,26 +514,45 @@ def get_arch(image_meta):
         if image_arch is not None:
             return image_arch
 
-    return arch.from_host()
+    return obj_fields.Architecture.from_host()
 
 
 def is_mounted(mount_path, source=None):
     """Check if the given source is mounted at given destination point."""
-    try:
-        check_cmd = ['findmnt', '--target', mount_path]
-        if source:
-            check_cmd.extend(['--source', source])
+    if not os.path.ismount(mount_path):
+        return False
 
-        utils.execute(*check_cmd)
+    if source is None:
         return True
-    except processutils.ProcessExecutionError:
-        return False
-    except OSError as exc:
-        # info since it's not required to have this tool.
-        if exc.errno == errno.ENOENT:
-            LOG.info(_LI("findmnt tool is not installed"))
-        return False
+
+    with open('/proc/mounts', 'r') as proc_mounts:
+        mounts = [mount.split() for mount in proc_mounts.readlines()]
+        return any(mnt[0] == source and mnt[1] == mount_path for mnt in mounts)
 
 
 def is_valid_hostname(hostname):
     return re.match(r"^[\w\-\.:]+$", hostname)
+
+
+def last_bytes(file_like_object, num):
+    """Return num bytes from the end of the file, and remaining byte count.
+
+    :param file_like_object: The file to read
+    :param num: The number of bytes to return
+
+    :returns: (data, remaining)
+    """
+
+    try:
+        file_like_object.seek(-num, os.SEEK_END)
+    except IOError as e:
+        # seek() fails with EINVAL when trying to go before the start of
+        # the file. It means that num is larger than the file size, so
+        # just go to the start.
+        if e.errno == errno.EINVAL:
+            file_like_object.seek(0, os.SEEK_SET)
+        else:
+            raise
+
+    remaining = file_like_object.tell()
+    return (file_like_object.read(), remaining)

@@ -19,16 +19,24 @@ from nova.policies import base
 
 
 BASE_POLICY_NAME = 'os_compute_api:os-rescue'
-POLICY_ROOT = 'os_compute_api:os-rescue:%s'
 
 
 rescue_policies = [
-    policy.RuleDefault(
-        name=POLICY_ROOT % 'discoverable',
-        check_str=base.RULE_ANY),
-    policy.RuleDefault(
-        name=BASE_POLICY_NAME,
-        check_str=base.RULE_ADMIN_OR_OWNER),
+    policy.DocumentedRuleDefault(
+        BASE_POLICY_NAME,
+        base.RULE_ADMIN_OR_OWNER,
+        "Rescue/unrescue a server",
+        [
+            {
+                'path': '/servers/{server_id}/action (rescue)',
+                'method': 'POST'
+            },
+            {
+                'path': '/servers/{server_id}/action (unrescue)',
+                'method': 'POST'
+            }
+        ]
+    ),
 ]
 
 

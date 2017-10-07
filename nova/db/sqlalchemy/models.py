@@ -81,10 +81,12 @@ class Service(BASE, NovaBase, models.SoftDeleteMixin):
         schema.UniqueConstraint("host", "topic", "deleted",
                                 name="uniq_services0host0topic0deleted"),
         schema.UniqueConstraint("host", "binary", "deleted",
-                                name="uniq_services0host0binary0deleted")
-        )
+                                name="uniq_services0host0binary0deleted"),
+        Index('services_uuid_idx', 'uuid', unique=True),
+    )
 
     id = Column(Integer, primary_key=True)
+    uuid = Column(String(36), nullable=True)
     host = Column(String(255))  # , ForeignKey('hosts.id'))
     binary = Column(String(255))
     topic = Column(String(255))
@@ -110,6 +112,7 @@ class ComputeNode(BASE, NovaBase, models.SoftDeleteMixin):
 
     __tablename__ = 'compute_nodes'
     __table_args__ = (
+        Index('compute_nodes_uuid_idx', 'uuid', unique=True),
         schema.UniqueConstraint(
             'host', 'hypervisor_hostname', 'deleted',
             name="uniq_compute_nodes0host0hypervisor_hostname0deleted"),
@@ -177,6 +180,7 @@ class ComputeNode(BASE, NovaBase, models.SoftDeleteMixin):
     ram_allocation_ratio = Column(Float, nullable=True)
     cpu_allocation_ratio = Column(Float, nullable=True)
     disk_allocation_ratio = Column(Float, nullable=True)
+    mapped = Column(Integer, nullable=True, default=0)
 
 
 class Certificate(BASE, NovaBase, models.SoftDeleteMixin):
@@ -198,6 +202,7 @@ class Instance(BASE, NovaBase, models.SoftDeleteMixin):
     __tablename__ = 'instances'
     __table_args__ = (
         Index('uuid', 'uuid', unique=True),
+        Index('instances_project_id_idx', 'project_id'),
         Index('instances_project_id_deleted_idx',
               'project_id', 'deleted'),
         Index('instances_reservation_id_idx',
@@ -214,6 +219,8 @@ class Instance(BASE, NovaBase, models.SoftDeleteMixin):
               'host', 'deleted', 'cleaned'),
         Index('instances_deleted_created_at_idx',
               'deleted', 'created_at'),
+        Index('instances_updated_at_project_id_idx',
+              'updated_at', 'project_id'),
         schema.UniqueConstraint('uuid', name='uniq_instances0uuid'),
     )
     injected_files = []
@@ -282,9 +289,6 @@ class Instance(BASE, NovaBase, models.SoftDeleteMixin):
 
     reservation_id = Column(String(255))
 
-    # NOTE(sbiswas7): 'scheduled_at' is still in the database
-    # and can be removed in the future release.
-
     launched_at = Column(DateTime)
     terminated_at = Column(DateTime)
 
@@ -337,7 +341,12 @@ class Instance(BASE, NovaBase, models.SoftDeleteMixin):
     # OpenStack compute cell name.  This will only be set at the top of
     # the cells tree and it'll be a full cell name such as 'api!hop1!hop2'
     cell_name = Column(String(255))
-    internal_id = Column(Integer)
+
+    # NOTE(pumaranikar): internal_id attribute is no longer used (bug 1441242)
+    # Hence, removing from object layer in current release (Ocata) and will
+    # treated as deprecated. The column can be removed from schema with
+    # a migration at the start of next release.
+    # internal_id = Column(Integer)
 
     # Records whether an instance has been deleted from disk
     cleaned = Column(Integer, default=0)
@@ -537,16 +546,14 @@ class Reservation(BASE, NovaBase, models.SoftDeleteMixin):
                          'QuotaUsage.deleted == 0)')
 
 
+# TODO(macsz) This class can be removed. It might need a DB migration to drop
+# this.
 class Snapshot(BASE, NovaBase, models.SoftDeleteMixin):
     """Represents a block storage device that can be attached to a VM."""
     __tablename__ = 'snapshots'
     __table_args__ = ()
     id = Column(String(36), primary_key=True, nullable=False)
     deleted = Column(String(36), default="")
-
-    @property
-    def name(self):
-        return CONF.snapshot_name_template % self.id
 
     @property
     def volume_name(self):
@@ -619,6 +626,8 @@ class BlockDeviceMapping(BASE, NovaBase, models.SoftDeleteMixin):
     connection_info = Column(MediumText())
 
     tag = Column(String(255))
+
+    attachment_id = Column(String(36))
 
 
 class SecurityGroupInstanceAssociation(BASE, NovaBase, models.SoftDeleteMixin):
@@ -1415,7 +1424,7 @@ class PciDevice(BASE, NovaBase, models.SoftDeleteMixin):
             name="uniq_pci_devices0compute_node_id0address0deleted")
     )
     id = Column(Integer, primary_key=True)
-
+    uuid = Column(String(36))
     compute_node_id = Column(Integer, ForeignKey('compute_nodes.id'),
                              nullable=False)
 

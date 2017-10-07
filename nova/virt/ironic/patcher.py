@@ -1,5 +1,3 @@
-# coding=utf-8
-#
 # Copyright 2014 Hewlett-Packard Development Company, L.P.
 # Copyright 2014 Red Hat, Inc.
 # All Rights Reserved.
@@ -21,7 +19,7 @@ Helper classes for Ironic HTTP PATCH creation.
 """
 
 from oslo_serialization import jsonutils
-import six
+
 
 import nova.conf
 
@@ -43,7 +41,7 @@ class GenericDriverFields(object):
         self.node = node
 
     def get_deploy_patch(self, instance, image_meta, flavor,
-                         preserve_ephemeral=None):
+                         preserve_ephemeral=None, boot_from_volume=False):
         """Build a patch to add the required fields to deploy a node.
 
         :param instance: the instance object.
@@ -51,12 +49,15 @@ class GenericDriverFields(object):
         :param flavor: the flavor object.
         :param preserve_ephemeral: preserve_ephemeral status (bool) to be
                                    specified during rebuild.
+        :param boot_from_volume: True if node boots from volume. Then,
+                                 image_source is not passed to ironic.
         :returns: a json-patch with the fields that needs to be updated.
 
         """
         patch = []
-        patch.append({'path': '/instance_info/image_source', 'op': 'add',
-                      'value': image_meta.id})
+        if not boot_from_volume:
+            patch.append({'path': '/instance_info/image_source', 'op': 'add',
+                          'value': image_meta.id})
         patch.append({'path': '/instance_info/root_gb', 'op': 'add',
                       'value': str(instance.flavor.root_gb)})
         patch.append({'path': '/instance_info/swap_mb', 'op': 'add',
@@ -65,6 +66,8 @@ class GenericDriverFields(object):
                       'op': 'add', 'value': instance.display_name})
         patch.append({'path': '/instance_info/vcpus', 'op': 'add',
                       'value': str(instance.flavor.vcpus)})
+        patch.append({'path': '/instance_info/nova_host_id', 'op': 'add',
+                      'value': instance.get('host')})
         patch.append({'path': '/instance_info/memory_mb', 'op': 'add',
                       'value': str(instance.flavor.memory_mb)})
         patch.append({'path': '/instance_info/local_gb', 'op': 'add',
@@ -91,7 +94,7 @@ class GenericDriverFields(object):
         # scan through the extra_specs values and ignore the keys
         # not starting with keyword 'capabilities'.
 
-        for key, val in six.iteritems(extra_specs):
+        for key, val in extra_specs.items():
             if not key.startswith('capabilities:'):
                 continue
 

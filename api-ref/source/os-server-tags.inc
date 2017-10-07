@@ -13,7 +13,7 @@ Tags have the following restrictions:
 
 -  Tag is a Unicode bytestring no longer than 60 characters.
 
--  Tags are case sensitive.
+-  Tag is a non-empty string.
 
 -  '/' is not allowed to be in a tag name
 

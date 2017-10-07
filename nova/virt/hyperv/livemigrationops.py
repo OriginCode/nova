@@ -77,8 +77,7 @@ class LiveMigrationOps(object):
             with excutils.save_and_reraise_exception():
                 LOG.debug("Calling live migration recover_method "
                           "for instance: %s", instance_name)
-                recover_method(context, instance_ref, dest, block_migration,
-                               migrate_data)
+                recover_method(context, instance_ref, dest, migrate_data)
 
         LOG.debug("Calling live migration post_method for instance: %s",
                   instance_name)
@@ -96,7 +95,7 @@ class LiveMigrationOps(object):
             if not boot_from_volume and instance.image_ref:
                 self._imagecache.get_cached_image(context, instance)
 
-        self._volumeops.initialize_volumes_connection(block_device_info)
+        self._volumeops.connect_volumes(block_device_info)
 
         disk_path_mapping = self._volumeops.get_disk_path_mapping(
             block_device_info)
@@ -120,6 +119,7 @@ class LiveMigrationOps(object):
                                            network_info, block_migration):
         LOG.debug("post_live_migration_at_destination called",
                   instance=instance_ref)
+        self._vmops.plug_vifs(instance_ref, network_info)
 
     def check_can_live_migrate_destination(self, ctxt, instance_ref,
                                            src_compute_info, dst_compute_info,
@@ -139,5 +139,6 @@ class LiveMigrationOps(object):
 
     def check_can_live_migrate_source(self, ctxt, instance_ref,
                                       dest_check_data):
-        LOG.debug("check_can_live_migrate_source called", instance_ref)
+        LOG.debug("check_can_live_migrate_source called",
+                  instance=instance_ref)
         return dest_check_data

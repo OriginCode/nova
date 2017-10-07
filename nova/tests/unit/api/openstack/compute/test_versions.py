@@ -14,7 +14,6 @@
 #    under the License.
 
 import copy
-import uuid as stdlib_uuid
 
 from oslo_serialization import jsonutils
 
@@ -23,6 +22,7 @@ from nova.api.openstack.compute import views
 from nova import test
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit import matchers
+from nova.tests import uuidsentinel as uuids
 from nova import wsgi
 
 
@@ -104,7 +104,7 @@ class VersionsTestV21WithV2CompatibleWrapper(test.NoDBTestCase):
 
     @property
     def wsgi_app(self):
-        return fakes.wsgi_app_v21(v2_compatible=True, init_only=('versions',))
+        return fakes.wsgi_app_v21(v2_compatible=True)
 
     def test_get_version_list(self):
         req = fakes.HTTPRequest.blank('/', base_url='')
@@ -259,7 +259,7 @@ class VersionsTestV21WithV2CompatibleWrapper(test.NoDBTestCase):
         self.assertEqual("application/json", res.content_type)
 
     def test_multi_choice_server(self):
-        uuid = str(stdlib_uuid.uuid4())
+        uuid = uuids.fake
         req = fakes.HTTPRequest.blank('/servers/' + uuid, base_url='')
         req.accept = "application/json"
         res = req.get_response(self.wsgi_app)
@@ -345,8 +345,7 @@ class VersionsViewBuilderTests(test.NoDBTestCase):
 
         self.assertEqual(expected, output)
 
-    def _test_view_builder_osapi_compute_link_prefix(self,
-                                                     href=None):
+    def _test_view_builder_compute_link_prefix(self, href=None):
         base_url = "http://example.org/v2.1/"
         if href is None:
             href = base_url
@@ -382,13 +381,13 @@ class VersionsViewBuilderTests(test.NoDBTestCase):
         output = builder.build_version(version_data)
         self.assertEqual(expected, output)
 
-    def test_view_builder_with_osapi_compute_link_prefix(self):
-        self.flags(osapi_compute_link_prefix='http://zoo.com:42')
+    def test_view_builder_with_compute_link_prefix(self):
+        self.flags(compute_link_prefix='http://zoo.com:42', group='api')
         href = "http://zoo.com:42/v2.1/"
-        self._test_view_builder_osapi_compute_link_prefix(href)
+        self._test_view_builder_compute_link_prefix(href)
 
-    def test_view_builder_without_osapi_compute_link_prefix(self):
-        self._test_view_builder_osapi_compute_link_prefix()
+    def test_view_builder_without_compute_link_prefix(self):
+        self._test_view_builder_compute_link_prefix()
 
     def test_generate_href(self):
         base_url = "http://example.org/app/"
@@ -447,7 +446,7 @@ class VersionsTestV21(test.NoDBTestCase):
 
     @property
     def wsgi_app(self):
-        return fakes.wsgi_app_v21(init_only=('versions',))
+        return fakes.wsgi_app_v21()
 
     def test_get_version_list_302(self):
         req = fakes.HTTPRequest.blank('/v2.1')
@@ -512,7 +511,7 @@ class VersionBehindSslTestCase(test.NoDBTestCase):
 
     @property
     def wsgi_app(self):
-        return fakes.wsgi_app_v21(v2_compatible=True, init_only=('versions',))
+        return fakes.wsgi_app_v21(v2_compatible=True)
 
     def test_versions_without_headers(self):
         req = wsgi.Request.blank('/')

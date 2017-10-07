@@ -108,13 +108,14 @@ class ExtendedIpsMacTestV21(test.TestCase):
     def setUp(self):
         super(ExtendedIpsMacTestV21, self).setUp()
         fakes.stub_out_nw_api(self)
+        fakes.stub_out_secgroup_api(self)
         self.stub_out('nova.compute.api.API.get', fake_compute_get)
         self.stub_out('nova.compute.api.API.get_all', fake_compute_get_all)
 
     def _make_request(self, url):
         req = fakes.HTTPRequest.blank(url)
         req.headers['Accept'] = self.content_type
-        res = req.get_response(fakes.wsgi_app_v21(init_only=('servers',)))
+        res = req.get_response(fakes.wsgi_app_v21())
         return res
 
     def _get_server(self, body):
@@ -134,7 +135,7 @@ class ExtendedIpsMacTestV21(test.TestCase):
             results.append({'address': ip.get('addr'),
                             'mac_address': ip.get('%smac_addr' % self.prefix)})
 
-        self.assertEqual(ALL_IPS, sorted(results))
+        self.assertJsonEqual(ALL_IPS, results)
 
     def test_show(self):
         url = '/v2/fake/servers/%s' % UUID3

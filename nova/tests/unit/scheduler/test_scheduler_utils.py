@@ -15,7 +15,6 @@
 """
 Tests For Scheduler Utils
 """
-import uuid
 
 import mock
 import six
@@ -203,7 +202,7 @@ class SchedulerUtilsTestCase(test.NoDBTestCase):
                                                       'force-node2'])
 
     def test_populate_retry_exception_at_max_attempts(self):
-        self.flags(scheduler_max_attempts=2)
+        self.flags(max_attempts=2, group='scheduler')
         msg = 'The exception text was preserved!'
         filter_properties = dict(retry=dict(num_attempts=2, hosts=[],
                                             exc_reason=[msg]))
@@ -243,15 +242,16 @@ class SchedulerUtilsTestCase(test.NoDBTestCase):
                                   [('bar', -2.1)])
 
     def test_validate_filters_configured(self):
-        self.flags(scheduler_default_filters='FakeFilter1,FakeFilter2')
+        self.flags(enabled_filters='FakeFilter1,FakeFilter2',
+                   group='filter_scheduler')
         self.assertTrue(scheduler_utils.validate_filter('FakeFilter1'))
         self.assertTrue(scheduler_utils.validate_filter('FakeFilter2'))
         self.assertFalse(scheduler_utils.validate_filter('FakeFilter3'))
 
     def test_validate_weighers_configured(self):
-        self.flags(scheduler_weight_classes=
-                   ['ServerGroupSoftAntiAffinityWeigher',
-                    'FakeFilter1'])
+        self.flags(weight_classes=[
+            'ServerGroupSoftAntiAffinityWeigher', 'FakeFilter1'],
+            group='filter_scheduler')
 
         self.assertTrue(scheduler_utils.validate_weigher(
             'ServerGroupSoftAntiAffinityWeigher'))
@@ -271,7 +271,7 @@ class SchedulerUtilsTestCase(test.NoDBTestCase):
 
         group = objects.InstanceGroup()
         group.name = 'pele'
-        group.uuid = str(uuid.uuid4())
+        group.uuid = uuids.fake
         group.members = [instance.uuid]
         group.policies = [policy]
         return group
@@ -304,14 +304,14 @@ class SchedulerUtilsTestCase(test.NoDBTestCase):
         self.assertIsNone(group_info)
 
     def _get_group_details_with_filter_not_configured(self, policy):
-        self.flags(scheduler_default_filters=['fake'])
-        self.flags(scheduler_weight_classes=['fake'])
+        self.flags(enabled_filters=['fake'], group='filter_scheduler')
+        self.flags(weight_classes=['fake'], group='filter_scheduler')
 
         instance = fake_instance.fake_instance_obj(self.context,
                 params={'host': 'hostA'})
 
         group = objects.InstanceGroup()
-        group.uuid = str(uuid.uuid4())
+        group.uuid = uuids.fake
         group.members = [instance.uuid]
         group.policies = [policy]
 
@@ -334,43 +334,42 @@ class SchedulerUtilsTestCase(test.NoDBTestCase):
             self._get_group_details_with_filter_not_configured(policy)
 
     @mock.patch.object(scheduler_utils, '_get_group_details')
-    def test_setup_instance_group_in_filter_properties(self, mock_ggd):
+    def test_setup_instance_group_in_request_spec(self, mock_ggd):
         mock_ggd.return_value = scheduler_utils.GroupDetails(
             hosts=set(['hostA', 'hostB']), policies=['policy'],
             members=['instance1'])
-        spec = {'instance_properties': {'uuid': uuids.instance}}
-        filter_props = {'group_hosts': ['hostC']}
+        spec = objects.RequestSpec(instance_uuid=uuids.instance)
+        spec.instance_group = objects.InstanceGroup(hosts=['hostC'])
 
-        scheduler_utils.setup_instance_group(self.context, spec, filter_props)
+        scheduler_utils.setup_instance_group(self.context, spec)
 
         mock_ggd.assert_called_once_with(self.context, uuids.instance,
                                          ['hostC'])
-        expected_filter_props = {'group_updated': True,
-                                 'group_hosts': set(['hostA', 'hostB']),
-                                 'group_policies': ['policy'],
-                                 'group_members': ['instance1']}
-        self.assertEqual(expected_filter_props, filter_props)
+        # Given it returns a list from a set, make sure it's sorted.
+        self.assertEqual(['hostA', 'hostB'], sorted(spec.instance_group.hosts))
+        self.assertEqual(['policy'], spec.instance_group.policies)
+        self.assertEqual(['instance1'], spec.instance_group.members)
 
     @mock.patch.object(scheduler_utils, '_get_group_details')
     def test_setup_instance_group_with_no_group(self, mock_ggd):
         mock_ggd.return_value = None
-        spec = {'instance_properties': {'uuid': uuids.instance}}
-        filter_props = {'group_hosts': ['hostC']}
+        spec = objects.RequestSpec(instance_uuid=uuids.instance)
+        spec.instance_group = objects.InstanceGroup(hosts=['hostC'])
 
-        scheduler_utils.setup_instance_group(self.context, spec, filter_props)
+        scheduler_utils.setup_instance_group(self.context, spec)
 
         mock_ggd.assert_called_once_with(self.context, uuids.instance,
                                          ['hostC'])
-        self.assertNotIn('group_updated', filter_props)
-        self.assertNotIn('group_policies', filter_props)
-        self.assertEqual(['hostC'], filter_props['group_hosts'])
+        # Make sure the field isn't touched by the caller.
+        self.assertFalse(spec.instance_group.obj_attr_is_set('policies'))
+        self.assertEqual(['hostC'], spec.instance_group.hosts)
 
     @mock.patch.object(scheduler_utils, '_get_group_details')
     def test_setup_instance_group_with_filter_not_configured(self, mock_ggd):
         mock_ggd.side_effect = exception.NoValidHost(reason='whatever')
         spec = {'instance_properties': {'uuid': uuids.instance}}
-        filter_props = {'group_hosts': ['hostC']}
-
+        spec = objects.RequestSpec(instance_uuid=uuids.instance)
+        spec.instance_group = objects.InstanceGroup(hosts=['hostC'])
         self.assertRaises(exception.NoValidHost,
                           scheduler_utils.setup_instance_group,
-                          self.context, spec, filter_props)
+                          self.context, spec)

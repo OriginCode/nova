@@ -28,16 +28,13 @@ from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
 from nova.api import validation
 from nova import compute
-from nova.compute import utils as compute_utils
 from nova import exception
 from nova.i18n import _
-from nova.i18n import _LW
 from nova import network
 from nova.policies import floating_ips as fi_policies
 
 
 LOG = logging.getLogger(__name__)
-ALIAS = 'os-floating-ips'
 
 
 def _translate_floating_ip_view(floating_ip):
@@ -201,14 +198,19 @@ class FloatingIPController(wsgi.Controller):
         except exception.CannotDisassociateAutoAssignedFloatingIP:
             msg = _('Cannot disassociate auto assigned floating IP')
             raise webob.exc.HTTPForbidden(explanation=msg)
+        except exception.FloatingIpNotFoundForAddress as exc:
+            raise webob.exc.HTTPNotFound(explanation=exc.format_message())
 
 
 class FloatingIPActionController(wsgi.Controller):
+    """This API is deprecated from the Microversion '2.44'."""
+
     def __init__(self, *args, **kwargs):
         super(FloatingIPActionController, self).__init__(*args, **kwargs)
         self.compute_api = compute.API()
         self.network_api = network.API()
 
+    @wsgi.Controller.api_version("2.1", "2.43")
     @extensions.expected_errors((400, 403, 404))
     @wsgi.action('addFloatingIp')
     @validation.schema(floating_ips.add_floating_ip)
@@ -221,11 +223,11 @@ class FloatingIPActionController(wsgi.Controller):
 
         instance = common.get_instance(self.compute_api, context, id,
                                        expected_attrs=['flavor'])
-        cached_nwinfo = compute_utils.get_nw_info_for_instance(instance)
+        cached_nwinfo = instance.get_network_info()
         if not cached_nwinfo:
             LOG.warning(
-                _LW('Info cache is %r during associate with no nw_info cache'),
-                    instance.info_cache, instance=instance)
+                'Info cache is %r during associate with no nw_info cache',
+                instance.info_cache, instance=instance)
             msg = _('Instance network is not ready yet')
             raise webob.exc.HTTPBadRequest(explanation=msg)
 
@@ -256,8 +258,8 @@ class FloatingIPActionController(wsgi.Controller):
                         {'address': address, 'id': id})
                 raise webob.exc.HTTPBadRequest(explanation=msg)
             if len(fixed_ips) > 1:
-                LOG.warning(_LW('multiple fixed_ips exist, using the first '
-                                'IPv4 fixed_ip: %s'), fixed_address)
+                LOG.warning('multiple fixed_ips exist, using the first '
+                            'IPv4 fixed_ip: %s', fixed_address)
 
         try:
             self.network_api.associate_floating_ip(context, instance,
@@ -266,6 +268,8 @@ class FloatingIPActionController(wsgi.Controller):
         except exception.FloatingIpAssociated:
             msg = _('floating IP is already associated')
             raise webob.exc.HTTPBadRequest(explanation=msg)
+        except exception.FloatingIpAssociateFailed as e:
+            raise webob.exc.HTTPBadRequest(explanation=e.format_message())
         except exception.NoFloatingIpInterface:
             msg = _('l3driver call to add floating IP failed')
             raise webob.exc.HTTPBadRequest(explanation=msg)
@@ -287,6 +291,7 @@ class FloatingIPActionController(wsgi.Controller):
 
         return webob.Response(status_int=202)
 
+    @wsgi.Controller.api_version("2.1", "2.43")
     @extensions.expected_errors((400, 403, 404, 409))
     @wsgi.action('removeFloatingIp')
     @validation.schema(floating_ips.remove_floating_ip)
@@ -324,21 +329,3 @@ class FloatingIPActionController(wsgi.Controller):
             msg = _("Floating IP %(address)s is not associated with instance "
                     "%(id)s.") % {'address': address, 'id': id}
             raise webob.exc.HTTPConflict(explanation=msg)
-
-
-class FloatingIps(extensions.V21APIExtensionBase):
-    """Floating IPs support."""
-
-    name = "FloatingIps"
-    alias = ALIAS
-    version = 1
-
-    def get_resources(self):
-        resource = [extensions.ResourceExtension(ALIAS,
-                                FloatingIPController())]
-        return resource
-
-    def get_controller_extensions(self):
-        controller = FloatingIPActionController()
-        extension = extensions.ControllerExtension(self, 'servers', controller)
-        return [extension]

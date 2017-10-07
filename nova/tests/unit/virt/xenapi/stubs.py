@@ -13,18 +13,18 @@
 
 """Stubouts, mocks and fixtures for the test suite."""
 
-import mock
 import pickle
 import random
 import sys
 
 import fixtures
+import mock
+from os_xenapi.client import session
+from os_xenapi.client import XenAPI
 from oslo_serialization import jsonutils
-import six
 
 from nova import test
 import nova.tests.unit.image.fake
-from nova.virt.xenapi.client import session
 from nova.virt.xenapi import fake
 from nova.virt.xenapi import vm_utils
 from nova.virt.xenapi import vmops
@@ -56,18 +56,21 @@ def stubout_instance_snapshot(stubs):
 
 
 def stubout_session(stubs, cls, product_version=(5, 6, 2),
-                    product_brand='XenServer', **opt_args):
+                    product_brand='XenServer', platform_version=(1, 9, 0),
+                    **opt_args):
     """Stubs out methods from XenAPISession."""
     stubs.Set(session.XenAPISession, '_create_session',
               lambda s, url: cls(url, **opt_args))
     stubs.Set(session.XenAPISession, '_get_product_version_and_brand',
               lambda s: (product_version, product_brand))
+    stubs.Set(session.XenAPISession, '_get_platform_version',
+              lambda s: platform_version)
 
 
 def stubout_get_this_vm_uuid(stubs):
     def f(session):
-        vms = [rec['uuid'] for ref, rec
-               in six.iteritems(fake.get_all_records('VM'))
+        vms = [rec['uuid'] for rec
+               in fake.get_all_records('VM').values()
                if rec['is_control_domain']]
         return vms[0]
     stubs.Set(vm_utils, 'get_this_vm_uuid', f)
@@ -118,7 +121,7 @@ def stubout_fetch_disk_image(stubs, raise_failure=False):
     def _fake_fetch_disk_image(context, session, instance, name_label, image,
                                image_type):
         if raise_failure:
-            raise fake.Failure("Test Exception raised by "
+            raise XenAPI.Failure("Test Exception raised by "
                                "fake fetch_image_glance_disk")
         elif image_type == vm_utils.ImageType.KERNEL:
             filename = "kernel"
@@ -137,7 +140,7 @@ def stubout_create_vm(stubs):
     """Simulates a failure in create_vm."""
 
     def f(*args):
-        raise fake.Failure("Test Exception raised by fake create_vm")
+        raise XenAPI.Failure("Test Exception raised by fake create_vm")
     stubs.Set(vm_utils, 'create_vm', f)
 
 
@@ -145,7 +148,7 @@ def stubout_attach_disks(stubs):
     """Simulates a failure in _attach_disks."""
 
     def f(*args):
-        raise fake.Failure("Test Exception raised by fake _attach_disks")
+        raise XenAPI.Failure("Test Exception raised by fake _attach_disks")
     stubs.Set(vmops.VMOps, '_attach_disks', f)
 
 
@@ -169,10 +172,12 @@ class FakeSessionForVMTests(fake.SessionBase):
                                   "# Completed on Sun Nov  6 22:49:02 2011\n")
 
     def host_call_plugin(self, _1, _2, plugin, method, _5):
+        plugin = plugin.rstrip('.py')
+
         if plugin == 'glance' and method in ('download_vhd2'):
             root_uuid = _make_fake_vdi()
             return pickle.dumps(dict(root=dict(uuid=root_uuid)))
-        elif (plugin, method) == ("xenhost", "iptables_config"):
+        elif (plugin, method) == ('xenhost', 'iptables_config'):
             return fake.as_json(out=self._fake_iptables_save_output,
                                 err='')
         else:
@@ -182,7 +187,7 @@ class FakeSessionForVMTests(fake.SessionBase):
     def VM_start(self, _1, ref, _2, _3):
         vm = fake.get_record('VM', ref)
         if vm['power_state'] != 'Halted':
-            raise fake.Failure(['VM_BAD_POWER_STATE', ref, 'Halted',
+            raise XenAPI.Failure(['VM_BAD_POWER_STATE', ref, 'Halted',
                                 vm['power_state']])
         vm['power_state'] = 'Running'
         vm['is_a_template'] = False
@@ -214,11 +219,13 @@ class FakeSessionForFirewallTests(FakeSessionForVMTests):
         self._test_case = test_case
 
     def host_call_plugin(self, _1, _2, plugin, method, args):
-        """Mock method four host_call_plugin to be used in unit tests
+        """Mock method for host_call_plugin to be used in unit tests
            for the dom0 iptables Firewall drivers for XenAPI
 
         """
-        if plugin == "xenhost" and method == "iptables_config":
+        plugin = plugin.rstrip('.py')
+
+        if plugin == 'xenhost' and method == 'iptables_config':
             # The command to execute is a json-encoded list
             cmd_args = args.get('cmd_args', None)
             cmd = jsonutils.loads(cmd_args)
@@ -295,7 +302,7 @@ class FakeSessionForVolumeTests(fake.SessionBase):
             if rec['uuid'] == uuid:
                 valid_vdi = True
         if not valid_vdi:
-            raise fake.Failure([['INVALID_VDI', 'session', self._session]])
+            raise XenAPI.Failure([['INVALID_VDI', 'session', self._session]])
 
 
 class FakeSessionForVolumeFailedTests(FakeSessionForVolumeTests):
@@ -303,7 +310,7 @@ class FakeSessionForVolumeFailedTests(FakeSessionForVolumeTests):
     def VDI_introduce(self, _1, uuid, _2, _3, _4, _5,
                       _6, _7, _8, _9, _10, _11):
         # This is for testing failure
-        raise fake.Failure([['INVALID_VDI', 'session', self._session]])
+        raise XenAPI.Failure([['INVALID_VDI', 'session', self._session]])
 
     def PBD_unplug(self, _1, ref):
         rec = fake.get_record('PBD', ref)
@@ -360,14 +367,14 @@ def stub_out_migration_methods(stubs):
 class FakeSessionForFailedMigrateTests(FakeSessionForVMTests):
     def VM_assert_can_migrate(self, session, vmref, migrate_data,
                               live, vdi_map, vif_map, options):
-        raise fake.Failure("XenAPI VM.assert_can_migrate failed")
+        raise XenAPI.Failure("XenAPI VM.assert_can_migrate failed")
 
     def host_migrate_receive(self, session, hostref, networkref, options):
-        raise fake.Failure("XenAPI host.migrate_receive failed")
+        raise XenAPI.Failure("XenAPI host.migrate_receive failed")
 
     def VM_migrate_send(self, session, vmref, migrate_data, islive, vdi_map,
                         vif_map, options):
-        raise fake.Failure("XenAPI VM.migrate_send failed")
+        raise XenAPI.Failure("XenAPI VM.migrate_send failed")
 
 
 def get_fake_session(error=None):
@@ -389,6 +396,10 @@ def get_fake_session(error=None):
 class XenAPITestBase(test.TestCase):
     def setUp(self):
         super(XenAPITestBase, self).setUp()
+        # TODO(mriedem): The tests need to be fixed to work with the
+        # XenAPIOpenVswitchDriver vif driver.
+        self.flags(vif_driver='nova.virt.xenapi.vif.XenAPIBridgeDriver',
+                   group='xenserver')
         self.useFixture(ReplaceModule('XenAPI', fake))
         fake.reset()
 
@@ -396,5 +407,9 @@ class XenAPITestBase(test.TestCase):
 class XenAPITestBaseNoDB(test.NoDBTestCase):
     def setUp(self):
         super(XenAPITestBaseNoDB, self).setUp()
+        # TODO(mriedem): The tests need to be fixed to work with the
+        # XenAPIOpenVswitchDriver vif driver.
+        self.flags(vif_driver='nova.virt.xenapi.vif.XenAPIBridgeDriver',
+                   group='xenserver')
         self.useFixture(ReplaceModule('XenAPI', fake))
         fake.reset()

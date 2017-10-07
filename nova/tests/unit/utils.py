@@ -17,6 +17,7 @@ import platform
 import socket
 import sys
 
+import mock
 from six.moves import range
 
 from nova.compute import flavors
@@ -162,11 +163,15 @@ def get_test_network_info(count=1):
             vlan=FAKE_NETWORK_VLAN,
             bridge_interface=FAKE_NETWORK_INTERFACE,
             injected=False)
+        if CONF.use_neutron:
+            vif_type = network_model.VIF_TYPE_OVS
+        else:
+            vif_type = network_model.VIF_TYPE_BRIDGE
         vif = network_model.VIF(
             id=FAKE_VIF_UUID,
             address=FAKE_VIF_MAC,
             network=network,
-            type=network_model.VIF_TYPE_BRIDGE,
+            type=vif_type,
             devname=None,
             ovs_interfaceid=None)
 
@@ -287,3 +292,37 @@ def obj_called_with(the_mock, *args, **kwargs):
 
 def obj_called_once_with(the_mock, *args, **kwargs):
     return _obj_called_with(the_mock, *args, **kwargs) == 1
+
+
+class CustomMockCallMatcher(object):
+    def __init__(self, comparator):
+        self.comparator = comparator
+
+    def __eq__(self, other):
+        return self.comparator(other)
+
+
+def assert_instance_delete_notification_by_uuid(
+        mock_notify, expected_instance_uuid, expected_notifier,
+        expected_context, expect_targeted_context=False):
+
+    match_by_instance_uuid = CustomMockCallMatcher(
+        lambda instance:
+        instance.uuid == expected_instance_uuid)
+
+    mock_notify.assert_has_calls([
+        mock.call(expected_notifier,
+                  expected_context,
+                  match_by_instance_uuid,
+                  'delete.start'),
+        mock.call(expected_notifier,
+                  expected_context,
+                  match_by_instance_uuid,
+                  'delete.end',
+                  system_metadata={})])
+
+    for call in mock_notify.call_args_list:
+        if expect_targeted_context:
+            assert call[0][1].db_connection is not None
+        else:
+            assert call[0][1].db_connection is None

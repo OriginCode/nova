@@ -27,11 +27,9 @@ from nova.api import validation
 from nova import compute
 from nova import exception
 from nova.i18n import _
-from nova.i18n import _LE
 from nova.policies import migrate_server as ms_policies
 
 LOG = logging.getLogger(__name__)
-ALIAS = "os-migrate-server"
 
 
 class MigrateServerController(wsgi.Controller):
@@ -65,7 +63,7 @@ class MigrateServerController(wsgi.Controller):
     @wsgi.response(202)
     @extensions.expected_errors((400, 404, 409))
     @wsgi.action('os-migrateLive')
-    @validation.schema(migrate_server.migrate_live, "2.1", "2.24")
+    @validation.schema(migrate_server.migrate_live, "2.0", "2.24")
     @validation.schema(migrate_server.migrate_live_v2_25, "2.25", "2.29")
     @validation.schema(migrate_server.migrate_live_v2_30, "2.30")
     def _migrate_live(self, req, id, body):
@@ -94,8 +92,8 @@ class MigrateServerController(wsgi.Controller):
             disk_over_commit = strutils.bool_from_string(disk_over_commit,
                                                          strict=True)
 
+        instance = common.get_instance(self.compute_api, context, id)
         try:
-            instance = common.get_instance(self.compute_api, context, id)
             self.compute_api.live_migrate(context, instance, block_migration,
                                           disk_over_commit, host, force, async)
         except exception.InstanceUnknownCell as e:
@@ -114,9 +112,9 @@ class MigrateServerController(wsgi.Controller):
                 exception.LiveMigrationWithOldNovaNotSupported) as ex:
             if async:
                 with excutils.save_and_reraise_exception():
-                    LOG.error(_LE("Unexpected exception received from "
-                                  "conductor during pre-live-migration checks "
-                                  "'%(ex)s'"), {'ex': ex})
+                    LOG.error("Unexpected exception received from "
+                              "conductor during pre-live-migration checks "
+                              "'%(ex)s'", {'ex': ex})
             else:
                 raise exc.HTTPBadRequest(explanation=ex.format_message())
         except exception.InstanceIsLocked as e:
@@ -132,19 +130,3 @@ class MigrateServerController(wsgi.Controller):
             message = _("Can't force to a non-provided destination")
             raise exc.HTTPBadRequest(explanation=message)
         return force
-
-
-class MigrateServer(extensions.V21APIExtensionBase):
-    """Enable migrate and live-migrate server actions."""
-
-    name = "MigrateServer"
-    alias = ALIAS
-    version = 1
-
-    def get_controller_extensions(self):
-        controller = MigrateServerController()
-        extension = extensions.ControllerExtension(self, 'servers', controller)
-        return [extension]
-
-    def get_resources(self):
-        return []

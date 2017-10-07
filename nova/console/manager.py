@@ -17,12 +17,11 @@
 
 from oslo_log import log as logging
 import oslo_messaging as messaging
-from oslo_utils import importutils
 
 from nova.compute import rpcapi as compute_rpcapi
 import nova.conf
+from nova.console import xvp
 from nova import exception
-from nova.i18n import _LI
 from nova import manager
 from nova import objects
 from nova import utils
@@ -41,17 +40,15 @@ class ConsoleProxyManager(manager.Manager):
 
     target = messaging.Target(version='2.0')
 
-    def __init__(self, console_driver=None, *args, **kwargs):
-        if not console_driver:
-            console_driver = CONF.console_driver
-        self.driver = importutils.import_object(console_driver)
+    def __init__(self, *args, **kwargs):
+        self.driver = xvp.XVPConsoleProxy()
         super(ConsoleProxyManager, self).__init__(service_name='console',
                                                   *args, **kwargs)
         self.driver.host = self.host
         self.compute_rpcapi = compute_rpcapi.ComputeAPI()
 
     def reset(self):
-        LOG.info(_LI('Reloading compute RPC API'))
+        LOG.info('Reloading compute RPC API')
         compute_rpcapi.LAST_VERSION = None
         self.compute_rpcapi = compute_rpcapi.ComputeAPI()
 
@@ -110,7 +107,8 @@ class ConsoleProxyManager(manager.Manager):
             pool_info['password'] = self.driver.fix_pool_password(
                                                     pool_info['password'])
             pool_info['host'] = self.host
-            pool_info['public_hostname'] = CONF.console_public_hostname
+            pool_info['public_hostname'] = \
+                CONF.xenserver.console_public_hostname
             pool_info['console_type'] = self.driver.console_type
             pool_info['compute_host'] = instance_host
             pool = self.db.console_pool_create(context, pool_info)

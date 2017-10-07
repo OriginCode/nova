@@ -58,15 +58,18 @@ class ServerGroupSoftAffinityWeigher(_SoftAffinityWeigherBase):
     warning_sent = False
 
     def weight_multiplier(self):
-        if (CONF.soft_affinity_weight_multiplier < 0 and
+        if (CONF.filter_scheduler.soft_affinity_weight_multiplier < 0 and
                 not self.warning_sent):
             LOG.warning(_LW('For the soft_affinity_weight_multiplier only a '
                             'positive value is meaningful as a negative value '
                             'would mean that the affinity weigher would '
-                            'prefer non-collocating placement.'))
+                            'prefer non-collocating placement. Future '
+                            'versions of nova will restrict the config '
+                            'option to values >=0. Update your configuration '
+                            'file to mitigate future upgrade issues.'))
             self.warning_sent = True
 
-        return CONF.soft_affinity_weight_multiplier
+        return CONF.filter_scheduler.soft_affinity_weight_multiplier
 
 
 class ServerGroupSoftAntiAffinityWeigher(_SoftAffinityWeigherBase):
@@ -74,15 +77,19 @@ class ServerGroupSoftAntiAffinityWeigher(_SoftAffinityWeigherBase):
     warning_sent = False
 
     def weight_multiplier(self):
-        if (CONF.soft_anti_affinity_weight_multiplier < 0 and
+        if (CONF.filter_scheduler.soft_anti_affinity_weight_multiplier < 0 and
                 not self.warning_sent):
             LOG.warning(_LW('For the soft_anti_affinity_weight_multiplier '
                             'only a positive value is meaningful as a '
                             'negative value would mean that the anti-affinity '
-                            'weigher would prefer collocating placement.'))
+                            'weigher would prefer collocating placement. '
+                            'Future versions of nova will restrict the '
+                            'config option to values >=0. Update your '
+                            'configuration file to mitigate future upgrade '
+                            'issues.'))
             self.warning_sent = True
 
-        return CONF.soft_anti_affinity_weight_multiplier
+        return CONF.filter_scheduler.soft_anti_affinity_weight_multiplier
 
     def _weigh_object(self, host_state, request_spec):
         weight = super(ServerGroupSoftAntiAffinityWeigher, self)._weigh_object(

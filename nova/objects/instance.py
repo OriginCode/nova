@@ -20,7 +20,10 @@ from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import timeutils
 from oslo_utils import versionutils
+from sqlalchemy import or_
 from sqlalchemy.orm import joinedload
+from sqlalchemy.sql import func
+from sqlalchemy.sql import null
 
 from nova.cells import opts as cells_opts
 from nova.cells import rpcapi as cells_rpcapi
@@ -31,7 +34,8 @@ from nova import db
 from nova.db.sqlalchemy import api as db_api
 from nova.db.sqlalchemy import models
 from nova import exception
-from nova.i18n import _LE, _LW
+from nova.i18n import _, _LE, _LW
+from nova.network import model as network_model
 from nova import notifications
 from nova import objects
 from nova.objects import base
@@ -88,7 +92,13 @@ def _expected_cols(expected_attrs):
     if complex_cols:
         simple_cols.append('extra')
     simple_cols = [x for x in simple_cols if x not in _INSTANCE_EXTRA_FIELDS]
-    return simple_cols + complex_cols
+    expected_cols = simple_cols + complex_cols
+    # NOTE(pumaranikar): expected_cols list can contain duplicates since
+    # caller appends column attributes to expected_attr without checking if
+    # it is already present in the list or not. Hence, we remove duplicates
+    # here, if any. The resultant list is sorted based on list index to
+    # maintain the insertion order.
+    return sorted(list(set(expected_cols)), key=expected_cols.index)
 
 
 _NO_DATA_SENTINEL = object()
@@ -233,6 +243,19 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         if fields is None or 'metadata' in fields:
             self._orig_metadata = (dict(self.metadata) if
                                    'metadata' in self else {})
+
+    def obj_clone(self):
+        """Create a copy of this instance object."""
+        nobj = super(Instance, self).obj_clone()
+        # Since the base object only does a deep copy of the defined fields,
+        # need to make sure to also copy the additional tracking metadata
+        # attributes so they don't show as changed and cause the metadata
+        # to always be updated even when stale information.
+        if hasattr(self, '_orig_metadata'):
+            nobj._orig_metadata = dict(self._orig_metadata)
+        if hasattr(self, '_orig_system_metadata'):
+            nobj._orig_system_metadata = dict(self._orig_system_metadata)
+        return nobj
 
     def obj_reset_changes(self, fields=None, recursive=False):
         super(Instance, self).obj_reset_changes(fields,
@@ -460,7 +483,17 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         if self.obj_attr_is_set('id'):
             raise exception.ObjectActionError(action='create',
                                               reason='already created')
+        if self.obj_attr_is_set('deleted') and self.deleted:
+            raise exception.ObjectActionError(action='create',
+                                              reason='already deleted')
         updates = self.obj_get_changes()
+
+        # NOTE(danms): We know because of the check above that deleted
+        # is either unset or false. Since we need to avoid passing False
+        # down to the DB layer (which uses an integer), we can always
+        # default it to zero here.
+        updates['deleted'] = 0
+
         expected_attrs = [attr for attr in INSTANCE_DEFAULT_FIELDS
                           if attr in updates]
         if 'security_groups' in updates:
@@ -585,6 +618,10 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         # NOTE(yjiang5): All devices held by PCI tracker, only PCI tracker
         # permitted to update the DB. all change to devices from here will
         # be dropped.
+        pass
+
+    def _save_tags(self, context):
+        # NOTE(gibi): tags are not saved through the instance
         pass
 
     def _save_flavor(self, context):
@@ -805,14 +842,16 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         else:
             raise exception.ObjectActionError(
                 action='obj_load_attr',
-                reason='loading %s requires recursion' % attrname)
+                reason=_('loading %s requires recursion') % attrname)
 
     def _load_fault(self):
         self.fault = objects.InstanceFault.get_latest_for_instance(
             self._context, self.uuid)
 
-    def _load_numa_topology(self, db_topology=None):
-        if db_topology is not None:
+    def _load_numa_topology(self, db_topology=_NO_DATA_SENTINEL):
+        if db_topology is None:
+            self.numa_topology = None
+        elif db_topology is not _NO_DATA_SENTINEL:
             self.numa_topology = \
                 objects.InstanceNUMATopology.obj_from_db_obj(self.uuid,
                                                              db_topology)
@@ -824,9 +863,8 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
             except exception.NumaTopologyNotFound:
                 self.numa_topology = None
 
-    def _load_pci_requests(self, db_requests=None):
-        # FIXME: also do this if none!
-        if db_requests is not None:
+    def _load_pci_requests(self, db_requests=_NO_DATA_SENTINEL):
+        if db_requests is not _NO_DATA_SENTINEL:
             self.pci_requests = objects.InstancePCIRequests.obj_from_db(
                 self._context, self.uuid, db_requests)
         else:
@@ -834,11 +872,13 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
                 objects.InstancePCIRequests.get_by_instance_uuid(
                     self._context, self.uuid)
 
-    def _load_device_metadata(self, db_requests=None):
-        if db_requests is not None:
+    def _load_device_metadata(self, db_dev_meta=_NO_DATA_SENTINEL):
+        if db_dev_meta is None:
+            self.device_metadata = None
+        elif db_dev_meta is not _NO_DATA_SENTINEL:
             self.device_metadata = \
                 objects.InstanceDeviceMetadata.obj_from_db(
-                self._context, db_requests)
+                self._context, db_dev_meta)
         else:
             self.device_metadata = \
                 objects.InstanceDeviceMetadata.get_by_instance_uuid(
@@ -862,8 +902,10 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         instance.system_metadata.update(self.get('system_metadata', {}))
         self.system_metadata = instance.system_metadata
 
-    def _load_vcpu_model(self, db_vcpu_model=None):
+    def _load_vcpu_model(self, db_vcpu_model=_NO_DATA_SENTINEL):
         if db_vcpu_model is None:
+            self.vcpu_model = None
+        elif db_vcpu_model is _NO_DATA_SENTINEL:
             self.vcpu_model = objects.VirtCPUModel.get_by_instance_uuid(
                 self._context, self.uuid)
         else:
@@ -962,6 +1004,12 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         context will be saved which can cause incorrect resource tracking, and
         should be avoided.
         """
+        # First check to see if we even have a migration context set and if not
+        # we can exit early without lazy-loading other attributes.
+        if 'migration_context' in self and self.migration_context is None:
+            yield
+            return
+
         current_values = {}
         for attr_name in _MIGRATION_CONTEXT_ATTRS:
             current_values[attr_name] = getattr(self, attr_name)
@@ -988,7 +1036,7 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         if attrname not in INSTANCE_OPTIONAL_ATTRS:
             raise exception.ObjectActionError(
                 action='obj_load_attr',
-                reason='attribute %s not lazy-loadable' % attrname)
+                reason=_('attribute %s not lazy-loadable') % attrname)
 
         if not self._context:
             raise exception.OrphanedObjectError(method='obj_load_attr',
@@ -1118,6 +1166,15 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         finally:
             self._normalize_cell_name()
 
+    def get_network_info(self):
+        if self.info_cache is None:
+            return network_model.NetworkInfo.hydrate([])
+        return self.info_cache.network_info
+
+    def get_bdms(self):
+        return objects.BlockDeviceMappingList.get_by_instance_uuid(
+            self._context, self.uuid)
+
 
 def _make_instance_list(context, inst_list, db_inst_list, expected_attrs):
     get_fault = expected_attrs and 'fault' in expected_attrs
@@ -1150,7 +1207,10 @@ def _make_instance_list(context, inst_list, db_inst_list, expected_attrs):
 class InstanceList(base.ObjectListBase, base.NovaObject):
     # Version 2.0: Initial Version
     # Version 2.1: Add get_uuids_by_host()
-    VERSION = '2.1'
+    # Version 2.2: Pagination for get_active_by_window_joined()
+    # Version 2.3: Add get_count_by_vm_state()
+    # Version 2.4: Add get_counts()
+    VERSION = '2.4'
 
     fields = {
         'objects': fields.ListOfObjectsField('Instance'),
@@ -1235,16 +1295,16 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
     @db.select_db_reader_mode
     def _db_instance_get_active_by_window_joined(
             context, begin, end, project_id, host, columns_to_join,
-            use_slave=False):
+            use_slave=False, limit=None, marker=None):
         return db.instance_get_active_by_window_joined(
             context, begin, end, project_id, host,
-            columns_to_join=columns_to_join)
+            columns_to_join=columns_to_join, limit=limit, marker=marker)
 
     @base.remotable_classmethod
     def _get_active_by_window_joined(cls, context, begin, end=None,
                                     project_id=None, host=None,
-                                    expected_attrs=None,
-                                    use_slave=False):
+                                    expected_attrs=None, use_slave=False,
+                                    limit=None, marker=None):
         # NOTE(mriedem): We need to convert the begin/end timestamp strings
         # to timezone-aware datetime objects for the DB API call.
         begin = timeutils.parse_isotime(begin)
@@ -1252,15 +1312,15 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
         db_inst_list = cls._db_instance_get_active_by_window_joined(
             context, begin, end, project_id, host,
             columns_to_join=_expected_cols(expected_attrs),
-            use_slave=use_slave)
+            use_slave=use_slave, limit=limit, marker=marker)
         return _make_instance_list(context, cls(), db_inst_list,
                                    expected_attrs)
 
     @classmethod
     def get_active_by_window_joined(cls, context, begin, end=None,
                                     project_id=None, host=None,
-                                    expected_attrs=None,
-                                    use_slave=False):
+                                    expected_attrs=None, use_slave=False,
+                                    limit=None, marker=None):
         """Get instances and joins active during a certain time window.
 
         :param:context: nova request context
@@ -1271,6 +1331,8 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
         :param:expected_attrs: list of related fields that can be joined
         in the database layer when querying for instances
         :param use_slave if True, ship this query off to a DB slave
+        :param limit: maximum number of instances to return per page
+        :param marker: last instance uuid from the previous page
         :returns: InstanceList
 
         """
@@ -1281,7 +1343,8 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
         return cls._get_active_by_window_joined(context, begin, end,
                                                 project_id, host,
                                                 expected_attrs,
-                                                use_slave=use_slave)
+                                                use_slave=use_slave,
+                                                limit=limit, marker=marker)
 
     @base.remotable_classmethod
     def get_by_security_group_id(cls, context, security_group_id):
@@ -1308,12 +1371,11 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
         :returns: A list of instance uuids for which faults were found.
         """
         uuids = [inst.uuid for inst in self]
-        faults = objects.InstanceFaultList.get_by_instance_uuids(
+        faults = objects.InstanceFaultList.get_latest_by_instance_uuids(
             self._context, uuids)
         faults_by_uuid = {}
         for fault in faults:
-            if fault.instance_uuid not in faults_by_uuid:
-                faults_by_uuid[fault.instance_uuid] = fault
+            faults_by_uuid[fault.instance_uuid] = fault
 
         for instance in self:
             if instance.uuid in faults_by_uuid:
@@ -1334,8 +1396,72 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
                                                    columns_to_join=[])
         return [inst['uuid'] for inst in db_instances]
 
+    @staticmethod
+    @db_api.pick_context_manager_reader
+    def _get_count_by_vm_state_in_db(context, project_id, user_id, vm_state):
+        return context.session.query(models.Instance.id).\
+            filter_by(deleted=0).\
+            filter_by(project_id=project_id).\
+            filter_by(user_id=user_id).\
+            filter_by(vm_state=vm_state).\
+            count()
 
-@db_api.main_context_manager.writer
+    @base.remotable_classmethod
+    def get_count_by_vm_state(cls, context, project_id, user_id, vm_state):
+        return cls._get_count_by_vm_state_in_db(context, project_id, user_id,
+                                                vm_state)
+
+    @staticmethod
+    @db_api.pick_context_manager_reader
+    def _get_counts_in_db(context, project_id, user_id=None):
+        # NOTE(melwitt): Copied from nova/db/sqlalchemy/api.py:
+        # It would be better to have vm_state not be nullable
+        # but until then we test it explicitly as a workaround.
+        not_soft_deleted = or_(
+            models.Instance.vm_state != vm_states.SOFT_DELETED,
+            models.Instance.vm_state == null()
+            )
+        project_query = context.session.query(
+            func.count(models.Instance.id),
+            func.sum(models.Instance.vcpus),
+            func.sum(models.Instance.memory_mb)).\
+            filter_by(deleted=0).\
+            filter(not_soft_deleted).\
+            filter_by(project_id=project_id)
+
+        project_result = project_query.first()
+        fields = ('instances', 'cores', 'ram')
+        project_counts = {field: int(project_result[idx] or 0)
+                          for idx, field in enumerate(fields)}
+        counts = {'project': project_counts}
+        if user_id:
+            user_result = project_query.filter_by(user_id=user_id).first()
+            user_counts = {field: int(user_result[idx] or 0)
+                           for idx, field in enumerate(fields)}
+            counts['user'] = user_counts
+        return counts
+
+    @base.remotable_classmethod
+    def get_counts(cls, context, project_id, user_id=None):
+        """Get the counts of Instance objects in the database.
+
+        :param context: The request context for database access
+        :param project_id: The project_id to count across
+        :param user_id: The user_id to count across
+        :returns: A dict containing the project-scoped counts and user-scoped
+                  counts if user_id is specified. For example:
+
+                    {'project': {'instances': <count across project>,
+                                 'cores': <count across project>,
+                                 'ram': <count across project},
+                     'user': {'instances': <count across user>,
+                              'cores': <count across user>,
+                              'ram': <count across user>}}
+        """
+        return cls._get_counts_in_db(context, project_id, user_id=user_id)
+
+
+@db_api.pick_context_manager_writer
 def _migrate_instance_keypairs(ctxt, count):
     db_extras = ctxt.session.query(models.InstanceExtra).\
         options(joinedload('instance')).\
@@ -1347,6 +1473,12 @@ def _migrate_instance_keypairs(ctxt, count):
     count_all = len(db_extras)
     count_hit = 0
     for db_extra in db_extras:
+        if db_extra.instance is None:
+            LOG.error(
+                ('Instance %(uuid)s has been purged, but an instance_extra '
+                 'record remains for it. Unable to migrate.'),
+                {'uuid': db_extra.instance_uuid})
+            continue
         key_name = db_extra.instance.key_name
         keypairs = objects.KeyPairList(objects=[])
         if key_name:

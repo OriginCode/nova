@@ -13,6 +13,7 @@
 #    under the License.
 
 from oslo_serialization import jsonutils
+from oslo_utils import versionutils
 
 from nova import db
 from nova.objects import base
@@ -61,6 +62,15 @@ class IDEDeviceBus(DeviceBus):
 
 
 @base.NovaObjectRegistry.register
+class XenDeviceBus(DeviceBus):
+    VERSION = '1.0'
+
+    fields = {
+        'address': fields.XenAddressField(),
+    }
+
+
+@base.NovaObjectRegistry.register
 class DeviceMetadata(base.NovaObject):
     VERSION = '1.0'
 
@@ -72,11 +82,19 @@ class DeviceMetadata(base.NovaObject):
 
 @base.NovaObjectRegistry.register
 class NetworkInterfaceMetadata(DeviceMetadata):
-    VERSION = '1.0'
+    # Version 1.0: Initial version
+    # Version 1.1: Add vlans field
+    VERSION = '1.1'
 
     fields = {
         'mac': fields.MACAddressField(),
+        'vlan': fields.IntegerField(),
     }
+
+    def obj_make_compatible(self, primitive, target_version):
+        target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 1) and 'vlan' in primitive:
+            del primitive['vlan']
 
 
 @base.NovaObjectRegistry.register
@@ -94,12 +112,12 @@ class InstanceDeviceMetadata(base.NovaObject):
     VERSION = '1.0'
     fields = {
         'devices': fields.ListOfObjectsField('DeviceMetadata',
-                                                     subclasses=True),
+                                             subclasses=True),
     }
 
     @classmethod
-    def obj_from_db(cls, context, db_requests):
-        primitive = jsonutils.loads(db_requests)
+    def obj_from_db(cls, context, db_dev_meta):
+        primitive = jsonutils.loads(db_dev_meta)
         device_metadata = cls.obj_from_primitive(primitive)
         return device_metadata
 

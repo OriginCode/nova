@@ -73,14 +73,13 @@ import itertools
 import operator
 
 from oslo_config import cfg
-import six
+
 
 from nova import block_device
-from nova.compute import arch
-from nova.compute import vm_mode
 from nova import exception
 from nova.i18n import _
 from nova.objects import base as obj_base
+from nova.objects import fields as obj_fields
 from nova.virt import configdrive
 from nova.virt import driver
 from nova.virt.libvirt import utils as libvirt_utils
@@ -143,7 +142,7 @@ def get_dev_prefix_for_disk_bus(disk_bus):
     elif disk_bus == "sata":
         return "sd"
     else:
-        raise exception.NovaException(
+        raise exception.InternalError(
             _("Unable to determine disk prefix for %s") %
             disk_bus)
 
@@ -164,15 +163,13 @@ def get_dev_count_for_disk_bus(disk_bus):
 
 
 def find_disk_dev_for_disk_bus(mapping, bus,
-                               last_device=False,
                                assigned_devices=None):
     """Identify a free disk dev name for a bus.
 
        Determines the possible disk dev names for
        the bus, and then checks them in order until
        it identifies one that is not yet used in the
-       disk mapping. If 'last_device' is set, it will
-       only consider the last available disk dev name.
+       disk mapping.
 
        Returns the chosen disk_dev name, or raises an
        exception if none is available.
@@ -186,10 +183,7 @@ def find_disk_dev_for_disk_bus(mapping, bus,
         assigned_devices = []
 
     max_dev = get_dev_count_for_disk_bus(bus)
-    if last_device:
-        devs = [max_dev - 1]
-    else:
-        devs = range(max_dev)
+    devs = range(max_dev)
 
     for idx in devs:
         disk_dev = dev_prefix + chr(ord('a') + idx)
@@ -197,9 +191,8 @@ def find_disk_dev_for_disk_bus(mapping, bus,
             if disk_dev not in assigned_devices:
                 return disk_dev
 
-    raise exception.NovaException(
-        _("No free disk device names for prefix '%s'") %
-        dev_prefix)
+    msg = _("No free disk device names for prefix '%s'") % dev_prefix
+    raise exception.InternalError(msg)
 
 
 def is_disk_bus_valid_for_virt(virt_type, disk_bus):
@@ -209,7 +202,7 @@ def is_disk_bus_valid_for_virt(virt_type, disk_bus):
         'xen': ['xen', 'ide'],
         'uml': ['uml'],
         'lxc': ['lxc'],
-        'parallels': ['ide', 'scsi', 'sata']
+        'parallels': ['ide', 'scsi']
         }
 
     if virt_type not in valid_bus:
@@ -253,16 +246,22 @@ def get_disk_bus_for_device_type(instance,
     elif virt_type == "lxc":
         return "lxc"
     elif virt_type == "xen":
-        guest_vm_mode = vm_mode.get_from_instance(instance)
-        if guest_vm_mode == vm_mode.HVM:
+        guest_vm_mode = obj_fields.VMMode.get_from_instance(instance)
+        if guest_vm_mode == obj_fields.VMMode.HVM:
             return "ide"
         else:
             return "xen"
     elif virt_type in ("qemu", "kvm"):
         if device_type == "cdrom":
             guestarch = libvirt_utils.get_arch(image_meta)
-            if guestarch in (arch.PPC, arch.PPC64, arch.PPCLE, arch.PPC64LE,
-                arch.S390, arch.S390X, arch.AARCH64):
+            if guestarch in (
+                    obj_fields.Architecture.PPC,
+                    obj_fields.Architecture.PPC64,
+                    obj_fields.Architecture.PPCLE,
+                    obj_fields.Architecture.PPC64LE,
+                    obj_fields.Architecture.S390,
+                    obj_fields.Architecture.S390X,
+                    obj_fields.Architecture.AARCH64):
                 return "scsi"
             else:
                 return "ide"
@@ -274,7 +273,7 @@ def get_disk_bus_for_device_type(instance,
         if device_type == "cdrom":
             return "ide"
         elif device_type == "disk":
-            return "sata"
+            return "scsi"
     else:
         # If virt-type not in list then it is unsupported
         raise exception.UnsupportedVirtType(virt=virt_type)
@@ -301,8 +300,6 @@ def get_disk_bus_for_disk_dev(virt_type, disk_dev):
         # this picks the most likely mappings
         if virt_type == "xen":
             return "xen"
-        elif virt_type == "parallels":
-            return "sata"
         else:
             return "scsi"
     elif disk_dev.startswith('vd'):
@@ -314,14 +311,12 @@ def get_disk_bus_for_disk_dev(virt_type, disk_dev):
     elif disk_dev.startswith('ubd'):
         return "uml"
     else:
-        raise exception.NovaException(
-            _("Unable to determine disk bus for '%s'") %
-            disk_dev[:1])
+        msg = _("Unable to determine disk bus for '%s'") % disk_dev[:1]
+        raise exception.InternalError(msg)
 
 
 def get_next_disk_info(mapping, disk_bus,
                        device_type='disk',
-                       last_device=False,
                        boot_index=None,
                        assigned_devices=None):
     """Determine the disk info for the next device on disk_bus.
@@ -335,7 +330,6 @@ def get_next_disk_info(mapping, disk_bus,
 
     disk_dev = find_disk_dev_for_disk_bus(mapping,
                                           disk_bus,
-                                          last_device,
                                           assigned_devices)
     info = {'bus': disk_bus,
             'dev': disk_dev,
@@ -457,6 +451,13 @@ def get_root_info(instance, virt_type, image_meta, root_bdm,
 
     if not get_device_name(root_bdm) and root_device_name:
         root_bdm = root_bdm.copy()
+        # it can happen, eg for libvirt+Xen, that the root_device_name is
+        # incompatible with the disk bus. In that case fix the root_device_name
+        if virt_type == 'xen':
+            dev_prefix = get_dev_prefix_for_disk_bus(disk_bus)
+            if not root_device_name.startswith(dev_prefix):
+                letter = block_device.get_device_letter(root_device_name)
+                root_device_name = '%s%s' % (dev_prefix, letter)
         root_bdm['device_name'] = root_device_name
     return get_info_from_bdm(instance, virt_type, image_meta,
                              root_bdm, {}, disk_bus)
@@ -475,7 +476,7 @@ def default_device_names(virt_type, context, instance, block_device_info,
 
 def get_default_ephemeral_info(instance, disk_bus, block_device_info, mapping):
     ephemerals = driver.block_device_info_get_ephemerals(block_device_info)
-    if instance.ephemeral_gb <= 0 or ephemerals:
+    if not instance.ephemeral_gb or instance.ephemeral_gb <= 0 or ephemerals:
         return None
     else:
         info = get_next_disk_info(mapping, disk_bus)
@@ -521,6 +522,17 @@ def get_disk_mapping(virt_type, instance,
         os_info = get_next_disk_info(mapping,
                                      disk_bus)
         mapping['disk'] = os_info
+
+        if configdrive.required_by(instance):
+            device_type = get_config_drive_type()
+            disk_bus = get_disk_bus_for_device_type(instance,
+                                                    virt_type,
+                                                    image_meta,
+                                                    device_type)
+            config_info = get_next_disk_info(mapping,
+                                             disk_bus,
+                                             device_type)
+            mapping['disk.config.rescue'] = config_info
 
         return mapping
 
@@ -604,8 +616,7 @@ def get_disk_mapping(virt_type, instance,
                                                 device_type)
         config_info = get_next_disk_info(mapping,
                                          disk_bus,
-                                         device_type,
-                                         last_device=True)
+                                         device_type)
         mapping['disk.config'] = config_info
 
     return mapping
@@ -642,7 +653,7 @@ def get_disk_info(virt_type, instance, image_meta,
 
 
 def get_boot_order(disk_info):
-    boot_mapping = (info for name, info in six.iteritems(disk_info['mapping'])
+    boot_mapping = (info for name, info in disk_info['mapping'].items()
                     if name != 'root' and info.get('boot_index') is not None)
     boot_devs_dup = (BOOT_DEV_FOR_TYPE[dev['type']] for dev in
                      sorted(boot_mapping,

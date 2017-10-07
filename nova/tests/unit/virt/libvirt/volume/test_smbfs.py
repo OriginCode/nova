@@ -32,15 +32,17 @@ class LibvirtSMBFSVolumeDriverTestCase(test_volume.LibvirtVolumeBaseTestCase):
     def test_libvirt_smbfs_driver(self, mock_is_mounted):
         mock_is_mounted.return_value = False
 
-        libvirt_driver = smbfs.LibvirtSMBFSVolumeDriver(self.fake_conn)
+        libvirt_driver = smbfs.LibvirtSMBFSVolumeDriver(self.fake_host)
         export_string = '//192.168.1.1/volumes'
         export_mnt_base = os.path.join(self.mnt_base,
                                        utils.get_hash_str(export_string))
         connection_info = {'data': {'export': export_string,
                                     'name': self.name,
                                     'options': None}}
-        libvirt_driver.connect_volume(connection_info, self.disk_info)
-        libvirt_driver.disconnect_volume(connection_info, "vde")
+        libvirt_driver.connect_volume(connection_info, self.disk_info,
+                                      mock.sentinel.instance)
+        libvirt_driver.disconnect_volume(connection_info, "vde",
+                                         mock.sentinel.instance)
 
         expected_commands = [
             ('mkdir', '-p', export_mnt_base),
@@ -49,25 +51,26 @@ class LibvirtSMBFSVolumeDriverTestCase(test_volume.LibvirtVolumeBaseTestCase):
             ('umount', export_mnt_base)]
         self.assertEqual(expected_commands, self.executes)
 
-    def test_libvirt_smbfs_driver_already_mounted(self):
-        libvirt_driver = smbfs.LibvirtSMBFSVolumeDriver(self.fake_conn)
+    @mock.patch.object(libvirt_utils, 'is_mounted', return_value=True)
+    def test_libvirt_smbfs_driver_already_mounted(self, mock_is_mounted):
+        libvirt_driver = smbfs.LibvirtSMBFSVolumeDriver(self.fake_host)
         export_string = '//192.168.1.1/volumes'
         export_mnt_base = os.path.join(self.mnt_base,
                                        utils.get_hash_str(export_string))
         connection_info = {'data': {'export': export_string,
                                     'name': self.name}}
 
-        libvirt_driver.connect_volume(connection_info, self.disk_info)
-        libvirt_driver.disconnect_volume(connection_info, "vde")
+        libvirt_driver.connect_volume(connection_info, self.disk_info,
+                                      mock.sentinel.instance)
+        libvirt_driver.disconnect_volume(connection_info, "vde",
+                                         mock.sentinel.instance)
 
         expected_commands = [
-            ('findmnt', '--target', export_mnt_base,
-             '--source', export_string),
             ('umount', export_mnt_base)]
         self.assertEqual(expected_commands, self.executes)
 
     def test_libvirt_smbfs_driver_get_config(self):
-        libvirt_driver = smbfs.LibvirtSMBFSVolumeDriver(self.fake_conn)
+        libvirt_driver = smbfs.LibvirtSMBFSVolumeDriver(self.fake_host)
         export_string = '//192.168.1.1/volumes'
         export_mnt_base = os.path.join(self.mnt_base,
                                        utils.get_hash_str(export_string))
@@ -84,7 +87,7 @@ class LibvirtSMBFSVolumeDriverTestCase(test_volume.LibvirtVolumeBaseTestCase):
     def test_libvirt_smbfs_driver_with_opts(self, mock_is_mounted):
         mock_is_mounted.return_value = False
 
-        libvirt_driver = smbfs.LibvirtSMBFSVolumeDriver(self.fake_conn)
+        libvirt_driver = smbfs.LibvirtSMBFSVolumeDriver(self.fake_host)
         export_string = '//192.168.1.1/volumes'
         options = '-o user=guest,uid=107,gid=105'
         export_mnt_base = os.path.join(self.mnt_base,
@@ -93,8 +96,10 @@ class LibvirtSMBFSVolumeDriverTestCase(test_volume.LibvirtVolumeBaseTestCase):
                                     'name': self.name,
                                     'options': options}}
 
-        libvirt_driver.connect_volume(connection_info, self.disk_info)
-        libvirt_driver.disconnect_volume(connection_info, "vde")
+        libvirt_driver.connect_volume(connection_info, self.disk_info,
+                                      mock.sentinel.instance)
+        libvirt_driver.disconnect_volume(connection_info, "vde",
+                                         mock.sentinel.instance)
 
         expected_commands = [
             ('mkdir', '-p', export_mnt_base),

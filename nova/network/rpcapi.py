@@ -22,12 +22,15 @@ from oslo_serialization import jsonutils
 import nova.conf
 from nova import exception
 from nova.objects import base as objects_base
+from nova import profiler
 from nova import rpc
 
 
 CONF = nova.conf.CONF
+RPC_TOPIC = 'network'
 
 
+@profiler.trace_cls("rpc")
 class NetworkAPI(object):
     '''Client side of the network rpc API.
 
@@ -101,11 +104,15 @@ class NetworkAPI(object):
         * 1.16 - Transfer instance in addition to instance_id in
                  setup_networks_on_host
 
-        ... Liberty supports message version 1.16.  So, any changes to
+        ... Mitaka supports message version 1.16.  So, any changes to
         existing methods in 1.x after that point should be done such that they
         can handle the version_cap being set to 1.16.
 
         * 1.17 - Add method release_dhcp()
+
+        ... Newton and Ocata support message version 1.17.  So, any changes to
+        existing methods in 1.x after that point should be done such that they
+        can handle the version_cap being set to 1.17.
     '''
 
     VERSION_ALIASES = {
@@ -116,11 +123,13 @@ class NetworkAPI(object):
         'kilo': '1.13',
         'liberty': '1.15',
         'mitaka': '1.16',
+        'newton': '1.17',
+        'ocata': '1.17',
     }
 
     def __init__(self, topic=None):
         super(NetworkAPI, self).__init__()
-        topic = topic or CONF.network_topic
+        topic = topic or RPC_TOPIC
         target = messaging.Target(topic=topic, version='1.0')
         version_cap = self.VERSION_ALIASES.get(CONF.upgrade_levels.network,
                                                CONF.upgrade_levels.network)

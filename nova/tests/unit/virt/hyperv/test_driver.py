@@ -162,11 +162,21 @@ class HyperVDriverTestCase(test_base.HyperVBaseTestCase):
         self.driver.destroy(
             mock.sentinel.context, mock.sentinel.instance,
             mock.sentinel.network_info, mock.sentinel.block_device_info,
-            mock.sentinel.destroy_disks, mock.sentinel.migrate_data)
+            mock.sentinel.destroy_disks)
 
         self.driver._vmops.destroy.assert_called_once_with(
             mock.sentinel.instance, mock.sentinel.network_info,
             mock.sentinel.block_device_info, mock.sentinel.destroy_disks)
+
+    def test_cleanup(self):
+        self.driver.cleanup(
+            mock.sentinel.context, mock.sentinel.instance,
+            mock.sentinel.network_info, mock.sentinel.block_device_info,
+            mock.sentinel.destroy_disks, mock.sentinel.migrate_data,
+            mock.sentinel.destroy_vifs)
+
+        self.driver._vmops.unplug_vifs.assert_called_once_with(
+            mock.sentinel.instance, mock.sentinel.network_info)
 
     def test_get_info(self):
         self.driver.get_info(mock.sentinel.instance)
@@ -196,8 +206,7 @@ class HyperVDriverTestCase(test_base.HyperVBaseTestCase):
 
     def test_get_volume_connector(self):
         self.driver.get_volume_connector(mock.sentinel.instance)
-        self.driver._volumeops.get_volume_connector.assert_called_once_with(
-            mock.sentinel.instance)
+        self.driver._volumeops.get_volume_connector.assert_called_once_with()
 
     def test_get_available_resource(self):
         self.driver.get_available_resource(mock.sentinel.nodename)
@@ -259,7 +268,8 @@ class HyperVDriverTestCase(test_base.HyperVBaseTestCase):
             mock.sentinel.network_info, mock.sentinel.block_device_info)
 
         self.driver._vmops.power_on.assert_called_once_with(
-            mock.sentinel.instance, mock.sentinel.block_device_info)
+            mock.sentinel.instance, mock.sentinel.block_device_info,
+            mock.sentinel.network_info)
 
     def test_resume_state_on_host_boot(self):
         self.driver.resume_state_on_host_boot(
@@ -361,12 +371,18 @@ class HyperVDriverTestCase(test_base.HyperVBaseTestCase):
             mock.sentinel.dest_check_data)
 
     def test_plug_vifs(self):
-        self.assertRaises(NotImplementedError, self.driver.plug_vifs,
-                          mock.sentinel.instance, mock.sentinel.network_info)
+        self.driver.plug_vifs(
+            mock.sentinel.instance, mock.sentinel.network_info)
+
+        self.driver._vmops.plug_vifs.assert_called_once_with(
+            mock.sentinel.instance, mock.sentinel.network_info)
 
     def test_unplug_vifs(self):
-        self.assertRaises(NotImplementedError, self.driver.unplug_vifs,
-                          mock.sentinel.instance, mock.sentinel.network_info)
+        self.driver.unplug_vifs(
+            mock.sentinel.instance, mock.sentinel.network_info)
+
+        self.driver._vmops.unplug_vifs.assert_called_once_with(
+            mock.sentinel.instance, mock.sentinel.network_info)
 
     def test_refresh_instance_security_rules(self):
         self.assertRaises(NotImplementedError,
@@ -389,10 +405,12 @@ class HyperVDriverTestCase(test_base.HyperVBaseTestCase):
 
     def test_confirm_migration(self):
         self.driver.confirm_migration(
+            mock.sentinel.context,
             mock.sentinel.migration, mock.sentinel.instance,
             mock.sentinel.network_info)
 
         self.driver._migrationops.confirm_migration.assert_called_once_with(
+            mock.sentinel.context,
             mock.sentinel.migration, mock.sentinel.instance,
             mock.sentinel.network_info)
 

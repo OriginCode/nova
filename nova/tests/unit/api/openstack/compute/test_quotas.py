@@ -18,12 +18,11 @@ import mock
 import webob
 
 from nova.api.openstack.compute import quota_sets as quotas_v21
-from nova.api.openstack.compute import tenant_networks
-from nova.api.openstack import extensions
 from nova import db
 from nova import exception
 from nova import quota
 from nova import test
+from nova.tests import fixtures as nova_fixtures
 from nova.tests.unit.api.openstack import fakes
 
 
@@ -41,6 +40,14 @@ def quota_set(id, include_server_group_quotas=True):
 
 
 class BaseQuotaSetsTest(test.TestCase):
+
+    def setUp(self):
+        super(BaseQuotaSetsTest, self).setUp()
+        # We need to stub out verify_project_id so that it doesn't
+        # generate an EndpointNotFound exception and result in a
+        # server error.
+        self.stub_out('nova.api.openstack.identity.verify_project_id',
+                      lambda ctx, project_id: True)
 
     def get_delete_status_int(self, res):
         # NOTE: on v2.1, http status code is set as wsgi_code of API
@@ -75,8 +82,7 @@ class QuotaSetsTestV21(BaseQuotaSetsTest):
             self.default_quotas['server_group_members'] = 10
 
     def _setup_controller(self):
-        self.ext_mgr = self.mox.CreateMock(extensions.ExtensionManager)
-        self.controller = self.plugin.QuotaSetsController(self.ext_mgr)
+        self.controller = self.plugin.QuotaSetsController()
 
     def _get_http_request(self, url=''):
         return fakes.HTTPRequest.blank(url)
@@ -269,16 +275,13 @@ class QuotaSetsTestV21(BaseQuotaSetsTest):
         body = {'quota_set': self.default_quotas}
         self._quotas_update_bad_request_case(body)
 
-    def test_quotas_delete(self):
+    @mock.patch.object(quota.QUOTAS, 'destroy_all_by_project')
+    def test_quotas_delete(self, mock_destroy_all_by_project):
         req = self._get_http_request()
-        self.mox.StubOutWithMock(quota.QUOTAS,
-                                 "destroy_all_by_project")
-        quota.QUOTAS.destroy_all_by_project(req.environ['nova.context'],
-                                            1234)
-        self.mox.ReplayAll()
         res = self.controller.delete(req, 1234)
-        self.mox.VerifyAll()
         self.assertEqual(202, self.get_delete_status_int(res))
+        mock_destroy_all_by_project.assert_called_once_with(
+            req.environ['nova.context'], 1234)
 
     def test_update_network_quota_disabled(self):
         self.flags(enable_network_quota=False)
@@ -288,10 +291,9 @@ class QuotaSetsTestV21(BaseQuotaSetsTest):
 
     def test_update_network_quota_enabled(self):
         self.flags(enable_network_quota=True)
-        tenant_networks._register_network_quota()
+        self.useFixture(nova_fixtures.RegisterNetworkQuota())
         self.controller.update(self._get_http_request(),
                                1234, body={'quota_set': {'networks': 1}})
-        del quota.QUOTAS._resources['networks']
 
 
 class ExtendedQuotasTestV21(BaseQuotaSetsTest):
@@ -312,8 +314,7 @@ class ExtendedQuotasTestV21(BaseQuotaSetsTest):
                                  'reserved': 0}}
 
     def _setup_controller(self):
-        self.ext_mgr = self.mox.CreateMock(extensions.ExtensionManager)
-        self.controller = self.plugin.QuotaSetsController(self.ext_mgr)
+        self.controller = self.plugin.QuotaSetsController()
 
     def fake_get_quotas(self, context, id, user_id=None, usages=False):
         if usages:
@@ -404,8 +405,7 @@ class UserQuotasTestV21(BaseQuotaSetsTest):
         return fakes.HTTPRequest.blank(url)
 
     def _setup_controller(self):
-        self.ext_mgr = self.mox.CreateMock(extensions.ExtensionManager)
-        self.controller = self.plugin.QuotaSetsController(self.ext_mgr)
+        self.controller = self.plugin.QuotaSetsController()
 
     def test_user_quotas_show(self):
         req = self._get_http_request('/v2/fake4/os-quota-sets/1234?user_id=1')
@@ -441,17 +441,15 @@ class UserQuotasTestV21(BaseQuotaSetsTest):
         self.assertRaises(webob.exc.HTTPBadRequest, self.controller.update,
                           req, 'update_me', body=body)
 
-    def test_user_quotas_delete(self):
+    @mock.patch.object(quota.QUOTAS, "destroy_all_by_project_and_user")
+    def test_user_quotas_delete(self, mock_destroy_all_by_project_and_user):
         url = '/v2/fake4/os-quota-sets/1234?user_id=1'
         req = self._get_http_request(url)
-        self.mox.StubOutWithMock(quota.QUOTAS,
-                                 "destroy_all_by_project_and_user")
-        quota.QUOTAS.destroy_all_by_project_and_user(
-            req.environ['nova.context'], 1234, '1')
-        self.mox.ReplayAll()
         res = self.controller.delete(req, 1234)
-        self.mox.VerifyAll()
         self.assertEqual(202, self.get_delete_status_int(res))
+        mock_destroy_all_by_project_and_user.assert_called_once_with(
+            req.environ['nova.context'], 1234, '1'
+        )
 
     @mock.patch('nova.objects.Quotas.create_limit')
     def test_user_quotas_update_good_data(self, mock_createlimit):
@@ -540,49 +538,100 @@ class QuotaSetsTestV236(test.NoDBTestCase):
 
     def setUp(self):
         super(QuotaSetsTestV236, self).setUp()
+        # We need to stub out verify_project_id so that it doesn't
+        # generate an EndpointNotFound exception and result in a
+        # server error.
+        self.stub_out('nova.api.openstack.identity.verify_project_id',
+                      lambda ctx, project_id: True)
+
         self.flags(enable_network_quota=True)
-        tenant_networks._register_network_quota()
+        self.useFixture(nova_fixtures.RegisterNetworkQuota())
         self.old_req = fakes.HTTPRequest.blank('', version='2.1')
         self.filtered_quotas = ['fixed_ips', 'floating_ips', 'networks',
             'security_group_rules', 'security_groups']
+        self.quotas = {
+            'cores': {'limit': 20},
+            'fixed_ips': {'limit': -1},
+            'floating_ips': {'limit': 10},
+            'injected_file_content_bytes': {'limit': 10240},
+            'injected_file_path_bytes': {'limit': 255},
+            'injected_files': {'limit': 5},
+            'instances': {'limit': 10},
+            'key_pairs': {'limit': 100},
+            'metadata_items': {'limit': 128},
+            'networks': {'limit': 3},
+            'ram': {'limit': 51200},
+            'security_group_rules': {'limit': 20},
+            'security_groups': {'limit': 10},
+            'server_group_members': {'limit': 10},
+            'server_groups': {'limit': 10}
+        }
+        self.defaults = {
+            'cores': 20,
+            'fixed_ips': -1,
+            'floating_ips': 10,
+            'injected_file_content_bytes': 10240,
+            'injected_file_path_bytes': 255,
+            'injected_files': 5,
+            'instances': 10,
+            'key_pairs': 100,
+            'metadata_items': 128,
+            'networks': 3,
+            'ram': 51200,
+            'security_group_rules': 20,
+            'security_groups': 10,
+            'server_group_members': 10,
+            'server_groups': 10
+        }
         self.controller = quotas_v21.QuotaSetsController()
         self.req = fakes.HTTPRequest.blank('', version='2.36')
-        self.addCleanup(self._remove_network_quota)
-
-    def _remove_network_quota(self):
-        del quota.QUOTAS._resources['networks']
 
     def _ensure_filtered_quotas_existed_in_old_api(self):
         res_dict = self.controller.show(self.old_req, 1234)
         for filtered in self.filtered_quotas:
             self.assertIn(filtered, res_dict['quota_set'])
 
-    def test_quotas_show_filtered(self):
+    @mock.patch('nova.quota.QUOTAS.get_project_quotas')
+    def test_quotas_show_filtered(self, mock_quotas):
+        mock_quotas.return_value = self.quotas
         self._ensure_filtered_quotas_existed_in_old_api()
         res_dict = self.controller.show(self.req, 1234)
         for filtered in self.filtered_quotas:
             self.assertNotIn(filtered, res_dict['quota_set'])
 
-    def test_quotas_default_filtered(self):
+    @mock.patch('nova.quota.QUOTAS.get_defaults')
+    @mock.patch('nova.quota.QUOTAS.get_project_quotas')
+    def test_quotas_default_filtered(self, mock_quotas, mock_defaults):
+        mock_quotas.return_value = self.quotas
         self._ensure_filtered_quotas_existed_in_old_api()
         res_dict = self.controller.defaults(self.req, 1234)
         for filtered in self.filtered_quotas:
             self.assertNotIn(filtered, res_dict['quota_set'])
 
-    def test_quotas_detail_filtered(self):
+    @mock.patch('nova.quota.QUOTAS.get_project_quotas')
+    def test_quotas_detail_filtered(self, mock_quotas):
+        mock_quotas.return_value = self.quotas
         self._ensure_filtered_quotas_existed_in_old_api()
         res_dict = self.controller.detail(self.req, 1234)
         for filtered in self.filtered_quotas:
             self.assertNotIn(filtered, res_dict['quota_set'])
 
-    def test_quotas_update_input_filtered(self):
+    @mock.patch('nova.quota.QUOTAS.get_project_quotas')
+    def test_quotas_update_input_filtered(self, mock_quotas):
+        mock_quotas.return_value = self.quotas
         self._ensure_filtered_quotas_existed_in_old_api()
         for filtered in self.filtered_quotas:
             self.assertRaises(exception.ValidationError,
                 self.controller.update, self.req, 1234,
                 body={'quota_set': {filtered: 100}})
 
-    def test_quotas_update_output_filtered(self):
+    @mock.patch('nova.objects.Quotas.create_limit')
+    @mock.patch('nova.quota.QUOTAS.get_settable_quotas')
+    @mock.patch('nova.quota.QUOTAS.get_project_quotas')
+    def test_quotas_update_output_filtered(self, mock_quotas, mock_settable,
+                                           mock_create_limit):
+        mock_quotas.return_value = self.quotas
+        mock_settable.return_value = {'cores': {'maximum': -1, 'minimum': 0}}
         self._ensure_filtered_quotas_existed_in_old_api()
         res_dict = self.controller.update(self.req, 1234,
              body={'quota_set': {'cores': 100}})

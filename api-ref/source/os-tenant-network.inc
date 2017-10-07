@@ -11,9 +11,9 @@
 
    These APIs are proxy calls to the Network service. Nova has
    deprecated all the proxy APIs and users should use the native APIs
-   instead. These will fail with a 404 after microversion 2.35.
+   instead. These will fail with a 404 starting from microversion 2.36.
    See: `Relevant Network APIs
-   <http://developer.openstack.org/api-ref-networking-v2-ext.html>`__.
+   <https://developer.openstack.org/api-ref/networking/v2/#networks>`__.
 
 Creates, lists, shows information for, and deletes project networks.
 
@@ -44,6 +44,11 @@ Create Project Network
 ======================
 
 .. rest_method:: POST /os-tenant-networks
+
+.. note::
+    This API is only implemented for the nova-network service and will result
+    in a 503 error response if the cloud is using the Neutron networking
+    service. Use the Neutron ``networks`` API to create a new network.
 
 Creates a project network.
 
@@ -103,6 +108,11 @@ Delete Project Network
 ======================
 
 .. rest_method:: DELETE /os-tenant-networks/{network_id}
+
+.. note::
+    This API is only implemented for the nova-network service and will result
+    in a 500 error response if the cloud is using the Neutron networking
+    service. Use the Neutron ``networks`` API to delete an existing network.
 
 Deletes a project network.
 

@@ -20,14 +20,15 @@
 networking and storage of VMs, and compute hosts on which they run)."""
 
 import base64
+import collections
 import copy
 import functools
 import re
 import string
-import uuid
 
 from oslo_log import log as logging
 from oslo_messaging import exceptions as oslo_exceptions
+from oslo_serialization import base64 as base64utils
 from oslo_serialization import jsonutils
 from oslo_utils import excutils
 from oslo_utils import strutils
@@ -57,25 +58,21 @@ from nova import exception
 from nova import exception_wrapper
 from nova import hooks
 from nova.i18n import _
-from nova.i18n import _LE
-from nova.i18n import _LI
-from nova.i18n import _LW
 from nova import image
 from nova import keymgr
 from nova import network
 from nova.network import model as network_model
 from nova.network.security_group import openstack_driver
 from nova.network.security_group import security_group_base
-from nova import notifications
 from nova import objects
 from nova.objects import base as obj_base
 from nova.objects import block_device as block_device_obj
 from nova.objects import fields as fields_obj
 from nova.objects import keypair as keypair_obj
 from nova.objects import quotas as quotas_obj
-from nova.objects import security_group as security_group_obj
 from nova.pci import request as pci_request
 import nova.policy
+from nova import profiler
 from nova import rpc
 from nova.scheduler import client as scheduler_client
 from nova.scheduler import utils as scheduler_utils
@@ -99,12 +96,17 @@ CONF = nova.conf.CONF
 
 MAX_USERDATA_SIZE = 65535
 RO_SECURITY_GROUPS = ['default']
-VIDEO_RAM = 'hw_video:ram_max_mb'
 
 AGGREGATE_ACTION_UPDATE = 'Update'
 AGGREGATE_ACTION_UPDATE_META = 'UpdateMeta'
 AGGREGATE_ACTION_DELETE = 'Delete'
 AGGREGATE_ACTION_ADD = 'Add'
+BFV_RESERVE_MIN_COMPUTE_VERSION = 17
+
+# FIXME(danms): Keep a global cache of the cells we find the
+# first time we look. This needs to be refreshed on a timer or
+# trigger.
+CELLS = []
 
 
 def check_instance_state(vm_state=None, task_state=(None,),
@@ -121,7 +123,7 @@ def check_instance_state(vm_state=None, task_state=(None,),
         task_state = set(task_state)
 
     def outer(f):
-        @functools.wraps(f)
+        @six.wraps(f)
         def inner(self, context, instance, *args, **kw):
             if vm_state is not None and instance.vm_state not in vm_state:
                 raise exception.InstanceInvalidState(
@@ -148,8 +150,41 @@ def check_instance_state(vm_state=None, task_state=(None,),
     return outer
 
 
+def _set_or_none(q):
+    return q if q is None or isinstance(q, set) else set(q)
+
+
+def reject_instance_state(vm_state=None, task_state=None):
+    """Decorator.  Raise InstanceInvalidState if instance is in any of the
+    given states.
+    """
+
+    vm_state = _set_or_none(vm_state)
+    task_state = _set_or_none(task_state)
+
+    def outer(f):
+        @six.wraps(f)
+        def inner(self, context, instance, *args, **kw):
+            _InstanceInvalidState = functools.partial(
+                exception.InstanceInvalidState,
+                instance_uuid=instance.uuid,
+                method=f.__name__)
+
+            if vm_state is not None and instance.vm_state in vm_state:
+                raise _InstanceInvalidState(
+                    attr='vm_state', state=instance.vm_state)
+
+            if task_state is not None and instance.task_state in task_state:
+                raise _InstanceInvalidState(
+                    attr='task_state', state=instance.task_state)
+
+            return f(self, context, instance, *args, **kw)
+        return inner
+    return outer
+
+
 def check_instance_host(function):
-    @functools.wraps(function)
+    @six.wraps(function)
     def wrapped(self, context, instance, *args, **kwargs):
         if not instance.host:
             raise exception.InstanceNotReady(instance_id=instance.uuid)
@@ -158,7 +193,7 @@ def check_instance_host(function):
 
 
 def check_instance_lock(function):
-    @functools.wraps(function)
+    @six.wraps(function)
     def inner(self, context, instance, *args, **kwargs):
         if instance.locked and not context.is_admin:
             raise exception.InstanceIsLocked(instance_uuid=instance.uuid)
@@ -167,10 +202,10 @@ def check_instance_lock(function):
 
 
 def check_instance_cell(fn):
+    @six.wraps(fn)
     def _wrapped(self, context, instance, *args, **kwargs):
         self._validate_cell(instance)
         return fn(self, context, instance, *args, **kwargs)
-    _wrapped.__name__ = fn.__name__
     return _wrapped
 
 
@@ -191,6 +226,20 @@ def _diff_dict(orig, new):
     return result
 
 
+def load_cells():
+    global CELLS
+    if not CELLS:
+        CELLS = objects.CellMappingList.get_all(
+            nova_context.get_admin_context())
+        LOG.debug('Found %(count)i cells: %(cells)s',
+                  dict(count=len(CELLS),
+                       cells=','.join([c.identity for c in CELLS])))
+
+    if not CELLS:
+        LOG.error('No cells are configured, unable to continue')
+
+
+@profiler.trace_cls("compute_api")
 class API(base.Base):
     """API for interacting with the compute manager."""
 
@@ -266,113 +315,6 @@ class API(base.Base):
             else:
                 raise exception.OnsetFileContentLimitExceeded()
 
-    def _get_headroom(self, quotas, usages, deltas):
-        headroom = {res: quotas[res] -
-                         (usages[res]['in_use'] + usages[res]['reserved'])
-                    for res in quotas.keys()}
-        # If quota_cores is unlimited [-1]:
-        # - set cores headroom based on instances headroom:
-        if quotas.get('cores') == -1:
-            if deltas.get('cores'):
-                hc = headroom.get('instances', 1) * deltas['cores']
-                headroom['cores'] = hc / deltas.get('instances', 1)
-            else:
-                headroom['cores'] = headroom.get('instances', 1)
-
-        # If quota_ram is unlimited [-1]:
-        # - set ram headroom based on instances headroom:
-        if quotas.get('ram') == -1:
-            if deltas.get('ram'):
-                hr = headroom.get('instances', 1) * deltas['ram']
-                headroom['ram'] = hr / deltas.get('instances', 1)
-            else:
-                headroom['ram'] = headroom.get('instances', 1)
-
-        return headroom
-
-    def _check_num_instances_quota(self, context, instance_type, min_count,
-                                   max_count, project_id=None, user_id=None):
-        """Enforce quota limits on number of instances created."""
-
-        # Determine requested cores and ram
-        req_cores = max_count * instance_type['vcpus']
-        vram_mb = int(instance_type.get('extra_specs', {}).get(VIDEO_RAM, 0))
-        req_ram = max_count * (instance_type['memory_mb'] + vram_mb)
-
-        # Check the quota
-        try:
-            quotas = objects.Quotas(context=context)
-            quotas.reserve(instances=max_count,
-                           cores=req_cores, ram=req_ram,
-                           project_id=project_id, user_id=user_id)
-        except exception.OverQuota as exc:
-            # OK, we exceeded quota; let's figure out why...
-            quotas = exc.kwargs['quotas']
-            overs = exc.kwargs['overs']
-            usages = exc.kwargs['usages']
-            deltas = {'instances': max_count,
-                      'cores': req_cores, 'ram': req_ram}
-            headroom = self._get_headroom(quotas, usages, deltas)
-
-            allowed = headroom.get('instances', 1)
-            # Reduce 'allowed' instances in line with the cores & ram headroom
-            if instance_type['vcpus']:
-                allowed = min(allowed,
-                              headroom['cores'] // instance_type['vcpus'])
-            if instance_type['memory_mb']:
-                allowed = min(allowed,
-                              headroom['ram'] // (instance_type['memory_mb'] +
-                                                  vram_mb))
-
-            # Convert to the appropriate exception message
-            if allowed <= 0:
-                msg = _("Cannot run any more instances of this type.")
-            elif min_count <= allowed <= max_count:
-                # We're actually OK, but still need reservations
-                return self._check_num_instances_quota(context, instance_type,
-                                                       min_count, allowed)
-            else:
-                msg = (_("Can only run %s more instances of this type.") %
-                       allowed)
-
-            num_instances = (str(min_count) if min_count == max_count else
-                "%s-%s" % (min_count, max_count))
-            requested = dict(instances=num_instances, cores=req_cores,
-                             ram=req_ram)
-            (overs, reqs, total_alloweds, useds) = self._get_over_quota_detail(
-                headroom, overs, quotas, requested)
-            params = {'overs': overs, 'pid': context.project_id,
-                      'min_count': min_count, 'max_count': max_count,
-                      'msg': msg}
-
-            if min_count == max_count:
-                LOG.debug(("%(overs)s quota exceeded for %(pid)s,"
-                           " tried to run %(min_count)d instances. "
-                           "%(msg)s"), params)
-            else:
-                LOG.debug(("%(overs)s quota exceeded for %(pid)s,"
-                           " tried to run between %(min_count)d and"
-                           " %(max_count)d instances. %(msg)s"),
-                          params)
-            raise exception.TooManyInstances(overs=overs,
-                                             req=reqs,
-                                             used=useds,
-                                             allowed=total_alloweds)
-
-        return max_count, quotas
-
-    def _get_over_quota_detail(self, headroom, overs, quotas, requested):
-        reqs = []
-        useds = []
-        total_alloweds = []
-        for resource in overs:
-            reqs.append(str(requested[resource]))
-            useds.append(str(quotas[resource] - headroom[resource]))
-            total_alloweds.append(str(quotas[resource]))
-        (overs, reqs, useds, total_alloweds) = map(', '.join, (
-            overs, reqs, useds, total_alloweds))
-        return overs, reqs, total_alloweds, useds
-
     def _check_metadata_properties_quota(self, context, metadata=None):
         """Enforce quota limits on metadata properties."""
         if not metadata:
@@ -392,7 +334,7 @@ class API(base.Base):
         #  as if this is quota-controlled for forwards compatibility.
         # Those are only used in V2 API, from V2.1 API, those checks are
         # validated at API layer schema validation.
-        for k, v in six.iteritems(metadata):
+        for k, v in metadata.items():
             try:
                 utils.check_string_length(v)
                 utils.check_string_length(k, min_length=1)
@@ -409,14 +351,37 @@ class API(base.Base):
     def _check_requested_secgroups(self, context, secgroups):
         """Check if the security group requested exists and belongs to
         the project.
+
+        :param context: The nova request context.
+        :type context: nova.context.RequestContext
+        :param secgroups: list of requested security group names, or uuids in
+            the case of Neutron.
+        :type secgroups: list
+        :returns: list of requested security group names unmodified if using
+            nova-network. If using Neutron, the list returned is all uuids.
+            Note that 'default' is a special case and will be unmodified if
+            it's requested.
         """
+        security_groups = []
         for secgroup in secgroups:
             # NOTE(sdague): default is handled special
             if secgroup == "default":
+                security_groups.append(secgroup)
                 continue
-            if not self.security_group_api.get(context, secgroup):
+            secgroup_dict = self.security_group_api.get(context, secgroup)
+            if not secgroup_dict:
                 raise exception.SecurityGroupNotFoundForProject(
                     project_id=context.project_id, security_group_id=secgroup)
+
+            # Check to see if it's a nova-network or neutron type.
+            if isinstance(secgroup_dict['id'], int):
+                # This is nova-network so just return the requested name.
+                security_groups.append(secgroup)
+            else:
+                # The id for neutron is a uuid, so we return the id (uuid).
+                security_groups.append(secgroup_dict['id'])
+
+        return security_groups
 
     def _check_requested_networks(self, context, requested_networks,
                                   max_count):
@@ -545,8 +510,8 @@ class API(base.Base):
             new_name = (CONF.multi_instance_display_name_template %
                         params)
         except (KeyError, TypeError):
-            LOG.exception(_LE('Failed to set instance name using '
-                              'multi_instance_display_name_template.'))
+            LOG.exception('Failed to set instance name using '
+                          'multi_instance_display_name_template.')
             new_name = display_name
         return new_name
 
@@ -810,11 +775,21 @@ class API(base.Base):
                     length=l, maxsize=MAX_USERDATA_SIZE)
 
             try:
-                base64.decodestring(user_data)
-            except base64.binascii.Error:
+                base64utils.decode_as_bytes(user_data)
+            except (base64.binascii.Error, TypeError):
+                # TODO(harlowja): reduce the above exceptions caught to
+                # only type error once we get a new oslo.serialization
+                # release that captures and makes only one be output.
+                #
+                # We can eliminate the capture of `binascii.Error` when:
+                #
+                # https://review.openstack.org/#/c/418066/ is released.
                 raise exception.InstanceUserDataMalformed()
 
-        self._check_requested_secgroups(context, security_groups)
+        # When using Neutron, _check_requested_secgroups will translate and
+        # return any requested security group names to uuids.
+        security_groups = (
+            self._check_requested_secgroups(context, security_groups))
 
         # Note:  max_count is the number of instances requested by the user,
         # max_network_count is the maximum number of instances taking into
@@ -900,34 +875,37 @@ class API(base.Base):
 
         # return the validated options and maximum number of instances allowed
         # by the network quotas
-        return base_options, max_network_count, key_pair
+        return base_options, max_network_count, key_pair, security_groups
 
     def _provision_instances(self, context, instance_type, min_count,
             max_count, base_options, boot_meta, security_groups,
             block_device_mapping, shutdown_terminate,
             instance_group, check_server_group_quota, filter_properties,
-            key_pair):
-        # Reserve quotas
-        num_instances, quotas = self._check_num_instances_quota(
+            key_pair, tags):
+        # Check quotas
+        num_instances = compute_utils.check_num_instances_quota(
                 context, instance_type, min_count, max_count)
         security_groups = self.security_group_api.populate_security_groups(
                 security_groups)
         self.security_group_api.ensure_default(context)
         LOG.debug("Going to run %s instances...", num_instances)
-        instances = []
-        instance_mappings = []
-        build_requests = []
+        instances_to_build = []
         try:
             for i in range(num_instances):
                 # Create a uuid for the instance so we can store the
                 # RequestSpec before the instance is created.
-                instance_uuid = str(uuid.uuid4())
+                instance_uuid = uuidutils.generate_uuid()
                 # Store the RequestSpec that will be used for scheduling.
                 req_spec = objects.RequestSpec.from_components(context,
                         instance_uuid, boot_meta, instance_type,
                         base_options['numa_topology'],
                         base_options['pci_requests'], filter_properties,
-                        instance_group, base_options['availability_zone'])
+                        instance_group, base_options['availability_zone'],
+                        security_groups=security_groups)
+                # NOTE(danms): We need to record num_instances on the request
+                # spec as this is how the conductor knows how many were in this
+                # batch.
+                req_spec.num_instances = num_instances
                 req_spec.create()
 
                 # Create an instance object, but do not store in db yet.
@@ -944,13 +922,15 @@ class API(base.Base):
                 block_device_mapping = (
                     self._bdm_validate_set_size_and_instance(context,
                         instance, instance_type, block_device_mapping))
+                instance_tags = self._transform_tags(tags, instance.uuid)
 
                 build_request = objects.BuildRequest(context,
                         instance=instance, instance_uuid=instance.uuid,
                         project_id=instance.project_id,
-                        block_device_mappings=block_device_mapping)
+                        block_device_mappings=block_device_mapping,
+                        tags=instance_tags)
                 build_request.create()
-                build_requests.append(build_request)
+
                 # Create an instance_mapping.  The null cell_mapping indicates
                 # that the instance doesn't yet exist in a cell, and lookups
                 # for it need to instead look for the RequestSpec.
@@ -962,67 +942,51 @@ class API(base.Base):
                 inst_mapping.project_id = context.project_id
                 inst_mapping.cell_mapping = None
                 inst_mapping.create()
-                instance_mappings.append(inst_mapping)
-                # TODO(alaski): Cast to conductor here which will call the
-                # scheduler and defer instance creation until the scheduler
-                # has picked a cell/host. Set the instance_mapping to the cell
-                # that the instance is scheduled to.
-                # NOTE(alaski): Instance and block device creation are going
-                # to move to the conductor.
-                instance.create()
-                instances.append(instance)
 
-                self._create_block_device_mapping(block_device_mapping)
+                instances_to_build.append(
+                    (req_spec, build_request, inst_mapping))
 
                 if instance_group:
                     if check_server_group_quota:
-                        count = objects.Quotas.count(context,
-                                             'server_group_members',
-                                             instance_group,
-                                             context.user_id)
                         try:
-                            objects.Quotas.limit_check(context,
-                                               server_group_members=count + 1)
+                            objects.Quotas.check_deltas(
+                                context, {'server_group_members': 1},
+                                instance_group, context.user_id)
                         except exception.OverQuota:
                             msg = _("Quota exceeded, too many servers in "
                                     "group")
                             raise exception.QuotaError(msg)
 
-                    objects.InstanceGroup.add_members(context,
-                                                      instance_group.uuid,
-                                                      [instance.uuid])
+                    members = objects.InstanceGroup.add_members(
+                        context, instance_group.uuid, [instance.uuid])
 
-                # send a state update notification for the initial create to
-                # show it going from non-existent to BUILDING
-                notifications.send_update_with_states(context, instance, None,
-                        vm_states.BUILDING, None, None, service="api")
+                    # NOTE(melwitt): We recheck the quota after creating the
+                    # object to prevent users from allocating more resources
+                    # than their allowed quota in the event of a race. This is
+                    # configurable because it can be expensive if strict quota
+                    # limits are not required in a deployment.
+                    if CONF.quota.recheck_quota and check_server_group_quota:
+                        try:
+                            objects.Quotas.check_deltas(
+                                context, {'server_group_members': 0},
+                                instance_group, context.user_id)
+                        except exception.OverQuota:
+                            objects.InstanceGroup._remove_members_in_db(
+                                context, instance_group.id, [instance.uuid])
+                            msg = _("Quota exceeded, too many servers in "
+                                    "group")
+                            raise exception.QuotaError(msg)
+                    # list of members added to servers group in this iteration
+                    # is needed to check quota of server group during add next
+                    # instance
+                    instance_group.members.extend(members)
 
-        # In the case of any exceptions, attempt DB cleanup and rollback the
-        # quota reservations.
+        # In the case of any exceptions, attempt DB cleanup
         except Exception:
             with excutils.save_and_reraise_exception():
-                try:
-                    for instance in instances:
-                        try:
-                            instance.destroy()
-                        except exception.ObjectActionError:
-                            pass
-                    for instance_mapping in instance_mappings:
-                        try:
-                            instance_mapping.destroy()
-                        except exception.InstanceMappingNotFound:
-                            pass
-                    for build_request in build_requests:
-                        try:
-                            build_request.destroy()
-                        except exception.BuildRequestNotFound:
-                            pass
-                finally:
-                    quotas.rollback()
+                self._cleanup_build_artifacts(None, instances_to_build)
 
-        # Commit the reservations
-        quotas.commit()
-        return instances
+        return instances_to_build
 
     def _get_bdm_image_metadata(self, context, block_device_mapping,
                                 legacy_bdm=True):
@@ -1093,7 +1057,7 @@ class API(base.Base):
                requested_networks, config_drive,
                block_device_mapping, auto_disk_config, filter_properties,
                reservation_id=None, legacy_bdm=True, shutdown_terminate=False,
-               check_server_group_quota=False):
+               check_server_group_quota=False, tags=None):
         """Verify all the input parameters regardless of the provisioning
         strategy being performed and schedule the instance(s) for
         creation.
@@ -1106,6 +1070,7 @@ class API(base.Base):
         min_count = min_count or 1
         max_count = max_count or min_count
         block_device_mapping = block_device_mapping or []
+        tags = tags or []
 
         if image_href:
             image_id, boot_meta = self._get_image(context, image_href)
@@ -1117,7 +1082,7 @@ class API(base.Base):
         self._check_auto_disk_config(image=boot_meta,
                                      auto_disk_config=auto_disk_config)
 
-        base_options, max_net_count, key_pair = \
+        base_options, max_net_count, key_pair, security_groups = \
                 self._validate_and_build_base_options(
                     context, instance_type, boot_meta, image_href, image_id,
                     kernel_id, ramdisk_id, display_name, display_description,
@@ -1132,10 +1097,10 @@ class API(base.Base):
         if max_net_count < min_count:
             raise exception.PortLimitExceeded()
         elif max_net_count < max_count:
-            LOG.info(_LI("max count reduced from %(max_count)d to "
-                         "%(max_net_count)d due to network port quota"),
-                        {'max_count': max_count,
-                         'max_net_count': max_net_count})
+            LOG.info("max count reduced from %(max_count)d to "
+                     "%(max_net_count)d due to network port quota",
+                     {'max_count': max_count,
+                      'max_net_count': max_net_count})
             max_count = max_net_count
 
         block_device_mapping = self._check_and_transform_bdm(context,
@@ -1151,17 +1116,48 @@ class API(base.Base):
         instance_group = self._get_requested_instance_group(context,
                                    filter_properties)
 
-        instances = self._provision_instances(context, instance_type,
-                min_count, max_count, base_options, boot_meta, security_groups,
-                block_device_mapping, shutdown_terminate,
-                instance_group, check_server_group_quota, filter_properties,
-                key_pair)
+        tags = self._create_tag_list_obj(context, tags)
 
-        for instance in instances:
-            self._record_action_start(context, instance,
-                                      instance_actions.CREATE)
+        instances_to_build = self._provision_instances(
+            context, instance_type, min_count, max_count, base_options,
+            boot_meta, security_groups, block_device_mapping,
+            shutdown_terminate, instance_group, check_server_group_quota,
+            filter_properties, key_pair, tags)
 
-        self.compute_task_api.build_instances(context,
+        instances = []
+        request_specs = []
+        build_requests = []
+        for rs, build_request, im in instances_to_build:
+            build_requests.append(build_request)
+            instance = build_request.get_new_instance(context)
+            instances.append(instance)
+            request_specs.append(rs)
+
+        if CONF.cells.enable:
+            # NOTE(danms): CellsV1 can't do the new thing, so we
+            # do the old thing here. We can remove this path once
+            # we stop supporting v1.
+            for instance in instances:
+                instance.create()
+            # NOTE(melwitt): We recheck the quota after creating the objects
+            # to prevent users from allocating more resources than their
+            # allowed quota in the event of a race. This is configurable
+            # because it can be expensive if strict quota limits are not
+            # required in a deployment.
+            if CONF.quota.recheck_quota:
+                try:
+                    compute_utils.check_num_instances_quota(
+                        context, instance_type, 0, 0,
+                        orig_num_req=len(instances))
+                except exception.TooManyInstances:
+                    with excutils.save_and_reraise_exception():
+                        # Need to clean up all the instances we created
+                        # along with the build requests, request specs,
+                        # and instance mappings.
+                        self._cleanup_build_artifacts(instances,
+                                                      instances_to_build)
+
+            self.compute_task_api.build_instances(context,
                 instances=instances, image=boot_meta,
                 filter_properties=filter_properties,
                 admin_password=admin_password,
@@ -1170,8 +1166,44 @@ class API(base.Base):
                 security_groups=security_groups,
                 block_device_mapping=block_device_mapping,
                 legacy_bdm=False)
+        else:
+            self.compute_task_api.schedule_and_build_instances(
+                context,
+                build_requests=build_requests,
+                request_spec=request_specs,
+                image=boot_meta,
+                admin_password=admin_password,
+                injected_files=injected_files,
+                requested_networks=requested_networks,
+                block_device_mapping=block_device_mapping,
+                tags=tags)
 
         return (instances, reservation_id)
+
+    @staticmethod
+    def _cleanup_build_artifacts(instances, instances_to_build):
+        # instances_to_build is a list of tuples:
+        # (RequestSpec, BuildRequest, InstanceMapping)
+
+        # Be paranoid about artifacts being deleted underneath us.
+        for instance in instances or []:
+            try:
+                instance.destroy()
+            except exception.InstanceNotFound:
+                pass
+        for rs, build_request, im in instances_to_build or []:
+            try:
+                rs.destroy()
+            except exception.RequestSpecNotFound:
+                pass
+            try:
+                build_request.destroy()
+            except exception.BuildRequestNotFound:
+                pass
+            try:
+                im.destroy()
+            except exception.InstanceMappingNotFound:
+                pass
 
     @staticmethod
     def _volume_size(instance_type, bdm):
@@ -1298,15 +1330,30 @@ class API(base.Base):
                         "destination_type 'volume' need to have a non-zero "
                         "size specified"))
             elif volume_id is not None:
+                min_compute_version = objects.Service.get_minimum_version(
+                    context, 'nova-compute')
                 try:
-                    volume = self.volume_api.get(context, volume_id)
-                    self.volume_api.check_attach(context,
-                                                 volume,
-                                                 instance=instance)
+                    # NOTE(ildikov): The boot from volume operation did not
+                    # reserve the volume before Pike and as the older computes
+                    # are running 'check_attach' which will fail if the volume
+                    # is in 'attaching' state; if the compute service version
+                    # is not high enough we will just perform the old check as
+                    # opposed to reserving the volume here.
+                    if (min_compute_version >=
+                        BFV_RESERVE_MIN_COMPUTE_VERSION):
+                        volume = self._check_attach_and_reserve_volume(
+                            context, volume_id, instance)
+                    else:
+                        # NOTE(ildikov): This call is here only for backward
+                        # compatibility can be removed after Ocata EOL.
+                        volume = self._check_attach(context, volume_id,
+                                                    instance)
                     bdm.volume_size = volume.get('size')
                 except (exception.CinderConnectionFailed,
                         exception.InvalidVolume):
                     raise
+                except exception.InvalidInput as exc:
+                    raise exception.InvalidVolume(reason=exc.format_message())
                 except Exception:
                     raise exception.InvalidBDMVolume(id=volume_id)
             elif snapshot_id is not None:
@@ -1347,6 +1394,23 @@ class API(base.Base):
                              if bdm.destination_type == 'local'])
             if num_local > max_local:
                 raise exception.InvalidBDMLocalsLimit()
+
+    def _check_attach(self, context, volume_id, instance):
+        # TODO(ildikov): This check_attach code is kept only for backward
+        # compatibility and should be removed after Ocata EOL.
+        volume = self.volume_api.get(context, volume_id)
+        if volume['status'] != 'available':
+            msg = _("volume '%(vol)s' status must be 'available'. Currently "
+                    "in '%(status)s'") % {'vol': volume['id'],
+                                          'status': volume['status']}
+            raise exception.InvalidVolume(reason=msg)
+        if volume['attach_status'] == 'attached':
+            msg = _("volume %s already attached") % volume['id']
+            raise exception.InvalidVolume(reason=msg)
+        self.volume_api.check_availability_zone(context, volume,
+                                                instance=instance)
+
+        return volume
 
     def _populate_instance_names(self, instance, num_instances):
         """Populate instance display_name and hostname."""
@@ -1397,8 +1461,15 @@ class API(base.Base):
         instance.old_flavor = None
         instance.new_flavor = None
         if CONF.ephemeral_storage_encryption.enabled:
+            # NOTE(kfarr): dm-crypt expects the cipher in a
+            # hyphenated format: cipher-chainmode-ivmode
+            # (ex: aes-xts-plain64). The algorithm needs
+            # to be parsed out to pass to the key manager (ex: aes).
+            cipher = CONF.ephemeral_storage_encryption.cipher
+            algorithm = cipher.split('-')[0] if cipher else None
             instance.ephemeral_key_uuid = self.key_manager.create_key(
                 context,
+                algorithm=algorithm,
                 length=CONF.ephemeral_storage_encryption.key_size)
         else:
             instance.ephemeral_key_uuid = None
@@ -1416,9 +1487,18 @@ class API(base.Base):
         # In case we couldn't find any suitable base_image
         system_meta.setdefault('image_base_image_ref', instance.image_ref)
 
+        system_meta['owner_user_name'] = context.user_name
+        system_meta['owner_project_name'] = context.project_name
+
         instance.system_metadata.update(system_meta)
 
-        instance.security_groups = security_groups
+        if CONF.use_neutron:
+            # For Neutron we don't actually store anything in the database, we
+            # proxy the security groups on the instance from the ports
+            # attached to the instance.
+            instance.security_groups = objects.SecurityGroupList()
+        else:
+            instance.security_groups = security_groups
 
         self._populate_instance_names(instance, num_instances)
         instance.shutdown_terminate = shutdown_terminate
@@ -1427,6 +1507,33 @@ class API(base.Base):
                                                           index)
 
         return instance
+
+    def _create_tag_list_obj(self, context, tags):
+        """Create TagList objects from simple string tags.
+
+        :param context: security context.
+        :param tags: simple string tags from API request.
+        :returns: TagList object.
+        """
+        tag_list = [objects.Tag(context=context, tag=t) for t in tags]
+        tag_list_obj = objects.TagList(objects=tag_list)
+        return tag_list_obj
+
+    def _transform_tags(self, tags, resource_id):
+        """Change the resource_id of the tags according to the input param.
+
+        Because this method can be called multiple times when more than one
+        instance is booted in a single request it makes a copy of the tags
+        list.
+
+        :param tags: TagList object.
+        :param resource_id: string.
+        :returns: TagList object.
+        """
+        instance_tags = tags.obj_clone()
+        for tag in instance_tags:
+            tag.resource_id = resource_id
+        return instance_tags
 
     # This method remains because cellsv1 uses it in the scheduler
     def create_db_entry_for_new_instance(self, context, instance_type, image,
@@ -1478,14 +1585,14 @@ class API(base.Base):
                image_href, kernel_id=None, ramdisk_id=None,
                min_count=None, max_count=None,
                display_name=None, display_description=None,
-               key_name=None, key_data=None, security_group=None,
+               key_name=None, key_data=None, security_groups=None,
                availability_zone=None, forced_host=None, forced_node=None,
                user_data=None, metadata=None, injected_files=None,
                admin_password=None, block_device_mapping=None,
                access_ip_v4=None, access_ip_v6=None, requested_networks=None,
                config_drive=None, auto_disk_config=None, scheduler_hints=None,
                legacy_bdm=True, shutdown_terminate=False,
-               check_server_group_quota=False):
+               check_server_group_quota=False, tags=None):
         """Provision instances, sending instance information to the
         scheduler.  The scheduler will determine where the instance(s)
         go and will handle creating the DB entries.
@@ -1515,7 +1622,7 @@ class API(base.Base):
                        image_href, kernel_id, ramdisk_id,
                        min_count, max_count,
                        display_name, display_description,
-                       key_name, key_data, security_group,
+                       key_name, key_data, security_groups,
                        availability_zone, user_data, metadata,
                        injected_files, admin_password,
                        access_ip_v4, access_ip_v6,
@@ -1524,7 +1631,8 @@ class API(base.Base):
                        filter_properties=filter_properties,
                        legacy_bdm=legacy_bdm,
                        shutdown_terminate=shutdown_terminate,
-                       check_server_group_quota=check_server_group_quota)
+                       check_server_group_quota=check_server_group_quota,
+                       tags=tags)
 
     def _check_auto_disk_config(self, instance=None, image=None,
                                 **extra_instance_updates):
@@ -1569,13 +1677,17 @@ class API(base.Base):
             # guaranteed everyone is using cellsv2.
             pass
 
-        if inst_map is None or inst_map.cell_mapping is None:
+        if (inst_map is None or inst_map.cell_mapping is None or
+                CONF.cells.enable):
             # If inst_map is None then the deployment has not migrated to
             # cellsv2 yet.
             # If inst_map.cell_mapping is None then the instance is not in a
             # cell yet. Until instance creation moves to the conductor the
             # instance can be found in the configured database, so attempt
             # to look it up.
+            # If we're on cellsv1, we can't yet short-circuit the cells
+            # messaging path
+            cell = None
             try:
                 instance = objects.Instance.get_by_uuid(context, uuid)
             except exception.InstanceNotFound:
@@ -1583,18 +1695,18 @@ class API(base.Base):
                 # instance to the database and hasn't done that yet. It's up to
                 # the caller of this method to determine what to do with that
                 # information.
-                return
+                return None, None
         else:
-            with nova_context.target_cell(context, inst_map.cell_mapping):
+            cell = inst_map.cell_mapping
+            with nova_context.target_cell(context, cell) as cctxt:
                 try:
-                    instance = objects.Instance.get_by_uuid(context,
-                                                            uuid)
+                    instance = objects.Instance.get_by_uuid(cctxt, uuid)
                 except exception.InstanceNotFound:
                     # Since the cell_mapping exists we know the instance is in
                     # the cell, however InstanceNotFound means it's already
                     # deleted.
-                    return
-        return instance
+                    return None, None
+        return cell, instance
 
     def _delete_while_booting(self, context, instance):
         """Handle deletion if the instance has not reached a cell yet
@@ -1622,34 +1734,32 @@ class API(base.Base):
             # buildrequest indicates that the build process should be halted by
             # the conductor.
 
-            # Since conductor has halted the build process no cleanup of the
-            # instance is necessary, but quotas must still be decremented.
-            project_id, user_id = quotas_obj.ids_from_instance(
-                context, instance)
-            # This is confusing but actually decrements quota.
-            quotas = self._create_reservations(context,
-                                               instance,
-                                               instance.task_state,
-                                               project_id, user_id)
+            # NOTE(alaski): Though the conductor halts the build process it
+            # does not currently delete the instance record. This is
+            # because in the near future the instance record will not be
+            # created if the buildrequest has been deleted here. For now we
+            # ensure the instance has been set to deleted at this point.
+            # Yes this directly contradicts the comment earlier in this
+            # method, but this is a temporary measure.
+            # Look up the instance because the current instance object was
+            # stashed on the buildrequest and therefore not complete enough
+            # to run .destroy().
             try:
-                quotas.commit()
-
-                # NOTE(alaski): Though the conductor halts the build process it
-                # does not currently delete the instance record. This is
-                # because in the near future the instance record will not be
-                # created if the buildrequest has been deleted here. For now we
-                # ensure the instance has been set to deleted at this point.
-                # Yes this directly contradicts the comment earlier in this
-                # method, but this is a temporary measure.
-                # Look up the instance because the current instance object was
-                # stashed on the buildrequest and therefore not complete enough
-                # to run .destroy().
-                instance = self._lookup_instance(context, instance.uuid)
+                instance_uuid = instance.uuid
+                cell, instance = self._lookup_instance(context, instance_uuid)
                 if instance is not None:
                     # If instance is None it has already been deleted.
-                    instance.destroy()
+                    if cell:
+                        with nova_context.target_cell(context, cell) as cctxt:
+                            # FIXME: When the instance context is targeted,
+                            # we can remove this
+                            with compute_utils.notify_about_instance_delete(
+                                    self.notifier, cctxt, instance):
+                                instance.destroy()
+                    else:
+                        instance.destroy()
             except exception.InstanceNotFound:
-                quotas.rollback()
+                pass
 
             return True
         return False
@@ -1671,76 +1781,93 @@ class API(base.Base):
 
     def _delete(self, context, instance, delete_type, cb, **instance_attrs):
         if instance.disable_terminate:
-            LOG.info(_LI('instance termination disabled'),
-                     instance=instance)
+            LOG.info('instance termination disabled', instance=instance)
             return
 
-        # If there is an instance.host the instance has been scheduled and
-        # sent to a cell/compute which means it was pulled from the cell db.
+        cell = None
+        # If there is an instance.host (or the instance is shelved-offloaded),
+        # the instance has been scheduled and sent to a cell/compute which
+        # means it was pulled from the cell db.
         # Normal delete should be attempted.
-        if not instance.host:
-            if self._delete_while_booting(context, instance):
-                return
-            # If instance.host was not set it's possible that the Instance
-            # object here was pulled from a BuildRequest object and is not
-            # fully populated. Notably it will be missing an 'id' field which
-            # will prevent instance.destroy from functioning properly. A lookup
-            # is attempted which will either return a full Instance or None if
-            # not found. If not found then it's acceptable to skip the rest of
-            # the delete processing.
-            instance = self._lookup_instance(context, instance.uuid)
-            if not instance:
-                # Instance is already deleted.
-                return
+        if not (instance.host or
+                instance.vm_state == vm_states.SHELVED_OFFLOADED):
+            try:
+                if self._delete_while_booting(context, instance):
+                    return
+                # If instance.host was not set it's possible that the Instance
+                # object here was pulled from a BuildRequest object and is not
+                # fully populated. Notably it will be missing an 'id' field
+                # which will prevent instance.destroy from functioning
+                # properly. A lookup is attempted which will either return a
+                # full Instance or None if not found. If not found then it's
+                # acceptable to skip the rest of the delete processing.
+                cell, instance = self._lookup_instance(context, instance.uuid)
+                if cell and instance:
+                    try:
+                        # Now destroy the instance from the cell it lives in.
+                        with compute_utils.notify_about_instance_delete(
+                                self.notifier, context, instance):
+                            instance.destroy()
+                    except exception.InstanceNotFound:
+                        pass
+                    # The instance was deleted or is already gone.
+                    return
+                if not instance:
+                    # Instance is already deleted.
+                    return
+            except exception.ObjectActionError:
+                # NOTE(melwitt): This means the instance.host changed
+                # under us indicating the instance became scheduled
+                # during the destroy(). Refresh the instance from the DB and
+                # continue on with the delete logic for a scheduled instance.
+                # NOTE(danms): If instance.host is set, we should be able to
+                # do the following lookup. If not, there's not much we can
+                # do to recover.
+                cell, instance = self._lookup_instance(context, instance.uuid)
+                if not instance:
+                    # Instance is already deleted
+                    return
 
         bdms = objects.BlockDeviceMappingList.get_by_instance_uuid(
                 context, instance.uuid)
-
-        project_id, user_id = quotas_obj.ids_from_instance(context, instance)
 
         # At these states an instance has a snapshot associate.
         if instance.vm_state in (vm_states.SHELVED,
                                  vm_states.SHELVED_OFFLOADED):
             snapshot_id = instance.system_metadata.get('shelved_image_id')
-            LOG.info(_LI("Working on deleting snapshot %s "
-                         "from shelved instance..."),
+            LOG.info("Working on deleting snapshot %s "
+                     "from shelved instance...",
                      snapshot_id, instance=instance)
             try:
                 self.image_api.delete(context, snapshot_id)
             except (exception.ImageNotFound,
                     exception.ImageNotAuthorized) as exc:
-                LOG.warning(_LW("Failed to delete snapshot "
-                                "from shelved instance (%s)."),
+                LOG.warning("Failed to delete snapshot "
+                            "from shelved instance (%s).",
                             exc.format_message(), instance=instance)
             except Exception:
-                LOG.exception(_LE("Something wrong happened when trying to "
-                                  "delete snapshot from shelved instance."),
+                LOG.exception("Something wrong happened when trying to "
+                              "delete snapshot from shelved instance.",
                               instance=instance)
 
         original_task_state = instance.task_state
-        quotas = None
         try:
             # NOTE(maoy): no expected_task_state needs to be set
             instance.update(instance_attrs)
             instance.progress = 0
             instance.save()
 
-            # NOTE(comstud): If we delete the instance locally, we'll
-            # commit the reservations here.  Otherwise, the manager side
-            # will commit or rollback the reservations based on success.
-            quotas = self._create_reservations(context,
-                                               instance,
-                                               original_task_state,
-                                               project_id, user_id)
+            # NOTE(dtp): cells.enable = False means "use cells v2".
+            # Run everywhere except v1 compute cells.
+            if not CONF.cells.enable or self.cell_type == 'api':
+                self.consoleauth_rpcapi.delete_tokens_for_instance(
+                    context, instance.uuid)
 
             if self.cell_type == 'api':
                 # NOTE(comstud): If we're in the API cell, we need to
                 # skip all remaining logic and just call the callback,
-                # which will cause a cast to the child cell.  Also,
-                # commit reservations here early until we have a better
-                # way to deal with quotas with cells.
-                cb(context, instance, bdms, reservations=None)
-                quotas.commit()
+                # which will cause a cast to the child cell.
+                cb(context, instance, bdms)
                 return
             shelved_offloaded = (instance.vm_state
                                  == vm_states.SHELVED_OFFLOADED)
@@ -1754,11 +1881,10 @@ class API(base.Base):
                             self.notifier, context, instance,
                             "%s.end" % delete_type,
                             system_metadata=instance.system_metadata)
-                    quotas.commit()
-                    LOG.info(_LI('Instance deleted and does not have host '
-                                 'field, its vm_state is %(state)s.'),
-                                 {'state': instance.vm_state},
-                                 instance=instance)
+                    LOG.info('Instance deleted and does not have host '
+                             'field, its vm_state is %(state)s.',
+                             {'state': instance.vm_state},
+                              instance=instance)
                     return
                 except exception.ObjectActionError:
                     instance.refresh()
@@ -1776,24 +1902,14 @@ class API(base.Base):
                 if not is_local_delete:
                     if original_task_state in (task_states.DELETING,
                                                   task_states.SOFT_DELETING):
-                        LOG.info(_LI('Instance is already in deleting state, '
-                                     'ignoring this request'),
+                        LOG.info('Instance is already in deleting state, '
+                                 'ignoring this request',
                                  instance=instance)
-                        quotas.rollback()
                         return
                     self._record_action_start(context, instance,
                                               instance_actions.DELETE)
 
-                    # NOTE(snikitin): If instance's vm_state is 'soft-delete',
-                    # we should not count reservations here, because instance
-                    # in soft-delete vm_state have already had quotas
-                    # decremented. More details:
-                    # https://bugs.launchpad.net/nova/+bug/1333145
-                    if instance.vm_state == vm_states.SOFT_DELETED:
-                        quotas.rollback()
-
-                    cb(context, instance, bdms,
-                       reservations=quotas.reservations)
+                    cb(context, instance, bdms)
             except exception.ComputeHostNotFound:
                 pass
 
@@ -1801,17 +1917,26 @@ class API(base.Base):
                 # If instance is in shelved_offloaded state or compute node
                 # isn't up, delete instance from db and clean bdms info and
                 # network info
-                self._local_delete(context, instance, bdms, delete_type, cb)
-                quotas.commit()
+                if cell is None:
+                    # NOTE(danms): If we didn't get our cell from one of the
+                    # paths above, look it up now.
+                    try:
+                        im = objects.InstanceMapping.get_by_instance_uuid(
+                            context, instance.uuid)
+                        cell = im.cell_mapping
+                    except exception.InstanceMappingNotFound:
+                        LOG.warning('During local delete, failed to find '
+                                    'instance mapping', instance=instance)
+                        return
+
+                LOG.debug('Doing local delete in cell %s', cell.identity,
+                          instance=instance)
+                with nova_context.target_cell(context, cell) as cctxt:
+                    self._local_delete(cctxt, instance, bdms, delete_type, cb)
 
         except exception.InstanceNotFound:
             # NOTE(comstud): Race condition. Instance already gone.
-            if quotas:
-                quotas.rollback()
-        except Exception:
-            with excutils.save_and_reraise_exception():
-                if quotas:
-                    quotas.rollback()
+            pass
 
     def _confirm_resize_on_deleting(self, context, instance):
         # If in the middle of a resize, use confirm_resize to
@@ -1821,70 +1946,27 @@ class API(base.Base):
             try:
                 migration = objects.Migration.get_by_instance_and_status(
                         context.elevated(), instance.uuid, status)
-                LOG.info(_LI('Found an unconfirmed migration during delete, '
-                             'id: %(id)s, status: %(status)s'),
+                LOG.info('Found an unconfirmed migration during delete, '
+                         'id: %(id)s, status: %(status)s',
                          {'id': migration.id,
                           'status': migration.status},
-                         context=context, instance=instance)
+                         instance=instance)
                 break
             except exception.MigrationNotFoundByStatus:
                 pass
 
         if not migration:
-            LOG.info(_LI('Instance may have been confirmed during delete'),
-                     context=context, instance=instance)
+            LOG.info('Instance may have been confirmed during delete',
+                     instance=instance)
             return
 
         src_host = migration.source_compute
-        # Call since this can race with the terminate_instance.
-        # The resize is done but awaiting confirmation/reversion,
-        # so there are two cases:
-        # 1. up-resize: here -instance['vcpus'/'memory_mb'] match
-        #    the quota usages accounted for this instance,
-        #    so no further quota adjustment is needed
-        # 2. down-resize: here -instance['vcpus'/'memory_mb'] are
-        #    shy by delta(old, new) from the quota usages accounted
-        #    for this instance, so we must adjust
-        try:
-            deltas = compute_utils.downsize_quota_delta(context, instance)
-        except KeyError:
-            LOG.info(_LI('Migration %s may have been confirmed during '
-                         'delete'),
-                     migration.id, context=context, instance=instance)
-            return
-        quotas = compute_utils.reserve_quota_delta(context, deltas, instance)
 
         self._record_action_start(context, instance,
                                   instance_actions.CONFIRM_RESIZE)
 
         self.compute_rpcapi.confirm_resize(context,
-                instance, migration,
-                src_host, quotas.reservations,
-                cast=False)
-
-    def _create_reservations(self, context, instance, original_task_state,
-                             project_id, user_id):
-        # NOTE(wangpan): if the instance is resizing, and the resources
-        #                are updated to new instance type, we should use
-        #                the old instance type to create reservation.
-        # see https://bugs.launchpad.net/nova/+bug/1099729 for more details
-        if original_task_state in (task_states.RESIZE_MIGRATED,
-                                   task_states.RESIZE_FINISH):
-            old_flavor = instance.old_flavor
-            instance_vcpus = old_flavor.vcpus
-            vram_mb = old_flavor.extra_specs.get('hw_video:ram_max_mb', 0)
-            instance_memory_mb = old_flavor.memory_mb + vram_mb
-        else:
-            instance_vcpus = instance.flavor.vcpus
-            instance_memory_mb = instance.flavor.memory_mb
-
-        quotas = objects.Quotas(context=context)
-        quotas.reserve(project_id=project_id,
-                       user_id=user_id,
-                       instances=-1,
-                       cores=-instance_vcpus,
-                       ram=-instance_memory_mb)
-        return quotas
+                instance, migration, src_host, cast=False)
 
     def _get_stashed_volume_connector(self, bdm, instance):
         """Lookup a connector dict from the bdm.connection_info if set
@@ -1920,36 +2002,41 @@ class API(base.Base):
         for bdm in bdms:
             if bdm.is_volume:
                 try:
-                    connector = self._get_stashed_volume_connector(
-                        bdm, instance)
-                    if connector:
-                        self.volume_api.terminate_connection(context,
-                                                             bdm.volume_id,
-                                                             connector)
+                    if bdm.attachment_id:
+                        self.volume_api.attachment_delete(context,
+                                                          bdm.attachment_id)
                     else:
-                        LOG.debug('Unable to find connector for volume %s, '
-                                  'not attempting terminate_connection.',
-                                  bdm.volume_id, instance=instance)
-                    # Attempt to detach the volume. If there was no connection
-                    # made in the first place this is just cleaning up the
-                    # volume state in the Cinder database.
-                    self.volume_api.detach(elevated, bdm.volume_id,
-                                           instance.uuid)
+                        connector = self._get_stashed_volume_connector(
+                            bdm, instance)
+                        if connector:
+                            self.volume_api.terminate_connection(context,
+                                                                 bdm.volume_id,
+                                                                 connector)
+                        else:
+                            LOG.debug('Unable to find connector for volume %s,'
+                                      ' not attempting terminate_connection.',
+                                      bdm.volume_id, instance=instance)
+                        # Attempt to detach the volume. If there was no
+                        # connection made in the first place this is just
+                        # cleaning up the volume state in the Cinder DB.
+                        self.volume_api.detach(elevated, bdm.volume_id,
+                                               instance.uuid)
+
                     if bdm.delete_on_termination:
                         self.volume_api.delete(context, bdm.volume_id)
                 except Exception as exc:
-                    err_str = _LW("Ignoring volume cleanup failure due to %s")
-                    LOG.warning(err_str % exc, instance=instance)
+                    LOG.warning("Ignoring volume cleanup failure due to %s",
+                                exc, instance=instance)
             bdm.destroy()
 
     def _local_delete(self, context, instance, bdms, delete_type, cb):
         if instance.vm_state == vm_states.SHELVED_OFFLOADED:
-            LOG.info(_LI("instance is in SHELVED_OFFLOADED state, cleanup"
-                         " the instance's info from database."),
+            LOG.info("instance is in SHELVED_OFFLOADED state, cleanup"
+                     " the instance's info from database.",
                      instance=instance)
         else:
-            LOG.warning(_LW("instance's host %s is down, deleting from "
-                            "database"), instance.host, instance=instance)
+            LOG.warning("instance's host %s is down, deleting from "
+                        "database", instance.host, instance=instance)
         compute_utils.notify_about_instance_usage(
             self.notifier, context, instance, "%s.start" % delete_type)
 
@@ -1983,8 +2070,7 @@ class API(base.Base):
             self.notifier, context, instance, "%s.end" % delete_type,
             system_metadata=sys_meta)
 
-    def _do_delete(self, context, instance, bdms, reservations=None,
-                   local=False):
+    def _do_delete(self, context, instance, bdms, local=False):
         if local:
             instance.vm_state = vm_states.DELETED
             instance.task_state = None
@@ -1992,11 +2078,9 @@ class API(base.Base):
             instance.save()
         else:
             self.compute_rpcapi.terminate_instance(context, instance, bdms,
-                                                   reservations=reservations,
                                                    delete_type='delete')
 
-    def _do_force_delete(self, context, instance, bdms, reservations=None,
-                         local=False):
+    def _do_force_delete(self, context, instance, bdms, local=False):
         if local:
             instance.vm_state = vm_states.DELETED
             instance.task_state = None
@@ -2004,19 +2088,16 @@ class API(base.Base):
             instance.save()
         else:
             self.compute_rpcapi.terminate_instance(context, instance, bdms,
-                                                   reservations=reservations,
                                                    delete_type='force_delete')
 
-    def _do_soft_delete(self, context, instance, bdms, reservations=None,
-                        local=False):
+    def _do_soft_delete(self, context, instance, bdms, local=False):
         if local:
             instance.vm_state = vm_states.SOFT_DELETED
             instance.task_state = None
             instance.terminated_at = timeutils.utcnow()
             instance.save()
         else:
-            self.compute_rpcapi.soft_delete_instance(context, instance,
-                                                     reservations=reservations)
+            self.compute_rpcapi.soft_delete_instance(context, instance)
 
     # NOTE(maoy): we allow delete to be called no matter what vm_state says.
     @check_instance_lock
@@ -2049,31 +2130,28 @@ class API(base.Base):
     @check_instance_state(vm_state=[vm_states.SOFT_DELETED])
     def restore(self, context, instance):
         """Restore a previously deleted (but not reclaimed) instance."""
-        # Reserve quotas
+        # Check quotas
         flavor = instance.get_flavor()
         project_id, user_id = quotas_obj.ids_from_instance(context, instance)
-        num_instances, quotas = self._check_num_instances_quota(
-                context, flavor, 1, 1,
+        compute_utils.check_num_instances_quota(context, flavor, 1, 1,
                 project_id=project_id, user_id=user_id)
 
         self._record_action_start(context, instance, instance_actions.RESTORE)
 
-        try:
-            if instance.host:
-                instance.task_state = task_states.RESTORING
-                instance.deleted_at = None
-                instance.save(expected_task_state=[None])
-                self.compute_rpcapi.restore_instance(context, instance)
-            else:
-                instance.vm_state = vm_states.ACTIVE
-                instance.task_state = None
-                instance.deleted_at = None
-                instance.save(expected_task_state=[None])
-
-            quotas.commit()
-        except Exception:
-            with excutils.save_and_reraise_exception():
-                quotas.rollback()
+        if instance.host:
+            instance.task_state = task_states.RESTORING
+            instance.deleted_at = None
+            instance.save(expected_task_state=[None])
+            # TODO(melwitt): We're not rechecking for strict quota here to
+            # guard against going over quota during a race at this time because
+            # the resource consumption for this operation is written to the
+            # database by compute.
+            self.compute_rpcapi.restore_instance(context, instance)
+        else:
+            instance.vm_state = vm_states.ACTIVE
+            instance.task_state = None
+            instance.deleted_at = None
+            instance.save(expected_task_state=[None])
 
     @check_instance_lock
     @check_instance_state(must_have_launched=False)
@@ -2151,14 +2229,17 @@ class API(base.Base):
         # service versions.
         service_version = objects.Service.get_minimum_version(
             context, 'nova-osapi_compute')
-        if service_version < 15:
+        # If we're on cellsv1, we also need to consult the top-level
+        # merged replica instead of the cell directly, so fall through
+        # here in that case as well.
+        if service_version < 15 or CONF.cells.enable:
             return objects.Instance.get_by_uuid(context, instance_uuid,
                                                 expected_attrs=expected_attrs)
         inst_map = self._get_instance_map_or_none(context, instance_uuid)
         if inst_map and (inst_map.cell_mapping is not None):
-            with nova_context.target_cell(context, inst_map.cell_mapping):
-                instance = objects.Instance.get_by_uuid(
-                    context, instance_uuid, expected_attrs=expected_attrs)
+            nova_context.set_target_cell(context, inst_map.cell_mapping)
+            instance = objects.Instance.get_by_uuid(
+                context, instance_uuid, expected_attrs=expected_attrs)
         elif inst_map and (inst_map.cell_mapping is None):
             # This means the instance has not been scheduled and put in
             # a cell yet. For now it also may mean that the deployer
@@ -2173,29 +2254,15 @@ class API(base.Base):
                 inst_map = self._get_instance_map_or_none(context,
                                                           instance_uuid)
                 if inst_map and (inst_map.cell_mapping is not None):
-                    with nova_context.target_cell(context,
-                                                  inst_map.cell_mapping):
-                        instance = objects.Instance.get_by_uuid(
-                            context, instance_uuid,
-                            expected_attrs=expected_attrs)
-                else:
-                    # If BuildRequest is not found but inst_map.cell_mapping
-                    # does not point at a cell then cell migration has not
-                    # happened yet. This will be a failure case later.
-                    # TODO(alaski): Make this a failure case after we put in
-                    # a block that requires migrating to cellsv2.
+                    nova_context.set_target_cell(context,
+                                                 inst_map.cell_mapping)
                     instance = objects.Instance.get_by_uuid(
-                        context, instance_uuid, expected_attrs=expected_attrs)
+                        context, instance_uuid,
+                        expected_attrs=expected_attrs)
+                else:
+                    raise exception.InstanceNotFound(instance_id=instance_uuid)
         else:
-            # This should not happen once a deployment has migrated to cellsv2.
-            # If it happens after that point we handle it gracefully for now
-            # but this will become an exception in the future.
-            # TODO(alaski): Once devstack is setting up cellsv2 by default add
-            # a warning log message that this will become an exception in the
-            # future. The warning message will be conditional upon the
-            # migration having happened, which means a db lookup to check that.
-            instance = objects.Instance.get_by_uuid(
-                context, instance_uuid, expected_attrs=expected_attrs)
+            raise exception.InstanceNotFound(instance_id=instance_uuid)
 
         return instance
 
@@ -2272,7 +2339,7 @@ class API(base.Base):
                 'system_metadata': _remap_system_metadata_filter}
 
         # copy from search_opts, doing various remappings as necessary
-        for opt, value in six.iteritems(search_opts):
+        for opt, value in search_opts.items():
             # Do remappings.
             # Values not in the filter_mapping table are copied as-is.
             # If remapping is None, option is not copied
@@ -2321,11 +2388,18 @@ class API(base.Base):
         except exception.CellMappingNotFound:
             cell0_instances = objects.InstanceList(objects=[])
         else:
-            with nova_context.target_cell(context, cell0_mapping):
-                cell0_instances = self._get_instances_by_filters(
-                    context, filters, limit=limit, marker=marker,
-                    expected_attrs=expected_attrs, sort_keys=sort_keys,
-                    sort_dirs=sort_dirs)
+            with nova_context.target_cell(context, cell0_mapping) as cctxt:
+                try:
+                    cell0_instances = self._get_instances_by_filters(
+                        cctxt, filters, limit=limit, marker=marker,
+                        expected_attrs=expected_attrs, sort_keys=sort_keys,
+                        sort_dirs=sort_dirs)
+                    # If we found the marker in cell0 we need to set it to None
+                    # so we don't expect to find it in the cells below.
+                    marker = None
+                except exception.MarkerNotFound:
+                    # We can ignore this since we need to look in the cell DB
+                    cell0_instances = objects.InstanceList(objects=[])
         # Only subtract from limit if it is not None
         limit = (limit - len(cell0_instances)) if limit else limit
 
@@ -2333,10 +2407,23 @@ class API(base.Base):
         # instance lists should be proxied to project Searchlight, or a similar
         # alternative.
         if limit is None or limit > 0:
-            cell_instances = self._get_instances_by_filters(context, filters,
-                    limit=limit, marker=marker, expected_attrs=expected_attrs,
-                    sort_keys=sort_keys, sort_dirs=sort_dirs)
+            if not CONF.cells.enable:
+                cell_instances = self._get_instances_by_filters_all_cells(
+                        context, filters,
+                        limit=limit, marker=marker,
+                        expected_attrs=expected_attrs, sort_keys=sort_keys,
+                        sort_dirs=sort_dirs)
+            else:
+                # NOTE(melwitt): If we're on cells v1, we need to read
+                # instances from the top-level database because reading from
+                # cells results in changed behavior, because of the syncing.
+                # We can remove this path once we stop supporting cells v1.
+                cell_instances = self._get_instances_by_filters(
+                    context, filters, limit=limit, marker=marker,
+                    expected_attrs=expected_attrs, sort_keys=sort_keys,
+                    sort_dirs=sort_dirs)
         else:
+            LOG.debug('Limit excludes any results from real cells')
             cell_instances = objects.InstanceList(objects=[])
 
         def _get_unique_filter_method():
@@ -2351,6 +2438,8 @@ class API(base.Base):
             return _filter
 
         filter_method = _get_unique_filter_method()
+        # Only subtract from limit if it is not None
+        limit = (limit - len(cell_instances)) if limit else limit
         # TODO(alaski): Clean up the objects concatenation when List objects
         # support it natively.
         instances = objects.InstanceList(
@@ -2370,7 +2459,7 @@ class API(base.Base):
         ipv6_f = re.compile(str(filters.get('ip6')))
 
         def _match_instance(instance):
-            nw_info = compute_utils.get_nw_info_for_instance(instance)
+            nw_info = instance.get_network_info()
             for vif in nw_info:
                 for fixed_ip in vif.fixed_ips():
                     address = fixed_ip.get('address')
@@ -2389,6 +2478,58 @@ class API(base.Base):
                 if limit and len(result_objs) == limit:
                     break
         return objects.InstanceList(objects=result_objs)
+
+    def _get_instances_by_filters_all_cells(self, context, *args, **kwargs):
+        """This is just a wrapper that iterates (non-zero) cells."""
+        load_cells()
+        if len(CELLS) == 1:
+            # We always expect at least two cells; one for cell0 and one for at
+            # least a single main cell. If there is only one cell it indicates
+            # that nova-api was started before all of the cells were mapped and
+            # we should provide a warning to the operator.
+            LOG.warning('At least two cells are expected but only one '
+                        'was found (%s). cell0 and the initial main cell '
+                        'should be created before starting nova-api since '
+                        'the cells are cached in each worker. When you '
+                        'create more cells, you will need to restart the '
+                        'nova-api service to reset the cache.',
+                        CELLS[0].identity)
+
+        limit = kwargs.pop('limit', None)
+
+        instances = []
+        for cell in CELLS:
+            if cell.uuid == objects.CellMapping.CELL0_UUID:
+                LOG.debug('Skipping already-collected cell0 list')
+                continue
+            LOG.debug('Listing %s instances in cell %s',
+                      limit or 'all', cell.identity)
+            with nova_context.target_cell(context, cell) as ccontext:
+                try:
+                    cell_insts = self._get_instances_by_filters(ccontext,
+                                                                *args,
+                                                                limit=limit,
+                                                                **kwargs)
+                except exception.MarkerNotFound:
+                    # NOTE(danms): We need to keep looking through the
+                    # later cells to find the marker
+                    continue
+                instances.extend(cell_insts)
+                # NOTE(danms): We must have found a marker if we had one,
+                # so make sure we don't require a marker in the next cell
+                kwargs['marker'] = None
+                if limit:
+                    limit -= len(cell_insts)
+                    if limit <= 0:
+                        break
+
+        marker = kwargs.get('marker')
+        if marker is not None and len(instances) == 0:
+            # NOTE(danms): If we did not find the marker in any cell,
+            # mimic the db_api behavior here.
+            raise exception.MarkerNotFound(marker=marker)
+
+        return objects.InstanceList(objects=instances)
 
     def _get_instances_by_filters(self, context, filters,
                                   limit=None, marker=None, expected_attrs=None,
@@ -2415,9 +2556,14 @@ class API(base.Base):
             # Instance has been scheduled and the BuildRequest has been deleted
             # we can directly write the update down to the right cell.
             inst_map = self._get_instance_map_or_none(context, instance.uuid)
-            if inst_map and (inst_map.cell_mapping is not None):
-                with nova_context.target_cell(context, inst_map.cell_mapping):
-                    instance.save()
+            # If we have a cell_mapping and we're not on cells v1, then
+            # look up the instance in the cell database
+            if inst_map and (inst_map.cell_mapping is not None) and (
+                    not CONF.cells.enable):
+                with nova_context.target_cell(context,
+                                              inst_map.cell_mapping) as cctxt:
+                    with instance.obj_alternate_context(cctxt):
+                        instance.save()
             else:
                 # If inst_map.cell_mapping does not point at a cell then cell
                 # migration has not happened yet.
@@ -2458,10 +2604,11 @@ class API(base.Base):
                 inst_map = self._get_instance_map_or_none(context,
                                                           instance.uuid)
                 if inst_map and (inst_map.cell_mapping is not None):
-                    with nova_context.target_cell(context,
-                                                  inst_map.cell_mapping):
+                    with nova_context.target_cell(
+                            context,
+                            inst_map.cell_mapping) as cctxt:
                         instance = objects.Instance.get_by_uuid(
-                            context, instance.uuid,
+                            cctxt, instance.uuid,
                             expected_attrs=expected_attrs)
                         instance.update(updates)
                         instance.save()
@@ -2497,9 +2644,10 @@ class API(base.Base):
         props_copy = dict(extra_properties, backup_type=backup_type)
 
         if compute_utils.is_volume_backed_instance(context, instance):
-            LOG.info(_LI("It's not supported to backup volume backed "
-                         "instance."), context=context, instance=instance)
-            raise exception.InvalidRequest()
+            LOG.info("It's not supported to backup volume backed "
+                     "instance.", instance=instance)
+            raise exception.InvalidRequest(
+                _('Backup is not supported for volume-backed instances.'))
         else:
             image_meta = self._create_image(context, instance,
                                             name, 'backup',
@@ -2538,7 +2686,36 @@ class API(base.Base):
         # NOTE(comstud): Any changes to this method should also be made
         # to the snapshot_instance() method in nova/cells/messaging.py
         instance.task_state = task_states.IMAGE_SNAPSHOT_PENDING
-        instance.save(expected_task_state=[None])
+        try:
+            instance.save(expected_task_state=[None])
+        except (exception.InstanceNotFound,
+                exception.UnexpectedDeletingTaskStateError) as ex:
+            # Changing the instance task state to use in raising the
+            # InstanceInvalidException below
+            LOG.debug('Instance disappeared during snapshot.',
+                      instance=instance)
+            try:
+                image_id = image_meta['id']
+                self.image_api.delete(context, image_id)
+                LOG.info('Image %s deleted because instance '
+                         'deleted before snapshot started.',
+                         image_id, instance=instance)
+            except exception.ImageNotFound:
+                pass
+            except Exception as exc:
+                LOG.warning("Error while trying to clean up image %(img_id)s: "
+                            "%(error_msg)s",
+                            {"img_id": image_meta['id'],
+                             "error_msg": six.text_type(exc)})
+            attr = 'task_state'
+            state = task_states.DELETING
+            if type(ex) == exception.InstanceNotFound:
+                attr = 'vm_state'
+                state = vm_states.DELETED
+            raise exception.InstanceInvalidState(attr=attr,
+                                           instance_uuid=instance.uuid,
+                                           state=state,
+                                           method='snapshot')
 
         self.compute_rpcapi.snapshot_instance(context, instance,
                                               image_meta['id'])
@@ -2642,9 +2819,9 @@ class API(base.Base):
                         'image_os_require_quiesce')):
                     raise
                 else:
-                    LOG.info(_LI('Skipping quiescing instance: '
-                                 '%(reason)s.'), {'reason': err},
-                             context=context, instance=instance)
+                    LOG.info('Skipping quiescing instance: %(reason)s.',
+                             {'reason': err},
+                             instance=instance)
 
         bdms = objects.BlockDeviceMappingList.get_by_instance_uuid(
                 context, instance.uuid)
@@ -2817,6 +2994,40 @@ class API(base.Base):
                 request_spec=request_spec,
                 kwargs=kwargs)
 
+    @staticmethod
+    def _check_quota_for_upsize(context, instance, current_flavor, new_flavor):
+        project_id, user_id = quotas_obj.ids_from_instance(context,
+                                                           instance)
+        # Deltas will be empty if the resize is not an upsize.
+        deltas = compute_utils.upsize_quota_delta(context, new_flavor,
+                                                  current_flavor)
+        if deltas:
+            try:
+                res_deltas = {'cores': deltas.get('cores', 0),
+                              'ram': deltas.get('ram', 0)}
+                objects.Quotas.check_deltas(context, res_deltas,
+                                            project_id, user_id=user_id,
+                                            check_project_id=project_id,
+                                            check_user_id=user_id)
+            except exception.OverQuota as exc:
+                quotas = exc.kwargs['quotas']
+                overs = exc.kwargs['overs']
+                usages = exc.kwargs['usages']
+                headroom = compute_utils.get_headroom(quotas, usages,
+                                                      deltas)
+                (overs, reqs, total_alloweds,
+                 useds) = compute_utils.get_over_quota_detail(headroom,
+                                                              overs,
+                                                              quotas,
+                                                              deltas)
+                LOG.warning("%(overs)s quota exceeded for %(pid)s,"
+                            " tried to resize instance.",
+                            {'overs': overs, 'pid': context.project_id})
+                raise exception.TooManyInstances(overs=overs,
+                                                 req=reqs,
+                                                 used=useds,
+                                                 allowed=total_alloweds)
+
     @check_instance_lock
     @check_instance_cell
     @check_instance_state(vm_state=[vm_states.RESIZED])
@@ -2826,31 +3037,26 @@ class API(base.Base):
         migration = objects.Migration.get_by_instance_and_status(
             elevated, instance.uuid, 'finished')
 
-        # reverse quota reservation for increased resource usage
-        deltas = compute_utils.reverse_upsize_quota_delta(context, instance)
-        quotas = compute_utils.reserve_quota_delta(context, deltas, instance)
+        # If this is a resize down, a revert might go over quota.
+        self._check_quota_for_upsize(context, instance, instance.flavor,
+                                     instance.old_flavor)
 
         instance.task_state = task_states.RESIZE_REVERTING
-        try:
-            instance.save(expected_task_state=[None])
-        except Exception:
-            with excutils.save_and_reraise_exception():
-                quotas.rollback()
+        instance.save(expected_task_state=[None])
 
         migration.status = 'reverting'
         migration.save()
-        # With cells, the best we can do right now is commit the reservations
-        # immediately...
-        if CONF.cells.enable:
-            quotas.commit()
 
         self._record_action_start(context, instance,
                                   instance_actions.REVERT_RESIZE)
 
+        # TODO(melwitt): We're not rechecking for strict quota here to guard
+        # against going over quota during a race at this time because the
+        # resource consumption for this operation is written to the database
+        # by compute.
         self.compute_rpcapi.revert_resize(context, instance,
                                           migration,
-                                          migration.dest_compute,
-                                          quotas.reservations or [])
+                                          migration.dest_compute)
 
     @check_instance_lock
     @check_instance_cell
@@ -2858,20 +3064,17 @@ class API(base.Base):
     def confirm_resize(self, context, instance, migration=None):
         """Confirms a migration/resize and deletes the 'old' instance."""
         elevated = context.elevated()
+        # NOTE(melwitt): We're not checking quota here because there isn't a
+        # change in resource usage when confirming a resize. Resource
+        # consumption for resizes are written to the database by compute, so
+        # a confirm resize is just a clean up of the migration objects and a
+        # state change in compute.
         if migration is None:
             migration = objects.Migration.get_by_instance_and_status(
                 elevated, instance.uuid, 'finished')
 
-        # reserve quota only for any decrease in resource usage
-        deltas = compute_utils.downsize_quota_delta(context, instance)
-        quotas = compute_utils.reserve_quota_delta(context, deltas, instance)
-
         migration.status = 'confirming'
         migration.save()
-        # With cells, the best we can do right now is commit the reservations
-        # immediately...
-        if CONF.cells.enable:
-            quotas.commit()
 
         self._record_action_start(context, instance,
                                   instance_actions.CONFIRM_RESIZE)
@@ -2879,19 +3082,15 @@ class API(base.Base):
         self.compute_rpcapi.confirm_resize(context,
                                            instance,
                                            migration,
-                                           migration.source_compute,
-                                           quotas.reservations or [])
+                                           migration.source_compute)
 
     @staticmethod
-    def _resize_cells_support(context, quotas, instance,
+    def _resize_cells_support(context, instance,
                               current_instance_type, new_instance_type):
         """Special API cell logic for resize."""
-        # With cells, the best we can do right now is commit the
-        # reservations immediately...
-        quotas.commit()
         # NOTE(johannes/comstud): The API cell needs a local migration
-        # record for later resize_confirm and resize_reverts to deal
-        # with quotas.  We don't need source and/or destination
+        # record for later resize_confirm and resize_reverts.
+        # We don't need source and/or destination
         # information, just the old and new flavors. Status is set to
         # 'finished' since nothing else will update the status along
         # the way.
@@ -2959,29 +3158,9 @@ class API(base.Base):
 
         # ensure there is sufficient headroom for upsizes
         if flavor_id:
-            deltas = compute_utils.upsize_quota_delta(context,
-                                                      new_instance_type,
-                                                      current_instance_type)
-            try:
-                quotas = compute_utils.reserve_quota_delta(context, deltas,
-                                                           instance)
-            except exception.OverQuota as exc:
-                quotas = exc.kwargs['quotas']
-                overs = exc.kwargs['overs']
-                usages = exc.kwargs['usages']
-                headroom = self._get_headroom(quotas, usages, deltas)
-                (overs, reqs, total_alloweds,
-                 useds) = self._get_over_quota_detail(headroom, overs, quotas,
-                                                      deltas)
-                LOG.warning(_LW("%(overs)s quota exceeded for %(pid)s,"
-                                " tried to resize instance."),
-                            {'overs': overs, 'pid': context.project_id})
-                raise exception.TooManyInstances(overs=overs,
-                                                 req=reqs,
-                                                 used=useds,
-                                                 allowed=total_alloweds)
-        else:
-            quotas = objects.Quotas(context=context)
+            self._check_quota_for_upsize(context, instance,
+                                         current_instance_type,
+                                         new_instance_type)
 
         instance.task_state = task_states.RESIZE_PREP
         instance.progress = 0
@@ -2994,8 +3173,8 @@ class API(base.Base):
             filter_properties['ignore_hosts'].append(instance.host)
 
         if self.cell_type == 'api':
-            # Commit reservations early and create migration record.
-            self._resize_cells_support(context, quotas, instance,
+            # Create migration record.
+            self._resize_cells_support(context, instance,
                                        current_instance_type,
                                        new_instance_type)
 
@@ -3019,11 +3198,14 @@ class API(base.Base):
             # to them, we need to support the old way
             request_spec = None
 
+        # TODO(melwitt): We're not rechecking for strict quota here to guard
+        # against going over quota during a race at this time because the
+        # resource consumption for this operation is written to the database
+        # by compute.
         scheduler_hint = {'filter_properties': filter_properties}
         self.compute_task_api.resize_instance(context, instance,
                 extra_instance_updates, scheduler_hint=scheduler_hint,
                 flavor=new_instance_type,
-                reservations=quotas.reservations or [],
                 clean_shutdown=clean_shutdown,
                 request_spec=request_spec)
 
@@ -3204,6 +3386,8 @@ class API(base.Base):
                                                new_pass=password)
 
     @check_instance_host
+    @reject_instance_state(
+        task_state=[task_states.DELETING, task_states.MIGRATING])
     def get_vnc_console(self, context, instance, console_type):
         """Get a url to an instance Console."""
         connect_info = self.compute_rpcapi.get_vnc_console(context,
@@ -3225,6 +3409,8 @@ class API(base.Base):
         return connect_info
 
     @check_instance_host
+    @reject_instance_state(
+        task_state=[task_states.DELETING, task_states.MIGRATING])
     def get_spice_console(self, context, instance, console_type):
         """Get a url to an instance Console."""
         connect_info = self.compute_rpcapi.get_spice_console(context,
@@ -3245,6 +3431,8 @@ class API(base.Base):
         return connect_info
 
     @check_instance_host
+    @reject_instance_state(
+        task_state=[task_states.DELETING, task_states.MIGRATING])
     def get_rdp_console(self, context, instance, console_type):
         """Get a url to an instance Console."""
         connect_info = self.compute_rpcapi.get_rdp_console(context,
@@ -3265,6 +3453,8 @@ class API(base.Base):
         return connect_info
 
     @check_instance_host
+    @reject_instance_state(
+        task_state=[task_states.DELETING, task_states.MIGRATING])
     def get_serial_console(self, context, instance, console_type):
         """Get a url to a serial console."""
         connect_info = self.compute_rpcapi.get_serial_console(context,
@@ -3285,6 +3475,8 @@ class API(base.Base):
         return connect_info
 
     @check_instance_host
+    @reject_instance_state(
+        task_state=[task_states.DELETING, task_states.MIGRATING])
     def get_mks_console(self, context, instance, console_type):
         """Get a url to a MKS console."""
         connect_info = self.compute_rpcapi.get_mks_console(context,
@@ -3310,7 +3502,7 @@ class API(base.Base):
             return
 
         context = context.elevated()
-        LOG.debug('Locking', context=context, instance=instance)
+        LOG.debug('Locking', instance=instance)
         instance.locked = True
         instance.locked_by = 'owner' if is_owner else 'admin'
         instance.save()
@@ -3326,7 +3518,7 @@ class API(base.Base):
     def unlock(self, context, instance):
         """Unlock the given instance."""
         context = context.elevated()
-        LOG.debug('Unlocking', context=context, instance=instance)
+        LOG.debug('Unlocking', instance=instance)
         instance.locked = False
         instance.locked_by = None
         instance.save()
@@ -3344,13 +3536,19 @@ class API(base.Base):
         self.compute_rpcapi.inject_network_info(context, instance=instance)
 
     def _create_volume_bdm(self, context, instance, device, volume_id,
-                           disk_bus, device_type, is_local_creation=False):
+                           disk_bus, device_type, is_local_creation=False,
+                           tag=None):
         if is_local_creation:
             # when the creation is done locally we can't specify the device
             # name as we do not have a way to check that the name specified is
             # a valid one.
             # We leave the setting of that value when the actual attach
             # happens on the compute manager
+            # NOTE(artom) Local attach (to a shelved-offload instance) cannot
+            # support device tagging because we have no way to call the compute
+            # manager to check that it supports device tagging. In fact, we
+            # don't even know which computer manager the instance will
+            # eventually end up on when it's unshelved.
             volume_bdm = objects.BlockDeviceMapping(
                 context=context,
                 source_type='volume', destination_type='volume',
@@ -3367,7 +3565,7 @@ class API(base.Base):
             #             have to make sure that they are assigned atomically.
             volume_bdm = self.compute_rpcapi.reserve_block_device_name(
                 context, instance, device, volume_id, disk_bus=disk_bus,
-                device_type=device_type)
+                device_type=device_type, tag=tag)
         return volume_bdm
 
     def _check_attach_and_reserve_volume(self, context, volume_id, instance):
@@ -3376,8 +3574,10 @@ class API(base.Base):
                                                 instance=instance)
         self.volume_api.reserve_volume(context, volume_id)
 
+        return volume
+
     def _attach_volume(self, context, instance, volume_id, device,
-                       disk_bus, device_type):
+                       disk_bus, device_type, tag=None):
         """Attach an existing volume to an existing instance.
 
         This method is separated to make it possible for cells version
@@ -3385,7 +3585,7 @@ class API(base.Base):
         """
         volume_bdm = self._create_volume_bdm(
             context, instance, device, volume_id, disk_bus=disk_bus,
-            device_type=device_type)
+            device_type=device_type, tag=tag)
         try:
             self._check_attach_and_reserve_volume(context, volume_id, instance)
             self.compute_rpcapi.attach_volume(context, instance, volume_bdm)
@@ -3429,7 +3629,7 @@ class API(base.Base):
                                     vm_states.SOFT_DELETED, vm_states.SHELVED,
                                     vm_states.SHELVED_OFFLOADED])
     def attach_volume(self, context, instance, volume_id, device=None,
-                       disk_bus=None, device_type=None):
+                      disk_bus=None, device_type=None, tag=None):
         """Attach an existing volume to an existing instance."""
         # NOTE(vish): Fail fast if the device is not going to pass. This
         #             will need to be removed along with the test if we
@@ -3440,6 +3640,13 @@ class API(base.Base):
 
         is_shelved_offloaded = instance.vm_state == vm_states.SHELVED_OFFLOADED
         if is_shelved_offloaded:
+            if tag:
+                # NOTE(artom) Local attach (to a shelved-offload instance)
+                # cannot support device tagging because we have no way to call
+                # the compute manager to check that it supports device tagging.
+                # In fact, we don't even know which computer manager the
+                # instance will eventually end up on when it's unshelved.
+                raise exception.VolumeTaggedAttachToShelvedNotSupported()
             return self._attach_volume_shelved_offloaded(context,
                                                          instance,
                                                          volume_id,
@@ -3448,11 +3655,7 @@ class API(base.Base):
                                                          device_type)
 
         return self._attach_volume(context, instance, volume_id, device,
-                                   disk_bus, device_type)
-
-    def _check_and_begin_detach(self, context, volume, instance):
-        self.volume_api.check_detach(context, volume, instance=instance)
-        self.volume_api.begin_detaching(context, volume['id'])
+                                   disk_bus, device_type, tag=tag)
 
     def _detach_volume(self, context, instance, volume):
         """Detach volume from instance.
@@ -3460,7 +3663,10 @@ class API(base.Base):
         This method is separated to make it easier for cells version
         to override.
         """
-        self._check_and_begin_detach(context, volume, instance)
+        try:
+            self.volume_api.begin_detaching(context, volume['id'])
+        except exception.InvalidInput as exc:
+            raise exception.InvalidVolume(reason=exc.format_message())
         attachments = volume.get('attachments', {})
         attachment_id = None
         if attachments and instance.uuid in attachments:
@@ -3477,7 +3683,10 @@ class API(base.Base):
         If the volume has delete_on_termination option set then we call the
         volume api delete as well.
         """
-        self._check_and_begin_detach(context, volume, instance)
+        try:
+            self.volume_api.begin_detaching(context, volume['id'])
+        except exception.InvalidInput as exc:
+            raise exception.InvalidVolume(reason=exc.format_message())
         bdms = [objects.BlockDeviceMapping.get_by_volume_id(
                 context, volume['id'], instance.uuid)]
         self._local_cleanup_bdm_volumes(bdms, instance, context)
@@ -3500,8 +3709,6 @@ class API(base.Base):
                                     vm_states.RESIZED, vm_states.SOFT_DELETED])
     def swap_volume(self, context, instance, old_volume, new_volume):
         """Swap volume attached to an instance."""
-        if old_volume['attach_status'] == 'detached':
-            raise exception.VolumeUnattached(volume_id=old_volume['id'])
         # The caller likely got the instance from volume['attachments']
         # in the first place, but let's sanity check.
         if not old_volume.get('attachments', {}).get(instance.uuid):
@@ -3513,30 +3720,53 @@ class API(base.Base):
         if int(new_volume['size']) < int(old_volume['size']):
             msg = _("New volume must be the same size or larger.")
             raise exception.InvalidVolume(reason=msg)
-        self.volume_api.check_detach(context, old_volume)
-        self.volume_api.check_attach(context, new_volume, instance=instance)
-        self.volume_api.begin_detaching(context, old_volume['id'])
-        self.volume_api.reserve_volume(context, new_volume['id'])
+        self.volume_api.check_availability_zone(context, new_volume,
+                                                instance=instance)
+        try:
+            self.volume_api.begin_detaching(context, old_volume['id'])
+        except exception.InvalidInput as exc:
+            raise exception.InvalidVolume(reason=exc.format_message())
+
+        # Get the BDM for the attached (old) volume so we can tell if it was
+        # attached with the new-style Cinder 3.27 API.
+        bdm = objects.BlockDeviceMapping.get_by_volume_and_instance(
+            context, old_volume['id'], instance.uuid)
+        new_attachment_id = None
+        if bdm.attachment_id is None:
+            # This is an old-style attachment so reserve the new volume before
+            # we cast to the compute host.
+            self.volume_api.reserve_volume(context, new_volume['id'])
+        else:
+            # This is a new-style attachment so for the volume that we are
+            # going to swap to, create a new volume attachment.
+            new_attachment_id = self.volume_api.attachment_create(
+                context, new_volume['id'], instance.uuid)['id']
+
         try:
             self.compute_rpcapi.swap_volume(
                     context, instance=instance,
                     old_volume_id=old_volume['id'],
-                    new_volume_id=new_volume['id'])
+                    new_volume_id=new_volume['id'],
+                    new_attachment_id=new_attachment_id)
         except Exception:
             with excutils.save_and_reraise_exception():
                 self.volume_api.roll_detaching(context, old_volume['id'])
-                self.volume_api.unreserve_volume(context, new_volume['id'])
+                if new_attachment_id is None:
+                    self.volume_api.unreserve_volume(context, new_volume['id'])
+                else:
+                    self.volume_api.attachment_delete(
+                        context, new_attachment_id)
 
     @check_instance_lock
     @check_instance_state(vm_state=[vm_states.ACTIVE, vm_states.PAUSED,
                                     vm_states.STOPPED],
                           task_state=[None])
     def attach_interface(self, context, instance, network_id, port_id,
-                         requested_ip):
+                         requested_ip, tag=None):
         """Use hotplug to add an network adapter to an instance."""
         return self.compute_rpcapi.attach_interface(context,
             instance=instance, network_id=network_id, port_id=port_id,
-            requested_ip=requested_ip)
+            requested_ip=requested_ip, tag=tag)
 
     @check_instance_lock
     @check_instance_state(vm_state=[vm_states.ACTIVE, vm_states.PAUSED,
@@ -3620,6 +3850,10 @@ class API(base.Base):
 
         self._record_action_start(context, instance,
                                   instance_actions.LIVE_MIGRATION)
+
+        self.consoleauth_rpcapi.delete_tokens_for_instance(
+            context, instance.uuid)
+
         try:
             request_spec = objects.RequestSpec.get_by_instance_uuid(
                 context, instance.uuid)
@@ -3631,12 +3865,12 @@ class API(base.Base):
         # NOTE(sbauza): Force is a boolean by the new related API version
         if force is False and host_name:
             nodes = objects.ComputeNodeList.get_all_by_host(context, host_name)
-            if not nodes:
-                raise exception.ComputeHostNotFound(host=host_name)
-            # NOTE(sbauza): Unset the host to make sure we call the scheduler
+            # Unset the host to make sure we call the scheduler
+            # from the conductor LiveMigrationTask. Yes this is tightly-coupled
+            # to behavior in conductor and not great.
             host_name = None
             # FIXME(sbauza): Since only Ironic driver uses more than one
-            # compute per service but doesn't support evacuations,
+            # compute per service but doesn't support live migrations,
             # let's provide the first one.
             target = nodes[0]
             if request_spec:
@@ -3649,6 +3883,8 @@ class API(base.Base):
                     host=target.host,
                     node=target.hypervisor_hostname
                 )
+                # This is essentially a hint to the scheduler to only consider
+                # the specified host but still run it through the filters.
                 request_spec.requested_destination = destination
 
         try:
@@ -3744,8 +3980,8 @@ class API(base.Base):
         inst_host = instance.host
         service = objects.Service.get_by_compute_host(context, inst_host)
         if self.servicegroup_api.service_is_up(service):
-            LOG.error(_LE('Instance compute service state on %s '
-                          'expected to be down, but it was up.'), inst_host)
+            LOG.error('Instance compute service state on %s '
+                      'expected to be down, but it was up.', inst_host)
             raise exception.ComputeServiceInUse(host=inst_host)
 
         instance.task_state = task_states.REBUILDING
@@ -3778,8 +4014,6 @@ class API(base.Base):
         # NOTE(sbauza): Force is a boolean by the new related API version
         if force is False and host:
             nodes = objects.ComputeNodeList.get_all_by_host(context, host)
-            if not nodes:
-                raise exception.ComputeHostNotFound(host=host)
             # NOTE(sbauza): Unset the host to make sure we call the scheduler
             host = None
             # FIXME(sbauza): Since only Ironic driver uses more than one
@@ -3814,7 +4048,16 @@ class API(base.Base):
 
     def get_migrations(self, context, filters):
         """Get all migrations for the given filters."""
-        return objects.MigrationList.get_by_filters(context, filters)
+        load_cells()
+
+        migrations = []
+        for cell in CELLS:
+            if cell.uuid == objects.CellMapping.CELL0_UUID:
+                continue
+            with nova_context.target_cell(context, cell) as cctxt:
+                migrations.extend(objects.MigrationList.get_by_filters(
+                    cctxt, filters).objects)
+        return objects.MigrationList(objects=migrations)
 
     def get_migrations_in_progress_by_instance(self, context, instance_uuid,
                                                migration_type=None):
@@ -3828,52 +4071,128 @@ class API(base.Base):
         return objects.Migration.get_by_id_and_instance(
                 context, migration_id, instance_uuid)
 
+    def _get_bdm_by_volume_id(self, context, volume_id, expected_attrs=None):
+        """Retrieve a BDM without knowing its cell.
+
+        .. note:: The context will be targeted to the cell in which the
+            BDM is found, if any.
+
+        :param context: The API request context.
+        :param volume_id: The ID of the volume.
+        :param expected_attrs: list of any additional attributes that should
+            be joined when the BDM is loaded from the database.
+        :raises: nova.exception.VolumeBDMNotFound if not found in any cell
+        """
+        load_cells()
+        for cell in CELLS:
+            nova_context.set_target_cell(context, cell)
+            try:
+                return objects.BlockDeviceMapping.get_by_volume(
+                    context, volume_id, expected_attrs=expected_attrs)
+            except exception.NotFound:
+                continue
+        raise exception.VolumeBDMNotFound(volume_id=volume_id)
+
     def volume_snapshot_create(self, context, volume_id, create_info):
-        bdm = objects.BlockDeviceMapping.get_by_volume(
-                context, volume_id, expected_attrs=['instance'])
-        self.compute_rpcapi.volume_snapshot_create(context, bdm.instance,
-                volume_id, create_info)
-        snapshot = {
-            'snapshot': {
-                'id': create_info.get('id'),
-                'volumeId': volume_id
+        bdm = self._get_bdm_by_volume_id(
+            context, volume_id, expected_attrs=['instance'])
+
+        # We allow creating the snapshot in any vm_state as long as there is
+        # no task being performed on the instance and it has a host.
+        @check_instance_host
+        @check_instance_state(vm_state=None)
+        def do_volume_snapshot_create(self, context, instance):
+            self.compute_rpcapi.volume_snapshot_create(context, instance,
+                    volume_id, create_info)
+            snapshot = {
+                'snapshot': {
+                    'id': create_info.get('id'),
+                    'volumeId': volume_id
+                }
             }
-        }
-        return snapshot
+            return snapshot
+
+        return do_volume_snapshot_create(self, context, bdm.instance)
 
     def volume_snapshot_delete(self, context, volume_id, snapshot_id,
                                delete_info):
-        bdm = objects.BlockDeviceMapping.get_by_volume(
-                context, volume_id, expected_attrs=['instance'])
-        self.compute_rpcapi.volume_snapshot_delete(context, bdm.instance,
-                volume_id, snapshot_id, delete_info)
+        bdm = self._get_bdm_by_volume_id(
+            context, volume_id, expected_attrs=['instance'])
 
-    def external_instance_event(self, context, instances, events):
+        # We allow deleting the snapshot in any vm_state as long as there is
+        # no task being performed on the instance and it has a host.
+        @check_instance_host
+        @check_instance_state(vm_state=None)
+        def do_volume_snapshot_delete(self, context, instance):
+            self.compute_rpcapi.volume_snapshot_delete(context, instance,
+                    volume_id, snapshot_id, delete_info)
+
+        do_volume_snapshot_delete(self, context, bdm.instance)
+
+    def external_instance_event(self, api_context, instances, events):
         # NOTE(danms): The external API consumer just provides events,
         # but doesn't know where they go. We need to collate lists
         # by the host the affected instance is on and dispatch them
         # according to host
-        instances_by_host = {}
-        events_by_host = {}
-        hosts_by_instance = {}
+        instances_by_host = collections.defaultdict(list)
+        events_by_host = collections.defaultdict(list)
+        hosts_by_instance = collections.defaultdict(list)
+        cell_contexts_by_host = {}
         for instance in instances:
-            instances_on_host = instances_by_host.get(instance.host, [])
-            instances_on_host.append(instance)
-            instances_by_host[instance.host] = instances_on_host
-            hosts_by_instance[instance.uuid] = instance.host
+            # instance._context is used here since it's already targeted to
+            # the cell that the instance lives in, and we need to use that
+            # cell context to lookup any migrations associated to the instance.
+            for host in self._get_relevant_hosts(instance._context, instance):
+                # NOTE(danms): All instances on a host must have the same
+                # mapping, so just use that
+                # NOTE(mdbooth): We don't currently support migrations between
+                # cells, and given that the Migration record is hosted in the
+                # cell _get_relevant_hosts will likely have to change before we
+                # do. Consequently we can currently assume that the context for
+                # both the source and destination hosts of a migration is the
+                # same.
+                if host not in cell_contexts_by_host:
+                    cell_contexts_by_host[host] = instance._context
+
+                instances_by_host[host].append(instance)
+                hosts_by_instance[instance.uuid].append(host)
 
         for event in events:
-            host = hosts_by_instance[event.instance_uuid]
-            events_on_host = events_by_host.get(host, [])
-            events_on_host.append(event)
-            events_by_host[host] = events_on_host
+            if event.name == 'volume-extended':
+                # Volume extend is a user-initiated operation starting in the
+                # Block Storage service API. We record an instance action so
+                # the user can monitor the operation to completion.
+                host = hosts_by_instance[event.instance_uuid][0]
+                cell_context = cell_contexts_by_host[host]
+                objects.InstanceAction.action_start(
+                    cell_context, event.instance_uuid,
+                    instance_actions.EXTEND_VOLUME, want_result=False)
+            for host in hosts_by_instance[event.instance_uuid]:
+                events_by_host[host].append(event)
 
         for host in instances_by_host:
+            cell_context = cell_contexts_by_host[host]
+
             # TODO(salv-orlando): Handle exceptions raised by the rpc api layer
             # in order to ensure that a failure in processing events on a host
             # will not prevent processing events on other hosts
             self.compute_rpcapi.external_instance_event(
-                context, instances_by_host[host], events_by_host[host])
+                cell_context, instances_by_host[host], events_by_host[host],
+                host=host)
+
+    def _get_relevant_hosts(self, context, instance):
+        hosts = set()
+        hosts.add(instance.host)
+        if instance.migration_context is not None:
+            migration_id = instance.migration_context.migration_id
+            migration = objects.Migration.get_by_id(context, migration_id)
+            hosts.add(migration.dest_compute)
+            hosts.add(migration.source_compute)
+            LOG.debug('Instance %(instance)s is migrating, '
+                      'copying events to all relevant hosts: '
+                      '%(hosts)s', {'instance': instance.uuid,
+                                    'hosts': hosts})
+        return hosts
 
     def get_instance_host_status(self, instance):
         if instance.host:
@@ -3910,6 +4229,81 @@ class API(base.Base):
         return host_statuses
 
 
+def target_host_cell(fn):
+    """Target a host-based function to a cell.
+
+    Expects to wrap a function of signature:
+
+       func(self, context, host, ...)
+    """
+
+    @functools.wraps(fn)
+    def targeted(self, context, host, *args, **kwargs):
+        mapping = objects.HostMapping.get_by_host(context, host)
+        nova_context.set_target_cell(context, mapping.cell_mapping)
+        return fn(self, context, host, *args, **kwargs)
+    return targeted
+
+
+def _find_service_in_cell(context, service_id=None, service_host=None):
+    """Find a service by id or hostname by searching all cells.
+
+    If one matching service is found, return it. If none or multiple
+    are found, raise an exception.
+
+    :param context: A context.RequestContext
+    :param service_id: If not none, the DB ID of the service to find
+    :param service_host: If not None, the hostname of the service to find
+    :returns: An objects.Service
+    :raises: ServiceNotUnique if multiple matching IDs are found
+    :raises: NotFound if no matches are found
+    :raises: NovaException if called with neither search option
+    """
+
+    load_cells()
+    service = None
+    found_in_cell = None
+
+    is_uuid = False
+    if service_id is not None:
+        is_uuid = uuidutils.is_uuid_like(service_id)
+        if is_uuid:
+            lookup_fn = lambda c: objects.Service.get_by_uuid(c, service_id)
+        else:
+            lookup_fn = lambda c: objects.Service.get_by_id(c, service_id)
+    elif service_host is not None:
+        lookup_fn = lambda c: (
+            objects.Service.get_by_compute_host(c, service_host))
+    else:
+        LOG.exception('_find_service_in_cell called with no search parameters')
+        # This is intentionally cryptic so we don't leak implementation details
+        # out of the API.
+        raise exception.NovaException()
+
+    for cell in CELLS:
+        # NOTE(danms): Services can be in cell0, so don't skip it here
+        try:
+            with nova_context.target_cell(context, cell) as cctxt:
+                cell_service = lookup_fn(cctxt)
+        except exception.NotFound:
+            # NOTE(danms): Keep looking in other cells
+            continue
+        if service and cell_service:
+            raise exception.ServiceNotUnique()
+        service = cell_service
+        found_in_cell = cell
+        if service and is_uuid:
+            break
+
+    if service:
+        # NOTE(danms): Set the cell on the context so it remains
+        # when we return to our caller
+        nova_context.set_target_cell(context, found_in_cell)
+        return service
+    else:
+        raise exception.NotFound()
+
+
 class HostAPI(base.Base):
     """Sub-set of the Compute Manager API for managing host operations."""
 
@@ -3928,6 +4322,7 @@ class HostAPI(base.Base):
         return service['host']
 
     @wrap_exception()
+    @target_host_cell
     def set_host_enabled(self, context, host_name, enabled):
         """Sets the specified host's ability to accept new instances."""
         host_name = self._assert_host_exists(context, host_name)
@@ -3942,6 +4337,7 @@ class HostAPI(base.Base):
                                                payload)
         return result
 
+    @target_host_cell
     def get_host_uptime(self, context, host_name):
         """Returns the result of calling "uptime" on the target host."""
         host_name = self._assert_host_exists(context, host_name,
@@ -3949,6 +4345,7 @@ class HostAPI(base.Base):
         return self.rpcapi.get_host_uptime(context, host=host_name)
 
     @wrap_exception()
+    @target_host_cell
     def host_power_action(self, context, host_name, action):
         """Reboots, shuts down or powers up the host."""
         host_name = self._assert_host_exists(context, host_name)
@@ -3964,6 +4361,7 @@ class HostAPI(base.Base):
         return result
 
     @wrap_exception()
+    @target_host_cell
     def set_host_maintenance(self, context, host_name, mode):
         """Start/Stop host maintenance window. On start, it triggers
         guest VMs evacuation.
@@ -3980,23 +4378,39 @@ class HostAPI(base.Base):
                                                payload)
         return result
 
-    def service_get_all(self, context, filters=None, set_zones=False):
+    def service_get_all(self, context, filters=None, set_zones=False,
+                        all_cells=False):
         """Returns a list of services, optionally filtering the results.
 
         If specified, 'filters' should be a dictionary containing services
         attributes and matching values.  Ie, to get a list of services for
         the 'compute' topic, use filters={'topic': 'compute'}.
+
+        If all_cells=True, then scan all cells and merge the results.
         """
         if filters is None:
             filters = {}
         disabled = filters.pop('disabled', None)
         if 'availability_zone' in filters:
             set_zones = True
-        services = objects.ServiceList.get_all(context, disabled,
-                                               set_zones=set_zones)
+
+        # NOTE(danms): Eventually this all_cells nonsense should go away
+        # and we should always iterate over the cells. However, certain
+        # callers need the legacy behavior for now.
+        if all_cells:
+            load_cells()
+            services = []
+            for cell in CELLS:
+                with nova_context.target_cell(context, cell) as cctxt:
+                    cell_services = objects.ServiceList.get_all(
+                        cctxt, disabled, set_zones=set_zones)
+                services.extend(cell_services)
+        else:
+            services = objects.ServiceList.get_all(context, disabled,
+                                                   set_zones=set_zones)
         ret_services = []
         for service in services:
-            for key, val in six.iteritems(filters):
+            for key, val in filters.items():
                 if service[key] != val:
                     break
             else:
@@ -4005,9 +4419,13 @@ class HostAPI(base.Base):
         return ret_services
 
     def service_get_by_id(self, context, service_id):
-        """Get service entry for the given service id."""
-        return objects.Service.get_by_id(context, service_id)
+        """Get service entry for the given service id or uuid."""
+        try:
+            return _find_service_in_cell(context, service_id=service_id)
+        except exception.NotFound:
+            raise exception.ServiceNotFound(service_id=service_id)
 
+    @target_host_cell
     def service_get_by_compute_host(self, context, host_name):
         """Get service entry for the given compute hostname."""
         return objects.Service.get_by_compute_host(context, host_name)
@@ -4019,6 +4437,7 @@ class HostAPI(base.Base):
         service.save()
         return service
 
+    @target_host_cell
     def service_update(self, context, host_name, binary, params_to_update):
         """Enable / Disable a service.
 
@@ -4030,12 +4449,17 @@ class HostAPI(base.Base):
 
     def _service_delete(self, context, service_id):
         """Performs the actual Service deletion operation."""
-        objects.Service.get_by_id(context, service_id).destroy()
+        try:
+            service = _find_service_in_cell(context, service_id=service_id)
+        except exception.NotFound:
+            raise exception.ServiceNotFound(service_id=service_id)
+        service.destroy()
 
     def service_delete(self, context, service_id):
-        """Deletes the specified service."""
+        """Deletes the specified service found via id or uuid."""
         self._service_delete(context, service_id)
 
+    @target_host_cell
     def instance_get_all_by_host(self, context, host_name):
         """Return all instances on the given host."""
         return objects.InstanceList.get_by_host(context, host_name)
@@ -4052,19 +4476,107 @@ class HostAPI(base.Base):
                                         state=state)
 
     def compute_node_get(self, context, compute_id):
-        """Return compute node entry for particular integer ID."""
-        return objects.ComputeNode.get_by_id(context, int(compute_id))
+        """Return compute node entry for particular integer ID or UUID."""
+        load_cells()
+
+        # NOTE(danms): Unfortunately this API exposes database identifiers
+        # which means we really can't do something efficient here
+        is_uuid = uuidutils.is_uuid_like(compute_id)
+        for cell in CELLS:
+            if cell.uuid == objects.CellMapping.CELL0_UUID:
+                continue
+            with nova_context.target_cell(context, cell) as cctxt:
+                try:
+                    if is_uuid:
+                        # NOTE(mriedem): We wouldn't have to loop over cells if
+                        # we stored the ComputeNode.uuid in the HostMapping but
+                        # we don't have that. It could be added but would
+                        # require an online data migration to update existing
+                        # host mappings.
+                        return objects.ComputeNode.get_by_uuid(cctxt,
+                                                               compute_id)
+                    return objects.ComputeNode.get_by_id(cctxt,
+                                                         int(compute_id))
+                except exception.ComputeHostNotFound:
+                    # NOTE(danms): Keep looking in other cells
+                    continue
+
+        raise exception.ComputeHostNotFound(host=compute_id)
 
     def compute_node_get_all(self, context, limit=None, marker=None):
-        return objects.ComputeNodeList.get_by_pagination(
-            context, limit=limit, marker=marker)
+        load_cells()
+
+        computes = []
+        uuid_marker = marker and uuidutils.is_uuid_like(marker)
+        for cell in CELLS:
+            if cell.uuid == objects.CellMapping.CELL0_UUID:
+                continue
+            with nova_context.target_cell(context, cell) as cctxt:
+
+                # If we have a marker and it's a uuid, see if the compute node
+                # is in this cell.
+                if marker and uuid_marker:
+                    try:
+                        compute_marker = objects.ComputeNode.get_by_uuid(
+                            cctxt, marker)
+                        # we found the marker compute node, so use it's id
+                        # for the actual marker for paging in this cell's db
+                        marker = compute_marker.id
+                    except exception.ComputeHostNotFound:
+                        # The marker node isn't in this cell so keep looking.
+                        continue
+
+                try:
+                    cell_computes = objects.ComputeNodeList.get_by_pagination(
+                        cctxt, limit=limit, marker=marker)
+                except exception.MarkerNotFound:
+                    # NOTE(danms): Keep looking through cells
+                    continue
+                computes.extend(cell_computes)
+                # NOTE(danms): We must have found the marker, so continue on
+                # without one
+                marker = None
+                if limit:
+                    limit -= len(cell_computes)
+                    if limit <= 0:
+                        break
+
+        if marker is not None and len(computes) == 0:
+            # NOTE(danms): If we did not find the marker in any cell,
+            # mimic the db_api behavior here.
+            raise exception.MarkerNotFound(marker=marker)
+
+        return objects.ComputeNodeList(objects=computes)
 
     def compute_node_search_by_hypervisor(self, context, hypervisor_match):
-        return objects.ComputeNodeList.get_by_hypervisor(context,
-                                                         hypervisor_match)
+        load_cells()
+
+        computes = []
+        for cell in CELLS:
+            if cell.uuid == objects.CellMapping.CELL0_UUID:
+                continue
+            with nova_context.target_cell(context, cell) as cctxt:
+                cell_computes = objects.ComputeNodeList.get_by_hypervisor(
+                    cctxt, hypervisor_match)
+            computes.extend(cell_computes)
+        return objects.ComputeNodeList(objects=computes)
 
     def compute_node_statistics(self, context):
-        return self.db.compute_node_statistics(context)
+        load_cells()
+
+        cell_stats = []
+        for cell in CELLS:
+            if cell.uuid == objects.CellMapping.CELL0_UUID:
+                continue
+            with nova_context.target_cell(context, cell) as cctxt:
+                cell_stats.append(self.db.compute_node_statistics(cctxt))
+
+        if cell_stats:
+            keys = cell_stats[0].keys()
+            return {k: sum(stats[k] for stats in cell_stats)
+                    for k in keys}
+        else:
+            return {}
 
 
 class InstanceActionAPI(base.Base):
@@ -4156,6 +4668,13 @@ class AggregateAPI(base.Base):
                                                     "delete.start",
                                                     aggregate_payload)
         aggregate = objects.Aggregate.get_by_id(context, aggregate_id)
+
+        compute_utils.notify_about_aggregate_action(
+            context=context,
+            aggregate=aggregate,
+            action=fields_obj.NotificationAction.DELETE,
+            phase=fields_obj.NotificationPhase.START)
+
         if len(aggregate.hosts) > 0:
             msg = _("Host aggregate is not empty")
             raise exception.InvalidAggregateActionDelete(
@@ -4165,6 +4684,11 @@ class AggregateAPI(base.Base):
         compute_utils.notify_about_aggregate_update(context,
                                                     "delete.end",
                                                     aggregate_payload)
+        compute_utils.notify_about_aggregate_action(
+            context=context,
+            aggregate=aggregate,
+            action=fields_obj.NotificationAction.DELETE,
+            phase=fields_obj.NotificationPhase.END)
 
     def is_safe_to_update_az(self, context, metadata, aggregate,
                              hosts=None,
@@ -4231,8 +4755,18 @@ class AggregateAPI(base.Base):
         compute_utils.notify_about_aggregate_update(context,
                                                     "addhost.start",
                                                     aggregate_payload)
-        # validates the host; ComputeHostNotFound is raised if invalid
-        objects.Service.get_by_compute_host(context, host_name)
+        # validates the host; HostMappingNotFound or ComputeHostNotFound
+        # is raised if invalid
+        try:
+            mapping = objects.HostMapping.get_by_host(context, host_name)
+            nova_context.set_target_cell(context, mapping.cell_mapping)
+            objects.Service.get_by_compute_host(context, host_name)
+        except exception.HostMappingNotFound:
+            try:
+                # NOTE(danms): This targets our cell
+                _find_service_in_cell(context, service_host=host_name)
+            except exception.NotFound:
+                raise exception.ComputeHostNotFound(host=host_name)
 
         aggregate = objects.Aggregate.get_by_id(context, aggregate_id)
         self.is_safe_to_update_az(context, aggregate.metadata,
@@ -4258,7 +4792,10 @@ class AggregateAPI(base.Base):
         compute_utils.notify_about_aggregate_update(context,
                                                     "removehost.start",
                                                     aggregate_payload)
-        # validates the host; ComputeHostNotFound is raised if invalid
+        # validates the host; HostMappingNotFound or ComputeHostNotFound
+        # is raised if invalid
+        mapping = objects.HostMapping.get_by_host(context, host_name)
+        nova_context.set_target_cell(context, mapping.cell_mapping)
         objects.Service.get_by_compute_host(context, host_name)
         aggregate = objects.Aggregate.get_by_id(context, aggregate_id)
         aggregate.delete_host(host_name)
@@ -4302,11 +4839,8 @@ class KeypairAPI(base.Base):
             raise exception.InvalidKeypair(
                 reason=_('Keypair name must be string and between '
                          '1 and 255 characters long'))
-
-        count = objects.Quotas.count(context, 'key_pairs', user_id)
-
         try:
-            objects.Quotas.limit_check(context, key_pairs=count + 1)
+            objects.Quotas.check_deltas(context, {'key_pairs': 1}, user_id)
         except exception.OverQuota:
             raise exception.KeypairLimitExceeded()
 
@@ -4338,18 +4872,43 @@ class KeypairAPI(base.Base):
         """Create a new key pair."""
         self._validate_new_key_pair(context, user_id, key_name, key_type)
 
-        self._notify(context, 'create.start', key_name)
-
-        private_key, public_key, fingerprint = self._generate_key_pair(
-            user_id, key_type)
-
         keypair = objects.KeyPair(context)
         keypair.user_id = user_id
         keypair.name = key_name
         keypair.type = key_type
+        keypair.fingerprint = None
+        keypair.public_key = None
+
+        self._notify(context, 'create.start', key_name)
+        compute_utils.notify_about_keypair_action(
+            context=context,
+            keypair=keypair,
+            action=fields_obj.NotificationAction.CREATE,
+            phase=fields_obj.NotificationPhase.START)
+
+        private_key, public_key, fingerprint = self._generate_key_pair(
+            user_id, key_type)
+
         keypair.fingerprint = fingerprint
         keypair.public_key = public_key
         keypair.create()
+
+        # NOTE(melwitt): We recheck the quota after creating the object to
+        # prevent users from allocating more resources than their allowed quota
+        # in the event of a race. This is configurable because it can be
+        # expensive if strict quota limits are not required in a deployment.
+        if CONF.quota.recheck_quota:
+            try:
+                objects.Quotas.check_deltas(context, {'key_pairs': 0}, user_id)
+            except exception.OverQuota:
+                keypair.destroy()
+                raise exception.KeypairLimitExceeded()
+
+        compute_utils.notify_about_keypair_action(
+            context=context,
+            keypair=keypair,
+            action=fields_obj.NotificationAction.CREATE,
+            phase=fields_obj.NotificationPhase.END)
 
         self._notify(context, 'create.end', key_name)
 
@@ -4434,32 +4993,41 @@ class SecurityGroupAPI(base.Base, security_group_base.SecurityGroupBase):
         self.db.security_group_ensure_default(context)
 
     def create_security_group(self, context, name, description):
-        quotas = objects.Quotas(context=context)
         try:
-            quotas.reserve(security_groups=1)
+            objects.Quotas.check_deltas(context, {'security_groups': 1},
+                                        context.project_id,
+                                        user_id=context.user_id)
         except exception.OverQuota:
             msg = _("Quota exceeded, too many security groups.")
             self.raise_over_quota(msg)
 
-        LOG.info(_LI("Create Security Group %s"), name, context=context)
+        LOG.info("Create Security Group %s", name)
 
+        self.ensure_default(context)
+
+        group = {'user_id': context.user_id,
+                 'project_id': context.project_id,
+                 'name': name,
+                 'description': description}
         try:
-            self.ensure_default(context)
+            group_ref = self.db.security_group_create(context, group)
+        except exception.SecurityGroupExists:
+            msg = _('Security group %s already exists') % name
+            self.raise_group_already_exists(msg)
 
-            group = {'user_id': context.user_id,
-                     'project_id': context.project_id,
-                     'name': name,
-                     'description': description}
+        # NOTE(melwitt): We recheck the quota after creating the object to
+        # prevent users from allocating more resources than their allowed quota
+        # in the event of a race. This is configurable because it can be
+        # expensive if strict quota limits are not required in a deployment.
+        if CONF.quota.recheck_quota:
             try:
-                group_ref = self.db.security_group_create(context, group)
-            except exception.SecurityGroupExists:
-                msg = _('Security group %s already exists') % name
-                self.raise_group_already_exists(msg)
-            # Commit the reservation
-            quotas.commit()
-        except Exception:
-            with excutils.save_and_reraise_exception():
-                quotas.rollback()
+                objects.Quotas.check_deltas(context, {'security_groups': 0},
+                                            context.project_id,
+                                            user_id=context.user_id)
+            except exception.OverQuota:
+                self.db.security_group_destroy(context, group_ref['id'])
+                msg = _("Quota exceeded, too many security groups.")
+                self.raise_over_quota(msg)
 
         return group_ref
 
@@ -4539,22 +5107,8 @@ class SecurityGroupAPI(base.Base, security_group_base.SecurityGroupBase):
             msg = _("Security group is still in use")
             self.raise_invalid_group(msg)
 
-        quotas = objects.Quotas(context=context)
-        quota_project, quota_user = quotas_obj.ids_from_security_group(
-                                context, security_group)
-        try:
-            quotas.reserve(project_id=quota_project,
-                           user_id=quota_user, security_groups=-1)
-        except Exception:
-            LOG.exception(_LE("Failed to update usages deallocating "
-                              "security group"))
-
-        LOG.info(_LI("Delete security group %s"), security_group['name'],
-                  context=context)
+        LOG.info("Delete security group %s", security_group['name'])
         self.db.security_group_destroy(context, security_group['id'])
-
-        # Commit the reservations
-        quotas.commit()
 
     def is_associated_with_server(self, security_group, instance_uuid):
         """Check if the security group is already associated
@@ -4632,19 +5186,35 @@ class SecurityGroupAPI(base.Base, security_group_base.SecurityGroupBase):
         this function is written to support both.
         """
 
-        count = objects.Quotas.count(context, 'security_group_rules', id)
         try:
-            projected = count + len(vals)
-            objects.Quotas.limit_check(context, security_group_rules=projected)
+            objects.Quotas.check_deltas(context,
+                                        {'security_group_rules': len(vals)},
+                                        id)
         except exception.OverQuota:
             msg = _("Quota exceeded, too many security group rules.")
             self.raise_over_quota(msg)
 
-        msg = _LI("Security group %(name)s added %(protocol)s ingress "
-                  "(%(from_port)s:%(to_port)s)")
+        msg = ("Security group %(name)s added %(protocol)s ingress "
+               "(%(from_port)s:%(to_port)s)")
         rules = []
         for v in vals:
             rule = self.db.security_group_rule_create(context, v)
+
+            # NOTE(melwitt): We recheck the quota after creating the object to
+            # prevent users from allocating more resources than their allowed
+            # quota in the event of a race. This is configurable because it can
+            # be expensive if strict quota limits are not required in a
+            # deployment.
+            if CONF.quota.recheck_quota:
+                try:
+                    objects.Quotas.check_deltas(context,
+                                                {'security_group_rules': 0},
+                                                id)
+                except exception.OverQuota:
+                    self.db.security_group_rule_destroy(context, rule['id'])
+                    msg = _("Quota exceeded, too many security group rules.")
+                    self.raise_over_quota(msg)
+
             rules.append(rule)
             LOG.info(msg, {'name': name,
                            'protocol': rule.protocol,
@@ -4655,8 +5225,8 @@ class SecurityGroupAPI(base.Base, security_group_base.SecurityGroupBase):
         return rules
 
     def remove_rules(self, context, security_group, rule_ids):
-        msg = _LI("Security group %(name)s removed %(protocol)s ingress "
-                  "(%(from_port)s:%(to_port)s)")
+        msg = ("Security group %(name)s removed %(protocol)s ingress "
+               "(%(from_port)s:%(to_port)s)")
         for rule_id in rule_ids:
             rule = self.get_rule(context, rule_id)
             LOG.info(msg, {'name': security_group['name'],
@@ -4736,9 +5306,3 @@ class SecurityGroupAPI(base.Base, security_group_base.SecurityGroupBase):
             return self.db.security_group_get_by_instance(context,
                                                           instance.uuid)
         return [{'name': group.name} for group in instance.security_groups]
-
-    def populate_security_groups(self, security_groups):
-        if not security_groups:
-            # Make sure it's an empty SecurityGroupList and not None
-            return objects.SecurityGroupList()
-        return security_group_obj.make_secgroup_list(security_groups)

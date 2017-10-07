@@ -28,7 +28,6 @@ For postgres on Ubuntu this can be done with the following commands::
 
 """
 
-import logging
 import os
 
 from migrate.versioning import repository
@@ -44,6 +43,7 @@ from nova.db.sqlalchemy.api_migrations import migrate_repo
 from nova.db.sqlalchemy import api_models
 from nova.db.sqlalchemy import migration as sa_migration
 from nova import test
+from nova.tests import fixtures as nova_fixtures
 
 
 class NovaAPIModelsSync(test_migrations.ModelsMigrationsSync):
@@ -90,7 +90,8 @@ class NovaAPIModelsSync(test_migrations.ModelsMigrationsSync):
                     'display_name', 'access_ip_v6', 'access_ip_v4', 'key_name',
                     'locked_by', 'image_ref', 'progress', 'request_spec_id',
                     'info_cache', 'user_id', 'task_state', 'security_groups',
-                    'config_drive']
+                    'config_drive'],
+                'resource_providers': ['can_host'],
         }
 
         for element in diff:
@@ -137,13 +138,12 @@ class TestNovaAPIMigrationsPostgreSQL(NovaAPIModelsSync,
 
 class NovaAPIMigrationsWalk(test_migrations.WalkVersionsMixin):
     def setUp(self):
+        # NOTE(sdague): the oslo_db base test case completely
+        # invalidates our logging setup, we actually have to do that
+        # before it is called to keep this from vomiting all over our
+        # test output.
+        self.useFixture(nova_fixtures.StandardLogging())
         super(NovaAPIMigrationsWalk, self).setUp()
-        # NOTE(viktors): We should reduce log output because it causes issues,
-        #                when we run tests with testr
-        migrate_log = logging.getLogger('migrate')
-        old_level = migrate_log.level
-        migrate_log.setLevel(logging.WARN)
-        self.addCleanup(migrate_log.setLevel, old_level)
 
     @property
     def INIT_VERSION(self):
@@ -163,8 +163,16 @@ class NovaAPIMigrationsWalk(test_migrations.WalkVersionsMixin):
         return self.engine
 
     def _skippable_migrations(self):
-        mitaka_placeholders = range(8, 13)
-        return mitaka_placeholders
+        mitaka_placeholders = list(range(8, 13))
+        newton_placeholders = list(range(21, 26))
+        ocata_placeholders = list(range(31, 41))
+        special_cases = [
+            30,  # Enforcement migration, no changes to test
+        ]
+        return (mitaka_placeholders +
+                newton_placeholders +
+                ocata_placeholders +
+                special_cases)
 
     def migrate_up(self, version, with_data=False):
         if with_data:
@@ -461,6 +469,177 @@ class NovaAPIMigrationsWalk(test_migrations.WalkVersionsMixin):
         fake_build_req = build_requests.select(
             build_requests.c.id == 2020).execute().first()
         self.assertEqual('fake_BDM', fake_build_req.block_device_mappings)
+
+    def _check_026(self, engine, data):
+        self.assertColumnExists(engine, 'resource_classes', 'id')
+        self.assertColumnExists(engine, 'resource_classes', 'name')
+
+    def _check_027(self, engine, data):
+        # quota_classes
+        for column in ['created_at',
+                       'updated_at',
+                       'id',
+                       'class_name',
+                       'resource',
+                       'hard_limit']:
+            self.assertColumnExists(engine, 'quota_classes', column)
+
+        self.assertIndexExists(engine, 'quota_classes',
+            'quota_classes_class_name_idx')
+
+        # quota_usages
+        for column in ['created_at',
+                       'updated_at',
+                       'id',
+                       'project_id',
+                       'resource',
+                       'in_use',
+                       'reserved',
+                       'until_refresh',
+                       'user_id']:
+            self.assertColumnExists(engine, 'quota_usages', column)
+
+        self.assertIndexExists(engine, 'quota_usages',
+            'quota_usages_project_id_idx')
+        self.assertIndexExists(engine, 'quota_usages',
+            'quota_usages_user_id_idx')
+
+        # quotas
+        for column in ['created_at',
+                       'updated_at',
+                       'id',
+                       'project_id',
+                       'resource',
+                       'hard_limit']:
+            self.assertColumnExists(engine, 'quotas', column)
+
+        self.assertUniqueConstraintExists(engine, 'quotas',
+                                        ['project_id', 'resource'])
+
+        # project_user_quotas
+        for column in ['created_at',
+                       'updated_at',
+                       'id',
+                       'user_id',
+                       'project_id',
+                       'resource',
+                       'hard_limit']:
+            self.assertColumnExists(engine, 'project_user_quotas', column)
+
+        self.assertUniqueConstraintExists(engine, 'project_user_quotas',
+                                        ['user_id', 'project_id', 'resource'])
+        self.assertIndexExists(engine, 'project_user_quotas',
+            'project_user_quotas_project_id_idx')
+        self.assertIndexExists(engine, 'project_user_quotas',
+            'project_user_quotas_user_id_idx')
+
+        # reservations
+        for column in ['created_at',
+                       'updated_at',
+                       'id',
+                       'uuid',
+                       'usage_id',
+                       'project_id',
+                       'resource',
+                       'delta',
+                       'expire',
+                       'user_id']:
+            self.assertColumnExists(engine, 'reservations', column)
+
+        self.assertIndexExists(engine, 'reservations',
+                                       'reservations_project_id_idx')
+        self.assertIndexExists(engine, 'reservations',
+                                       'reservations_uuid_idx')
+        self.assertIndexExists(engine, 'reservations',
+                                       'reservations_expire_idx')
+        self.assertIndexExists(engine, 'reservations',
+                                       'reservations_user_id_idx')
+        # Ensure the foreign key still exists
+        inspector = reflection.Inspector.from_engine(engine)
+        # There should only be one foreign key here
+        fk = inspector.get_foreign_keys('reservations')[0]
+        self.assertEqual('quota_usages', fk['referred_table'])
+        self.assertEqual(['id'], fk['referred_columns'])
+
+    def _pre_upgrade_028(self, engine):
+        build_requests = db_utils.get_table(engine, 'build_requests')
+        fake_build_req = {'id': 2021,
+                          'project_id': 'fake_proj_id',
+                          'instance': '{"uuid": "foo", "name": "bar"}'}
+        build_requests.insert().execute(fake_build_req)
+
+    def _check_028(self, engine, data):
+        build_requests = db_utils.get_table(engine, 'build_requests')
+        if engine.name == 'mysql':
+            self.assertIsInstance(build_requests.c.block_device_mappings.type,
+                                  sqlalchemy.dialects.mysql.MEDIUMTEXT)
+
+        fake_build_req = build_requests.select(
+            build_requests.c.id == 2021).execute().first()
+        self.assertEqual('{"uuid": "foo", "name": "bar"}',
+                         fake_build_req.instance)
+
+    def _check_029(self, engine, data):
+        for column in ['created_at', 'updated_at', 'id', 'uuid']:
+            self.assertColumnExists(engine, 'placement_aggregates', column)
+
+    def _check_041(self, engine, data):
+        self.assertColumnExists(engine, 'traits', 'id')
+        self.assertUniqueConstraintExists(engine, 'traits', ['name'])
+
+        self.assertColumnExists(engine, 'resource_provider_traits', 'trait_id')
+        self.assertColumnExists(engine, 'resource_provider_traits',
+                                'resource_provider_id')
+        self.assertIndexExists(
+            engine, 'resource_provider_traits',
+            'resource_provider_traits_resource_provider_trait_idx')
+
+        inspector = reflection.Inspector.from_engine(engine)
+        self.assertEqual(
+            2, len(inspector.get_foreign_keys('resource_provider_traits')))
+        for fk in inspector.get_foreign_keys('resource_provider_traits'):
+            if 'traits' == fk['referred_table']:
+                self.assertEqual(['id'], fk['referred_columns'])
+                self.assertEqual(['trait_id'], fk['constrained_columns'])
+            elif 'resource_providers' == fk['referred_table']:
+                self.assertEqual(['id'], fk['referred_columns'])
+                self.assertEqual(['resource_provider_id'],
+                                 fk['constrained_columns'])
+
+    def _check_042(self, engine, data):
+        self.assertColumnExists(engine, 'build_requests', 'tags')
+
+    def _check_043(self, engine, data):
+        for column in ['created_at', 'updated_at', 'id', 'uuid', 'project_id',
+                       'user_id']:
+            self.assertColumnExists(engine, 'consumers', column)
+
+        self.assertIndexExists(engine, 'consumers',
+                               'consumers_project_id_uuid_idx')
+        self.assertIndexExists(engine, 'consumers',
+                               'consumers_project_id_user_id_uuid_idx')
+        self.assertUniqueConstraintExists(engine, 'consumers', ['uuid'])
+
+    def _check_044(self, engine, data):
+        for column in ['created_at', 'updated_at', 'id', 'external_id']:
+            self.assertColumnExists(engine, 'projects', column)
+            self.assertColumnExists(engine, 'users', column)
+
+        self.assertUniqueConstraintExists(engine, 'projects', ['external_id'])
+        self.assertUniqueConstraintExists(engine, 'users', ['external_id'])
+
+        # We needed to drop and recreate columns and indexes on consumers, so
+        # check that worked out properly
+        self.assertColumnExists(engine, 'consumers', 'project_id')
+        self.assertColumnExists(engine, 'consumers', 'user_id')
+        self.assertIndexExists(
+            engine, 'consumers',
+            'consumers_project_id_uuid_idx',
+        )
+        self.assertIndexExists(
+            engine, 'consumers',
+            'consumers_project_id_user_id_uuid_idx',
+        )
 
 
 class TestNovaAPIMigrationsWalkSQLite(NovaAPIMigrationsWalk,

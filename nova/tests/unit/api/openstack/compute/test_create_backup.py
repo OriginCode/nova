@@ -13,15 +13,21 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import mock
+from oslo_utils import timeutils
+import six
 import webob
 
 from nova.api.openstack import common
 from nova.api.openstack.compute import create_backup \
         as create_backup_v21
+from nova.compute import api
+from nova.compute import utils as compute_utils
 from nova import exception
 from nova import test
 from nova.tests.unit.api.openstack.compute import admin_only_action_common
 from nova.tests.unit.api.openstack import fakes
+from nova.tests.unit import fake_instance
 
 
 class CreateBackupTestsV21(admin_only_action_common.CommonMixin,
@@ -35,17 +41,13 @@ class CreateBackupTestsV21(admin_only_action_common.CommonMixin,
         self.controller = getattr(self.create_backup, self.controller_name)()
         self.compute_api = self.controller.compute_api
 
-        def _fake_controller(*args, **kwargs):
-            return self.controller
+        patch_get = mock.patch.object(self.compute_api, 'get')
+        self.mock_get = patch_get.start()
+        self.addCleanup(patch_get.stop)
 
-        self.stubs.Set(self.create_backup, self.controller_name,
-                       _fake_controller)
-        self.mox.StubOutWithMock(self.compute_api, 'get')
-        self.mox.StubOutWithMock(common,
-                                 'check_img_metadata_properties_quota')
-        self.mox.StubOutWithMock(self.compute_api, 'backup')
-
-    def test_create_backup_with_metadata(self):
+    @mock.patch.object(common, 'check_img_metadata_properties_quota')
+    @mock.patch.object(api.API, 'backup')
+    def test_create_backup_with_metadata(self, mock_backup, mock_check_image):
         metadata = {'123': 'asdf'}
         body = {
             'createBackup': {
@@ -59,15 +61,18 @@ class CreateBackupTestsV21(admin_only_action_common.CommonMixin,
         image = dict(id='fake-image-id', status='ACTIVE', name='Backup 1',
                      properties=metadata)
 
-        common.check_img_metadata_properties_quota(self.context, metadata)
-        instance = self._stub_instance_get()
-        self.compute_api.backup(self.context, instance, 'Backup 1',
-                                'daily', 1,
-                                extra_properties=metadata).AndReturn(image)
+        instance = fake_instance.fake_instance_obj(self.context)
+        self.mock_get.return_value = instance
+        mock_backup.return_value = image
 
-        self.mox.ReplayAll()
         res = self.controller._create_backup(self.req, instance.uuid,
                                              body=body)
+
+        mock_check_image.assert_called_once_with(self.context, metadata)
+        mock_backup.assert_called_once_with(self.context, instance, 'Backup 1',
+                                              'daily', 1,
+                                              extra_properties=metadata)
+
         self.assertEqual(202, res.status_int)
         self.assertIn('fake-image-id', res.headers['Location'])
 
@@ -95,8 +100,10 @@ class CreateBackupTestsV21(admin_only_action_common.CommonMixin,
                           self.controller._create_backup,
                           self.req, fakes.FAKE_UUID, body=body)
 
+    @mock.patch.object(common, 'check_img_metadata_properties_quota')
+    @mock.patch.object(api.API, 'backup')
     def test_create_backup_name_with_leading_trailing_spaces_compat_mode(
-            self):
+            self, mock_backup, mock_check_image):
         body = {
             'createBackup': {
                 'name': '  test  ',
@@ -106,15 +113,18 @@ class CreateBackupTestsV21(admin_only_action_common.CommonMixin,
         }
         image = dict(id='fake-image-id', status='ACTIVE', name='Backup 1',
                      properties={})
-        common.check_img_metadata_properties_quota(self.context, {})
-        instance = self._stub_instance_get()
-        self.compute_api.backup(self.context, instance, 'test',
-                                'daily', 1,
-                                extra_properties={}).AndReturn(image)
-        self.mox.ReplayAll()
+        instance = fake_instance.fake_instance_obj(self.context)
+        self.mock_get.return_value = instance
+        mock_backup.return_value = image
+
         self.req.set_legacy_v2()
         self.controller._create_backup(self.req, instance.uuid,
                                        body=body)
+
+        mock_check_image.assert_called_once_with(self.context, {})
+        mock_backup.assert_called_once_with(self.context, instance, 'test',
+                                              'daily', 1,
+                                              extra_properties={})
 
     def test_create_backup_no_rotation(self):
         # Rotation is required for backup requests.
@@ -155,6 +165,18 @@ class CreateBackupTestsV21(admin_only_action_common.CommonMixin,
                           self.controller._create_backup,
                           self.req, fakes.FAKE_UUID, body=body)
 
+    def test_create_backup_rotation_with_empty_string(self):
+        body = {
+            'createBackup': {
+                'name': 'Backup 1',
+                'backup_type': 'daily',
+                'rotation': '',
+            },
+        }
+        self.assertRaises(self.validation_error,
+                          self.controller._create_backup,
+                          self.req, fakes.FAKE_UUID, body=body)
+
     def test_create_backup_no_backup_type(self):
         # Backup Type (daily or weekly) is required for backup requests.
         body = {
@@ -186,7 +208,10 @@ class CreateBackupTestsV21(admin_only_action_common.CommonMixin,
                           self.controller._create_backup,
                           self.req, fakes.FAKE_UUID, body=body)
 
-    def test_create_backup_rotation_is_zero(self):
+    @mock.patch.object(common, 'check_img_metadata_properties_quota')
+    @mock.patch.object(api.API, 'backup')
+    def test_create_backup_rotation_is_zero(self, mock_backup,
+                                         mock_check_image):
         # The happy path for creating backups if rotation is zero.
         body = {
             'createBackup': {
@@ -198,20 +223,24 @@ class CreateBackupTestsV21(admin_only_action_common.CommonMixin,
 
         image = dict(id='fake-image-id', status='ACTIVE', name='Backup 1',
                      properties={})
-        common.check_img_metadata_properties_quota(self.context, {})
-        instance = self._stub_instance_get()
-        self.compute_api.backup(self.context, instance, 'Backup 1',
-                                'daily', 0,
-                                extra_properties={}).AndReturn(image)
-
-        self.mox.ReplayAll()
+        instance = fake_instance.fake_instance_obj(self.context)
+        self.mock_get.return_value = instance
+        mock_backup.return_value = image
 
         res = self.controller._create_backup(self.req, instance.uuid,
                                              body=body)
+
+        mock_check_image.assert_called_once_with(self.context, {})
+        mock_backup.assert_called_once_with(self.context, instance, 'Backup 1',
+                                              'daily', 0,
+                                              extra_properties={})
         self.assertEqual(202, res.status_int)
         self.assertNotIn('Location', res.headers)
 
-    def test_create_backup_rotation_is_positive(self):
+    @mock.patch.object(common, 'check_img_metadata_properties_quota')
+    @mock.patch.object(api.API, 'backup')
+    def test_create_backup_rotation_is_positive(self, mock_backup,
+                                                mock_check_image):
         # The happy path for creating backups if rotation is positive.
         body = {
             'createBackup': {
@@ -223,20 +252,25 @@ class CreateBackupTestsV21(admin_only_action_common.CommonMixin,
 
         image = dict(id='fake-image-id', status='ACTIVE', name='Backup 1',
                      properties={})
-        common.check_img_metadata_properties_quota(self.context, {})
-        instance = self._stub_instance_get()
-        self.compute_api.backup(self.context, instance, 'Backup 1',
-                                'daily', 1,
-                                extra_properties={}).AndReturn(image)
-
-        self.mox.ReplayAll()
+        instance = fake_instance.fake_instance_obj(self.context)
+        self.mock_get.return_value = instance
+        mock_backup.return_value = image
 
         res = self.controller._create_backup(self.req, instance.uuid,
                                              body=body)
+
+        mock_check_image.assert_called_once_with(self.context, {})
+        mock_backup.assert_called_once_with(self.context, instance, 'Backup 1',
+                                              'daily', 1,
+                                              extra_properties={})
+
         self.assertEqual(202, res.status_int)
         self.assertIn('fake-image-id', res.headers['Location'])
 
-    def test_create_backup_rotation_is_string_number(self):
+    @mock.patch.object(common, 'check_img_metadata_properties_quota')
+    @mock.patch.object(api.API, 'backup')
+    def test_create_backup_rotation_is_string_number(
+                                self, mock_backup, mock_check_image):
         body = {
             'createBackup': {
                 'name': 'Backup 1',
@@ -247,39 +281,45 @@ class CreateBackupTestsV21(admin_only_action_common.CommonMixin,
 
         image = dict(id='fake-image-id', status='ACTIVE', name='Backup 1',
                      properties={})
-        common.check_img_metadata_properties_quota(self.context, {})
-        instance = self._stub_instance_get()
-        self.compute_api.backup(self.context, instance, 'Backup 1',
-                                'daily', 1,
-                                extra_properties={}).AndReturn(image)
-
-        self.mox.ReplayAll()
+        instance = fake_instance.fake_instance_obj(self.context)
+        self.mock_get.return_value = instance
+        mock_backup.return_value = image
 
         res = self.controller._create_backup(self.req, instance['uuid'],
                                              body=body)
+
+        mock_check_image.assert_called_once_with(self.context, {})
+        mock_backup.assert_called_once_with(self.context, instance, 'Backup 1',
+                                              'daily', 1,
+                                              extra_properties={})
         self.assertEqual(202, res.status_int)
         self.assertIn('fake-image-id', res.headers['Location'])
 
-    def test_create_backup_raises_conflict_on_invalid_state(self):
-        body_map = {
+    @mock.patch.object(common, 'check_img_metadata_properties_quota')
+    @mock.patch.object(api.API, 'backup', return_value=dict(
+        id='fake-image-id', status='ACTIVE', name='Backup 1', properties={}))
+    def test_create_backup_v2_45(self, mock_backup, mock_check_image):
+        """Tests the 2.45 microversion to ensure the Location header is not
+        in the response.
+        """
+        body = {
             'createBackup': {
                 'name': 'Backup 1',
                 'backup_type': 'daily',
-                'rotation': 1,
+                'rotation': '1',
             },
         }
-        args_map = {
-            '_create_backup': (
-                ('Backup 1', 'daily', 1), {'extra_properties': {}}
-            ),
-        }
-        common.check_img_metadata_properties_quota(self.context, {})
-        self._test_invalid_state('_create_backup', method='backup',
-                                 body_map=body_map,
-                                 compute_api_args_map=args_map,
-                                 exception_arg='createBackup')
+        instance = fake_instance.fake_instance_obj(self.context)
+        self.mock_get.return_value = instance
+        req = fakes.HTTPRequest.blank('', version='2.45')
+        res = self.controller._create_backup(req, instance['uuid'], body=body)
+        self.assertIsInstance(res, dict)
+        self.assertEqual('fake-image-id', res['image_id'])
 
-    def test_create_backup_with_non_existed_instance(self):
+    @mock.patch.object(common, 'check_img_metadata_properties_quota')
+    @mock.patch.object(api.API, 'backup')
+    def test_create_backup_raises_conflict_on_invalid_state(self,
+                                   mock_backup, mock_check_image):
         body_map = {
             'createBackup': {
                 'name': 'Backup 1',
@@ -287,9 +327,35 @@ class CreateBackupTestsV21(admin_only_action_common.CommonMixin,
                 'rotation': 1,
             },
         }
-        common.check_img_metadata_properties_quota(self.context, {})
-        self._test_non_existing_instance('_create_backup',
-                                         body_map=body_map)
+        instance = fake_instance.fake_instance_obj(self.context)
+        self.mock_get.return_value = instance
+        mock_backup.side_effect = exception.InstanceInvalidState(
+                            attr='vm_state', instance_uuid=instance.uuid,
+                            state='foo', method='backup')
+
+        ex = self.assertRaises(webob.exc.HTTPConflict,
+                          self.controller._create_backup,
+                          self.req, instance.uuid,
+                          body=body_map)
+        self.assertIn("Cannot 'createBackup' instance %(id)s"
+                      % {'id': instance.uuid}, ex.explanation)
+
+    @mock.patch.object(common, 'check_img_metadata_properties_quota')
+    def test_create_backup_with_non_existed_instance(self, mock_check_image):
+        body_map = {
+            'createBackup': {
+                'name': 'Backup 1',
+                'backup_type': 'daily',
+                'rotation': 1,
+            },
+        }
+        uuid = fakes.FAKE_UUID
+        self.mock_get.side_effect = exception.InstanceNotFound(
+                                            instance_id=uuid)
+        self.assertRaises(webob.exc.HTTPNotFound,
+                          self.controller._create_backup,
+                          self.req, uuid, body=body_map)
+        mock_check_image.assert_called_once_with(self.context, {})
 
     def test_create_backup_with_invalid_create_backup(self):
         body = {
@@ -303,7 +369,11 @@ class CreateBackupTestsV21(admin_only_action_common.CommonMixin,
                           self.controller._create_backup,
                           self.req, fakes.FAKE_UUID, body=body)
 
-    def test_backup_volume_backed_instance(self):
+    @mock.patch.object(common, 'check_img_metadata_properties_quota')
+    @mock.patch.object(compute_utils, 'is_volume_backed_instance',
+                       return_value=True)
+    def test_backup_volume_backed_instance(self, mock_is_volume_backed,
+                                           mock_check_image):
         body = {
             'createBackup': {
                 'name': 'BackupMe',
@@ -312,18 +382,20 @@ class CreateBackupTestsV21(admin_only_action_common.CommonMixin,
             },
         }
 
-        common.check_img_metadata_properties_quota(self.context, {})
-        instance = self._stub_instance_get()
+        updates = {'vm_state': 'active',
+                   'task_state': None,
+                   'launched_at': timeutils.utcnow()}
+        instance = fake_instance.fake_instance_obj(self.context, **updates)
         instance.image_ref = None
+        self.mock_get.return_value = instance
 
-        self.compute_api.backup(self.context, instance, 'BackupMe', 'daily', 3,
-                extra_properties={}).AndRaise(exception.InvalidRequest())
-
-        self.mox.ReplayAll()
-
-        self.assertRaises(webob.exc.HTTPBadRequest,
-                          self.controller._create_backup,
-                          self.req, instance['uuid'], body=body)
+        ex = self.assertRaises(webob.exc.HTTPBadRequest,
+                               self.controller._create_backup,
+                               self.req, instance['uuid'], body=body)
+        mock_check_image.assert_called_once_with(self.context, {})
+        mock_is_volume_backed.assert_called_once_with(self.context, instance)
+        self.assertIn('Backup is not supported for volume-backed instances',
+                      six.text_type(ex))
 
 
 class CreateBackupPolicyEnforcementv21(test.NoDBTestCase):
@@ -352,3 +424,34 @@ class CreateBackupPolicyEnforcementv21(test.NoDBTestCase):
         self.assertEqual(
             "Policy doesn't allow %s to be performed." % rule_name,
             exc.format_message())
+
+
+class CreateBackupTestsV239(test.NoDBTestCase):
+
+    def setUp(self):
+        super(CreateBackupTestsV239, self).setUp()
+        self.controller = create_backup_v21.CreateBackupController()
+        self.req = fakes.HTTPRequest.blank('', version='2.39')
+
+    @mock.patch.object(common, 'check_img_metadata_properties_quota')
+    @mock.patch.object(common, 'get_instance')
+    def test_create_backup_no_quota_checks(self, mock_get_instance,
+                                                 mock_check_quotas):
+        # 'mock_get_instance' helps to skip the whole logic of the action,
+        # but to make the test
+        mock_get_instance.side_effect = webob.exc.HTTPNotFound
+        metadata = {'123': 'asdf'}
+        body = {
+            'createBackup': {
+                'name': 'Backup 1',
+                'backup_type': 'daily',
+                'rotation': 1,
+                'metadata': metadata,
+            },
+        }
+        self.assertRaises(webob.exc.HTTPNotFound,
+                          self.controller._create_backup, self.req,
+                          fakes.FAKE_UUID, body=body)
+        # starting from version 2.39 no quota checks on Nova side are performed
+        # for 'createBackup' action after removing 'image-metadata' proxy API
+        mock_check_quotas.assert_not_called()

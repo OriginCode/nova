@@ -22,7 +22,6 @@ import six
 import nova.conf
 from nova import exception
 from nova.i18n import _
-from nova.i18n import _LW
 from nova.virt.disk.vfs import api as vfs
 from nova.virt.image import model as imgmodel
 
@@ -80,8 +79,11 @@ class VFSGuestFS(vfs.VFS):
             g.add_drive("/dev/null")  # sic
             g.launch()
         except Exception as e:
-            if os.access("/boot/vmlinuz-%s" % os.uname()[2], os.R_OK):
-                raise exception.LibguestfsCannotReadKernel()
+            kernel_file = "/boot/vmlinuz-%s" % os.uname()[2]
+            if not os.access(kernel_file, os.R_OK):
+                raise exception.LibguestfsCannotReadKernel(
+                    _("Please change permissions on %s to 0x644")
+                    % kernel_file)
             raise exception.NovaException(
                 _("libguestfs installed but not usable (%s)") % e)
 
@@ -90,8 +92,8 @@ class VFSGuestFS(vfs.VFS):
     def configure_debug(self):
         """Configures guestfs to be verbose."""
         if not self.handle:
-            LOG.warning(_LW("Please consider to execute setup before trying "
-                            "to configure debug log message."))
+            LOG.warning("Please consider to execute setup before trying "
+                        "to configure debug log message.")
         else:
             def log_callback(ev, eh, buf, array):
                 if ev == guestfs.EVENT_APPLIANCE:
@@ -194,8 +196,8 @@ class VFSGuestFS(vfs.VFS):
         except AttributeError as ex:
             # set_backend_settings method doesn't exist in older
             # libguestfs versions, so nothing we can do but ignore
-            LOG.warning(_LW("Unable to force TCG mode, "
-                            "libguestfs too old? %s"), ex)
+            LOG.warning("Unable to force TCG mode, "
+                        "libguestfs too old? %s", ex)
             pass
 
         try:
@@ -243,7 +245,7 @@ class VFSGuestFS(vfs.VFS):
                 if self.mount:
                     self.handle.aug_close()
             except RuntimeError as e:
-                LOG.warning(_LW("Failed to close augeas %s"), e)
+                LOG.warning("Failed to close augeas %s", e)
 
             try:
                 self.handle.shutdown()
@@ -251,7 +253,7 @@ class VFSGuestFS(vfs.VFS):
                 # Older libguestfs versions haven't an explicit shutdown
                 pass
             except RuntimeError as e:
-                LOG.warning(_LW("Failed to shutdown appliance %s"), e)
+                LOG.warning("Failed to shutdown appliance %s", e)
 
             try:
                 self.handle.close()
@@ -259,7 +261,7 @@ class VFSGuestFS(vfs.VFS):
                 # Older libguestfs versions haven't an explicit close
                 pass
             except RuntimeError as e:
-                LOG.warning(_LW("Failed to close guest handle %s"), e)
+                LOG.warning("Failed to close guest handle %s", e)
         finally:
             # dereference object and implicitly close()
             self.handle = None
@@ -313,13 +315,20 @@ class VFSGuestFS(vfs.VFS):
         uid = -1
         gid = -1
 
-        if user is not None:
-            uid = int(self.handle.aug_get(
-                    "/files/etc/passwd/" + user + "/uid"))
-        if group is not None:
-            gid = int(self.handle.aug_get(
-                    "/files/etc/group/" + group + "/gid"))
+        def _get_item_id(id_path):
+            try:
+                return int(self.handle.aug_get("/files/etc/" + id_path))
+            except RuntimeError as e:
+                msg = _("Error obtaining uid/gid for %(user)s/%(group)s: "
+                        " path %(id_path)s not found (%(e)s)") % {
+                    'id_path': "/files/etc/" + id_path, 'user': user,
+                    'group': group, 'e': e}
+                raise exception.NovaException(msg)
 
+        if user is not None:
+            uid = _get_item_id('passwd/' + user + '/uid')
+        if group is not None:
+            gid = _get_item_id('group/' + group + '/gid')
         LOG.debug("chown uid=%(uid)d gid=%(gid)s",
                   {'uid': uid, 'gid': gid})
         self.handle.chown(uid, gid, path)

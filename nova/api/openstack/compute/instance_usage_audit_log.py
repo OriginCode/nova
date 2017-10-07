@@ -21,14 +21,13 @@ import webob.exc
 from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
 from nova import compute
+from nova.compute import rpcapi as compute_rpcapi
 import nova.conf
 from nova.i18n import _
 from nova.policies import instance_usage_audit_log as iual_policies
 from nova import utils
 
 CONF = nova.conf.CONF
-
-ALIAS = 'os-instance-usage-audit-log'
 
 
 class InstanceUsageAuditLogController(wsgi.Controller):
@@ -56,36 +55,25 @@ class InstanceUsageAuditLogController(wsgi.Controller):
         except ValueError:
             msg = _("Invalid timestamp for date %s") % id
             raise webob.exc.HTTPBadRequest(explanation=msg)
-        task_log = self._get_audit_task_logs(context,
-                                                     before=before_date)
+        task_log = self._get_audit_task_logs(context, before=before_date)
         return {'instance_usage_audit_log': task_log}
 
-    def _get_audit_task_logs(self, context, begin=None, end=None,
-                             before=None):
+    def _get_audit_task_logs(self, context, before=None):
         """Returns a full log for all instance usage audit tasks on all
            computes.
 
-        :param begin: datetime beginning of audit period to get logs for,
-            Defaults to the beginning of the most recently completed
-            audit period prior to the 'before' date.
-        :param end: datetime ending of audit period to get logs for,
-            Defaults to the ending of the most recently completed
-            audit period prior to the 'before' date.
+        :param context: Nova request context.
         :param before: By default we look for the audit period most recently
             completed before this datetime. Has no effect if both begin and end
             are specified.
         """
-        defbegin, defend = utils.last_completed_audit_period(before=before)
-        if begin is None:
-            begin = defbegin
-        if end is None:
-            end = defend
+        begin, end = utils.last_completed_audit_period(before=before)
         task_logs = self.host_api.task_log_get_all(context,
                                                    "instance_usage_audit",
                                                    begin, end)
         # We do this in this way to include disabled compute services,
         # which can have instances on them. (mdragon)
-        filters = {'topic': CONF.compute_topic}
+        filters = {'topic': compute_rpcapi.RPC_TOPIC}
         services = self.host_api.service_get_all(context, filters=filters)
         hosts = set(serv['host'] for serv in services)
         seen_hosts = set()
@@ -122,18 +110,3 @@ class InstanceUsageAuditLogController(wsgi.Controller):
                     total_errors=total_errors,
                     overall_status=overall_status,
                     log=log)
-
-
-class InstanceUsageAuditLog(extensions.V21APIExtensionBase):
-    """Admin-only Task Log Monitoring."""
-    name = "OSInstanceUsageAuditLog"
-    alias = ALIAS
-    version = 1
-
-    def get_resources(self):
-        ext = extensions.ResourceExtension('os-instance_usage_audit_log',
-                                           InstanceUsageAuditLogController())
-        return [ext]
-
-    def get_controller_extensions(self):
-        return []

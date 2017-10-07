@@ -61,6 +61,7 @@ fake_db_dev = {
     'deleted_at': None,
     'deleted': None,
     'id': 1,
+    'uuid': uuidsentinel.pci_device1,
     'compute_node_id': 1,
     'address': '0000:00:00.1',
     'vendor_id': 'v',
@@ -76,21 +77,26 @@ fake_db_dev = {
     'parent_addr': None,
     }
 fake_db_dev_1 = dict(fake_db_dev, vendor_id='v1',
+                     uuid=uuidsentinel.pci_device1,
                      product_id='p1', id=2,
                      address='0000:00:00.2',
                      numa_node=0)
 fake_db_dev_2 = dict(fake_db_dev, id=3, address='0000:00:00.3',
+                     uuid=uuidsentinel.pci_device2,
                      numa_node=None, parent_addr='0000:00:00.1')
 fake_db_devs = [fake_db_dev, fake_db_dev_1, fake_db_dev_2]
 
 fake_db_dev_3 = dict(fake_db_dev, id=4, address='0000:00:01.1',
+                     uuid=uuidsentinel.pci_device3,
                      vendor_id='v2', product_id='p2',
                      numa_node=None, dev_type=fields.PciDeviceType.SRIOV_PF)
 fake_db_dev_4 = dict(fake_db_dev, id=5, address='0000:00:02.1',
+                     uuid=uuidsentinel.pci_device4,
                      numa_node=None, dev_type=fields.PciDeviceType.SRIOV_VF,
                      vendor_id='v2', product_id='p2',
                      parent_addr='0000:00:01.1')
 fake_db_dev_5 = dict(fake_db_dev, id=6, address='0000:00:02.2',
+                     uuid=uuidsentinel.pci_device5,
                      numa_node=None, dev_type=fields.PciDeviceType.SRIOV_VF,
                      vendor_id='v2', product_id='p2',
                      parent_addr='0000:00:01.1')
@@ -472,6 +478,27 @@ class PciDevTrackerTestCase(test.NoDBTestCase):
         free_devs = self.tracker.pci_stats.get_free_devs()
         self.assertEqual(len(free_devs), 3)
 
+    def test_free_device(self):
+        pci_requests_obj = self._create_pci_requests_object(
+            [{'count': 1, 'spec': [{'vendor_id': 'v'}]}])
+        self.tracker.claim_instance(mock.sentinel.context,
+                                    pci_requests_obj, None)
+        self.tracker.update_pci_for_instance(None, self.inst, sign=1)
+        free_pci_device_ids = (
+            [dev.id for dev in self.tracker.pci_stats.get_free_devs()])
+        self.assertEqual(2, len(free_pci_device_ids))
+        allocated_devs = manager.get_instance_pci_devs(self.inst)
+        pci_device = allocated_devs[0]
+        self.assertNotIn(pci_device.id, free_pci_device_ids)
+        instance_uuid = self.inst['uuid']
+        self.assertIn(pci_device, self.tracker.allocations[instance_uuid])
+        self.tracker.free_device(pci_device, self.inst)
+        free_pci_device_ids = (
+            [dev.id for dev in self.tracker.pci_stats.get_free_devs()])
+        self.assertEqual(3, len(free_pci_device_ids))
+        self.assertIn(pci_device.id, free_pci_device_ids)
+        self.assertIsNone(self.tracker.allocations.get(instance_uuid))
+
 
 class PciGetInstanceDevs(test.NoDBTestCase):
 
@@ -488,3 +515,7 @@ class PciGetInstanceDevs(test.NoDBTestCase):
         self.load_attr_called = False
         manager.get_instance_pci_devs(objects.Instance())
         self.assertTrue(self.load_attr_called)
+
+    def test_get_devs_no_pci_devices(self):
+        inst = objects.Instance(pci_devices=None)
+        self.assertEqual([], manager.get_instance_pci_devs(inst))

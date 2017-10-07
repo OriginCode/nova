@@ -15,6 +15,7 @@
 
 import webob
 
+from nova.api.openstack import api_version_request
 from nova.api.openstack import common
 from nova.api.openstack.compute.schemas import create_backup
 from nova.api.openstack import extensions
@@ -24,14 +25,13 @@ from nova import compute
 from nova import exception
 from nova.policies import create_backup as cb_policies
 
-ALIAS = "os-create-backup"
-
 
 class CreateBackupController(wsgi.Controller):
     def __init__(self, *args, **kwargs):
         super(CreateBackupController, self).__init__(*args, **kwargs)
         self.compute_api = compute.API()
 
+    @wsgi.response(202)
     @extensions.expected_errors((400, 403, 404, 409))
     @wsgi.action('createBackup')
     @validation.schema(create_backup.create_backup_v20, '2.0', '2.0')
@@ -57,7 +57,11 @@ class CreateBackupController(wsgi.Controller):
 
         props = {}
         metadata = entity.get('metadata', {})
-        common.check_img_metadata_properties_quota(context, metadata)
+        # Starting from microversion 2.39 we don't check quotas on createBackup
+        if api_version_request.is_supported(
+                req, max_version=
+                api_version_request.MAX_IMAGE_META_PROXY_API_VERSION):
+            common.check_img_metadata_properties_quota(context, metadata)
         props.update(metadata)
 
         instance = common.get_instance(self.compute_api, context, id)
@@ -73,6 +77,11 @@ class CreateBackupController(wsgi.Controller):
         except exception.InvalidRequest as e:
             raise webob.exc.HTTPBadRequest(explanation=e.format_message())
 
+        # Starting with microversion 2.45 we return a response body containing
+        # the snapshot image id without the Location header.
+        if api_version_request.is_supported(req, '2.45'):
+            return {'image_id': image['id']}
+
         resp = webob.Response(status_int=202)
 
         # build location of newly-created image entity if rotation is not zero
@@ -83,19 +92,3 @@ class CreateBackupController(wsgi.Controller):
             resp.headers['Location'] = image_ref
 
         return resp
-
-
-class CreateBackup(extensions.V21APIExtensionBase):
-    """Create a backup of a server."""
-
-    name = "CreateBackup"
-    alias = ALIAS
-    version = 1
-
-    def get_controller_extensions(self):
-        controller = CreateBackupController()
-        extension = extensions.ControllerExtension(self, 'servers', controller)
-        return [extension]
-
-    def get_resources(self):
-        return []

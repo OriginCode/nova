@@ -5,14 +5,10 @@ Contents
 ========
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
 
    unreleased
+   ocata
+   newton
    mitaka
    liberty
-
-Indices and tables
-==================
-
-* :ref:`genindex`
-* :ref:`search`

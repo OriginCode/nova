@@ -52,10 +52,18 @@ _fake_alias3 = """{
                "device_type": "type-PF"
                }"""
 
+_fake_alias4 = """{
+               "name": " Cirrus Logic ",
+               "capability_type": "pci",
+               "product_id": "0ff2",
+               "vendor_id": "10de",
+               "device_type": "type-PCI"
+               }"""
+
 
 class AliasTestCase(test.NoDBTestCase):
     def test_good_alias(self):
-        self.flags(pci_alias=[_fake_alias1])
+        self.flags(alias=[_fake_alias1], group='pci')
         als = request._get_alias_from_config()
         self.assertIsInstance(als['QuicAssist'], list)
         expect_dict = {
@@ -67,7 +75,7 @@ class AliasTestCase(test.NoDBTestCase):
         self.assertEqual(expect_dict, als['QuicAssist'][0])
 
     def test_multispec_alias(self):
-        self.flags(pci_alias=[_fake_alias1, _fake_alias11])
+        self.flags(alias=[_fake_alias1, _fake_alias11], group='pci')
         als = request._get_alias_from_config()
         self.assertIsInstance(als['QuicAssist'], list)
         expect_dict1 = {
@@ -87,48 +95,51 @@ class AliasTestCase(test.NoDBTestCase):
         self.assertEqual(expect_dict2, als['QuicAssist'][1])
 
     def test_wrong_type_aliase(self):
-        self.flags(pci_alias=[_fake_alias2])
+        self.flags(alias=[_fake_alias2], group='pci')
         self.assertRaises(exception.PciInvalidAlias,
             request._get_alias_from_config)
 
     def test_wrong_product_id_aliase(self):
-        self.flags(pci_alias=[
+        self.flags(alias=[
             """{
                 "name": "xxx",
                 "capability_type": "pci",
                 "product_id": "g111",
                 "vendor_id": "1111",
                 "device_type": "NIC"
-                }"""])
+                }"""],
+                   group='pci')
         self.assertRaises(exception.PciInvalidAlias,
             request._get_alias_from_config)
 
     def test_wrong_vendor_id_aliase(self):
-        self.flags(pci_alias=[
+        self.flags(alias=[
             """{
                 "name": "xxx",
                 "capability_type": "pci",
                 "product_id": "1111",
                 "vendor_id": "0xg111",
                 "device_type": "NIC"
-                }"""])
+                }"""],
+                   group='pci')
         self.assertRaises(exception.PciInvalidAlias,
             request._get_alias_from_config)
 
     def test_wrong_cap_type_aliase(self):
-        self.flags(pci_alias=[
+        self.flags(alias=[
             """{
                 "name": "xxx",
                 "capability_type": "usb",
                 "product_id": "1111",
                 "vendor_id": "8086",
                 "device_type": "NIC"
-                }"""])
+                }"""],
+                   group='pci')
         self.assertRaises(exception.PciInvalidAlias,
             request._get_alias_from_config)
 
     def test_dup_aliase(self):
-        self.flags(pci_alias=[
+        self.flags(alias=[
             """{
                 "name": "xxx",
                 "capability_type": "pci",
@@ -142,7 +153,8 @@ class AliasTestCase(test.NoDBTestCase):
                 "product_id": "1111",
                 "vendor_id": "8086",
                 "device_type": "type-PCI"
-                }"""])
+                }"""],
+                   group='pci')
         self.assertRaises(
             exception.PciInvalidAlias,
             request._get_alias_from_config)
@@ -155,7 +167,7 @@ class AliasTestCase(test.NoDBTestCase):
             self.assertEqual(exp['spec'], real.spec)
 
     def test_aliase_2_request(self):
-        self.flags(pci_alias=[_fake_alias1, _fake_alias3])
+        self.flags(alias=[_fake_alias1, _fake_alias3], group='pci')
         expect_request = [
             {'count': 3,
              'spec': [{'vendor_id': '8086', 'product_id': '4443',
@@ -175,13 +187,13 @@ class AliasTestCase(test.NoDBTestCase):
         self._verify_result(expect_request, requests)
 
     def test_aliase_2_request_invalid(self):
-        self.flags(pci_alias=[_fake_alias1, _fake_alias3])
+        self.flags(alias=[_fake_alias1, _fake_alias3], group='pci')
         self.assertRaises(exception.PciRequestAliasNotDefined,
                           request._translate_alias_to_requests,
                           "QuicAssistX : 3")
 
     def test_get_pci_requests_from_flavor(self):
-        self.flags(pci_alias=[_fake_alias1, _fake_alias3])
+        self.flags(alias=[_fake_alias1, _fake_alias3], group='pci')
         expect_request = [
             {'count': 3,
              'spec': [{'vendor_id': '8086', 'product_id': '4443',
@@ -202,8 +214,30 @@ class AliasTestCase(test.NoDBTestCase):
                          set([p.count for p in requests.requests]))
         self._verify_result(expect_request, requests.requests)
 
+    def test_get_pci_requests_from_flavor_including_space(self):
+        self.flags(alias=[_fake_alias3, _fake_alias4], group='pci')
+        expect_request = [
+            {'count': 4,
+             'spec': [{'vendor_id': '10de', 'product_id': '0ff2',
+                       'dev_type': "type-PCI",
+                       'capability_type': 'pci'}],
+             'alias_name': 'Cirrus Logic'},
+
+            {'count': 3,
+             'spec': [{'vendor_id': '8086', 'product_id': '1111',
+                       'dev_type': "type-PF",
+                       'capability_type': 'pci'}],
+             'alias_name': 'IntelNIC'}, ]
+
+        flavor = {'extra_specs': {"pci_passthrough:alias":
+                                  " Cirrus Logic : 4, IntelNIC: 3"}}
+        requests = request.get_pci_requests_from_flavor(flavor)
+        self.assertEqual(set([3, 4]),
+                         set([p.count for p in requests.requests]))
+        self._verify_result(expect_request, requests.requests)
+
     def test_get_pci_requests_from_flavor_no_extra_spec(self):
-        self.flags(pci_alias=[_fake_alias1, _fake_alias3])
+        self.flags(alias=[_fake_alias1, _fake_alias3], group='pci')
         flavor = {}
         requests = request.get_pci_requests_from_flavor(flavor)
         self.assertEqual([], requests.requests)

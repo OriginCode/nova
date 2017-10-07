@@ -4,7 +4,6 @@
 # needs:fix_opt_description_indentation
 # needs:fix_opt_registration_consistency
 
-
 # Copyright 2016 OpenStack Foundation
 # All Rights Reserved.
 #
@@ -26,18 +25,16 @@ from oslo_config import cfg
 
 from nova.conf import paths
 
-# Downtime period in milliseconds
-LIVE_MIGRATION_DOWNTIME_MIN = 100
-# Step count
-LIVE_MIGRATION_DOWNTIME_STEPS_MIN = 3
-# Delay in seconds
-LIVE_MIGRATION_DOWNTIME_DELAY_MIN = 10
 
 libvirt_group = cfg.OptGroup("libvirt",
                              title="Libvirt Options",
                              help="""
 Libvirt options allows cloud administrator to configure related
 libvirt hypervisor driver to be used within an OpenStack deployment.
+
+Almost all of the libvirt config options are influence by ``virt_type`` config
+which describes the virtualization type (or so called domain type) libvirt
+should use for specific features such as live migration, snapshot.
 """)
 
 libvirt_general_opts = [
@@ -223,6 +220,7 @@ Related options:
                 deprecated_for_removal=True,
                 deprecated_reason="This option is being replaced by the "
                                   "'pointer_model' option.",
+                deprecated_since='14.0.0',
                 help="""
 Enable a mouse cursor within a graphical VNC or SPICE sessions.
 
@@ -237,66 +235,171 @@ Related options:
   an effect.
 """),
     cfg.StrOpt('live_migration_inbound_addr',
-               help='Live migration target ip or hostname '
-                    '(if this option is set to None, which is the default, '
-                    'the hostname of the migration target '
-                    'compute node will be used)'),
+               help="""
+The IP address or hostname to be used as the target for live migration traffic.
+
+If this option is set to None, the hostname of the migration target compute
+node will be used.
+
+This option is useful in environments where the live-migration traffic can
+impact the network plane significantly. A separate network for live-migration
+traffic can then use this config option and avoids the impact on the
+management network.
+
+Possible values:
+
+* A valid IP address or hostname, else None.
+
+Related options:
+
+* ``live_migration_tunnelled``: The live_migration_inbound_addr value is
+  ignored if tunneling is enabled.
+"""),
     cfg.StrOpt('live_migration_uri',
-               help='Override the default libvirt live migration target URI '
-                    '(which is dependent on virt_type) '
-                    '(any included "%s" is replaced with '
-                    'the migration target hostname)'),
+               deprecated_for_removal=True,
+               deprecated_since="15.0.0",
+               deprecated_reason="""
+live_migration_uri is deprecated for removal in favor of two other options that
+allow to change live migration scheme and target URI: ``live_migration_scheme``
+and ``live_migration_inbound_addr`` respectively.
+""",
+               help="""
+Live migration target URI to use.
+
+Override the default libvirt live migration target URI (which is dependent
+on virt_type). Any included "%s" is replaced with the migration target
+hostname.
+
+If this option is set to None (which is the default), Nova will automatically
+generate the `live_migration_uri` value based on only 4 supported `virt_type`
+in following list:
+
+* 'kvm': 'qemu+tcp://%s/system'
+* 'qemu': 'qemu+tcp://%s/system'
+* 'xen': 'xenmigr://%s/system'
+* 'parallels': 'parallels+tcp://%s/system'
+
+Related options:
+
+* ``live_migration_inbound_addr``: If ``live_migration_inbound_addr`` value
+  is not None and ``live_migration_tunnelled`` is False, the ip/hostname
+  address of target compute node is used instead of ``live_migration_uri`` as
+  the uri for live migration.
+* ``live_migration_scheme``: If ``live_migration_uri`` is not set, the scheme
+  used for live migration is taken from ``live_migration_scheme`` instead.
+"""),
+    cfg.StrOpt('live_migration_scheme',
+               help="""
+URI scheme used for live migration.
+
+Override the default libvirt live migration scheme (which is dependent on
+virt_type). If this option is set to None, nova will automatically choose a
+sensible default based on the hypervisor. It is not recommended that you change
+this unless you are very sure that hypervisor supports a particular scheme.
+
+Related options:
+
+* ``virt_type``: This option is meaningful only when ``virt_type`` is set to
+  `kvm` or `qemu`.
+* ``live_migration_uri``: If ``live_migration_uri`` value is not None, the
+  scheme used for live migration is taken from ``live_migration_uri`` instead.
+"""),
     cfg.BoolOpt('live_migration_tunnelled',
                 default=False,
-                help='Whether to use tunnelled migration, where migration '
-                     'data is transported over the libvirtd connection. If '
-                     'True, we use the VIR_MIGRATE_TUNNELLED migration flag, '
-                     'avoiding the need to configure the network to allow '
-                     'direct hypervisor to hypervisor communication. If '
-                     'False, use the native transport. If not set, Nova '
-                     'will choose a sensible default based on, for example '
-                     'the availability of native encryption support in the '
-                     'hypervisor.'),
+                help="""
+Enable tunnelled migration.
+
+This option enables the tunnelled migration feature, where migration data is
+transported over the libvirtd connection. If enabled, we use the
+VIR_MIGRATE_TUNNELLED migration flag, avoiding the need to configure
+the network to allow direct hypervisor to hypervisor communication.
+If False, use the native transport. If not set, Nova will choose a
+sensible default based on, for example the availability of native
+encryption support in the hypervisor. Enabling this option will definitely
+impact performance massively.
+
+Note that this option is NOT compatible with use of block migration.
+
+Related options:
+
+* ``live_migration_inbound_addr``: The live_migration_inbound_addr value is
+  ignored if tunneling is enabled.
+"""),
     cfg.IntOpt('live_migration_bandwidth',
                default=0,
-               help='Maximum bandwidth(in MiB/s) to be used during migration. '
-                    'If set to 0, will choose a suitable default. Some '
-                    'hypervisors do not support this feature and will return '
-                    'an error if bandwidth is not 0. Please refer to the '
-                    'libvirt documentation for further details'),
+               help="""
+Maximum bandwidth(in MiB/s) to be used during migration.
+
+If set to 0, the hypervisor will choose a suitable default. Some hypervisors
+do not support this feature and will return an error if bandwidth is not 0.
+Please refer to the libvirt documentation for further details.
+"""),
     cfg.IntOpt('live_migration_downtime',
                default=500,
-               help='Maximum permitted downtime, in milliseconds, for live '
-                    'migration switchover. Will be rounded up to a minimum '
-                    'of %dms. Use a large value if guest liveness is '
-                    'unimportant.' % LIVE_MIGRATION_DOWNTIME_MIN),
+               min=100,
+               help="""
+Maximum permitted downtime, in milliseconds, for live migration
+switchover.
+
+Will be rounded up to a minimum of 100ms. You can increase this value
+if you want to allow live-migrations to complete faster, or avoid
+live-migration timeout errors by allowing the guest to be paused for
+longer during the live-migration switch over.
+
+Related options:
+
+* live_migration_completion_timeout
+"""),
     cfg.IntOpt('live_migration_downtime_steps',
                default=10,
-               help='Number of incremental steps to reach max downtime value. '
-                    'Will be rounded up to a minimum of %d steps' %
-                    LIVE_MIGRATION_DOWNTIME_STEPS_MIN),
+               min=3,
+               help="""
+Number of incremental steps to reach max downtime value.
+
+Will be rounded up to a minimum of 3 steps.
+"""),
     cfg.IntOpt('live_migration_downtime_delay',
                default=75,
-               help='Time to wait, in seconds, between each step increase '
-                    'of the migration downtime. Minimum delay is %d seconds. '
-                    'Value is per GiB of guest RAM + disk to be transferred, '
-                    'with lower bound of a minimum of 2 GiB per device' %
-                    LIVE_MIGRATION_DOWNTIME_DELAY_MIN),
+               min=3,
+               help="""
+Time to wait, in seconds, between each step increase of the migration
+downtime.
+
+Minimum delay is 3 seconds. Value is per GiB of guest RAM + disk to be
+transferred, with lower bound of a minimum of 2 GiB per device.
+"""),
     cfg.IntOpt('live_migration_completion_timeout',
                default=800,
                mutable=True,
-               help='Time to wait, in seconds, for migration to successfully '
-                    'complete transferring data before aborting the '
-                    'operation. Value is per GiB of guest RAM + disk to be '
-                    'transferred, with lower bound of a minimum of 2 GiB. '
-                    'Should usually be larger than downtime delay * downtime '
-                    'steps. Set to 0 to disable timeouts.'),
+               help="""
+Time to wait, in seconds, for migration to successfully complete transferring
+data before aborting the operation.
+
+Value is per GiB of guest RAM + disk to be transferred, with lower bound of
+a minimum of 2 GiB. Should usually be larger than downtime delay * downtime
+steps. Set to 0 to disable timeouts.
+
+Related options:
+
+* live_migration_downtime
+* live_migration_downtime_steps
+* live_migration_downtime_delay
+"""),
     cfg.IntOpt('live_migration_progress_timeout',
-               default=150,
+               default=0,
+               deprecated_for_removal=True,
+               deprecated_reason="Serious bugs found in this feature.",
                mutable=True,
-               help='Time to wait, in seconds, for migration to make forward '
-                    'progress in transferring data before aborting the '
-                    'operation. Set to 0 to disable timeouts.'),
+               help="""
+Time to wait, in seconds, for migration to make forward progress in
+transferring data before aborting the operation.
+
+Set to 0 to disable timeouts.
+
+This is deprecated, and now disabled by default because we have found serious
+bugs in this feature that caused false live-migration timeout failures. This
+feature will be removed or replaced in a future release.
+"""),
     cfg.BoolOpt('live_migration_permit_post_copy',
                 default=False,
                 help="""
@@ -325,11 +428,11 @@ Related options:
                 default=False,
                 help="""
 This option allows nova to start live migration with auto converge on.
+
 Auto converge throttles down CPU if a progress of on-going live migration
 is slow. Auto converge will only be used if this flag is set to True and
 post copy is not permitted or post copy is unavailable due to the version
-of libvirt and QEMU in use. Auto converge requires libvirt>=1.2.3 and
-QEMU>=1.6.0.
+of libvirt and QEMU in use.
 
 Related options:
 
@@ -337,7 +440,21 @@ Related options:
 """),
     cfg.StrOpt('snapshot_image_format',
                choices=('raw', 'qcow2', 'vmdk', 'vdi'),
-               help='Snapshot image format. Defaults to same as source image'),
+               help="""
+Determine the snapshot image format when sending to the image service.
+
+If set, this decides what format is used when sending the snapshot to the
+image service.
+If not set, defaults to same type as source image.
+
+Possible values:
+
+* ``raw``: RAW disk format
+* ``qcow2``: KVM default disk format
+* ``vmdk``: VMWare default disk format
+* ``vdi``: VirtualBox default disk format
+* If not set, defaults to same type as source image.
+"""),
     cfg.StrOpt('disk_prefix',
                help="""
 Override the default disk prefix for the devices attached to an instance.
@@ -405,8 +522,55 @@ Related options:
                help='Location where the Xen hvmloader is kept'),
     cfg.ListOpt('disk_cachemodes',
                 default=[],
-                help='Specific cachemodes to use for different disk types '
-                     'e.g: file=directsync,block=none'),
+                help="""
+Specific cache modes to use for different disk types.
+
+For example: file=directsync,block=none,network=writeback
+
+For local or direct-attached storage, it is recommended that you use
+writethrough (default) mode, as it ensures data integrity and has acceptable
+I/O performance for applications running in the guest, especially for read
+operations. However, caching mode none is recommended for remote NFS storage,
+because direct I/O operations (O_DIRECT) perform better than synchronous I/O
+operations (with O_SYNC). Caching mode none effectively turns all guest I/O
+operations into direct I/O operations on the host, which is the NFS client in
+this environment.
+
+Possible cache modes:
+
+* default: Same as writethrough.
+* none: With caching mode set to none, the host page cache is disabled, but
+  the disk write cache is enabled for the guest. In this mode, the write
+  performance in the guest is optimal because write operations bypass the host
+  page cache and go directly to the disk write cache. If the disk write cache
+  is battery-backed, or if the applications or storage stack in the guest
+  transfer data properly (either through fsync operations or file system
+  barriers), then data integrity can be ensured. However, because the host
+  page cache is disabled, the read performance in the guest would not be as
+  good as in the modes where the host page cache is enabled, such as
+  writethrough mode.
+* writethrough: writethrough mode is the default caching mode. With
+  caching set to writethrough mode, the host page cache is enabled, but the
+  disk write cache is disabled for the guest. Consequently, this caching mode
+  ensures data integrity even if the applications and storage stack in the
+  guest do not transfer data to permanent storage properly (either through
+  fsync operations or file system barriers). Because the host page cache is
+  enabled in this mode, the read performance for applications running in the
+  guest is generally better. However, the write performance might be reduced
+  because the disk write cache is disabled.
+* writeback: With caching set to writeback mode, both the host page cache
+  and the disk write cache are enabled for the guest. Because of this, the
+  I/O performance for applications running in the guest is good, but the data
+  is not protected in a power failure. As a result, this caching mode is
+  recommended only for temporary data where potential data loss is not a
+  concern.
+* directsync: Like "writethrough", but it bypasses the host page cache.
+* unsafe: Caching mode of unsafe ignores cache transfer operations
+  completely. As its name implies, this caching mode should be used only for
+  temporary data where data loss is not a concern. This mode can be useful for
+  speeding up guest installations, but you should switch to another caching
+  mode in production environments.
+"""),
     cfg.StrOpt('rng_dev_path',
                help='A path to a device that will be used as source of '
                     'entropy on the host. Permitted options are: '
@@ -453,22 +617,11 @@ Then event statistics data can be collected from libvirt.  The minimum
 libvirt version is 2.0.0. For more information about `Performance monitoring
 events`, refer https://libvirt.org/formatdomain.html#elementsPerf .
 
-* Possible values:
-    A string list.
-    For example:
-    ``enabled_perf_events = cmt, mbml, mbmt``
-
-    The supported events list can be found in
-    https://libvirt.org/html/libvirt-libvirt-domain.html , which
-    you may need to search key words ``VIR_PERF_PARAM_*``
-
-* Services that use this:
-
-    ``nova-compute``
-
-* Related options:
-    None
-
+Possible values:
+* A string list. For example: ``enabled_perf_events = cmt, mbml, mbmt``
+  The supported events list can be found in
+  https://libvirt.org/html/libvirt-libvirt-domain.html ,
+  which you may need to search key words ``VIR_PERF_PARAM_*``
 """),
 ]
 
@@ -477,15 +630,30 @@ libvirt_imagebackend_opts = [
                default='default',
                choices=('raw', 'flat', 'qcow2', 'lvm', 'rbd', 'ploop',
                         'default'),
-               help='VM Images format. If default is specified, then'
-                    ' use_cow_images flag is used instead of this one.'),
+               help="""
+VM Images format.
+
+If default is specified, then use_cow_images flag is used instead of this
+one.
+
+Related options:
+
+* virt.use_cow_images
+* images_volume_group
+"""),
     cfg.StrOpt('images_volume_group',
-               help='LVM Volume Group that is used for VM images, when you'
-                    ' specify images_type=lvm.'),
+               help="""
+LVM Volume Group that is used for VM images, when you specify images_type=lvm
+
+Related options:
+
+* images_type
+"""),
     cfg.BoolOpt('sparse_logical_volumes',
                 default=False,
-                help='Create sparse logical volumes (with virtualsize)'
-                     ' if this flag is set to True.'),
+                help="""
+Create sparse logical volumes (with virtualsize) if this flag is set to True.
+"""),
     cfg.StrOpt('images_rbd_pool',
                default='rbd',
                help='The RADOS pool in which rbd volumes are stored'),
@@ -494,57 +662,104 @@ libvirt_imagebackend_opts = [
                help='Path to the ceph configuration file to use'),
     cfg.StrOpt('hw_disk_discard',
                choices=('ignore', 'unmap'),
-               help='Discard option for nova managed disks. Need'
-                    ' Libvirt(1.0.6) Qemu1.5 (raw format) Qemu1.6(qcow2'
-                    ' format)'),
+               help="""
+Discard option for nova managed disks.
+
+Requires:
+
+* Libvirt >= 1.0.6
+* Qemu >= 1.5 (raw format)
+* Qemu >= 1.6 (qcow2 format)
+"""),
 ]
 
 libvirt_imagecache_opts = [
     cfg.StrOpt('image_info_filename_pattern',
                default='$instances_path/$image_cache_subdirectory_name/'
                        '%(image)s.info',
-               help='Allows image information files to be stored in '
-                    'non-standard locations',
                deprecated_for_removal=True,
+               deprecated_since='14.0.0',
                deprecated_reason='Image info files are no longer used by the '
-                                 'image cache'),
+                                 'image cache',
+               help='Allows image information files to be stored in '
+                    'non-standard locations'),
     cfg.IntOpt('remove_unused_resized_minimum_age_seconds',
                default=3600,
                help='Unused resized base images younger than this will not be '
                     'removed'),
     cfg.BoolOpt('checksum_base_images',
                 default=False,
-                help='Write a checksum for files in _base to disk',
                 deprecated_for_removal=True,
+                deprecated_since='14.0.0',
                 deprecated_reason='The image cache no longer periodically '
                                   'calculates checksums of stored images. '
                                   'Data integrity can be checked at the block '
-                                  'or filesystem level.'),
+                                  'or filesystem level.',
+                help='Write a checksum for files in _base to disk'),
     cfg.IntOpt('checksum_interval_seconds',
                default=3600,
-               help='How frequently to checksum base images',
                deprecated_for_removal=True,
+               deprecated_since='14.0.0',
                deprecated_reason='The image cache no longer periodically '
                                  'calculates checksums of stored images. '
                                  'Data integrity can be checked at the block '
-                                 'or filesystem level.'),
+                                 'or filesystem level.',
+               help='How frequently to checksum base images'),
 ]
 
 libvirt_lvm_opts = [
     cfg.StrOpt('volume_clear',
                default='zero',
                choices=('none', 'zero', 'shred'),
-               help='Method used to wipe old volumes.'),
+               help="""
+Method used to wipe ephemeral disks when they are deleted. Only takes effect
+if LVM is set as backing storage.
+
+Possible values:
+
+* none - do not wipe deleted volumes
+* zero - overwrite volumes with zeroes
+* shred - overwrite volume repeatedly
+
+Related options:
+
+* images_type - must be set to ``lvm``
+* volume_clear_size
+"""),
     cfg.IntOpt('volume_clear_size',
                default=0,
-               help='Size in MiB to wipe at start of old volumes. 0 => all'),
+               min=0,
+               help="""
+Size of area in MiB, counting from the beginning of the allocated volume,
+that will be cleared using method set in ``volume_clear`` option.
+
+Possible values:
+
+* 0 - clear whole volume
+* >0 - clear specified amount of MiB
+
+Related options:
+
+* images_type - must be set to ``lvm``
+* volume_clear - must be set and the value must be different than ``none``
+  for this option to have any impact
+"""),
 ]
 
 libvirt_utils_opts = [
     cfg.BoolOpt('snapshot_compression',
                 default=False,
-                help='Compress snapshot images when possible. This '
-                     'currently applies exclusively to qcow2 images'),
+                help="""
+Enable snapshot compression for ``qcow2`` images.
+
+Note: you can set ``snapshot_image_format`` to ``qcow2`` to force all
+snapshots to be in ``qcow2`` format, independently from their original image
+type.
+
+Related options:
+
+* snapshot_image_format
+"""),
 ]
 
 libvirt_vif_opts = [
@@ -554,127 +769,179 @@ libvirt_vif_opts = [
 ]
 
 libvirt_volume_opts = [
-    cfg.ListOpt('qemu_allowed_storage_drivers',
-                default=[],
-                help='Protocols listed here will be accessed directly '
-                     'from QEMU. Currently supported protocols: [gluster]'),
     cfg.BoolOpt('volume_use_multipath',
                 default=False,
-                help='Use multipath connection of the iSCSI or FC volume',
-                deprecated_name='iscsi_use_multipath'),
+                deprecated_name='iscsi_use_multipath',
+                help="""
+Use multipath connection of the iSCSI or FC volume
+
+Volumes can be connected in the LibVirt as multipath devices. This will
+provide high availability and fault tolerance.
+"""),
+    cfg.IntOpt('num_volume_scan_tries',
+               deprecated_name='num_iscsi_scan_tries',
+               default=5,
+               help="""
+Number of times to scan given storage protocol to find volume.
+"""),
 ]
 
 libvirt_volume_aoe_opts = [
     cfg.IntOpt('num_aoe_discover_tries',
                default=3,
-               help='Number of times to rediscover AoE target to find volume'),
-]
+               help="""
+Number of times to rediscover AoE target to find volume.
 
-libvirt_volume_glusterfs_opts = [
-    cfg.StrOpt('glusterfs_mount_point_base',
-               default=paths.state_path_def('mnt'),
-               help='Directory where the glusterfs volume is mounted on the '
-                    'compute node'),
+Nova provides support for block storage attaching to hosts via AOE (ATA over
+Ethernet). This option allows the user to specify the maximum number of retry
+attempts that can be made to discover the AoE device.
+""")
 ]
 
 libvirt_volume_iscsi_opts = [
-    cfg.IntOpt('num_iscsi_scan_tries',
-               default=5,
-               help='Number of times to rescan iSCSI target to find volume'),
     cfg.StrOpt('iscsi_iface',
                deprecated_name='iscsi_transport',
-               help='The iSCSI transport iface to use to connect to target in '
-                    'case offload support is desired. Default format is of '
-                    'the form <transport_name>.<hwaddress> where '
-                    '<transport_name> is one of (be2iscsi, bnx2i, cxgb3i, '
-                    'cxgb4i, qla4xxx, ocs) and <hwaddress> is the MAC address '
-                    'of the interface and can be generated via the '
-                    'iscsiadm -m iface command. Do not confuse the '
-                    'iscsi_iface parameter to be provided here with the '
-                    'actual transport name.'),
-    # iser is also supported, but use LibvirtISERVolumeDriver
-    # instead
+               help="""
+The iSCSI transport iface to use to connect to target in case offload support
+is desired.
+
+Default format is of the form <transport_name>.<hwaddress> where
+<transport_name> is one of (be2iscsi, bnx2i, cxgb3i, cxgb4i, qla4xxx, ocs) and
+<hwaddress> is the MAC address of the interface and can be generated via the
+iscsiadm -m iface command. Do not confuse the iscsi_iface parameter to be
+provided here with the actual transport name.
+""")
+# iser is also supported, but use LibvirtISERVolumeDriver
+# instead
 ]
 
 libvirt_volume_iser_opts = [
     cfg.IntOpt('num_iser_scan_tries',
                default=5,
-               help='Number of times to rescan iSER target to find volume'),
+               help="""
+Number of times to scan iSER target to find volume.
+
+iSER is a server network protocol that extends iSCSI protocol to use Remote
+Direct Memory Access (RDMA). This option allows the user to specify the maximum
+number of scan attempts that can be made to find iSER volume.
+"""),
     cfg.BoolOpt('iser_use_multipath',
                 default=False,
-                help='Use multipath connection of the iSER volume'),
+                help="""
+Use multipath connection of the iSER volume.
+
+iSER volumes can be connected as multipath devices. This will provide high
+availability and fault tolerance.
+""")
 ]
 
 libvirt_volume_net_opts = [
     cfg.StrOpt('rbd_user',
-               help='The RADOS client name for accessing rbd volumes'),
+               help="""
+The RADOS client name for accessing rbd(RADOS Block Devices) volumes.
+
+Libvirt will refer to this user when connecting and authenticating with
+the Ceph RBD server.
+"""),
     cfg.StrOpt('rbd_secret_uuid',
-               help='The libvirt UUID of the secret for the rbd_user'
-                    'volumes'),
+               help="""
+The libvirt UUID of the secret for the rbd_user volumes.
+"""),
 ]
 
 libvirt_volume_nfs_opts = [
     cfg.StrOpt('nfs_mount_point_base',
                default=paths.state_path_def('mnt'),
-               help='Directory where the NFS volume is mounted on the'
-                    ' compute node'),
+               help="""
+Directory where the NFS volume is mounted on the compute node.
+The default is 'mnt' directory of the location where nova's Python module
+is installed.
+
+NFS provides shared storage for the OpenStack Block Storage service.
+
+Possible values:
+
+* A string representing absolute path of mount point.
+"""),
     cfg.StrOpt('nfs_mount_options',
-               help='Mount options passed to the NFS client. See section '
-                    'of the nfs man page for details'),
+               help="""
+Mount options passed to the NFS client. See section of the nfs man page
+for details.
+
+Mount options controls the way the filesystem is mounted and how the
+NFS client behaves when accessing files on this mount point.
+
+Possible values:
+
+* Any string representing mount options separated by commas.
+* Example string: vers=3,lookupcache=pos
+"""),
 ]
 
 libvirt_volume_quobyte_opts = [
     cfg.StrOpt('quobyte_mount_point_base',
                default=paths.state_path_def('mnt'),
-               help='Directory where the Quobyte volume is mounted on the '
-                    'compute node'),
+               help="""
+Directory where the Quobyte volume is mounted on the compute node.
+
+Nova supports Quobyte volume driver that enables storing Block Storage
+service volumes on a Quobyte storage back end. This Option sepcifies the
+path of the directory where Quobyte volume is mounted.
+
+Possible values:
+
+* A string representing absolute path of mount point.
+"""),
     cfg.StrOpt('quobyte_client_cfg',
                help='Path to a Quobyte Client configuration file.'),
-]
-
-libvirt_volume_scality_opts = [
-    cfg.StrOpt('scality_sofs_config',
-               help='Path or URL to Scality SOFS configuration file'),
-    cfg.StrOpt('scality_sofs_mount_point',
-               default='$state_path/scality',
-               help='Base dir where Scality SOFS shall be mounted'),
 ]
 
 libvirt_volume_smbfs_opts = [
     cfg.StrOpt('smbfs_mount_point_base',
                default=paths.state_path_def('mnt'),
-               help='Directory where the SMBFS shares are mounted on the '
-                    'compute node'),
+               help="""
+Directory where the SMBFS shares are mounted on the compute node.
+"""),
     cfg.StrOpt('smbfs_mount_options',
                default='',
-               help='Mount options passed to the SMBFS client. See '
-                    'mount.cifs man page for details. Note that the '
-                    'libvirt-qemu uid and gid must be specified.'),
+               help="""
+Mount options passed to the SMBFS client.
+
+Provide SMBFS options as a single string containing all parameters.
+See mount.cifs man page for  details. Note that the libvirt-qemu ``uid``
+and ``gid`` must be specified.
+"""),
 ]
 
 libvirt_remotefs_opts = [
     cfg.StrOpt('remote_filesystem_transport',
                default='ssh',
                choices=('ssh', 'rsync'),
-               help='Use ssh or rsync transport for creating, copying, '
-                    'removing files on the remote host.'),
+               help="""
+libvirt's transport method for remote file operations.
+
+Because libvirt cannot use RPC to copy files over network to/from other
+compute nodes, other method must be used for:
+
+* creating directory on remote host
+* creating file on remote host
+* removing file from remote host
+* copying file to remote host
+""")
 ]
 
 libvirt_volume_vzstorage_opts = [
     cfg.StrOpt('vzstorage_mount_point_base',
                default=paths.state_path_def('mnt'),
                help="""
-Directory where the Virtuozzo Storage clusters are mounted on the compute node.
+Directory where the Virtuozzo Storage clusters are mounted on the compute
+node.
 
 This option defines non-standard mountpoint for Vzstorage cluster.
 
-* Services that use this:
+Related options:
 
-    ``nova-compute``
-
-* Related options:
-
-    vzstorage_mount_* group of parameters
+* vzstorage_mount_* group of parameters
 """
               ),
     cfg.StrOpt('vzstorage_mount_user',
@@ -684,13 +951,9 @@ Mount owner user name.
 
 This option defines the owner user of Vzstorage cluster mountpoint.
 
-* Services that use this:
+Related options:
 
-    ``nova-compute``
-
-* Related options:
-
-    vzstorage_mount_* group of parameters
+* vzstorage_mount_* group of parameters
 """
               ),
     cfg.StrOpt('vzstorage_mount_group',
@@ -700,13 +963,9 @@ Mount owner group name.
 
 This option defines the owner group of Vzstorage cluster mountpoint.
 
-* Services that use this:
+Related options:
 
-    ``nova-compute``
-
-* Related options:
-
-    vzstorage_mount_* group of parameters
+* vzstorage_mount_* group of parameters
 """
               ),
     cfg.StrOpt('vzstorage_mount_perms',
@@ -719,17 +978,13 @@ in the format similar to one of chmod(1) utility, like this: 0770.
 It consists of one to four digits ranging from 0 to 7, with missing
 lead digits assumed to be 0's.
 
-* Services that use this:
+Related options:
 
-    ``nova-compute``
-
-* Related options:
-
-    vzstorage_mount_* group of parameters
+* vzstorage_mount_* group of parameters
 """
               ),
     cfg.StrOpt('vzstorage_log_path',
-               default='/var/log/pstorage/%(cluster_name)s/nova.log.gz',
+               default='/var/log/vstorage/%(cluster_name)s/nova.log.gz',
                help="""
 Path to vzstorage client log.
 
@@ -737,13 +992,9 @@ This option defines the log of cluster operations,
 it should include "%(cluster_name)s" template to separate
 logs from multiple shares.
 
-* Services that use this:
+Related options:
 
-    ``nova-compute``
-
-* Related options:
-
-    vzstorage_mount_opts may include more detailed logging options.
+* vzstorage_mount_opts may include more detailed logging options.
 """
               ),
     cfg.StrOpt('vzstorage_cache_path',
@@ -765,13 +1016,9 @@ vstorage-hwflush-check(1) utility.
 This option defines the path which should include "%(cluster_name)s"
 template to separate caches from multiple shares.
 
-* Services that use this:
+Related options:
 
-    ``nova-compute``
-
-* Related options:
-
-    vzstorage_mount_opts may include more detailed cache options.
+* vzstorage_mount_opts may include more detailed cache options.
 """
               ),
     cfg.ListOpt('vzstorage_mount_opts',
@@ -786,15 +1033,11 @@ Format is a python string representation of arguments list, like:
 Shouldn\'t include -c, -l, -C, -u, -g and -m as those have
 explicit vzstorage_* options.
 
-* Services that use this:
+Related options:
 
-    ``nova-compute``
-
-* Related options:
-
-    All other vzstorage_* options
+* All other vzstorage_* options
 """
-              ),
+),
 ]
 
 ALL_OPTS = list(itertools.chain(
@@ -806,13 +1049,11 @@ ALL_OPTS = list(itertools.chain(
     libvirt_vif_opts,
     libvirt_volume_opts,
     libvirt_volume_aoe_opts,
-    libvirt_volume_glusterfs_opts,
     libvirt_volume_iscsi_opts,
     libvirt_volume_iser_opts,
     libvirt_volume_net_opts,
     libvirt_volume_nfs_opts,
     libvirt_volume_quobyte_opts,
-    libvirt_volume_scality_opts,
     libvirt_volume_smbfs_opts,
     libvirt_remotefs_opts,
     libvirt_volume_vzstorage_opts,

@@ -28,14 +28,19 @@ import webob
 
 from oslo_log import log as logging
 
+from nova.api.openstack.placement.handlers import aggregate
 from nova.api.openstack.placement.handlers import allocation
+from nova.api.openstack.placement.handlers import allocation_candidate
 from nova.api.openstack.placement.handlers import inventory
+from nova.api.openstack.placement.handlers import resource_class
 from nova.api.openstack.placement.handlers import resource_provider
 from nova.api.openstack.placement.handlers import root
+from nova.api.openstack.placement.handlers import trait
 from nova.api.openstack.placement.handlers import usage
+from nova.api.openstack.placement import policy
 from nova.api.openstack.placement import util
 from nova import exception
-from nova.i18n import _, _LE
+from nova.i18n import _
 
 LOG = logging.getLogger(__name__)
 
@@ -47,6 +52,23 @@ LOG = logging.getLogger(__name__)
 ROUTE_DECLARATIONS = {
     '/': {
         'GET': root.home,
+    },
+    # NOTE(cdent): This allows '/placement/' and '/placement' to
+    # both work as the root of the service, which we probably want
+    # for those situations where the service is mounted under a
+    # prefix (as it is in devstack). While weird, an empty string is
+    # a legit key in a dictionary and matches as desired in Routes.
+    '': {
+        'GET': root.home,
+    },
+    '/resource_classes': {
+        'GET': resource_class.list_resource_classes,
+        'POST': resource_class.create_resource_class
+    },
+    '/resource_classes/{name}': {
+        'GET': resource_class.get_resource_class,
+        'PUT': resource_class.update_resource_class,
+        'DELETE': resource_class.delete_resource_class,
     },
     '/resource_providers': {
         'GET': resource_provider.list_resource_providers,
@@ -60,7 +82,8 @@ ROUTE_DECLARATIONS = {
     '/resource_providers/{uuid}/inventories': {
         'GET': inventory.get_inventories,
         'POST': inventory.create_inventory,
-        'PUT': inventory.set_inventories
+        'PUT': inventory.set_inventories,
+        'DELETE': inventory.delete_inventories
     },
     '/resource_providers/{uuid}/inventories/{resource_class}': {
         'GET': inventory.get_inventory,
@@ -70,6 +93,10 @@ ROUTE_DECLARATIONS = {
     '/resource_providers/{uuid}/usages': {
         'GET': usage.list_usages
     },
+    '/resource_providers/{uuid}/aggregates': {
+        'GET': aggregate.get_aggregates,
+        'PUT': aggregate.set_aggregates
+    },
     '/resource_providers/{uuid}/allocations': {
         'GET': allocation.list_for_resource_provider,
     },
@@ -77,6 +104,25 @@ ROUTE_DECLARATIONS = {
         'GET': allocation.list_for_consumer,
         'PUT': allocation.set_allocations,
         'DELETE': allocation.delete_allocations,
+    },
+    '/allocation_candidates': {
+        'GET': allocation_candidate.list_allocation_candidates,
+    },
+    '/traits': {
+        'GET': trait.list_traits,
+    },
+    '/traits/{name}': {
+        'GET': trait.get_trait,
+        'PUT': trait.put_trait,
+        'DELETE': trait.delete_trait,
+    },
+    '/resource_providers/{uuid}/traits': {
+        'GET': trait.list_traits_for_resource_provider,
+        'PUT': trait.update_traits_for_resource_provider,
+        'DELETE': trait.delete_traits_for_resource_provider
+    },
+    '/usages': {
+        'GET': usage.get_total_usages,
     },
 }
 
@@ -107,10 +153,16 @@ def handle_405(environ, start_response):
     _methods = util.wsgi_path_item(environ, '_methods')
     headers = {}
     if _methods:
-        headers['allow'] = _methods
-    raise webob.exc.HTTPMethodNotAllowed(
+        # Ensure allow header is a python 2 or 3 native string (thus
+        # not unicode in python 2 but stay a string in python 3)
+        # In the process done by Routes to save the allowed methods
+        # to its routing table they become unicode in py2.
+        headers['allow'] = str(_methods)
+    # Use Exception class as WSGI Application. We don't want to raise here.
+    response = webob.exc.HTTPMethodNotAllowed(
         _('The method specified is not allowed for this resource.'),
         headers=headers, json_formatter=util.json_error_formatter)
+    return response(environ, start_response)
 
 
 def make_map(declarations):
@@ -139,45 +191,41 @@ class PlacementHandler(object):
 
     def __call__(self, environ, start_response):
         # All requests but '/' require admin.
-        # TODO(cdent): We'll eventually want our own auth context,
-        # but using nova's is convenient for now.
         if environ['PATH_INFO'] != '/':
             context = environ['placement.context']
             # TODO(cdent): Using is_admin everywhere (except /) is
             # insufficiently flexible for future use case but is
-            # convenient for initial exploration. We will need to
-            # determine how to manage authorization/policy and
-            # implement that, probably per handler. Also this is
-            # just the wrong way to do things, but policy not
-            # integrated yet.
-            if 'admin' not in context.to_policy_values()['roles']:
+            # convenient for initial exploration.
+            if not policy.placement_authorize(context, 'placement'):
                 raise webob.exc.HTTPForbidden(
                     _('admin required'),
                     json_formatter=util.json_error_formatter)
-        # Check that an incoming write-oriented request method has
-        # the required content-type header. If not raise a 400. If
-        # this doesn't happen here then webob.dec.wsgify (elsewhere
-        # in the stack) will raise an uncaught KeyError. Since that
-        # is such a generic exception we cannot merely catch it
-        # here, we need to avoid it ever happening.
-        # TODO(cdent): Move this and the auth checking above into
-        # middleware. It shouldn't be here. This is for dispatch not
-        # validation or authorization.
-        request_method = environ['REQUEST_METHOD'].upper()
-        if request_method in ('POST', 'PUT', 'PATCH'):
-            if 'CONTENT_TYPE' not in environ:
+        # Check that an incoming request with a content-length header
+        # that is an integer > 0 and not empty, also has a content-type
+        # header that is not empty. If not raise a 400.
+        clen = environ.get('CONTENT_LENGTH')
+        try:
+            if clen and (int(clen) > 0) and not environ.get('CONTENT_TYPE'):
                 raise webob.exc.HTTPBadRequest(
-                    _('content-type header required'),
-                    json_formatter=util.json_error_formatter)
+                   _('content-type header required when content-length > 0'),
+                   json_formatter=util.json_error_formatter)
+        except ValueError as exc:
+            raise webob.exc.HTTPBadRequest(
+                _('content-length header must be an integer'),
+                json_formatter=util.json_error_formatter)
         try:
             return dispatch(environ, start_response, self._map)
-        # Trap the small number of nova exceptions that aren't
-        # caught elsewhere and transform them into webob.exc.
-        # These are common exceptions raised when making calls against
-        # nova.objects in the handlers.
+        # Trap the NotFound exceptions raised by the objects used
+        # with the API and transform them into webob.exc.HTTPNotFound.
         except exception.NotFound as exc:
             raise webob.exc.HTTPNotFound(
                 exc, json_formatter=util.json_error_formatter)
+        # Trap the HTTPNotFound that can be raised by dispatch()
+        # when no route is found. The exception is passed through to
+        # the FaultWrap middleware without causing an alarming log
+        # message.
+        except webob.exc.HTTPNotFound:
+            raise
         except Exception as exc:
-            LOG.exception(_LE("Uncaught exception"))
+            LOG.exception("Uncaught exception")
             raise

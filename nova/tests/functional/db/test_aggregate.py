@@ -11,6 +11,7 @@
 #    under the License.
 
 from copy import deepcopy
+
 import mock
 from oslo_db import exception as db_exc
 from oslo_utils import timeutils
@@ -20,13 +21,11 @@ from nova import db
 from nova.db.sqlalchemy import api as db_api
 from nova.db.sqlalchemy import api_models
 from nova import exception
+import nova.objects.aggregate as aggregate_obj
 from nova import test
-from nova.tests import fixtures
 from nova.tests.unit import matchers
 from nova.tests.unit.objects.test_objects import compare_obj as base_compare
 from nova.tests import uuidsentinel
-
-import nova.objects.aggregate as aggregate_obj
 
 
 SUBS = {'metadata': 'metadetails'}
@@ -110,14 +109,10 @@ def _aggregate_metadata_get_all(context, aggregate_id):
     return metadata
 
 
-class AggregateObjectDbTestCase(test.NoDBTestCase):
-
-    USES_DB_SELF = True
+class AggregateObjectDbTestCase(test.TestCase):
 
     def setUp(self):
         super(AggregateObjectDbTestCase, self).setUp()
-        self.useFixture(fixtures.Database())
-        self.useFixture(fixtures.Database(database='api'))
         self.context = context.RequestContext('fake-user', 'fake-project')
 
     def test_in_api(self):
@@ -132,8 +127,8 @@ class AggregateObjectDbTestCase(test.NoDBTestCase):
         cell_db_agg = aggregate_obj.Aggregate.get_by_id(
                                                     self.context, ca2['id'])
 
-        self.assertEqual(api_db_agg.in_api, True)
-        self.assertEqual(cell_db_agg.in_api, False)
+        self.assertTrue(api_db_agg.in_api)
+        self.assertFalse(cell_db_agg.in_api)
 
     def test_aggregate_get_from_db(self):
         result = _create_aggregate_with_hosts(self.context)
@@ -495,15 +490,12 @@ def compare_obj(test, result, source):
                         comparators={'updated_at': updated_at_comparator})
 
 
-class AggregateObjectCellTestCase(test.NoDBTestCase):
+class AggregateObjectCellTestCase(test.TestCase):
     """Tests for the case where all aggregate data is in Cell DB"""
-    USES_DB_SELF = True
 
     def setUp(self):
         super(AggregateObjectCellTestCase, self).setUp()
         self.context = context.RequestContext('fake-user', 'fake-project')
-        self.useFixture(fixtures.Database())
-        self.useFixture(fixtures.Database(database='api'))
         self._seed_data()
 
     def _seed_data(self):
@@ -610,17 +602,15 @@ class AggregateObjectMigrationTestCase(AggregateObjectCellTestCase):
         self.assertEqual(new_agg.name, result.name)
 
 
-class AggregateMigrationTestCase(test.NoDBTestCase):
-    USES_DB_SELF = True
+class AggregateMigrationTestCase(test.TestCase):
 
     def setUp(self):
         super(AggregateMigrationTestCase, self).setUp()
-        self.useFixture(fixtures.Database())
-        self.useFixture(fixtures.Database(database='api'))
         self.context = context.get_admin_context()
 
     def test_migration(self):
-        db.aggregate_create(self.context, {'name': 'foo'})
+        db.aggregate_create(self.context, {'name': 'foo',
+                                           'uuid': uuidsentinel.agg_uuid})
         main_aggregates_len = len(db.aggregate_get_all(self.context))
         match, done = aggregate_obj.migrate_aggregates(self.context, 50)
         self.assertEqual(1, main_aggregates_len)
@@ -646,3 +636,26 @@ class AggregateMigrationTestCase(test.NoDBTestCase):
             self.context, 0)
         self.assertEqual(0, match)
         self.assertEqual(0, done)
+
+    @mock.patch('nova.objects.aggregate.LOG.error')
+    def test_migrate_aggregates_duplicate_unicode(self, mock_log_error):
+        """Tests that we handle a duplicate aggregate when migrating and that
+        we handle when the exception message is in unicode.
+        """
+        # First create an aggregate that will be migrated from main to API DB.
+        create_aggregate(self.context, 1, in_api=False)
+        # Now create that same aggregate in the API DB.
+        create_aggregate(self.context, 1, in_api=True)
+        # Now let's run the online data migration which will fail to create
+        # a duplicate aggregate in the API database and will raise
+        # AggregateNameExists which we want to modify to have a unicode
+        # message.
+        with mock.patch.object(exception.AggregateNameExists, 'msg_fmt',
+                               u'\xF0\x9F\x92\xA9'):
+            match, done = aggregate_obj.migrate_aggregates(self.context, 50)
+            # we found one
+            self.assertEqual(1, match)
+            # but we didn't migrate it
+            self.assertEqual(0, done)
+            # and we logged an error for the duplicate aggregate
+            mock_log_error.assert_called()

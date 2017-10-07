@@ -25,18 +25,18 @@ A driver for XenServer or Xen Cloud Platform.
 
 import math
 
+from os_xenapi.client import session
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import units
 from oslo_utils import versionutils
-import six
+
 import six.moves.urllib.parse as urlparse
 
 import nova.conf
-from nova.i18n import _, _LE, _LW
 from nova import exception
+from nova.i18n import _
 from nova.virt import driver
-from nova.virt.xenapi.client import session
 from nova.virt.xenapi import host
 from nova.virt.xenapi import pool
 from nova.virt.xenapi import vm_utils
@@ -53,12 +53,12 @@ OVERHEAD_PER_VCPU = 1.5
 
 
 def invalid_option(option_name, recommended_value):
-    LOG.exception(_LE('Current value of '
-                      'CONF.xenserver.%(option)s option incompatible with '
-                      'CONF.xenserver.independent_compute=True.  '
-                      'Consider using "%(recommended)s"') % {
-                          'option': option_name,
-                          'recommended': recommended_value})
+    LOG.exception(_('Current value of '
+                    'CONF.xenserver.%(option)s option incompatible with '
+                    'CONF.xenserver.independent_compute=True.  '
+                    'Consider using "%(recommended)s"'),
+                  {'option': option_name,
+                   'recommended': recommended_value})
     raise exception.NotSupportedWithOption(
         operation=option_name,
         option='CONF.xenserver.independent_compute')
@@ -66,6 +66,13 @@ def invalid_option(option_name, recommended_value):
 
 class XenAPIDriver(driver.ComputeDriver):
     """A connection to XenServer or Xen Cloud Platform."""
+    capabilities = {
+        "has_imagecache": False,
+        "supports_recreate": False,
+        "supports_migrate_to_same_host": False,
+        "supports_attach_interface": True,
+        "supports_device_tagging": True,
+    }
 
     def __init__(self, virtapi, read_only=False):
         super(XenAPIDriver, self).__init__(virtapi)
@@ -79,7 +86,8 @@ class XenAPIDriver(driver.ComputeDriver):
                               'connection_password to use '
                               'compute_driver=xenapi.XenAPIDriver'))
 
-        self._session = session.XenAPISession(url, username, password)
+        self._session = session.XenAPISession(url, username, password,
+                                              originator="nova")
         self._volumeops = volumeops.VolumeOps(self._session)
         self._host_state = None
         self._host = host.Host(self._session, self.virtapi)
@@ -112,7 +120,7 @@ class XenAPIDriver(driver.ComputeDriver):
             try:
                 vm_utils.cleanup_attached_vdis(self._session)
             except Exception:
-                LOG.exception(_LE('Failure while cleaning up attached VDIs'))
+                LOG.exception(_('Failure while cleaning up attached VDIs'))
 
     def instance_exists(self, instance):
         """Checks existence of an instance on the host.
@@ -165,9 +173,8 @@ class XenAPIDriver(driver.ComputeDriver):
         self._vmops.spawn(context, instance, image_meta, injected_files,
                           admin_password, network_info, block_device_info)
 
-    def confirm_migration(self, migration, instance, network_info):
+    def confirm_migration(self, context, migration, instance, network_info):
         """Confirms a resize, destroying the source VM."""
-        # TODO(Vek): Need to pass context in for access to auth_token
         self._vmops.confirm_migration(migration, instance, network_info)
 
     def finish_revert_migration(self, context, instance, network_info,
@@ -215,7 +222,7 @@ class XenAPIDriver(driver.ComputeDriver):
         self._vmops.change_instance_metadata(instance, diff)
 
     def destroy(self, context, instance, network_info, block_device_info=None,
-                destroy_disks=True, migrate_data=None):
+                destroy_disks=True):
         """Destroy VM instance."""
         self._vmops.destroy(instance, network_info, block_device_info,
                             destroy_disks)
@@ -331,7 +338,7 @@ class XenAPIDriver(driver.ComputeDriver):
         # of mac addresses with values that are the bw counters:
         # e.g. {'instance-001' : { 12:34:56:78:90:12 : {'bw_in': 0, ....}}
         all_counters = self._vmops.get_all_bw_counters()
-        for instance_name, counters in six.iteritems(all_counters):
+        for instance_name, counters in all_counters.items():
             if instance_name in imap:
                 # yes these are stats for a nova-managed vm
                 # correlate the stats with the nova instance uuid:
@@ -356,7 +363,7 @@ class XenAPIDriver(driver.ComputeDriver):
                 self._initiator = stats['host_other-config']['iscsi_iqn']
                 self._hypervisor_hostname = stats['host_hostname']
             except (TypeError, KeyError) as err:
-                LOG.warning(_LW('Could not determine key: %s'), err,
+                LOG.warning('Could not determine key: %s', err,
                             instance=instance)
                 self._initiator = None
         return {
@@ -535,6 +542,7 @@ class XenAPIDriver(driver.ComputeDriver):
         # any volume that was attached to the destination during
         # live migration. XAPI should take care of all other cleanup.
         self._vmops.rollback_live_migration_at_destination(instance,
+                                                           network_info,
                                                            block_device_info)
 
     def pre_live_migration(self, context, instance, block_device_info,
@@ -559,6 +567,16 @@ class XenAPIDriver(driver.ComputeDriver):
         :param migrate_data: a XenapiLiveMigrateData object
         """
         self._vmops.post_live_migration(context, instance, migrate_data)
+
+    def post_live_migration_at_source(self, context, instance, network_info):
+        """Unplug VIFs from networks at source.
+
+        :param context: security context
+        :param instance: instance object reference
+        :param network_info: instance network information
+        """
+        self._vmops.post_live_migration_at_source(context, instance,
+                                                  network_info)
 
     def post_live_migration_at_destination(self, context, instance,
                                            network_info,
@@ -654,3 +672,39 @@ class XenAPIDriver(driver.ComputeDriver):
         :returns: dict of  nova uuid => dict of usage info
         """
         return self._vmops.get_per_instance_usage()
+
+    def attach_interface(self, context, instance, image_meta, vif):
+        """Use hotplug to add a network interface to a running instance.
+
+        The counter action to this is :func:`detach_interface`.
+
+        :param context: The request context.
+        :param nova.objects.instance.Instance instance:
+            The instance which will get an additional network interface.
+        :param nova.objects.ImageMeta image_meta:
+            The metadata of the image of the instance.
+        :param nova.network.model.VIF vif:
+            The object which has the information about the interface to attach.
+
+        :raise nova.exception.NovaException: If the attach fails.
+
+        :return: None
+        """
+        self._vmops.attach_interface(instance, vif)
+
+    def detach_interface(self, context, instance, vif):
+        """Use hotunplug to remove a network interface from a running instance.
+
+        The counter action to this is :func:`attach_interface`.
+
+        :param context: The request context.
+        :param nova.objects.instance.Instance instance:
+            The instance which gets a network interface removed.
+        :param nova.network.model.VIF vif:
+            The object which has the information about the interface to detach.
+
+        :raise nova.exception.NovaException: If the detach fails.
+
+        :return: None
+        """
+        self._vmops.detach_interface(instance, vif)

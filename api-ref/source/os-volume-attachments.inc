@@ -1,12 +1,11 @@
 .. -*- rst -*-
-.. needs:body_verification
 
 ===================================================================
  Servers with volume attachments (servers, os-volume\_attachments)
 ===================================================================
 
 Attaches volumes that are created through the volume API to server
-instances. Also, lists volume attachments for a server instance, shows
+instances. Also, lists volume attachments for a server, shows
 details for a volume attachment, and detaches a volume.
 
 List volume attachments for an instance
@@ -25,8 +24,9 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-
   - server_id: server_id_path
+  - limit: limit_simple
+  - offset: offset_simple
 
 Response
 --------
@@ -35,7 +35,7 @@ Response
 
   - volumeAttachments: volumeAttachments
   - device: device_resp
-  - id: attachment_id_resp
+  - id: attachment_id_required
   - serverId: server_id
   - volumeId: volumeId_resp
 
@@ -55,20 +55,28 @@ Normal response codes: 200
 
 Error response codes: badRequest(400), unauthorized(401), forbidden(403), itemNotFound(404), conflict(409)
 
+.. note:: From v2.20 attach a volume to an instance in SHELVED or SHELVED_OFFLOADED
+          state is allowed.
+
 Request
 -------
 
 .. rest_parameters:: parameters.yaml
 
-
   - server_id: server_id_path
-  - volumeAttachment: volumeAttachment
+  - volumeAttachment: volumeAttachment_post
   - volumeId: volumeId
   - device: device
+  - tag: device_tag_bdm_attachment
 
 **Example Attach a volume to an instance: JSON request**
 
 .. literalinclude:: ../../doc/api_samples/os-volumes/attach-volume-to-server-req.json
+   :language: javascript
+
+**Example Attach a volume to an instance and tag it (v2.49): JSON request**
+
+.. literalinclude:: ../../doc/api_samples/os-volumes/v2.49/attach-volume-to-server-req.json
    :language: javascript
 
 Response
@@ -78,7 +86,7 @@ Response
 
   - volumeAttachment: volumeAttachment
   - device: device_resp
-  - id: attachment_id_resp
+  - id: attachment_id_required
   - serverId: server_id
   - volumeId: volumeId_resp
 
@@ -90,7 +98,7 @@ Response
 Show a detail of a volume attachment
 ====================================
 
-.. rest_method:: GET /servers/{server_id}/os-volume_attachments/{attachment_id}
+.. rest_method:: GET /servers/{server_id}/os-volume_attachments/{volume_id}
 
 Show a detail of a volume attachment.
 
@@ -103,9 +111,8 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-
   - server_id: server_id_path
-  - attachment_id: attachment_id
+  - volume_id: volume_id
 
 Response
 --------
@@ -114,7 +121,7 @@ Response
 
   - volumeAttachment: volumeAttachment
   - device: device_resp
-  - id: attachment_id_resp
+  - id: attachment_id_required
   - serverId: server_id
   - volumeId: volumeId_resp
 
@@ -139,10 +146,9 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-
   - server_id: server_id_path
   - attachment_id: attachment_id
-  - volumeAttachment: volumeAttachment
+  - volumeAttachment: volumeAttachment_put
   - volumeId: volumeId_swap
 
 **Example Update a volume attachment: JSON request**
@@ -158,7 +164,7 @@ No body is returned on successful request.
 Detach a volume from an instance
 ================================
 
-.. rest_method:: DELETE /servers/{server_id}/os-volume_attachments/{attachment_id}
+.. rest_method:: DELETE /servers/{server_id}/os-volume_attachments/{volume_id}
 
 Detach a volume from an instance.
 
@@ -166,14 +172,16 @@ Normal response codes: 202
 
 Error response codes: badRequest(400), unauthorized(401), forbidden(403), itemNotFound(404), conflict(409)
 
+.. note:: From v2.20 detach a volume from an instance in SHELVED or SHELVED_OFFLOADED
+          state is allowed.
+
 Request
 -------
 
 .. rest_parameters:: parameters.yaml
 
-
   - server_id: server_id_path
-  - attachment_id: attachment_id
+  - volume_id: volume_id
 
 Response
 --------

@@ -10,14 +10,15 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import mock
 import os
+
+import mock
+from os_brick.initiator import connector
 
 from nova import exception
 from nova.tests.unit.virt.libvirt.volume import test_volume
 from nova import utils
 from nova.virt.libvirt.volume import vzstorage
-from os_brick.initiator import connector
 
 
 class LibvirtVZStorageTestCase(test_volume.LibvirtVolumeBaseTestCase):
@@ -31,7 +32,7 @@ class LibvirtVZStorageTestCase(test_volume.LibvirtVolumeBaseTestCase):
                    group='libvirt')
 
     def test_libvirt_vzstorage_driver(self):
-        libvirt_driver = vzstorage.LibvirtVZStorageVolumeDriver(self.fake_conn)
+        libvirt_driver = vzstorage.LibvirtVZStorageVolumeDriver(self.fake_host)
         self.assertIsInstance(libvirt_driver.connector,
                               connector.RemoteFsConnector)
 
@@ -39,7 +40,7 @@ class LibvirtVZStorageTestCase(test_volume.LibvirtVolumeBaseTestCase):
         """Test that custom options cannot duplicate the configured"""
         bad_opts = [
                      ["-c", "clus111", "-v"],
-                     ["-l", "/var/log/pstorage.log", "-L", "5x5"],
+                     ["-l", "/var/log/vstorage.log", "-L", "5x5"],
                      ["-u", "user1", "-p", "pass1"],
                      ["-v", "-R", "100", "-C", "/ssd"],
                    ]
@@ -47,11 +48,11 @@ class LibvirtVZStorageTestCase(test_volume.LibvirtVolumeBaseTestCase):
             self.flags(vzstorage_mount_opts=opts, group='libvirt')
             self.assertRaises(exception.NovaException,
                               vzstorage.LibvirtVZStorageVolumeDriver,
-                              self.fake_conn)
+                              self.fake_host)
 
     def test_libvirt_vzstorage_driver_share_fmt_neg(self):
 
-        drv = vzstorage.LibvirtVZStorageVolumeDriver(self.fake_conn)
+        drv = vzstorage.LibvirtVZStorageVolumeDriver(self.fake_host)
 
         wrong_export_string = 'mds1, mds2:/testcluster:passwd12111'
         connection_info = {'data': {'export': wrong_export_string,
@@ -63,37 +64,39 @@ class LibvirtVZStorageTestCase(test_volume.LibvirtVolumeBaseTestCase):
                                 err_pattern,
                                 drv.connect_volume,
                                 connection_info,
-                                self.disk_info)
+                                self.disk_info,
+                                mock.sentinel.instance)
 
     def test_libvirt_vzstorage_driver_connect(self):
         def brick_conn_vol(data):
             return {'path': 'vstorage://testcluster'}
 
-        drv = vzstorage.LibvirtVZStorageVolumeDriver(self.fake_conn)
+        drv = vzstorage.LibvirtVZStorageVolumeDriver(self.fake_host)
         drv.connector.connect_volume = brick_conn_vol
 
         export_string = 'testcluster'
         connection_info = {'data': {'export': export_string,
                                     'name': self.name}}
 
-        drv.connect_volume(connection_info, self.disk_info)
+        drv.connect_volume(connection_info, self.disk_info,
+                           mock.sentinel.instance)
         self.assertEqual('vstorage://testcluster',
                          connection_info['data']['device_path'])
         self.assertEqual('-u stack -g qemu -m 0770 '
-                         '-l /var/log/pstorage/testcluster/nova.log.gz '
+                         '-l /var/log/vstorage/testcluster/nova.log.gz '
                          '-C /tmp/ssd-cache/testcluster',
                           connection_info['data']['options'])
 
     def test_libvirt_vzstorage_driver_disconnect(self):
-        drv = vzstorage.LibvirtVZStorageVolumeDriver(self.fake_conn)
+        drv = vzstorage.LibvirtVZStorageVolumeDriver(self.fake_host)
         drv.connector.disconnect_volume = mock.MagicMock()
         conn = {'data': self.disk_info}
-        drv.disconnect_volume(conn, self.disk_info)
+        drv.disconnect_volume(conn, self.disk_info, mock.sentinel.instance)
         drv.connector.disconnect_volume.assert_called_once_with(
             self.disk_info, None)
 
     def test_libvirt_vzstorage_driver_get_config(self):
-        libvirt_driver = vzstorage.LibvirtVZStorageVolumeDriver(self.fake_conn)
+        libvirt_driver = vzstorage.LibvirtVZStorageVolumeDriver(self.fake_host)
         export_string = 'vzstorage'
         export_mnt_base = os.path.join(self.mnt_base,
                                        utils.get_hash_str(export_string))

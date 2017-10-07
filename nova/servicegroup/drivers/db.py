@@ -57,10 +57,8 @@ class DbDriver(base.Driver):
         """Moved from nova.utils
         Check whether a service is up based on last heartbeat.
         """
-        # Keep checking 'updated_at' if 'last_seen_up' isn't set.
-        # Should be able to use only 'last_seen_up' in the M release
         last_heartbeat = (service_ref.get('last_seen_up') or
-            service_ref['updated_at'] or service_ref['created_at'])
+            service_ref['created_at'])
         if isinstance(last_heartbeat, six.string_types):
             # NOTE(russellb) If this service_ref came in over rpc via
             # conductor, then the timestamp will be a string and needs to be
@@ -80,6 +78,10 @@ class DbDriver(base.Driver):
                        'host': service_ref.get('host'),
                        'lhb': str(last_heartbeat), 'el': str(elapsed)})
         return is_up
+
+    def updated_time(self, service_ref):
+        """Get the updated time from db"""
+        return service_ref['updated_at']
 
     def _report_state(self, service):
         """Update the state of this service in the datastore."""

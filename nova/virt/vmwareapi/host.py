@@ -22,14 +22,11 @@ from oslo_utils import units
 from oslo_utils import versionutils
 from oslo_vmware import exceptions as vexc
 
-from nova.compute import arch
-from nova.compute import hv_type
-from nova.compute import vm_mode
 import nova.conf
 from nova import context
 from nova import exception
-from nova.i18n import _LW
 from nova import objects
+from nova.objects import fields as obj_fields
 from nova.virt.vmwareapi import ds_util
 from nova.virt.vmwareapi import vim_util
 from nova.virt.vmwareapi import vm_util
@@ -81,8 +78,8 @@ class VCState(object):
             about_info = self._session._call_method(vim_util, "get_about_info")
         except (vexc.VimConnectionException, vexc.VimAttributeException) as ex:
             # VimAttributeException is thrown when vpxd service is down
-            LOG.warning(_LW("Failed to connect with %(node)s. "
-                            "Error: %(error)s"),
+            LOG.warning("Failed to connect with %(node)s. "
+                        "Error: %(error)s",
                         {'node': self._host_name, 'error': ex})
             self._set_host_enabled(False)
             return data
@@ -98,8 +95,12 @@ class VCState(object):
                 str(about_info.version))
         data["hypervisor_hostname"] = self._host_name
         data["supported_instances"] = [
-            (arch.I686, hv_type.VMWARE, vm_mode.HVM),
-            (arch.X86_64, hv_type.VMWARE, vm_mode.HVM)]
+            (obj_fields.Architecture.I686,
+             obj_fields.HVType.VMWARE,
+             obj_fields.VMMode.HVM),
+            (obj_fields.Architecture.X86_64,
+             obj_fields.HVType.VMWARE,
+             obj_fields.VMMode.HVM)]
 
         self._stats = data
         if self._auto_service_disabled:

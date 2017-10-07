@@ -12,14 +12,14 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import sys
 import time
-import uuid
 
 import fixtures
 from lxml import etree
-import six
 
-from nova.compute import arch
+from nova.objects import fields as obj_fields
+from nova.tests import uuidsentinel as uuids
 from nova.virt.libvirt import config as vconfig
 
 # Allow passing None to the various connect methods
@@ -52,6 +52,7 @@ VIR_DOMAIN_XML_MIGRATABLE = 8
 VIR_DOMAIN_BLOCK_REBASE_SHALLOW = 1
 VIR_DOMAIN_BLOCK_REBASE_REUSE_EXT = 2
 VIR_DOMAIN_BLOCK_REBASE_COPY = 8
+VIR_DOMAIN_BLOCK_REBASE_COPY_DEV = 32
 
 VIR_DOMAIN_BLOCK_JOB_ABORT_ASYNC = 1
 VIR_DOMAIN_BLOCK_JOB_ABORT_PIVOT = 2
@@ -68,6 +69,7 @@ VIR_DOMAIN_EVENT_SHUTDOWN = 6
 VIR_DOMAIN_EVENT_PMSUSPENDED = 7
 
 VIR_DOMAIN_UNDEFINE_MANAGED_SAVE = 1
+VIR_DOMAIN_UNDEFINE_NVRAM = 4
 
 VIR_DOMAIN_AFFECT_CURRENT = 0
 VIR_DOMAIN_AFFECT_LIVE = 1
@@ -154,13 +156,143 @@ VIR_SECRET_USAGE_TYPE_CEPH = 2
 VIR_SECRET_USAGE_TYPE_ISCSI = 3
 
 # Libvirt version to match MIN_LIBVIRT_VERSION in driver.py
-FAKE_LIBVIRT_VERSION = 1002001
+FAKE_LIBVIRT_VERSION = 1002009
 # Libvirt version to match MIN_QEMU_VERSION in driver.py
-FAKE_QEMU_VERSION = 1005003
+FAKE_QEMU_VERSION = 2001000
+
+PF_CAP_TYPE = 'virt_functions'
+VF_CAP_TYPE = 'phys_function'
+PF_PROD_NAME = 'Ethernet Controller 10-Gigabit X540-AT2'
+VF_PROD_NAME = 'X540 Ethernet Controller Virtual Function'
+PF_DRIVER_NAME = 'ixgbe'
+VF_DRIVER_NAME = 'ixgbevf'
+VF_SLOT = '10'
+PF_SLOT = '00'
+
+
+class FakePciDevice(object):
+    pci_dev_template = """<device>
+  <name>pci_0000_81_%(slot)02x_%(dev)d</name>
+  <path>/sys/devices/pci0000:80/0000:80:01.0/0000:81:%(slot)02x.%(dev)d</path>
+  <parent>pci_0000_80_01_0</parent>
+  <driver>
+    <name>%(driver)s</name>
+  </driver>
+  <capability type='pci'>
+    <domain>0</domain>
+    <bus>129</bus>
+    <slot>%(slot)d</slot>
+    <function>%(dev)d</function>
+    <product id='0x%(prod)d'>%(prod_name)s</product>
+    <vendor id='0x8086'>Intel Corporation</vendor>
+    <capability type='%(cap_type)s'>
+    %(functions)s
+    </capability>
+    <iommuGroup number='%(group_id)d'>
+ <address domain='0x0000' bus='0x81' slot='%(slot)#02x' function='0x%(dev)d'/>
+    </iommuGroup>
+    <numa node='%(numa_node)s'/>
+    <pci-express>
+      <link validity='cap' port='0' speed='5' width='8'/>
+      <link validity='sta' speed='5' width='8'/>
+    </pci-express>
+  </capability>
+</device>"""
+
+    def __init__(self, dev_type, vf_ratio, group, dev, product_id, numa_node):
+        """Populate pci devices
+
+        :param dev_type: (string) Indicates the type of the device (PF, VF)
+        :param vf_ratio: (int) Ratio of Virtual Functions on Physical
+        :param group: (int) iommu group id
+        :param dev: (int) function number of the device
+        :param product_id: (int) Device product ID
+        :param numa_node: (int) NUMA node of the device
+        """
+        addr_templ = ("  <address domain='0x0000' bus='0x81' slot='0x%(slot)s'"
+                      " function='0x%(dev)d'/>")
+        self.pci_dev = None
+
+        if dev_type == 'PF':
+            pf_caps = [addr_templ % {'dev': x, 'slot': VF_SLOT}
+                                     for x in range(dev * vf_ratio,
+                                                    (dev + 1) * vf_ratio)]
+            slot = int(str(PF_SLOT), 16)
+            self.pci_dev = self.pci_dev_template % {'dev': dev,
+                         'prod': product_id, 'group_id': group,
+                         'functions': '\n'.join(pf_caps), 'slot': slot,
+                         'cap_type': PF_CAP_TYPE, 'prod_name': PF_PROD_NAME,
+                         'driver': PF_DRIVER_NAME, 'numa_node': numa_node}
+        elif dev_type == 'VF':
+            vf_caps = [addr_templ % {'dev': int(dev / vf_ratio),
+                                     'slot': PF_SLOT}]
+            slot = int(str(VF_SLOT), 16)
+            self.pci_dev = self.pci_dev_template % {'dev': dev,
+                         'prod': product_id, 'group_id': group,
+                         'functions': '\n'.join(vf_caps), 'slot': slot,
+                         'cap_type': VF_CAP_TYPE, 'prod_name': VF_PROD_NAME,
+                         'driver': VF_DRIVER_NAME, 'numa_node': numa_node}
+
+    def XMLDesc(self, flags):
+        return self.pci_dev
+
+
+class HostPciSRIOVDevicesInfo(object):
+    """Represent a pool of host SR-IOV devices."""
+
+    def __init__(self, vf_product_id=1515, pf_product_id=1528, num_pfs=2,
+                 num_vfs=8, group=47, numa_node=None, total_numa_nodes=2):
+        """Create a new HostPciSRIOVDevicesInfo object.
+
+        :param vf_product_id: (int) Product ID of the Virtual Functions
+        :param pf_product_id=1528: (int) Product ID of the Physical Functions
+        :param num_pfs: (int) The number of the Physical Functions
+        :param num_vfs: (int) The number of the Virtual Functions
+        :param group: (int) Initial group id
+        :param numa_node: (int) NUMA node of the device, if set all of the
+                          device will be created in the provided node
+        :param total_numa_nodes: (int) total number of NUMA nodes
+        """
+        def _calc_numa_node(dev):
+            return dev % total_numa_nodes if numa_node is None else numa_node
+
+        self.devices = {}
+        if num_vfs and not num_pfs:
+            raise ValueError('Cannot create VFs without PFs')
+
+        vf_ratio = num_vfs // num_pfs if num_pfs else 0
+
+        # Generate PFs
+        for dev in range(num_pfs):
+            dev_group = group + dev + 1
+            pci_dev_name = 'pci_0000_81_%(slot)s_%(dev)d' % {'slot': PF_SLOT,
+                                                             'dev': dev}
+            self.devices[pci_dev_name] = FakePciDevice('PF', vf_ratio,
+                                                       dev_group, dev,
+                                                       pf_product_id,
+                                                       _calc_numa_node(dev))
+
+        # Generate VFs
+        for dev in range(num_vfs):
+            dev_group = group + dev + 1
+            pci_dev_name = 'pci_0000_81_%(slot)s_%(dev)d' % {'slot': VF_SLOT,
+                                                             'dev': dev}
+            self.devices[pci_dev_name] = FakePciDevice('VF', vf_ratio,
+                                                       dev_group, dev,
+                                                       vf_product_id,
+                                                       _calc_numa_node(dev))
+
+    def get_all_devices(self):
+        return self.devices.keys()
+
+    def get_device_by_name(self, device_name):
+        pci_dev = self.devices.get(device_name)
+        return pci_dev
 
 
 class HostInfo(object):
-    def __init__(self, arch=arch.X86_64, kB_mem=4096,
+
+    def __init__(self, arch=obj_fields.Architecture.X86_64, kB_mem=4096,
                  cpus=2, cpu_mhz=800, cpu_nodes=1,
                  cpu_sockets=1, cpu_cores=2,
                  cpu_threads=1, cpu_model="Penryn",
@@ -198,17 +330,41 @@ class HostInfo(object):
         self.numa_topology = numa_topology
         self.disabled_cpus_list = cpu_disabled or []
 
-    @classmethod
-    def _gen_numa_topology(self, cpu_nodes, cpu_sockets, cpu_cores,
-                           cpu_threads, kb_mem, numa_mempages_list=None):
 
-        topology = vconfig.LibvirtConfigCapsNUMATopology()
+class NUMAHostInfo(HostInfo):
+    """A NUMA-by-default variant of HostInfo."""
+
+    def __init__(self, **kwargs):
+        super(NUMAHostInfo, self).__init__(**kwargs)
+
+        if not self.numa_topology:
+            topology = NUMATopology(self.cpu_nodes, self.cpu_sockets,
+                                    self.cpu_cores, self.cpu_threads,
+                                    self.kB_mem)
+            self.numa_topology = topology
+
+            # update number of active cpus
+            cpu_count = len(topology.cells) * len(topology.cells[0].cpus)
+            self.cpus = cpu_count - len(self.disabled_cpus_list)
+
+
+class NUMATopology(vconfig.LibvirtConfigCapsNUMATopology):
+    """A batteries-included variant of LibvirtConfigCapsNUMATopology.
+
+    Provides sane defaults for LibvirtConfigCapsNUMATopology that can be used
+    in tests as is, or overridden where necessary.
+    """
+
+    def __init__(self, cpu_nodes=4, cpu_sockets=1, cpu_cores=1, cpu_threads=2,
+                 kb_mem=1048576, mempages=None, **kwargs):
+
+        super(NUMATopology, self).__init__(**kwargs)
 
         cpu_count = 0
         for cell_count in range(cpu_nodes):
             cell = vconfig.LibvirtConfigCapsNUMACell()
             cell.id = cell_count
-            cell.memory = kb_mem / cpu_nodes
+            cell.memory = kb_mem // cpu_nodes
             for socket_count in range(cpu_sockets):
                 for cpu_num in range(cpu_cores * cpu_threads):
                     cpu = vconfig.LibvirtConfigCapsNUMACPU()
@@ -221,22 +377,32 @@ class HostInfo(object):
                     cell.cpus.append(cpu)
 
                     cpu_count += 1
-            # Set mempages per numa cell. if numa_mempages_list is empty
-            # we will set only the default 4K pages.
-            if numa_mempages_list:
-                mempages = numa_mempages_list[cell_count]
+
+            # If no mempages are provided, use only the default 4K pages
+            if mempages:
+                cell.mempages = mempages[cell_count]
             else:
-                mempages = vconfig.LibvirtConfigCapsNUMAPages()
-                mempages.size = 4
-                mempages.total = cell.memory / mempages.size
-                mempages = [mempages]
-            cell.mempages = mempages
-            topology.cells.append(cell)
+                cell.mempages = create_mempages([(4, cell.memory // 4)])
 
-        return topology
+            self.cells.append(cell)
 
-    def get_numa_topology(self):
-        return self.numa_topology
+
+def create_mempages(mappings):
+    """Generate a list of LibvirtConfigCapsNUMAPages objects.
+
+    :param mappings: (dict) A mapping of page size to quantity of
+        said pages.
+    :returns: [LibvirtConfigCapsNUMAPages, ...]
+    """
+    mempages = []
+
+    for page_size, page_qty in mappings:
+        mempage = vconfig.LibvirtConfigCapsNUMAPages()
+        mempage.size = page_size
+        mempage.total = page_qty
+        mempages.append(mempage)
+
+    return mempages
 
 
 VIR_DOMAIN_JOB_NONE = 0
@@ -444,7 +610,7 @@ class Domain(object):
         if uuid_elem is not None:
             definition['uuid'] = uuid_elem.text
         else:
-            definition['uuid'] = str(uuid.uuid4())
+            definition['uuid'] = uuids.fake
 
         vcpu = tree.find('./vcpu')
         if vcpu is not None:
@@ -807,7 +973,7 @@ class DomainSnapshot(object):
 
 class Connection(object):
     def __init__(self, uri=None, readonly=False, version=FAKE_LIBVIRT_VERSION,
-                 hv_version=FAKE_QEMU_VERSION, host_info=None):
+                 hv_version=FAKE_QEMU_VERSION, host_info=None, pci_info=None):
         if not uri or uri == '':
             if allow_default_uri_connection:
                 uri = 'qemu:///session'
@@ -841,6 +1007,8 @@ class Connection(object):
         self.fakeLibVersion = version
         self.fakeVersion = hv_version
         self.host_info = host_info or HostInfo()
+        self.pci_info = pci_info or HostPciSRIOVDevicesInfo(num_pfs=0,
+                                                            num_vfs=0)
 
     def _add_filter(self, nwfilter):
         self._nwfilters[nwfilter._name] = nwfilter
@@ -865,7 +1033,7 @@ class Connection(object):
 
         dom._id = -1
 
-        for (k, v) in six.iteritems(self._running_vms):
+        for (k, v) in self._running_vms.items():
             if v == dom:
                 del self._running_vms[k]
                 self._emit_lifecycle(dom, VIR_DOMAIN_EVENT_STOPPED, 0)
@@ -886,38 +1054,24 @@ class Connection(object):
                 self.host_info.cpu_cores,
                 self.host_info.cpu_threads]
 
-    def numOfDomains(self):
-        return len(self._running_vms)
-
-    def listDomainsID(self):
-        return list(self._running_vms.keys())
-
-    def lookupByID(self, id):
-        if id in self._running_vms:
-            return self._running_vms[id]
+    def lookupByUUIDString(self, uuid):
+        for vm in self._vms.values():
+            if vm.UUIDString() == uuid:
+                return vm
         raise make_libvirtError(
                 libvirtError,
-                'Domain not found: no domain with matching id %d' % id,
+                'Domain not found: no domain with matching uuid "%s"' % uuid,
                 error_code=VIR_ERR_NO_DOMAIN,
                 error_domain=VIR_FROM_QEMU)
 
-    def lookupByName(self, name):
-        if name in self._vms:
-            return self._vms[name]
-        raise make_libvirtError(
-                libvirtError,
-                'Domain not found: no domain with matching name "%s"' % name,
-                error_code=VIR_ERR_NO_DOMAIN,
-                error_domain=VIR_FROM_QEMU)
-
-    def listAllDomains(self, flags):
+    def listAllDomains(self, flags=None):
         vms = []
-        for vm in self._vms:
+        for vm in self._vms.values():
             if flags & VIR_CONNECT_LIST_DOMAINS_ACTIVE:
-                if vm.state != VIR_DOMAIN_SHUTOFF:
+                if vm._state != VIR_DOMAIN_SHUTOFF:
                     vms.append(vm)
             if flags & VIR_CONNECT_LIST_DOMAINS_INACTIVE:
-                if vm.state == VIR_DOMAIN_SHUTOFF:
+                if vm._state == VIR_DOMAIN_SHUTOFF:
                     vms.append(vm)
         return vms
 
@@ -973,7 +1127,7 @@ class Connection(object):
 
     def getCapabilities(self):
         """Return spoofed capabilities."""
-        numa_topology = self.host_info.get_numa_topology()
+        numa_topology = self.host_info.numa_topology
         if isinstance(numa_topology, vconfig.LibvirtConfigCapsNUMATopology):
             numa_topology = numa_topology.to_xml()
 
@@ -1213,8 +1367,8 @@ class Connection(object):
 
         arch_node = tree.find('./arch')
         if arch_node is not None:
-            if arch_node.text not in [arch.X86_64,
-                                      arch.I686]:
+            if arch_node.text not in [obj_fields.Architecture.X86_64,
+                                      obj_fields.Architecture.I686]:
                 return VIR_CPU_COMPARE_INCOMPATIBLE
 
         model_node = tree.find('./model')
@@ -1259,7 +1413,13 @@ class Connection(object):
         nwfilter = NWFilter(self, xml)
         self._add_filter(nwfilter)
 
+    def device_lookup_by_name(self, dev_name):
+        return self.pci_info.get_device_by_name(dev_name)
+
     def nodeDeviceLookupByName(self, name):
+        pci_dev = self.pci_info.get_device_by_name(name)
+        if pci_dev:
+            return pci_dev
         try:
             return self._nodedevs[name]
         except KeyError:
@@ -1269,11 +1429,8 @@ class Connection(object):
                     error_code=VIR_ERR_NO_NODE_DEVICE,
                     error_domain=VIR_FROM_NODEDEV)
 
-    def listDefinedDomains(self):
-        return []
-
     def listDevices(self, cap, flags):
-        return []
+        return self.pci_info.get_all_devices()
 
     def baselineCPU(self, cpu, flag):
         """Add new libvirt API."""
@@ -1358,8 +1515,24 @@ virConnect = Connection
 class FakeLibvirtFixture(fixtures.Fixture):
     """Performs global setup/stubbing for all libvirt tests.
     """
+    def __init__(self, stub_os_vif=True):
+        self.stub_os_vif = stub_os_vif
 
     def setUp(self):
         super(FakeLibvirtFixture, self).setUp()
 
+        # Some modules load the libvirt library in a strange way
+        for module in ('driver', 'host', 'guest', 'firewall', 'migration'):
+            i = 'nova.virt.libvirt.{module}.libvirt'.format(module=module)
+            # NOTE(mdbooth): The strange incantation below means 'this module'
+            self.useFixture(fixtures.MonkeyPatch(i, sys.modules[__name__]))
+
         disable_event_thread(self)
+
+        if self.stub_os_vif:
+            # Make sure to never try and actually plug VIFs in os-vif unless
+            # we're explicitly testing that code and the test itself will
+            # handle the appropriate mocking.
+            self.useFixture(fixtures.MonkeyPatch(
+                'nova.virt.libvirt.vif.LibvirtGenericVIFDriver._plug_os_vif',
+                lambda *a, **kw: None))

@@ -13,6 +13,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import operator
+
 from oslo_config import cfg
 
 from nova import context as nova_context
@@ -57,8 +59,17 @@ class IronicDriverFieldsTestCase(test.NoDBTestCase):
              'op': 'add'},
             {'path': '/instance_info/local_gb',
              'value': str(self.node.properties.get('local_gb', 0)),
-             'op': 'add'}
+             'op': 'add'},
+            {'path': '/instance_info/nova_host_id',
+             'value': u'fake-host',
+             'op': 'add'},
         ]
+
+    def assertPatchEqual(self, expected, observed):
+        self.assertEqual(
+            sorted(expected, key=operator.itemgetter('path', 'value')),
+            sorted(observed, key=operator.itemgetter('path', 'value'))
+        )
 
     def test_create_generic(self):
         node = ironic_utils.get_test_node(driver='pxe_fake')
@@ -69,7 +80,7 @@ class IronicDriverFieldsTestCase(test.NoDBTestCase):
         node = ironic_utils.get_test_node(driver='fake')
         patch = patcher.create(node).get_deploy_patch(
                 self.instance, self.image_meta, self.flavor)
-        self.assertEqual(sorted(self._expected_deploy_patch), sorted(patch))
+        self.assertPatchEqual(self._expected_deploy_patch, patch)
 
     def test_generic_get_deploy_patch_capabilities(self):
         node = ironic_utils.get_test_node(driver='fake')
@@ -80,7 +91,7 @@ class IronicDriverFieldsTestCase(test.NoDBTestCase):
         expected += self._expected_deploy_patch
         patch = patcher.create(node).get_deploy_patch(
                 self.instance, self.image_meta, self.flavor)
-        self.assertEqual(sorted(expected), sorted(patch))
+        self.assertPatchEqual(expected, patch)
 
     def test_generic_get_deploy_patch_capabilities_op(self):
         node = ironic_utils.get_test_node(driver='fake')
@@ -91,7 +102,7 @@ class IronicDriverFieldsTestCase(test.NoDBTestCase):
         expected += self._expected_deploy_patch
         patch = patcher.create(node).get_deploy_patch(
                 self.instance, self.image_meta, self.flavor)
-        self.assertEqual(sorted(expected), sorted(patch))
+        self.assertPatchEqual(expected, patch)
 
     def test_generic_get_deploy_patch_capabilities_nested_key(self):
         node = ironic_utils.get_test_node(driver='fake')
@@ -102,7 +113,7 @@ class IronicDriverFieldsTestCase(test.NoDBTestCase):
         expected += self._expected_deploy_patch
         patch = patcher.create(node).get_deploy_patch(
                 self.instance, self.image_meta, self.flavor)
-        self.assertEqual(sorted(expected), sorted(patch))
+        self.assertPatchEqual(expected, patch)
 
     def test_generic_get_deploy_patch_ephemeral(self):
         CONF.set_override('default_ephemeral_format', 'testfmt')
@@ -120,7 +131,7 @@ class IronicDriverFieldsTestCase(test.NoDBTestCase):
                      'value': 'testfmt',
                      'op': 'add'}]
         expected += self._expected_deploy_patch
-        self.assertEqual(sorted(expected), sorted(patch))
+        self.assertPatchEqual(expected, patch)
 
     def test_generic_get_deploy_patch_preserve_ephemeral(self):
         node = ironic_utils.get_test_node(driver='fake')
@@ -131,4 +142,13 @@ class IronicDriverFieldsTestCase(test.NoDBTestCase):
             expected = [{'path': '/instance_info/preserve_ephemeral',
                          'value': str(preserve), 'op': 'add', }]
             expected += self._expected_deploy_patch
-            self.assertEqual(sorted(expected), sorted(patch))
+            self.assertPatchEqual(expected, patch)
+
+    def test_generic_get_deploy_patch_boot_from_volume(self):
+        node = ironic_utils.get_test_node(driver='fake')
+        expected = [patch for patch in self._expected_deploy_patch
+                    if patch['path'] != '/instance_info/image_source']
+        patch = patcher.create(node).get_deploy_patch(
+                self.instance, self.image_meta, self.flavor,
+                boot_from_volume=True)
+        self.assertPatchEqual(expected, patch)

@@ -20,18 +20,20 @@ from __future__ import absolute_import
 import copy
 import inspect
 import itertools
+import os
 import random
 import sys
 import time
 
 import cryptography
-from eventlet import greenthread
+from cursive import exception as cursive_exception
+from cursive import signature_utils
 import glanceclient
 import glanceclient.exc
 from glanceclient.v2 import schemas
+from keystoneauth1 import loading as ks_loading
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
-from oslo_service import sslutils
 from oslo_utils import excutils
 from oslo_utils import timeutils
 import six
@@ -40,14 +42,31 @@ import six.moves.urllib.parse as urlparse
 
 import nova.conf
 from nova import exception
-from nova.i18n import _LE, _LI, _LW
 import nova.image.download as image_xfers
 from nova import objects
 from nova.objects import fields
-from nova import signature_utils
+from nova import service_auth
 
 LOG = logging.getLogger(__name__)
 CONF = nova.conf.CONF
+
+_SESSION = None
+
+
+def _glanceclient_from_endpoint(context, endpoint, version):
+    global _SESSION
+
+    if not _SESSION:
+        _SESSION = ks_loading.load_session_from_conf_options(
+            CONF, nova.conf.glance.glance_group.name)
+
+    auth = service_auth.get_auth_plugin(context)
+
+    # TODO(johngarbutt) eventually we should default to getting the
+    # endpoint URL from the service catalog.
+    return glanceclient.Client(version, session=_SESSION, auth=auth,
+                               endpoint_override=endpoint,
+                               global_request_id=context.global_id)
 
 
 def generate_glance_url():
@@ -84,26 +103,6 @@ def generate_identity_headers(context, status='Confirmed'):
     }
 
 
-def _glanceclient_from_endpoint(context, endpoint, version=1):
-    """Instantiate a new glanceclient.Client object."""
-    params = {}
-    # NOTE(sdague): even if we aren't using keystone, it doesn't
-    # hurt to send these headers.
-    params['identity_headers'] = generate_identity_headers(context)
-    if endpoint.startswith('https://'):
-        # https specific params
-        params['insecure'] = CONF.glance.api_insecure
-        params['ssl_compression'] = False
-        sslutils.is_enabled(CONF)
-        if CONF.ssl.cert_file:
-            params['cert_file'] = CONF.ssl.cert_file
-        if CONF.ssl.key_file:
-            params['key_file'] = CONF.ssl.key_file
-        if CONF.ssl.ca_file:
-            params['cacert'] = CONF.ssl.ca_file
-    return glanceclient.Client(str(version), endpoint, **params)
-
-
 def get_api_servers():
     """Shuffle a list of CONF.glance.api_servers and return an iterator
     that will cycle through the list, looping around to the beginning
@@ -115,11 +114,10 @@ def get_api_servers():
         if '//' not in api_server:
             api_server = 'http://' + api_server
             # NOTE(sdague): remove in O.
-            LOG.warning(
-                _LW("No protocol specified in for api_server '%s', "
-                    "please update [glance] api_servers with fully "
-                    "qualified url including scheme (http / https)"),
-                api_server)
+            LOG.warning("No protocol specified in for api_server '%s', "
+                        "please update [glance] api_servers with fully "
+                        "qualified url including scheme (http / https)",
+                        api_server)
         api_servers.append(api_server)
     random.shuffle(api_servers)
     return itertools.cycle(api_servers)
@@ -129,10 +127,7 @@ class GlanceClientWrapper(object):
     """Glance client wrapper class that implements retries."""
 
     def __init__(self, context=None, endpoint=None):
-        if CONF.glance.use_glance_v1:
-            version = 1
-        else:
-            version = 2
+        version = 2
         if endpoint is not None:
             self.client = self._create_static_client(context,
                                                      endpoint,
@@ -160,13 +155,7 @@ class GlanceClientWrapper(object):
         retry_excs = (glanceclient.exc.ServiceUnavailable,
                 glanceclient.exc.InvalidEndpoint,
                 glanceclient.exc.CommunicationError)
-        retries = CONF.glance.num_retries
-        if retries < 0:
-            LOG.warning(_LW("Treating negative config value (%(retries)s) for "
-                            "'glance.num_retries' as 0."),
-                        {'retries': retries})
-            retries = 0
-        num_attempts = retries + 1
+        num_attempts = 1 + CONF.glance.num_retries
 
         for attempt in range(1, num_attempts + 1):
             client = self.client or self._create_onetime_client(context,
@@ -186,250 +175,15 @@ class GlanceClientWrapper(object):
                 else:
                     extra = 'done trying'
 
-                LOG.exception(_LE("Error contacting glance server "
-                                  "'%(server)s' for '%(method)s', "
-                                  "%(extra)s."),
+                LOG.exception("Error contacting glance server "
+                              "'%(server)s' for '%(method)s', "
+                              "%(extra)s.",
                               {'server': self.api_server,
                                'method': method, 'extra': extra})
                 if attempt == num_attempts:
                     raise exception.GlanceConnectionFailed(
                         server=str(self.api_server), reason=six.text_type(e))
                 time.sleep(1)
-
-
-class GlanceImageService(object):
-    """Provides storage and retrieval of disk image objects within Glance."""
-
-    def __init__(self, client=None):
-        self._client = client or GlanceClientWrapper()
-        # NOTE(jbresnah) build the table of download handlers at the beginning
-        # so that operators can catch errors at load time rather than whenever
-        # a user attempts to use a module.  Note this cannot be done in glance
-        # space when this python module is loaded because the download module
-        # may require configuration options to be parsed.
-        self._download_handlers = {}
-        download_modules = image_xfers.load_transfer_modules()
-
-        for scheme, mod in six.iteritems(download_modules):
-            if scheme not in CONF.glance.allowed_direct_url_schemes:
-                continue
-
-            try:
-                self._download_handlers[scheme] = mod.get_download_handler()
-            except Exception as ex:
-                LOG.error(_LE('When loading the module %(module_str)s the '
-                              'following error occurred: %(ex)s'),
-                          {'module_str': str(mod), 'ex': ex})
-
-    def detail(self, context, **kwargs):
-        """Calls out to Glance for a list of detailed image information."""
-        params = _extract_query_params(kwargs)
-        try:
-            images = self._client.call(context, 1, 'list', **params)
-        except Exception:
-            _reraise_translated_exception()
-
-        _images = []
-        for image in images:
-            if _is_image_available(context, image):
-                _images.append(_translate_from_glance(image))
-
-        return _images
-
-    def show(self, context, image_id, include_locations=False,
-             show_deleted=True):
-        """Returns a dict with image data for the given opaque image id.
-
-        :param context: The context object to pass to image client
-        :param image_id: The UUID of the image
-        :param include_locations: (Optional) include locations in the returned
-                                  dict of information if the image service API
-                                  supports it. If the image service API does
-                                  not support the locations attribute, it will
-                                  still be included in the returned dict, as an
-                                  empty list.
-        :param show_deleted: (Optional) show the image even the status of
-                             image is deleted.
-        """
-        version = 1
-        if include_locations:
-            version = 2
-        try:
-            image = self._client.call(context, version, 'get', image_id)
-        except Exception:
-            _reraise_translated_image_exception(image_id)
-
-        if not show_deleted and getattr(image, 'deleted', False):
-            raise exception.ImageNotFound(image_id=image_id)
-
-        if not _is_image_available(context, image):
-            raise exception.ImageNotFound(image_id=image_id)
-
-        image = _translate_from_glance(image,
-                                       include_locations=include_locations)
-        if include_locations:
-            locations = image.get('locations', None) or []
-            du = image.get('direct_url', None)
-            if du:
-                locations.append({'url': du, 'metadata': {}})
-            image['locations'] = locations
-
-        return image
-
-    def _get_transfer_module(self, scheme):
-        try:
-            return self._download_handlers[scheme]
-        except KeyError:
-            return None
-        except Exception:
-            LOG.error(_LE("Failed to instantiate the download handler "
-                          "for %(scheme)s"), {'scheme': scheme})
-        return
-
-    def download(self, context, image_id, data=None, dst_path=None):
-        """Calls out to Glance for data and writes data."""
-        if CONF.glance.allowed_direct_url_schemes and dst_path is not None:
-            image = self.show(context, image_id, include_locations=True)
-            for entry in image.get('locations', []):
-                loc_url = entry['url']
-                loc_meta = entry['metadata']
-                o = urlparse.urlparse(loc_url)
-                xfer_mod = self._get_transfer_module(o.scheme)
-                if xfer_mod:
-                    try:
-                        xfer_mod.download(context, o, dst_path, loc_meta)
-                        LOG.info(_LI("Successfully transferred "
-                                     "using %s"), o.scheme)
-                        return
-                    except Exception:
-                        LOG.exception(_LE("Download image error"))
-
-        try:
-            image_chunks = self._client.call(context, 1, 'data', image_id)
-        except Exception:
-            _reraise_translated_image_exception(image_id)
-
-        # Retrieve properties for verification of Glance image signature
-        verifier = None
-        if CONF.glance.verify_glance_signatures:
-            image_meta_dict = self.show(context, image_id,
-                                        include_locations=False)
-            image_meta = objects.ImageMeta.from_dict(image_meta_dict)
-            img_signature = image_meta.properties.get('img_signature')
-            img_sig_hash_method = image_meta.properties.get(
-                'img_signature_hash_method'
-            )
-            img_sig_cert_uuid = image_meta.properties.get(
-                'img_signature_certificate_uuid'
-            )
-            img_sig_key_type = image_meta.properties.get(
-                'img_signature_key_type'
-            )
-            try:
-                verifier = signature_utils.get_verifier(context,
-                                                        img_sig_cert_uuid,
-                                                        img_sig_hash_method,
-                                                        img_signature,
-                                                        img_sig_key_type)
-            except exception.SignatureVerificationError:
-                with excutils.save_and_reraise_exception():
-                    LOG.error(_LE('Image signature verification failed '
-                                  'for image: %s'), image_id)
-
-        close_file = False
-        if data is None and dst_path:
-            data = open(dst_path, 'wb')
-            close_file = True
-
-        if data is None:
-
-            # Perform image signature verification
-            if verifier:
-                try:
-                    for chunk in image_chunks:
-                        verifier.update(chunk)
-                        greenthread.sleep(0)
-                    verifier.verify()
-
-                    LOG.info(_LI('Image signature verification succeeded '
-                                 'for image: %s'), image_id)
-
-                except cryptography.exceptions.InvalidSignature:
-                    with excutils.save_and_reraise_exception():
-                        LOG.error(_LE('Image signature verification failed '
-                                      'for image: %s'), image_id)
-            return image_chunks
-        else:
-            try:
-                for chunk in image_chunks:
-                    if verifier:
-                        verifier.update(chunk)
-                    data.write(chunk)
-                if verifier:
-                    verifier.verify()
-                    LOG.info(_LI('Image signature verification succeeded '
-                                 'for image %s'), image_id)
-            except cryptography.exceptions.InvalidSignature:
-                data.truncate(0)
-                with excutils.save_and_reraise_exception():
-                    LOG.error(_LE('Image signature verification failed '
-                                  'for image: %s'), image_id)
-            except Exception as ex:
-                with excutils.save_and_reraise_exception():
-                    LOG.error(_LE("Error writing to %(path)s: %(exception)s"),
-                              {'path': dst_path, 'exception': ex})
-            finally:
-                if close_file:
-                    data.close()
-
-    def create(self, context, image_meta, data=None):
-        """Store the image data and return the new image object."""
-        sent_service_image_meta = _translate_to_glance(image_meta)
-
-        if data:
-            sent_service_image_meta['data'] = data
-
-        try:
-            recv_service_image_meta = self._client.call(
-                context, 1, 'create', **sent_service_image_meta)
-        except glanceclient.exc.HTTPException:
-            _reraise_translated_exception()
-
-        return _translate_from_glance(recv_service_image_meta)
-
-    def update(self, context, image_id, image_meta, data=None,
-            purge_props=True):
-        """Modify the given image with the new data."""
-        image_meta = _translate_to_glance(image_meta)
-        image_meta['purge_props'] = purge_props
-        # NOTE(bcwaldon): id is not an editable field, but it is likely to be
-        # passed in by calling code. Let's be nice and ignore it.
-        image_meta.pop('id', None)
-        if data:
-            image_meta['data'] = data
-        try:
-            image_meta = self._client.call(context, 1, 'update',
-                                           image_id, **image_meta)
-        except Exception:
-            _reraise_translated_image_exception(image_id)
-        else:
-            return _translate_from_glance(image_meta)
-
-    def delete(self, context, image_id):
-        """Delete the given image.
-
-        :raises: ImageNotFound if the image does not exist.
-        :raises: NotAuthorized if the user is not an owner.
-        :raises: ImageNotAuthorized if the user is not authorized.
-
-        """
-        try:
-            self._client.call(context, 1, 'delete', image_id)
-        except glanceclient.exc.NotFound:
-            raise exception.ImageNotFound(image_id=image_id)
-        except glanceclient.exc.HTTPForbidden:
-            raise exception.ImageNotAuthorized(image_id=image_id)
-        return True
 
 
 class GlanceImageServiceV2(object):
@@ -445,15 +199,15 @@ class GlanceImageServiceV2(object):
         self._download_handlers = {}
         download_modules = image_xfers.load_transfer_modules()
 
-        for scheme, mod in six.iteritems(download_modules):
+        for scheme, mod in download_modules.items():
             if scheme not in CONF.glance.allowed_direct_url_schemes:
                 continue
 
             try:
                 self._download_handlers[scheme] = mod.get_download_handler()
             except Exception as ex:
-                LOG.error(_LE('When loading the module %(module_str)s the '
-                              'following error occurred: %(ex)s'),
+                LOG.error('When loading the module %(module_str)s the '
+                          'following error occurred: %(ex)s',
                           {'module_str': str(mod), 'ex': ex})
 
     def show(self, context, image_id, include_locations=False,
@@ -499,8 +253,8 @@ class GlanceImageServiceV2(object):
         except KeyError:
             return None
         except Exception:
-            LOG.error(_LE("Failed to instantiate the download handler "
-                          "for %(scheme)s"), {'scheme': scheme})
+            LOG.error("Failed to instantiate the download handler "
+                      "for %(scheme)s", {'scheme': scheme})
         return
 
     def detail(self, context, **kwargs):
@@ -530,11 +284,10 @@ class GlanceImageServiceV2(object):
                 if xfer_mod:
                     try:
                         xfer_mod.download(context, o, dst_path, loc_meta)
-                        LOG.info(_LI("Successfully transferred "
-                                     "using %s"), o.scheme)
+                        LOG.info("Successfully transferred using %s", o.scheme)
                         return
                     except Exception:
-                        LOG.exception(_LE("Download image error"))
+                        LOG.exception("Download image error")
 
         try:
             image_chunks = self._client.call(context, 2, 'data', image_id)
@@ -558,15 +311,17 @@ class GlanceImageServiceV2(object):
                 'img_signature_key_type'
             )
             try:
-                verifier = signature_utils.get_verifier(context,
-                                                        img_sig_cert_uuid,
-                                                        img_sig_hash_method,
-                                                        img_signature,
-                                                        img_sig_key_type)
-            except exception.SignatureVerificationError:
+                verifier = signature_utils.get_verifier(
+                    context=context,
+                    img_signature_certificate_uuid=img_sig_cert_uuid,
+                    img_signature_hash_method=img_sig_hash_method,
+                    img_signature=img_signature,
+                    img_signature_key_type=img_sig_key_type,
+                )
+            except cursive_exception.SignatureVerificationError:
                 with excutils.save_and_reraise_exception():
-                    LOG.error(_LE('Image signature verification failed '
-                                  'for image: %s'), image_id)
+                    LOG.error('Image signature verification failed '
+                              'for image: %s', image_id)
 
         close_file = False
         if data is None and dst_path:
@@ -582,13 +337,13 @@ class GlanceImageServiceV2(object):
                         verifier.update(chunk)
                     verifier.verify()
 
-                    LOG.info(_LI('Image signature verification succeeded '
-                                 'for image: %s'), image_id)
+                    LOG.info('Image signature verification succeeded '
+                             'for image: %s', image_id)
 
                 except cryptography.exceptions.InvalidSignature:
                     with excutils.save_and_reraise_exception():
-                        LOG.error(_LE('Image signature verification failed '
-                                      'for image: %s'), image_id)
+                        LOG.error('Image signature verification failed '
+                                  'for image: %s', image_id)
             return image_chunks
         else:
             try:
@@ -598,19 +353,25 @@ class GlanceImageServiceV2(object):
                     data.write(chunk)
                 if verifier:
                     verifier.verify()
-                    LOG.info(_LI('Image signature verification succeeded '
-                                 'for image %s'), image_id)
+                    LOG.info('Image signature verification succeeded '
+                             'for image %s', image_id)
             except cryptography.exceptions.InvalidSignature:
                 data.truncate(0)
                 with excutils.save_and_reraise_exception():
-                    LOG.error(_LE('Image signature verification failed '
-                                  'for image: %s'), image_id)
+                    LOG.error('Image signature verification failed '
+                              'for image: %s', image_id)
             except Exception as ex:
                 with excutils.save_and_reraise_exception():
-                    LOG.error(_LE("Error writing to %(path)s: %(exception)s"),
+                    LOG.error("Error writing to %(path)s: %(exception)s",
                               {'path': dst_path, 'exception': ex})
             finally:
                 if close_file:
+                    # Ensure that the data is pushed all the way down to
+                    # persistent storage. This ensures that in the event of a
+                    # subsequent host crash we don't have running instances
+                    # using a corrupt backing file.
+                    data.flush()
+                    os.fsync(data.fileno())
                     data.close()
 
     def create(self, context, image_meta, data=None):
@@ -681,9 +442,9 @@ class GlanceImageServiceV2(object):
                       supported_disk_formats[0])
             return supported_disk_formats[0]
 
-        LOG.warning(_LW('Unable to determine disk_format schema from the '
-                        'Image Service v2 API. Defaulting to '
-                        '%(preferred_disk_format)s.'),
+        LOG.warning('Unable to determine disk_format schema from the '
+                    'Image Service v2 API. Defaulting to '
+                    '%(preferred_disk_format)s.',
                     {'preferred_disk_format': preferred_disk_formats[0]})
         return preferred_disk_formats[0]
 
@@ -878,19 +639,15 @@ def _is_image_available(context, image):
 def _translate_to_glance(image_meta):
     image_meta = _convert_to_string(image_meta)
     image_meta = _remove_read_only(image_meta)
-    # TODO(mfedosin): Remove this check once we move to glance V2
-    # completely and enable convert to v2 every time.
-    if not CONF.glance.use_glance_v1:
-        # v2 requires several additional changes
-        image_meta = _convert_to_v2(image_meta)
+    image_meta = _convert_to_v2(image_meta)
     return image_meta
 
 
 def _convert_to_v2(image_meta):
     output = {}
-    for name, value in six.iteritems(image_meta):
+    for name, value in image_meta.items():
         if name == 'properties':
-            for prop_name, prop_value in six.iteritems(value):
+            for prop_name, prop_value in value.items():
                 # if allow_additional_image_properties is disabled we can't
                 # define kernel_id and ramdisk_id as None, so we have to omit
                 # these properties if they are not set.
@@ -919,14 +676,8 @@ def _convert_to_v2(image_meta):
 
 
 def _translate_from_glance(image, include_locations=False):
-    # TODO(mfedosin): Remove this check once we move to glance V2
-    # completely.
-    if CONF.glance.use_glance_v1:
-        image_meta = _extract_attributes(
-            image, include_locations=include_locations)
-    else:
-        image_meta = _extract_attributes_v2(
-            image, include_locations=include_locations)
+    image_meta = _extract_attributes_v2(
+        image, include_locations=include_locations)
 
     image_meta = _convert_timestamps_to_datetimes(image_meta)
     image_meta = _convert_from_string(image_meta)
@@ -1037,7 +788,7 @@ def _extract_attributes_v2(image, include_locations=False):
     output = {'properties': {}, 'deleted': False, 'deleted_at': None,
               'disk_format': None, 'container_format': None, 'name': None,
               'checksum': None}
-    for name, value in six.iteritems(image):
+    for name, value in image.items():
         if (name in omit_attrs
                 or name in include_locations_attrs and not include_locations):
             continue
@@ -1066,14 +817,14 @@ def _reraise_translated_image_exception(image_id):
     """Transform the exception for the image but keep its traceback intact."""
     exc_type, exc_value, exc_trace = sys.exc_info()
     new_exc = _translate_image_exception(image_id, exc_value)
-    six.reraise(new_exc, None, exc_trace)
+    six.reraise(type(new_exc), new_exc, exc_trace)
 
 
 def _reraise_translated_exception():
     """Transform the exception but keep its traceback intact."""
     exc_type, exc_value, exc_trace = sys.exc_info()
     new_exc = _translate_plain_exception(exc_value)
-    six.reraise(new_exc, None, exc_trace)
+    six.reraise(type(new_exc), new_exc, exc_trace)
 
 
 def _translate_image_exception(image_id, exc_value):
@@ -1124,22 +875,12 @@ def get_remote_image_service(context, image_href):
     except ValueError:
         raise exception.InvalidImageRef(image_href=image_href)
 
-    # TODO(sbiswas7): Remove this check once we move to glance V2
-    # completely.
-    if CONF.glance.use_glance_v1:
-        image_service = GlanceImageService(client=glance_client)
-    else:
-        image_service = GlanceImageServiceV2(client=glance_client)
+    image_service = GlanceImageServiceV2(client=glance_client)
     return image_service, image_id
 
 
 def get_default_image_service():
-    # TODO(sbiswas7): Remove this check once we move to glance V2
-    # completely.
-    if CONF.glance.use_glance_v1:
-        return GlanceImageService()
-    else:
-        return GlanceImageServiceV2()
+    return GlanceImageServiceV2()
 
 
 class UpdateGlanceImage(object):

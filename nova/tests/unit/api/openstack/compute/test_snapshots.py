@@ -32,16 +32,17 @@ class SnapshotApiTestV21(test.NoDBTestCase):
     def setUp(self):
         super(SnapshotApiTestV21, self).setUp()
         fakes.stub_out_networking(self)
-        self.stubs.Set(cinder.API, "create_snapshot",
-                       fakes.stub_snapshot_create)
-        self.stubs.Set(cinder.API, "create_snapshot_force",
-                       fakes.stub_snapshot_create)
-        self.stubs.Set(cinder.API, "delete_snapshot",
-                       fakes.stub_snapshot_delete)
-        self.stubs.Set(cinder.API, "get_snapshot", fakes.stub_snapshot_get)
-        self.stubs.Set(cinder.API, "get_all_snapshots",
-                       fakes.stub_snapshot_get_all)
-        self.stubs.Set(cinder.API, "get", fakes.stub_volume_get)
+        self.stub_out("nova.volume.cinder.API.create_snapshot",
+                      fakes.stub_snapshot_create)
+        self.stub_out("nova.volume.cinder.API.create_snapshot_force",
+                      fakes.stub_snapshot_create)
+        self.stub_out("nova.volume.cinder.API.delete_snapshot",
+                      fakes.stub_snapshot_delete)
+        self.stub_out("nova.volume.cinder.API.get_snapshot",
+                      fakes.stub_snapshot_get)
+        self.stub_out("nova.volume.cinder.API.get_all_snapshots",
+                      fakes.stub_snapshot_get_all)
+        self.stub_out("nova.volume.cinder.API.get", fakes.stub_volume_get)
         self.req = fakes.HTTPRequest.blank('')
 
     def _test_snapshot_create(self, force):
@@ -113,11 +114,30 @@ class SnapshotApiTestV21(test.NoDBTestCase):
         resp_snapshot = resp_snapshots.pop()
         self.assertEqual(102, resp_snapshot['id'])
 
+    def test_snapshot_detail_offset_and_limit(self):
+        path = '/v2/fake/os-snapshots/detail?offset=1&limit=1'
+        req = fakes.HTTPRequest.blank(path)
+        resp_dict = self.controller.detail(req)
+        self.assertIn('snapshots', resp_dict)
+        resp_snapshots = resp_dict['snapshots']
+        self.assertEqual(1, len(resp_snapshots))
+
+        resp_snapshot = resp_snapshots.pop()
+        self.assertEqual(101, resp_snapshot['id'])
+
     def test_snapshot_index(self):
         resp_dict = self.controller.index(self.req)
         self.assertIn('snapshots', resp_dict)
         resp_snapshots = resp_dict['snapshots']
         self.assertEqual(3, len(resp_snapshots))
+
+    def test_snapshot_index_offset_and_limit(self):
+        path = '/v2/fake/os-snapshots?offset=1&limit=1'
+        req = fakes.HTTPRequest.blank(path)
+        resp_dict = self.controller.index(req)
+        self.assertIn('snapshots', resp_dict)
+        resp_snapshots = resp_dict['snapshots']
+        self.assertEqual(1, len(resp_snapshots))
 
 
 class TestSnapshotAPIDeprecation(test.NoDBTestCase):

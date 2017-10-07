@@ -19,6 +19,7 @@ Tests For IronicHostManager
 
 import mock
 
+from nova import context
 from nova import exception
 from nova import objects
 from nova.objects import base as obj_base
@@ -61,9 +62,11 @@ class IronicHostManagerTestCase(test.NoDBTestCase):
     def test_state_public_api_signatures(self):
         self.assertPublicAPISignatures(
             host_manager.HostState("dummy",
-                                   "dummy"),
+                                   "dummy",
+                                   uuids.cell),
             ironic_host_manager.IronicNodeState("dummy",
-                                                "dummy")
+                                                "dummy",
+                                                uuids.cell)
         )
 
     @mock.patch('nova.objects.ServiceList.get_by_binary')
@@ -111,7 +114,7 @@ class IronicHostManagerTestCase(test.NoDBTestCase):
 
         # for ironic compute nodes we always return an empty dict
         self.assertEqual({}, rv)
-        # base class implementation is overriden and not called
+        # base class implementation is overridden and not called
         self.assertFalse(mock_get_instance_info.called)
 
     @mock.patch.object(host_manager.HostManager, '_get_instance_info')
@@ -136,11 +139,14 @@ class IronicHostManagerTestCase(test.NoDBTestCase):
         cn1 = objects.ComputeNode(**{'hypervisor_type': 'ironic'})
         cn2 = objects.ComputeNode(**{'hypervisor_type': 'qemu'})
         cn3 = objects.ComputeNode(**{'hypervisor_type': 'qemu'})
+        cell = objects.CellMappingList.get_all(context.get_admin_context())[0]
+        self.host_manager.cells = [cell]
         mock_get_all.return_value.objects = [cn1, cn2, cn3]
 
         self.host_manager._init_instance_info()
         # ensure we filter out ironic nodes before calling the base class impl
-        mock_base_init_instance_info.assert_called_once_with([cn2, cn3])
+        mock_base_init_instance_info.assert_called_once_with(
+            {cell: [cn2, cn3]})
 
     @mock.patch.object(host_manager.HostManager, '_init_instance_info')
     @mock.patch.object(objects.ComputeNodeList, 'get_all')
@@ -148,13 +154,15 @@ class IronicHostManagerTestCase(test.NoDBTestCase):
                                               mock_base_init_instance_info):
         cn1 = objects.ComputeNode(**{'hypervisor_type': 'ironic'})
         cn2 = objects.ComputeNode(**{'hypervisor_type': 'qemu'})
+        cell = objects.CellMapping()
 
-        self.host_manager._init_instance_info(compute_nodes=[cn1, cn2])
+        self.host_manager._init_instance_info(computes_by_cell={
+            cell: [cn1, cn2]})
 
         # check we don't try to get nodes list if it was passed explicitly
         self.assertFalse(mock_get_all.called)
         # ensure we filter out ironic nodes before calling the base class impl
-        mock_base_init_instance_info.assert_called_once_with([cn2])
+        mock_base_init_instance_info.assert_called_once_with({cell: [cn2]})
 
 
 class IronicHostManagerChangedNodesTestCase(test.NoDBTestCase):
@@ -182,13 +190,15 @@ class IronicHostManagerChangedNodesTestCase(test.NoDBTestCase):
             hypervisor_version=1,
             hypervisor_hostname='fake_host',
             cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5,
-            disk_allocation_ratio=1.0)
+            disk_allocation_ratio=1.0,
+            uuid=uuids.compute_node_uuid)
 
     @mock.patch.object(ironic_host_manager.IronicNodeState, '__init__')
     def test_create_ironic_node_state(self, init_mock):
         init_mock.return_value = None
         compute = objects.ComputeNode(**{'hypervisor_type': 'ironic'})
         host_state = self.host_manager.host_state_cls('fake-host', 'fake-node',
+                                                      uuids.cell,
                                                       compute=compute)
         self.assertIs(ironic_host_manager.IronicNodeState, type(host_state))
 
@@ -197,13 +207,15 @@ class IronicHostManagerChangedNodesTestCase(test.NoDBTestCase):
         init_mock.return_value = None
         compute = objects.ComputeNode(**{'cpu_info': 'other cpu'})
         host_state = self.host_manager.host_state_cls('fake-host', 'fake-node',
+                                                      uuids.cell,
                                                       compute=compute)
         self.assertIs(host_manager.HostState, type(host_state))
 
     @mock.patch.object(host_manager.HostState, '__init__')
     def test_create_host_state_null_compute(self, init_mock):
         init_mock.return_value = None
-        host_state = self.host_manager.host_state_cls('fake-host', 'fake-node')
+        host_state = self.host_manager.host_state_cls('fake-host', 'fake-node',
+                                                      uuids.cell)
         self.assertIs(host_manager.HostState, type(host_state))
 
     @mock.patch('nova.objects.ServiceList.get_by_binary')
@@ -252,7 +264,8 @@ class IronicHostManagerChangedNodesTestCase(test.NoDBTestCase):
         self.assertEqual(len(host_states_map), 0)
 
     def test_update_from_compute_node(self):
-        host = ironic_host_manager.IronicNodeState("fakehost", "fakenode")
+        host = ironic_host_manager.IronicNodeState("fakehost", "fakenode",
+                                                   uuids.cell)
         host.update(compute=self.compute_node)
 
         self.assertEqual(1024, host.free_ram_mb)
@@ -264,9 +277,23 @@ class IronicHostManagerChangedNodesTestCase(test.NoDBTestCase):
         self.assertEqual('ironic', host.hypervisor_type)
         self.assertEqual(1, host.hypervisor_version)
         self.assertEqual('fake_host', host.hypervisor_hostname)
+        # Make sure the uuid is set since that's needed for the allocation
+        # requests (claims to Placement) made in the FilterScheduler.
+        self.assertEqual(self.compute_node.uuid, host.uuid)
+
+    def test_update_from_compute_node_not_ready(self):
+        """Tests that we ignore a compute node that does not have its
+        free_disk_gb field set yet from the compute resource tracker.
+        """
+        host = ironic_host_manager.IronicNodeState("fakehost", "fakenode",
+                                                   uuids.cell)
+        self.compute_node.free_disk_gb = None
+        host.update(compute=self.compute_node)
+        self.assertEqual(0, host.free_disk_mb)
 
     def test_consume_identical_instance_from_compute(self):
-        host = ironic_host_manager.IronicNodeState("fakehost", "fakenode")
+        host = ironic_host_manager.IronicNodeState("fakehost", "fakenode",
+                                                   uuids.cell)
         host.update(compute=self.compute_node)
 
         self.assertIsNone(host.updated)
@@ -282,7 +309,8 @@ class IronicHostManagerChangedNodesTestCase(test.NoDBTestCase):
         self.assertIsNotNone(host.updated)
 
     def test_consume_larger_instance_from_compute(self):
-        host = ironic_host_manager.IronicNodeState("fakehost", "fakenode")
+        host = ironic_host_manager.IronicNodeState("fakehost", "fakenode",
+                                                   uuids.cell)
         host.update(compute=self.compute_node)
 
         self.assertIsNone(host.updated)
@@ -297,7 +325,8 @@ class IronicHostManagerChangedNodesTestCase(test.NoDBTestCase):
         self.assertIsNotNone(host.updated)
 
     def test_consume_smaller_instance_from_compute(self):
-        host = ironic_host_manager.IronicNodeState("fakehost", "fakenode")
+        host = ironic_host_manager.IronicNodeState("fakehost", "fakenode",
+                                                   uuids.cell)
         host.update(compute=self.compute_node)
 
         self.assertIsNone(host.updated)
@@ -320,21 +349,25 @@ class IronicHostManagerTestFilters(test.NoDBTestCase):
     @mock.patch.object(host_manager.HostManager, '_init_aggregates')
     def setUp(self, mock_init_agg, mock_init_inst):
         super(IronicHostManagerTestFilters, self).setUp()
-        self.flags(scheduler_available_filters=['%s.%s' % (__name__, cls) for
-                                                cls in ['FakeFilterClass1',
-                                                        'FakeFilterClass2']])
-        self.flags(scheduler_default_filters=['FakeFilterClass1'])
-        self.flags(baremetal_scheduler_default_filters=['FakeFilterClass2'])
+        self.flags(available_filters=[
+            __name__ + '.FakeFilterClass1', __name__ + '.FakeFilterClass2'],
+                   group='filter_scheduler')
+        self.flags(enabled_filters=['FakeFilterClass1'],
+                   group='filter_scheduler')
+        self.flags(baremetal_enabled_filters=['FakeFilterClass2'],
+                   group='filter_scheduler')
         self.host_manager = ironic_host_manager.IronicHostManager()
+        cell = uuids.cell
         self.fake_hosts = [ironic_host_manager.IronicNodeState(
-                'fake_host%s' % x, 'fake-node') for x in range(1, 5)]
+                'fake_host%s' % x, 'fake-node', cell) for x in range(1, 5)]
         self.fake_hosts += [ironic_host_manager.IronicNodeState(
-                'fake_multihost', 'fake-node%s' % x) for x in range(1, 5)]
+                'fake_multihost', 'fake-node%s' % x, cell)
+                for x in range(1, 5)]
 
-    def test_default_filters(self):
-        default_filters = self.host_manager.default_filters
-        self.assertEqual(1, len(default_filters))
-        self.assertIsInstance(default_filters[0], FakeFilterClass1)
+    def test_enabled_filters(self):
+        enabled_filters = self.host_manager.enabled_filters
+        self.assertEqual(1, len(enabled_filters))
+        self.assertIsInstance(enabled_filters[0], FakeFilterClass1)
 
     def test_choose_host_filters_not_found(self):
         self.assertRaises(exception.SchedulerHostFilterNotFound,
@@ -348,33 +381,33 @@ class IronicHostManagerTestFilters(test.NoDBTestCase):
         self.assertEqual(1, len(host_filters))
         self.assertIsInstance(host_filters[0], FakeFilterClass2)
 
-    def test_host_manager_default_filters(self):
-        default_filters = self.host_manager.default_filters
-        self.assertEqual(1, len(default_filters))
-        self.assertIsInstance(default_filters[0], FakeFilterClass1)
+    def test_host_manager_enabled_filters(self):
+        enabled_filters = self.host_manager.enabled_filters
+        self.assertEqual(1, len(enabled_filters))
+        self.assertIsInstance(enabled_filters[0], FakeFilterClass1)
 
     @mock.patch.object(ironic_host_manager.IronicHostManager,
                        '_init_instance_info')
     @mock.patch.object(host_manager.HostManager, '_init_aggregates')
-    def test_host_manager_default_filters_uses_baremetal(self, mock_init_agg,
+    def test_host_manager_enabled_filters_uses_baremetal(self, mock_init_agg,
                                                          mock_init_inst):
-        self.flags(scheduler_use_baremetal_filters=True)
+        self.flags(use_baremetal_filters=True, group='filter_scheduler')
         host_manager = ironic_host_manager.IronicHostManager()
 
-        # ensure the defaults come from baremetal_scheduler_default_filters
-        # and not scheduler_default_filters
-        default_filters = host_manager.default_filters
-        self.assertEqual(1, len(default_filters))
-        self.assertIsInstance(default_filters[0], FakeFilterClass2)
+        # ensure the defaults come from scheduler.baremetal_enabled_filters
+        # and not enabled_filters
+        enabled_filters = host_manager.enabled_filters
+        self.assertEqual(1, len(enabled_filters))
+        self.assertIsInstance(enabled_filters[0], FakeFilterClass2)
 
     def test_load_filters(self):
-        # without scheduler_use_baremetal_filters
+        # without scheduler.use_baremetal_filters
         filters = self.host_manager._load_filters()
         self.assertEqual(['FakeFilterClass1'], filters)
 
     def test_load_filters_baremetal(self):
-        # with scheduler_use_baremetal_filters
-        self.flags(scheduler_use_baremetal_filters=True)
+        # with scheduler.use_baremetal_filters
+        self.flags(use_baremetal_filters=True, group='filter_scheduler')
         filters = self.host_manager._load_filters()
         self.assertEqual(['FakeFilterClass2'], filters)
 

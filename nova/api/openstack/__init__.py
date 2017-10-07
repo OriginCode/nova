@@ -20,16 +20,11 @@ WSGI middleware for OpenStack API controllers.
 
 from oslo_log import log as logging
 import routes
-import six
-import stevedore
 import webob.dec
 import webob.exc
 
 from nova.api.openstack import wsgi
 import nova.conf
-from nova.i18n import _LE
-from nova.i18n import _LI
-from nova.i18n import _LW
 from nova.i18n import translate
 from nova import notifications
 from nova import utils
@@ -54,7 +49,7 @@ class FaultWrapper(base_wsgi.Middleware):
                                   status, webob.exc.HTTPInternalServerError)()
 
     def _error(self, inner, req):
-        LOG.exception(_LE("Caught error: %s"), six.text_type(inner))
+        LOG.exception("Caught error: %s", inner)
 
         safe = getattr(inner, 'safe', False)
         headers = getattr(inner, 'headers', None)
@@ -63,7 +58,7 @@ class FaultWrapper(base_wsgi.Middleware):
             status = 500
 
         msg_dict = dict(url=req.url, status=status)
-        LOG.info(_LI("%(url)s returned with HTTP %(status)d"), msg_dict)
+        LOG.info("%(url)s returned with HTTP %(status)d", msg_dict)
         outer = self.status_to_type(status)
         if headers:
             outer.headers = headers
@@ -156,7 +151,7 @@ class APIMapper(routes.Mapper):
 
 
 class ProjectMapper(APIMapper):
-    def resource(self, member_name, collection_name, **kwargs):
+    def _get_project_id_token(self):
         # NOTE(sdague): project_id parameter is only valid if its hex
         # or hex + dashes (note, integers are a subset of this). This
         # is required to hand our overlaping routes issues.
@@ -164,7 +159,10 @@ class ProjectMapper(APIMapper):
         if CONF.osapi_v21.project_id_regex:
             project_id_regex = CONF.osapi_v21.project_id_regex
 
-        project_id_token = '{project_id:%s}' % project_id_regex
+        return '{project_id:%s}' % project_id_regex
+
+    def resource(self, member_name, collection_name, **kwargs):
+        project_id_token = self._get_project_id_token()
         if 'parent_resource' not in kwargs:
             kwargs['path_prefix'] = '%s/' % project_id_token
         else:
@@ -195,6 +193,20 @@ class ProjectMapper(APIMapper):
                                      collection_name,
                                      **kwargs)
 
+    def create_route(self, path, method, controller, action):
+        project_id_token = self._get_project_id_token()
+
+        # while we transition away from project IDs in the API URIs, create
+        # additional routes that include the project_id
+        self.connect('/%s%s' % (project_id_token, path),
+                     conditions=dict(method=[method]),
+                     controller=controller,
+                     action=action)
+        self.connect(path,
+                     conditions=dict(method=[method]),
+                     controller=controller,
+                     action=action)
+
 
 class PlainMapper(APIMapper):
     def resource(self, member_name, collection_name, **kwargs):
@@ -206,141 +218,3 @@ class PlainMapper(APIMapper):
         routes.Mapper.resource(self, member_name,
                                      collection_name,
                                      **kwargs)
-
-
-class APIRouterV21(base_wsgi.Router):
-    """Routes requests on the OpenStack v2.1 API to the appropriate controller
-    and method.
-    """
-
-    @classmethod
-    def factory(cls, global_config, **local_config):
-        """Simple paste factory, :class:`nova.wsgi.Router` doesn't have one."""
-        return cls()
-
-    @staticmethod
-    def api_extension_namespace():
-        return 'nova.api.v21.extensions'
-
-    def __init__(self, init_only=None):
-        def _check_load_extension(ext):
-            return self._register_extension(ext)
-
-        self.api_extension_manager = stevedore.enabled.EnabledExtensionManager(
-            namespace=self.api_extension_namespace(),
-            check_func=_check_load_extension,
-            invoke_on_load=True,
-            invoke_kwds={"extension_info": self.loaded_extension_info})
-
-        mapper = ProjectMapper()
-
-        self.resources = {}
-
-        # NOTE(cyeoh) Core API support is rewritten as extensions
-        # but conceptually still have core
-        if list(self.api_extension_manager):
-            # NOTE(cyeoh): Stevedore raises an exception if there are
-            # no plugins detected. I wonder if this is a bug.
-            self._register_resources_check_inherits(mapper)
-            self.api_extension_manager.map(self._register_controllers)
-
-        LOG.info(_LI("Loaded extensions: %s"),
-                 sorted(self.loaded_extension_info.get_extensions().keys()))
-        super(APIRouterV21, self).__init__(mapper)
-
-    def _register_resources_list(self, ext_list, mapper):
-        for ext in ext_list:
-            self._register_resources(ext, mapper)
-
-    def _register_resources_check_inherits(self, mapper):
-        ext_has_inherits = []
-        ext_no_inherits = []
-
-        for ext in self.api_extension_manager:
-            for resource in ext.obj.get_resources():
-                if resource.inherits:
-                    ext_has_inherits.append(ext)
-                    break
-            else:
-                ext_no_inherits.append(ext)
-
-        self._register_resources_list(ext_no_inherits, mapper)
-        self._register_resources_list(ext_has_inherits, mapper)
-
-    @property
-    def loaded_extension_info(self):
-        raise NotImplementedError()
-
-    def _register_extension(self, ext):
-        raise NotImplementedError()
-
-    def _register_resources(self, ext, mapper):
-        """Register resources defined by the extensions
-
-        Extensions define what resources they want to add through a
-        get_resources function
-        """
-
-        handler = ext.obj
-        LOG.debug("Running _register_resources on %s", ext.obj)
-
-        for resource in handler.get_resources():
-            LOG.debug('Extended resource: %s', resource.collection)
-
-            inherits = None
-            if resource.inherits:
-                inherits = self.resources.get(resource.inherits)
-                if not resource.controller:
-                    resource.controller = inherits.controller
-            wsgi_resource = wsgi.ResourceV21(resource.controller,
-                                             inherits=inherits)
-            self.resources[resource.collection] = wsgi_resource
-            kargs = dict(
-                controller=wsgi_resource,
-                collection=resource.collection_actions,
-                member=resource.member_actions)
-
-            if resource.parent:
-                kargs['parent_resource'] = resource.parent
-
-            # non core-API plugins use the collection name as the
-            # member name, but the core-API plugins use the
-            # singular/plural convention for member/collection names
-            if resource.member_name:
-                member_name = resource.member_name
-            else:
-                member_name = resource.collection
-            mapper.resource(member_name, resource.collection,
-                            **kargs)
-
-            if resource.custom_routes_fn:
-                resource.custom_routes_fn(mapper, wsgi_resource)
-
-    def _register_controllers(self, ext):
-        """Register controllers defined by the extensions
-
-        Extensions define what resources they want to add through
-        a get_controller_extensions function
-        """
-
-        handler = ext.obj
-        LOG.debug("Running _register_controllers on %s", ext.obj)
-
-        for extension in handler.get_controller_extensions():
-            ext_name = extension.extension.name
-            collection = extension.collection
-            controller = extension.controller
-
-            if collection not in self.resources:
-                LOG.warning(_LW('Extension %(ext_name)s: Cannot extend '
-                                'resource %(collection)s: No such resource'),
-                            {'ext_name': ext_name, 'collection': collection})
-                continue
-
-            LOG.debug('Extension %(ext_name)s extending resource: '
-                      '%(collection)s',
-                      {'ext_name': ext_name, 'collection': collection})
-
-            resource = self.resources[collection]
-            resource.register_actions(controller)
-            resource.register_extensions(controller)

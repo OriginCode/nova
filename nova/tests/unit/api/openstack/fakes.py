@@ -14,10 +14,10 @@
 #    under the License.
 
 import datetime
-import uuid
 
 from oslo_serialization import jsonutils
 from oslo_utils import timeutils
+from oslo_utils import uuidutils
 import routes
 import six
 from six.moves import range
@@ -33,9 +33,11 @@ from nova.api.openstack import wsgi as os_wsgi
 from nova.compute import api as compute_api
 from nova.compute import flavors
 from nova.compute import vm_states
+import nova.conf
 from nova import context
 from nova.db.sqlalchemy import models
 from nova import exception as exc
+from nova.network.security_group import security_group_base
 from nova import objects
 from nova.objects import base
 from nova import quota
@@ -46,6 +48,7 @@ from nova import utils
 from nova import wsgi
 
 
+CONF = nova.conf.CONF
 QUOTAS = quota.QUOTAS
 
 
@@ -60,9 +63,10 @@ def fake_wsgi(self, req):
     return self.application
 
 
-def wsgi_app_v21(fake_auth_context=None, init_only=None, v2_compatible=False):
+def wsgi_app_v21(fake_auth_context=None, v2_compatible=False,
+                 custom_routes=None):
 
-    inner_app_v21 = compute.APIRouterV21()
+    inner_app_v21 = compute.APIRouterV21(custom_routes=custom_routes)
 
     if v2_compatible:
         inner_app_v21 = openstack_api.LegacyV2CompatibleWrapper(inner_app_v21)
@@ -182,8 +186,41 @@ def stub_out_nw_api(test, cls=None, private=None, publics=None):
 
     if cls is None:
         cls = Fake
-    test.stub_out('nova.network.api.API', cls)
-    fake_network.stub_out_nw_api_get_instance_nw_info(test)
+    if CONF.use_neutron:
+        test.stub_out('nova.network.neutronv2.api.API', cls)
+    else:
+        test.stub_out('nova.network.api.API', cls)
+        fake_network.stub_out_nw_api_get_instance_nw_info(test)
+
+
+def stub_out_secgroup_api(test, security_groups=None):
+
+    class FakeSecurityGroupAPI(security_group_base.SecurityGroupBase):
+        """This handles both nova-network and neutron style security group APIs
+        """
+        def get_instances_security_groups_bindings(
+                self, context, servers, detailed=False):
+            # This method shouldn't be called unless using neutron.
+            if not CONF.use_neutron:
+                raise Exception('Invalid security group API call for nova-net')
+            instances_security_group_bindings = {}
+            if servers:
+                instances_security_group_bindings = {
+                    server['id']: [] for server in servers
+                }
+            return instances_security_group_bindings
+
+        def get_instance_security_groups(
+                self, context, instance, detailed=False):
+            return security_groups if security_groups is not None else []
+
+    if CONF.use_neutron:
+        test.stub_out(
+            'nova.network.security_group.neutron_driver.SecurityGroupAPI',
+            FakeSecurityGroupAPI)
+    else:
+        test.stub_out(
+            'nova.compute.api.SecurityGroupAPI', FakeSecurityGroupAPI)
 
 
 class FakeToken(object):
@@ -195,7 +232,7 @@ class FakeToken(object):
     def __init__(self, **kwargs):
         FakeToken.id_count += 1
         self.id = FakeToken.id_count
-        for k, v in six.iteritems(kwargs):
+        for k, v in kwargs.items():
             setattr(self, k, v)
 
 
@@ -302,7 +339,7 @@ def create_info_cache(nw_cache):
 
 def get_fake_uuid(token=0):
     if token not in FAKE_UUIDS:
-        FAKE_UUIDS[token] = str(uuid.uuid4())
+        FAKE_UUIDS[token] = uuidutils.generate_uuid()
     return FAKE_UUIDS[token]
 
 
@@ -660,10 +697,83 @@ def stub_bdm_get_all_by_instance_uuids(context, instance_uuids,
     return result
 
 
-def fake_get_available_languages():
-    existing_translations = ['en_GB', 'en_AU', 'de', 'zh_CN', 'en_US']
-    return existing_translations
-
-
 def fake_not_implemented(*args, **kwargs):
     raise NotImplementedError()
+
+
+FLAVORS = {
+    '1': objects.Flavor(
+        id=1,
+        name='flavor 1',
+        memory_mb=256,
+        vcpus=1,
+        root_gb=10,
+        ephemeral_gb=20,
+        flavorid='1',
+        swap=10,
+        rxtx_factor=1.0,
+        vcpu_weight=None,
+        disabled=False,
+        is_public=True,
+    ),
+    '2': objects.Flavor(
+        id=2,
+        name='flavor 2',
+        memory_mb=512,
+        vcpus=1,
+        root_gb=20,
+        ephemeral_gb=10,
+        flavorid='2',
+        swap=5,
+        rxtx_factor=None,
+        vcpu_weight=None,
+        disabled=True,
+        is_public=True,
+    ),
+}
+
+
+def stub_out_flavor_get_by_flavor_id(test):
+    @staticmethod
+    def fake_get_by_flavor_id(context, flavor_id, read_deleted=None):
+        return FLAVORS[flavor_id]
+
+    test.stub_out('nova.objects.Flavor.get_by_flavor_id',
+                  fake_get_by_flavor_id)
+
+
+def stub_out_flavor_get_all(test):
+    @staticmethod
+    def fake_get_all(context, inactive=False, filters=None,
+                     sort_key='flavorid', sort_dir='asc', limit=None,
+                     marker=None):
+        if marker in ['99999']:
+            raise exc.MarkerNotFound(marker)
+
+        def reject_min(db_attr, filter_attr):
+            return (filter_attr in filters and
+                    getattr(flavor, db_attr) < int(filters[filter_attr]))
+
+        filters = filters or {}
+        res = []
+        for flavor in FLAVORS.values():
+            if reject_min('memory_mb', 'min_memory_mb'):
+                continue
+            elif reject_min('root_gb', 'min_root_gb'):
+                continue
+
+            res.append(flavor)
+
+        res = sorted(res, key=lambda item: getattr(item, sort_key))
+        output = []
+        marker_found = True if marker is None else False
+        for flavor in res:
+            if not marker_found and marker == flavor.flavorid:
+                marker_found = True
+            elif marker_found:
+                if limit is None or len(output) < int(limit):
+                    output.append(flavor)
+
+        return objects.FlavorList(objects=output)
+
+    test.stub_out('nova.objects.FlavorList.get_all', fake_get_all)

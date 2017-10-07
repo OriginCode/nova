@@ -1,17 +1,19 @@
 .. -*- rst -*-
 
 ===============================================================
- Server consoles (servers, os-consoles, os-console-auth-token)
+ Server consoles (servers, os-consoles, os-console-auth-tokens)
 ===============================================================
 
 Manages server consoles.
+
+.. note:: This is only used in Xenserver VNC Proxy.
 
 Lists Consoles
 ==============
 
 .. rest_method:: GET /servers/{server_id}/consoles
 
-Lists all consoles for a server instance.
+Lists all consoles for a server.
 
 Normal response codes: 200
 
@@ -22,9 +24,7 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-
-  - server_id: server_id
-
+  - server_id: server_id_path
 
 Response
 --------
@@ -49,7 +49,7 @@ Create Console
 
 .. rest_method:: POST /servers/{server_id}/consoles
 
-Creates a console for a server instance.
+Creates a console for a server.
 
 Normal response codes: 200
 
@@ -60,14 +60,12 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-
-  - server_id: server_id
-
+  - server_id: server_id_path
 
 Response
 --------
 
-No body content is returned on a successful POST.
+If successful, this method does not return a response body.
 
 
 Show Console Details
@@ -75,7 +73,7 @@ Show Console Details
 
 .. rest_method:: GET /servers/{server_id}/consoles/{console_id}
 
-Shows console details for a server instance.
+Shows console details for a server.
 
 Normal response codes: 200
 
@@ -86,10 +84,8 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-
-  - server_id: server_id
+  - server_id: server_id_path
   - console_id: console_id
-
 
 Response
 --------
@@ -102,7 +98,7 @@ Response
   - id: console_id_in_body
   - instance_name: instance_name
   - password: console_password
-  - port: port
+  - port: port_number
 
 |
 
@@ -117,7 +113,7 @@ Delete Console
 
 .. rest_method:: DELETE /servers/{server_id}/consoles/{console_id}
 
-Deletes a console for a server instance.
+Deletes a console for a server.
 
 Normal response codes: 202
 
@@ -128,26 +124,27 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
+  - server_id: server_id_path
+  - console_id: console_id
 
-  - server_id: server_id
-  - id: console_id
 
 Response
 --------
 
-There is no body content for the response of a successful DELETE query
+If successful, this method does not return a response body.
 
 
-Show Console Authentication Token
-=================================
+Show Console Connection Information
+===================================
 
-.. rest_method:: GET /servers/{server_id}/os-console-auth-token
+.. rest_method:: GET /os-console-auth-tokens/{console_token}
 
-Given the console authentication token for a server instance,
+Given the console authentication token for a server,
 shows the related connection information.
 
-This method used to be available just for the ``rdp-html5`` console type prior
-microversion 2.31. Now it's available for all console types.
+This method used to be available only for the ``rdp-html5`` console type before
+microversion 2.31. Starting from microversion 2.31 it's available for all
+console types.
 
 Normal response codes: 200
 
@@ -159,7 +156,7 @@ Request
 .. rest_parameters:: parameters.yaml
 
 
-  - server_id: server_id
+  - console_token: console_token
 
 |
 
@@ -169,9 +166,9 @@ Response
 .. rest_parameters:: parameters.yaml
 
   - console: console
-  - instance_uuid: instance_id
+  - instance_uuid: instance_id_body
   - host: console_host
-  - port: port
+  - port: port_number
   - internal_access_path: internal_access_path
 
 |

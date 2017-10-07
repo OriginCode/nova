@@ -31,7 +31,6 @@ import six
 import nova.conf
 from nova import exception
 from nova.i18n import _
-from nova.i18n import _LE, _LI, _LW
 from nova import image
 from nova import keymgr
 from nova import utils
@@ -65,9 +64,9 @@ class Image(object):
         """
         if (CONF.ephemeral_storage_encryption.enabled and
                 not self._supports_encryption()):
-            raise exception.NovaException(_('Incompatible settings: '
-                                  'ephemeral storage encryption is supported '
-                                  'only for LVM images.'))
+            msg = _('Incompatible settings: ephemeral storage encryption is '
+                    'supported only for LVM images.')
+            raise exception.InternalError(msg)
 
         self.path = path
 
@@ -118,7 +117,8 @@ class Image(object):
         pass
 
     def libvirt_info(self, disk_bus, disk_dev, device_type, cache_mode,
-                     extra_specs, hypervisor_version, boot_order=None):
+                     extra_specs, hypervisor_version, boot_order=None,
+                     disk_unit=None):
         """Get `LibvirtConfigGuestDisk` filled for this image.
 
         :disk_dev: Disk bus device name
@@ -144,15 +144,29 @@ class Image(object):
         info.source_path = self.path
         info.boot_order = boot_order
 
+        if disk_bus == 'scsi':
+            self.disk_scsi(info, disk_unit)
+
         self.disk_qos(info, extra_specs)
 
         return info
+
+    def disk_scsi(self, info, disk_unit):
+        # The driver is responsible to create the SCSI controller
+        # at index 0.
+        info.device_addr = vconfig.LibvirtConfigGuestDeviceAddressDrive()
+        info.device_addr.controller = 0
+        if disk_unit is not None:
+            # In order to allow up to 256 disks handled by one
+            # virtio-scsi controller, the device addr should be
+            # specified.
+            info.device_addr.unit = disk_unit
 
     def disk_qos(self, info, extra_specs):
         tune_items = ['disk_read_bytes_sec', 'disk_read_iops_sec',
             'disk_write_bytes_sec', 'disk_write_iops_sec',
             'disk_total_bytes_sec', 'disk_total_iops_sec']
-        for key, value in six.iteritems(extra_specs):
+        for key, value in extra_specs.items():
             scope = key.split(':')
             if len(scope) > 1 and scope[0] == 'quota':
                 if scope[1] in tune_items:
@@ -200,18 +214,27 @@ class Image(object):
         :filename: Name of the file in the image directory
         :size: Size of created image in bytes (optional)
         """
-        @utils.synchronized(filename, external=True, lock_path=self.lock_path)
-        def fetch_func_sync(target, *args, **kwargs):
-            # The image may have been fetched while a subsequent
-            # call was waiting to obtain the lock.
-            if not os.path.exists(target):
-                fetch_func(target=target, *args, **kwargs)
-
         base_dir = os.path.join(CONF.instances_path,
                                 CONF.image_cache_subdirectory_name)
         if not os.path.exists(base_dir):
             fileutils.ensure_tree(base_dir)
         base = os.path.join(base_dir, filename)
+
+        @utils.synchronized(filename, external=True, lock_path=self.lock_path)
+        def fetch_func_sync(target, *args, **kwargs):
+            # NOTE(mdbooth): This method is called as a callback by the
+            # create_image() method of a specific backend. It assumes that
+            # target will be in the image cache, which is why it holds a
+            # lock, and does not overwrite an existing file. However,
+            # this is not true for all backends. Specifically Lvm writes
+            # directly to the target rather than to the image cache,
+            # and additionally it creates the target in advance.
+            # This guard is only relevant in the context of the lock if the
+            # target is in the image cache. If it isn't, we should
+            # call fetch_func. The lock we're holding is also unnecessary in
+            # that case, but it will not result in incorrect behaviour.
+            if target != base or not os.path.exists(target):
+                fetch_func(target=target, *args, **kwargs)
 
         if not self.exists() or not os.path.exists(base):
             self.create_image(fetch_func_sync, base, size,
@@ -239,8 +262,8 @@ class Image(object):
             can_fallocate = not err
             self.__class__.can_fallocate = can_fallocate
             if not can_fallocate:
-                LOG.warning(_LW('Unable to preallocate image at path: '
-                                '%(path)s'), {'path': self.path})
+                LOG.warning('Unable to preallocate image at path: %(path)s',
+                            {'path': self.path})
         return can_fallocate
 
     def verify_base_size(self, base, size, base_size=0):
@@ -265,18 +288,27 @@ class Image(object):
             base_size = self.get_disk_size(base)
 
         if size < base_size:
-            msg = _LE('%(base)s virtual size %(base_size)s '
-                      'larger than flavor root disk size %(size)s')
-            LOG.error(msg % {'base': base,
-                              'base_size': base_size,
-                              'size': size})
+            LOG.error('%(base)s virtual size %(base_size)s '
+                      'larger than flavor root disk size %(size)s',
+                      {'base': base,
+                       'base_size': base_size,
+                       'size': size})
             raise exception.FlavorDiskSmallerThanImage(
                 flavor_size=size, image_size=base_size)
 
     def get_disk_size(self, name):
         return disk.get_disk_size(name)
 
+    @abc.abstractmethod
     def snapshot_extract(self, target, out_format):
+        """Extract a snapshot of the image.
+
+        This is used during cold (offline) snapshots. Live snapshots
+        while the guest is still running are handled separately.
+
+        :param target: The target path for the image snapshot.
+        :param out_format: The image snapshot format.
+        """
         raise NotImplementedError()
 
     def _get_driver_format(self):
@@ -328,7 +360,7 @@ class Image(object):
                 with open(self.disk_info_path) as disk_info_file:
                     line = disk_info_file.read().rstrip()
                     dct = _dict_from_line(line)
-                    for path, driver_format in six.iteritems(dct):
+                    for path, driver_format in dct.items():
                         if path == self.path:
                             return driver_format
             driver_format = self._get_driver_format()
@@ -366,7 +398,10 @@ class Image(object):
 
     def direct_snapshot(self, context, snapshot_name, image_format, image_id,
                         base_image_id):
-        """Prepare a snapshot for direct reference from glance
+        """Prepare a snapshot for direct reference from glance.
+
+        The implementation of this method is optional and therefore is
+        not an abstractmethod.
 
         :raises: exception.ImageUnacceptable if it cannot be
                  referenced directly in the specified image format
@@ -387,6 +422,7 @@ class Image(object):
         """Get an image's name of a base file."""
         return os.path.split(base)[-1]
 
+    @abc.abstractmethod
     def get_model(self, connection):
         """Get the image information model
 
@@ -461,10 +497,9 @@ class Flat(Image):
             data = images.qemu_img_info(self.path)
             return data.file_format
         except exception.InvalidDiskInfo as e:
-            LOG.info(_LI('Failed to get image info from path %(path)s; '
-                         'error: %(error)s'),
-                      {'path': self.path,
-                       'error': e})
+            LOG.info('Failed to get image info from path %(path)s; '
+                     'error: %(error)s',
+                     {'path': self.path, 'error': e})
             return 'raw'
 
     def _supports_encryption(self):
@@ -676,7 +711,7 @@ class Lvm(Image):
         def create_lvm_image(base, size):
             base_size = disk.get_disk_size(base)
             self.verify_base_size(base, size, base_size=base_size)
-            resize = size > base_size
+            resize = size > base_size if size else False
             size = size if resize else base_size
             lvm.create_volume(self.vg, self.lv,
                                          size, sparse=self.sparse)
@@ -706,10 +741,10 @@ class Lvm(Image):
                             self.ephemeral_key_uuid).get_encoded()
                 except Exception:
                     with excutils.save_and_reraise_exception():
-                        LOG.error(_LE("Failed to retrieve ephemeral encryption"
-                                      " key"))
+                        LOG.error("Failed to retrieve ephemeral "
+                                  "encryption key")
             else:
-                raise exception.NovaException(
+                raise exception.InternalError(
                     _("Instance disk to be encrypted but no context provided"))
         # Generate images with specified size right on volume
         if generated and size:
@@ -754,7 +789,7 @@ class Rbd(Image):
 
     SUPPORTS_CLONE = True
 
-    def __init__(self, instance=None, disk_name=None, path=None, **kwargs):
+    def __init__(self, instance=None, disk_name=None, path=None):
         if not CONF.libvirt.images_rbd_pool:
             raise RuntimeError(_('You should specify'
                                  ' images_rbd_pool'
@@ -788,7 +823,8 @@ class Rbd(Image):
         self.discard_mode = CONF.libvirt.hw_disk_discard
 
     def libvirt_info(self, disk_bus, disk_dev, device_type, cache_mode,
-            extra_specs, hypervisor_version, boot_order=None):
+                     extra_specs, hypervisor_version, boot_order=None,
+                     disk_unit=None):
         """Get `LibvirtConfigGuestDisk` filled for this image.
 
         :disk_dev: Disk bus device name
@@ -823,6 +859,9 @@ class Rbd(Image):
         if auth_enabled:
             info.auth_secret_type = 'ceph'
             info.auth_secret_uuid = CONF.libvirt.rbd_secret_uuid
+
+        if disk_bus == 'scsi':
+            self.disk_scsi(info, disk_unit)
 
         self.disk_qos(info, extra_specs)
 
@@ -871,7 +910,7 @@ class Rbd(Image):
                                    include_locations=True)
         locations = image_meta['locations']
 
-        LOG.debug('Image locations are: %(locs)s' % {'locs': locations})
+        LOG.debug('Image locations are: %(locs)s', {'locs': locations})
 
         if image_meta.get('disk_format') not in ['raw', 'iso']:
             reason = _('Image is not raw format')
@@ -1017,11 +1056,18 @@ class Ploop(Image):
 
         self.resolve_driver_format()
 
+    # Create new ploop disk (in case of epehemeral) or
+    # copy ploop disk from glance image
     def create_image(self, prepare_template, base, size, *args, **kwargs):
-        filename = os.path.split(base)[-1]
+        filename = os.path.basename(base)
 
+        # Copy main file of ploop disk, restore DiskDescriptor.xml for it
+        # and resize if necessary
         @utils.synchronized(filename, external=True, lock_path=self.lock_path)
-        def create_ploop_image(base, target, size):
+        def _copy_ploop_image(base, target, size):
+            # Ploop disk is a directory with data file(root.hds) and
+            # DiskDescriptor.xml, so create this dir
+            fileutils.ensure_tree(target)
             image_path = os.path.join(target, "root.hds")
             libvirt_utils.copy_image(base, image_path)
             utils.execute('ploop', 'restore-descriptor', '-f', self.pcs_format,
@@ -1029,7 +1075,28 @@ class Ploop(Image):
             if size:
                 self.resize_image(size)
 
-        if not os.path.exists(self.path):
+        # Generating means that we create empty ploop disk
+        generating = 'image_id' not in kwargs
+        remove_func = functools.partial(fileutils.delete_if_exists,
+                                        remove=shutil.rmtree)
+        if generating:
+            if os.path.exists(self.path):
+                return
+            with fileutils.remove_path_on_error(self.path, remove=remove_func):
+                prepare_template(target=self.path, *args, **kwargs)
+        else:
+            # Create ploop disk from glance image
+            if not os.path.exists(base):
+                prepare_template(target=base, *args, **kwargs)
+            else:
+                # Disk already exists in cache, just update time
+                libvirt_utils.update_mtime(base)
+            self.verify_base_size(base, size)
+
+            if os.path.exists(self.path):
+                return
+
+            # Get format for ploop disk
             if CONF.force_raw_images:
                 self.pcs_format = "raw"
             else:
@@ -1041,27 +1108,16 @@ class Ploop(Image):
                 elif format == "raw":
                     self.pcs_format = "raw"
                 else:
-                    reason = _("PCS doesn't support images in %s format."
-                                " You should either set force_raw_images=True"
-                                " in config or upload an image in ploop"
-                                " or raw format.") % format
+                    reason = _("Ploop image backend doesn't support images in"
+                               " %s format. You should either set"
+                               " force_raw_images=True in config or upload an"
+                               " image in ploop or raw format.") % format
                     raise exception.ImageUnacceptable(
                                         image_id=kwargs["image_id"],
                                         reason=reason)
 
-        if not os.path.exists(base):
-            prepare_template(target=base, *args, **kwargs)
-        self.verify_base_size(base, size)
-
-        if os.path.exists(self.path):
-            return
-
-        fileutils.ensure_tree(self.path)
-
-        remove_func = functools.partial(fileutils.delete_if_exists,
-                                        remove=shutil.rmtree)
-        with fileutils.remove_path_on_error(self.path, remove=remove_func):
-            create_ploop_image(base, self.path, size)
+            with fileutils.remove_path_on_error(self.path, remove=remove_func):
+                _copy_ploop_image(base, self.path, size)
 
     def resize_image(self, size):
         image = imgmodel.LocalFileImage(self.path, imgmodel.FORMAT_PLOOP)
@@ -1073,6 +1129,9 @@ class Ploop(Image):
                                        'parallels',
                                        target,
                                        out_format)
+
+    def get_model(self, connection):
+        return imgmodel.LocalFileImage(self.path, imgmodel.FORMAT_PLOOP)
 
 
 class Backend(object):
@@ -1095,22 +1154,28 @@ class Backend(object):
             raise RuntimeError(_('Unknown image_type=%s') % image_type)
         return image
 
-    def image(self, instance, disk_name, image_type=None):
-        """Constructs image for selected backend
+    def by_name(self, instance, name, image_type=None):
+        """Return an Image object for a disk with the given name.
 
-        :instance: Instance name.
-        :name: Image name.
-        :image_type: Image type.
-                     Optional, is CONF.libvirt.images_type by default.
+        :param instance: the instance which owns this disk
+        :param name: The name of the disk
+        :param image_type: (Optional) Image type.
+                           Default is CONF.libvirt.images_type.
+        :return: An Image object for the disk with given name and instance.
+        :rtype: Image
         """
         backend = self.backend(image_type)
-        return backend(instance=instance, disk_name=disk_name)
+        return backend(instance=instance, disk_name=name)
 
-    def snapshot(self, instance, disk_path, image_type=None):
-        """Returns snapshot for given image
+    def by_libvirt_path(self, instance, path, image_type=None):
+        """Return an Image object for a disk with the given libvirt path.
 
-        :path: path to image
-        :image_type: type of image
+        :param instance: The instance which owns this disk.
+        :param path: The libvirt representation of the image's path.
+        :param image_type: (Optional) Image type.
+                           Default is CONF.libvirt.images_type.
+        :return: An Image object for the given libvirt path.
+        :rtype: Image
         """
         backend = self.backend(image_type)
-        return backend(instance=instance, path=disk_path)
+        return backend(instance=instance, path=path)

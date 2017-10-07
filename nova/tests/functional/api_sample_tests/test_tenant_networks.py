@@ -17,6 +17,7 @@
 from oslo_serialization import jsonutils
 
 import nova.conf
+from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional.api_sample_tests import api_sample_base
 
 CONF = nova.conf.CONF
@@ -29,6 +30,7 @@ class TenantNetworksJsonTests(api_sample_base.ApiSampleTestBaseV21):
     def setUp(self):
         super(TenantNetworksJsonTests, self).setUp()
         CONF.set_override("enable_network_quota", True)
+        self.useFixture(nova_fixtures.RegisterNetworkQuota())
 
         def fake(*args, **kwargs):
             pass
@@ -54,4 +56,4 @@ class TenantNetworksJsonTests(api_sample_base.ApiSampleTestBaseV21):
         response = self._do_delete('os-tenant-networks/%s' %
                                                 net["network"]["id"])
         self.assertEqual(202, response.status_code)
-        self.assertEqual("", response.content)
+        self.assertEqual("", response.text)

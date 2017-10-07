@@ -18,6 +18,8 @@ import mock
 from nova import exception
 from nova import test
 from nova.tests.unit.virt.libvirt import fakelibvirt
+from nova.virt import fake
+from nova.virt.libvirt import driver
 from nova.virt.libvirt import host
 from nova.virt.libvirt.volume import volume
 
@@ -47,6 +49,17 @@ class FakeSecret(object):
         return 0
 
 
+class LibvirtBaseVolumeDriverSubclassSignatureTestCase(
+        test.SubclassSignatureTestCase):
+    def _get_base_class(self):
+        # We do this because it has the side-effect of loading all the
+        # volume drivers
+        self.useFixture(fakelibvirt.FakeLibvirtFixture())
+        driver.LibvirtDriver(fake.FakeVirtAPI(), False)
+
+        return volume.LibvirtBaseVolumeDriver
+
+
 class LibvirtVolumeBaseTestCase(test.NoDBTestCase):
     """Contains common setup and helper methods for libvirt volume tests."""
 
@@ -62,14 +75,8 @@ class LibvirtVolumeBaseTestCase(test.NoDBTestCase):
 
         self.useFixture(fakelibvirt.FakeLibvirtFixture())
 
-        class FakeLibvirtDriver(object):
-            def __init__(self):
-                self._host = host.Host("qemu:///system")
+        self.fake_host = host.Host("qemu:///system")
 
-            def _get_all_block_devices(self):
-                return []
-
-        self.fake_conn = FakeLibvirtDriver()
         self.connr = {
             'ip': '127.0.0.1',
             'initiator': 'fake_initiator',
@@ -130,7 +137,7 @@ class LibvirtVolumeTestCase(LibvirtISCSIVolumeBaseTestCase):
         self.assertEqual(disk_info['dev'], tree.find('./target').get('dev'))
 
     def _test_libvirt_volume_driver_disk_info(self):
-        libvirt_driver = volume.LibvirtVolumeDriver(self.fake_conn)
+        libvirt_driver = volume.LibvirtVolumeDriver(self.fake_host)
         connection_info = {
             'driver_volume_type': 'fake',
             'data': {
@@ -155,7 +162,7 @@ class LibvirtVolumeTestCase(LibvirtISCSIVolumeBaseTestCase):
         self._test_libvirt_volume_driver_disk_info()
 
     def test_libvirt_volume_driver_serial(self):
-        libvirt_driver = volume.LibvirtVolumeDriver(self.fake_conn)
+        libvirt_driver = volume.LibvirtVolumeDriver(self.fake_host)
         connection_info = {
             'driver_volume_type': 'fake',
             'data': {
@@ -171,7 +178,7 @@ class LibvirtVolumeTestCase(LibvirtISCSIVolumeBaseTestCase):
         self.assertIsNone(tree.find("driver[@discard]"))
 
     def test_libvirt_volume_driver_blockio(self):
-        libvirt_driver = volume.LibvirtVolumeDriver(self.fake_conn)
+        libvirt_driver = volume.LibvirtVolumeDriver(self.fake_host)
         connection_info = {
             'driver_volume_type': 'fake',
             'data': {
@@ -193,7 +200,7 @@ class LibvirtVolumeTestCase(LibvirtISCSIVolumeBaseTestCase):
         self.assertEqual('4096', blockio.get('physical_block_size'))
 
     def test_libvirt_volume_driver_iotune(self):
-        libvirt_driver = volume.LibvirtVolumeDriver(self.fake_conn)
+        libvirt_driver = volume.LibvirtVolumeDriver(self.fake_host)
         connection_info = {
             'driver_volume_type': 'fake',
             'data': {
@@ -232,7 +239,7 @@ class LibvirtVolumeTestCase(LibvirtISCSIVolumeBaseTestCase):
         self.assertEqual('200', tree.find('./iotune/write_iops_sec').text)
 
     def test_libvirt_volume_driver_readonly(self):
-        libvirt_driver = volume.LibvirtVolumeDriver(self.fake_conn)
+        libvirt_driver = volume.LibvirtVolumeDriver(self.fake_host)
         connection_info = {
             'driver_volume_type': 'fake',
             'data': {
@@ -265,7 +272,7 @@ class LibvirtVolumeTestCase(LibvirtISCSIVolumeBaseTestCase):
     def test_libvirt_volume_driver_discard_true(self, mock_has_min_version):
         # Check the discard attrib is present in driver section
         mock_has_min_version.return_value = True
-        libvirt_driver = volume.LibvirtVolumeDriver(self.fake_conn)
+        libvirt_driver = volume.LibvirtVolumeDriver(self.fake_host)
         connection_info = {
             'driver_volume_type': 'fake',
             'data': {
@@ -283,31 +290,12 @@ class LibvirtVolumeTestCase(LibvirtISCSIVolumeBaseTestCase):
 
     def test_libvirt_volume_driver_discard_false(self):
         # Check the discard attrib is not present in driver section
-        libvirt_driver = volume.LibvirtVolumeDriver(self.fake_conn)
+        libvirt_driver = volume.LibvirtVolumeDriver(self.fake_host)
         connection_info = {
             'driver_volume_type': 'fake',
             'data': {
                 'device_path': '/foo',
                 'discard': False,
-            },
-            'serial': 'fake_serial',
-        }
-
-        conf = libvirt_driver.get_config(connection_info, self.disk_info)
-        tree = conf.format_dom()
-        self.assertIsNone(tree.find("driver[@discard]"))
-
-    @mock.patch('nova.virt.libvirt.host.Host.has_min_version')
-    def test_libvirt_volume_driver_discard_true_bad_version(
-            self, mock_has_min_version):
-        # Check the discard attrib is not present in driver section
-        mock_has_min_version.return_value = False
-        libvirt_driver = volume.LibvirtVolumeDriver(self.fake_conn)
-        connection_info = {
-            'driver_volume_type': 'fake',
-            'data': {
-                'device_path': '/foo',
-                'discard': True,
             },
             'serial': 'fake_serial',
         }

@@ -81,11 +81,8 @@ class ISCSIParametersTestCase(stubs.XenAPITestBaseNoDB):
         self.assertIsNone(volume_utils._get_target_host(None))
 
     def test_target_port(self):
-        self.assertEqual(volume_utils._get_target_port('host:port'),
-                         'port')
-
-        self.assertEqual(volume_utils._get_target_port('host'),
-                         '3260')
+        self.assertEqual(volume_utils._get_target_port('host:port'), 'port')
+        self.assertEqual(volume_utils._get_target_port('host'), 3260)
 
 
 class IntroduceTestCase(stubs.XenAPITestBaseNoDB):
@@ -149,7 +146,7 @@ class ParseVolumeInfoTestCase(stubs.XenAPITestBaseNoDB):
             'xvdq': -1,
         }
 
-        for (input, expected) in six.iteritems(cases):
+        for (input, expected) in cases.items():
             actual = volume_utils._mountpoint_to_number(input)
             self.assertEqual(actual, expected,
                     '%s yielded %s, not %s' % (input, actual, expected))
