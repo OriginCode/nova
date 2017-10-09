@@ -58,8 +58,6 @@ override_dh_install:
 		--output-file=$(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf \
 		--wrap-width 140 \
 		--namespace nova.conf \
-		--namespace nova.api \
-		--namespace nova.cells \
 		--namespace oslo.log \
 		--namespace oslo.messaging \
 		--namespace oslo.policy \
@@ -70,6 +68,7 @@ override_dh_install:
 		--namespace oslo.middleware \
 		--namespace oslo.concurrency \
 		--namespace keystonemiddleware.auth_token
+
 	# Otherwise, this is set to the build dir
 	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf DEFAULT pybasedir /usr/lib/python2.7/dist-packages
 	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf DEFAULT bindir /usr/bin
