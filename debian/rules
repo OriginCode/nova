@@ -53,6 +53,11 @@ override_dh_install:
 	rm -rf $(CURDIR)/debian/tmp
 	python setup.py install -f --install-layout=deb --root=$(CURDIR)/debian/tmp
 
+	mkdir -p $(CURDIR)/debian/nova-common/etc/nova
+	PYTHONPATH=$(CURDIR)/debian/tmp/usr/lib/python2.7/dist-packages oslopolicy-sample-generator \
+		--output-file=$(CURDIR)/debian/nova-common/etc/nova/policy.yaml \
+		--namespace nova
+
 	mkdir -p $(CURDIR)/debian/nova-common/usr/share/nova-common
 	PYTHONPATH=$(CURDIR)/debian/tmp/usr/lib/python2.7/dist-packages oslo-config-generator \
 		--output-file=$(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf \
