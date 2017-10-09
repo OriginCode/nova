@@ -17,6 +17,7 @@ nova (2:16.0.1-1) experimental; urgency=medium
   * New upstream release.
   * Removed nova-network.
   * Fixed (build-)depends for this release.
+  * Rebased some patch, delete others.
 
  -- Thomas Goirand <zigo@debian.org>  Sun, 08 Oct 2017 00:41:47 +0200
 
