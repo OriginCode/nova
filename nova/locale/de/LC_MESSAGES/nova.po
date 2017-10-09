@@ -1901,9 +1901,6 @@ msgstr "Ungültiger Konsolentyp %(console_type)s"
 msgid "Invalid content type %(content_type)s."
 msgstr "Ungültiger Inhaltstyp %(content_type)s."
 
-msgid "Invalid data supplied to HashRing.get_hosts."
-msgstr "Ungültige Daten für HashRing.get_hosts angegeben."
-
 #, python-format
 msgid "Invalid datetime string: %(reason)s"
 msgstr "Falsche Datumszeit-Zeichenkette: %(reason)s"
@@ -1934,9 +1931,6 @@ msgstr "Ungültige feste IP-Adresse %s in der Anforderung"
 #, python-format
 msgid "Invalid floating IP %s in request"
 msgstr "Ungültige dynamische IP-Adresse %s in Anforderung"
-
-msgid "Invalid hosts supplied when building HashRing."
-msgstr "Ungültige Hosts beim Erstellen von HashRing angegeben."
 
 #, python-format
 msgid "Invalid image format '%(format)s'"
