@@ -21,6 +21,7 @@ nova (2:16.0.1-1) experimental; urgency=medium
   * Blacklist all nova.tests.unit.test_wsgi.TestWSGIServerWithSSL* tests.
   * Fix namespaces for nova.conf generation.
   * Generating /etc/nova/policy.yaml.
+  * Removed nova-cert, which is also removed upstream.
 
  -- Thomas Goirand <zigo@debian.org>  Sun, 08 Oct 2017 00:41:47 +0200
 
