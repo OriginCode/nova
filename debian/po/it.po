@@ -6,7 +6,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova\n"
 "Report-Msgid-Bugs-To: nova@packages.debian.org\n"
-"POT-Creation-Date: 2016-03-29 11:54+0000\n"
+"POT-Creation-Date: 2017-10-26 22:06+0000\n"
 "PO-Revision-Date: 2014-08-02 13:11+0200\n"
 "Last-Translator: Beatrice Torracca <beatricet@libero.it>\n"
 "Language-Team: Italian <debian-l10n-italian@lists.debian.org>\n"
@@ -355,7 +355,7 @@ msgstr "Registrare Nova nel catalogo dei punti terminali di Keystone?"
 
 #. Type: boolean
 #. Description
-#: ../nova-api.templates:1001
+#: ../nova-api.templates:1001 ../nova-placement-api.templates:1001
 msgid ""
 "Each Openstack services (each API) should be registered in order to be "
 "accessible. This is done using \"keystone service-create\" and \"keystone "
@@ -368,7 +368,7 @@ msgstr ""
 
 #. Type: boolean
 #. Description
-#: ../nova-api.templates:1001
+#: ../nova-api.templates:1001 ../nova-placement-api.templates:1001
 #, fuzzy
 #| msgid ""
 #| "Note that you will need to have an up and running keystone server on "
@@ -383,13 +383,13 @@ msgstr ""
 
 #. Type: string
 #. Description
-#: ../nova-api.templates:2001
+#: ../nova-api.templates:2001 ../nova-placement-api.templates:2001
 msgid "Keystone IP address:"
 msgstr "Indirizzo IP di Keystone:"
 
 #. Type: string
 #. Description
-#: ../nova-api.templates:2001
+#: ../nova-api.templates:2001 ../nova-placement-api.templates:2001
 msgid ""
 "Enter the IP address of your keystone server, so that nova-api can contact "
 "Keystone to do the Nova service and endpoint creation."
@@ -400,7 +400,7 @@ msgstr ""
 
 #. Type: string
 #. Description
-#: ../nova-api.templates:3001
+#: ../nova-api.templates:3001 ../nova-placement-api.templates:3001
 #, fuzzy
 #| msgid "Neutron admin tenant name:"
 msgid "Keystone admin name:"
@@ -413,7 +413,8 @@ msgstr "Nome del locatario («tenant») per l'amministrazione di Neutron:"
 #. Type: password
 #. Description
 #: ../nova-api.templates:3001 ../nova-api.templates:4001
-#: ../nova-api.templates:5001
+#: ../nova-api.templates:5001 ../nova-placement-api.templates:3001
+#: ../nova-placement-api.templates:4001 ../nova-placement-api.templates:5001
 msgid ""
 "To register the service endpoint, this package needs to know the Admin "
 "login, name, project name, and password to the Keystone server."
@@ -421,7 +422,7 @@ msgstr ""
 
 #. Type: string
 #. Description
-#: ../nova-api.templates:4001
+#: ../nova-api.templates:4001 ../nova-placement-api.templates:4001
 #, fuzzy
 #| msgid "Neutron admin tenant name:"
 msgid "Keystone admin project name:"
@@ -429,7 +430,7 @@ msgstr "Nome del locatario («tenant») per l'amministrazione di Neutron:"
 
 #. Type: password
 #. Description
-#: ../nova-api.templates:5001
+#: ../nova-api.templates:5001 ../nova-placement-api.templates:5001
 #, fuzzy
 #| msgid "Neutron administrator password:"
 msgid "Keystone admin password:"
@@ -437,13 +438,13 @@ msgstr "Password dell'amministratore di Neutron:"
 
 #. Type: string
 #. Description
-#: ../nova-api.templates:6001
+#: ../nova-api.templates:6001 ../nova-placement-api.templates:6001
 msgid "Nova endpoint IP address:"
 msgstr "Indirizzo IP del punto terminale Nova:"
 
 #. Type: string
 #. Description
-#: ../nova-api.templates:6001
+#: ../nova-api.templates:6001 ../nova-placement-api.templates:6001
 msgid ""
 "Enter the IP address that will be used to contact Nova (eg: the Nova "
 "endpoint IP address)."
@@ -453,7 +454,7 @@ msgstr ""
 
 #. Type: string
 #. Description
-#: ../nova-api.templates:6001
+#: ../nova-api.templates:6001 ../nova-placement-api.templates:6001
 msgid ""
 "This IP address should be accessible from the clients that will use this "
 "service, so if you are installing a public cloud, this should be a public IP "
@@ -465,13 +466,13 @@ msgstr ""
 
 #. Type: string
 #. Description
-#: ../nova-api.templates:7001
+#: ../nova-api.templates:7001 ../nova-placement-api.templates:7001
 msgid "Name of the region to register:"
 msgstr "Nome della regione da registrare:"
 
 #. Type: string
 #. Description
-#: ../nova-api.templates:7001
+#: ../nova-api.templates:7001 ../nova-placement-api.templates:7001
 msgid ""
 "Openstack can be used using availability zones, with each region "
 "representing a location. Please enter the zone that you wish to use when "
@@ -502,6 +503,14 @@ msgid ""
 msgstr ""
 "È possibile cambiare questa impostazione successivamente eseguendo \"dpkg-"
 "reconfigure -plow nova-common\"."
+
+#. Type: boolean
+#. Description
+#: ../nova-placement-api.templates:1001
+#, fuzzy
+#| msgid "Register Nova in the keystone endpoint catalog?"
+msgid "Register Nova Placement API in the keystone endpoint catalog?"
+msgstr "Registrare Nova nel catalogo dei punti terminali di Keystone?"
 
 #. Type: select
 #. Description

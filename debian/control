@@ -512,8 +512,11 @@ Description: OpenStack Compute - documentation
 Package: nova-placement-api
 Architecture: all
 Depends:
+ adduser,
  debconf,
  nova-common (= ${binary:Version}),
+ python-openstackclient,
+ q-text-as-data,
  uwsgi-plugin-python,
  ${misc:Depends},
  ${ostack-lsb-base},
