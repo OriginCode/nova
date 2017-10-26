@@ -208,6 +208,7 @@ Depends:
  conntrack,
  curl,
  ebtables,
+ fdisk | util-linux (<< 2.29.2-3~),
  gawk,
  iptables,
  kpartx,
