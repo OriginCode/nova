@@ -6,7 +6,7 @@ set -e
 
 if [ "$1" = "configure" ] ; then
 	. /usr/share/debconf/confmodule
-	pkgos_register_endpoint_postinst nova nova compute "Nova Compute Service" 8774 /v2/'%(tenant_id)s'
+	pkgos_register_endpoint_postinst nova nova compute "Nova Compute Service" 8774 /v2.1
 
 	db_get nova/active-api
 	if [ -n "${RET}" ] ; then
