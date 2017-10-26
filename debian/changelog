@@ -1,3 +1,9 @@
+nova (2:16.0.1-2) UNRELEASED; urgency=medium
+
+  * Fixed nova-xenvncproxy init script syntax (Closes: #863165).
+
+ -- Thomas Goirand <zigo@debian.org>  Thu, 26 Oct 2017 21:12:41 +0000
+
 nova (2:16.0.1-1) experimental; urgency=medium
 
   [ Daniel Baumann ]

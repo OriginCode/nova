@@ -24,6 +24,6 @@ else
 fi
 
 # If SERVICE_FILE is set, we're generating the .service file, and we don't want to exit
-if ! [ "${NOVA_CONSOLE_PROXY_TYPE}" = "xenvnc" ] && [ -z "${SERVICE_FILE}"; then
+if ! [ "${NOVA_CONSOLE_PROXY_TYPE}" = "xenvnc" ] && [ -z "${SERVICE_FILE}" ] ; then
 	exit 0
 fi
