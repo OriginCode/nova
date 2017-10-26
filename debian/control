@@ -514,6 +514,7 @@ Architecture: all
 Depends:
  debconf,
  nova-common (= ${binary:Version}),
+ uwsgi-plugin-python,
  ${misc:Depends},
  ${ostack-lsb-base},
  ${python:Depends},
