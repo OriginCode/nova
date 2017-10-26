@@ -5,6 +5,7 @@ nova (2:16.0.1-2) UNRELEASED; urgency=medium
   * Now setting-up nova-placement-api automatically with debconf.
   * The nova-compute daemon now runtime depends on fdisk (Closes: #872135).
   * Update pt.po (Closes: #873173).
+  * Update fr.po (Closes: #874103).
 
  -- Thomas Goirand <zigo@debian.org>  Thu, 26 Oct 2017 21:12:41 +0000
 
