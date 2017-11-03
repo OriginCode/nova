@@ -1,3 +1,9 @@
+nova (2:16.0.1-3) unstable; urgency=medium
+
+  * Add missing source of debconf script in nova-placement-api.postinst.
+
+ -- Thomas Goirand <zigo@debian.org>  Fri, 03 Nov 2017 21:37:20 +0000
+
 nova (2:16.0.1-2) unstable; urgency=medium
 
   * Fixed nova-xenvncproxy init script syntax (Closes: #863165).

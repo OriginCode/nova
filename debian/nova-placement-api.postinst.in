@@ -5,6 +5,7 @@ set -e
 #PKGOS-INCLUDE#
 
 if [ "$1" = "configure" ] ; then
+	. /usr/share/debconf/confmodule
 	pkgos_register_endpoint_postinst nova-placement-api placement placement "Placement API" 8778 ""
 	db_stop
 fi
