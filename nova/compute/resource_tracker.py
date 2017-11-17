@@ -1010,7 +1010,7 @@ class ResourceTracker(object):
                 continue
 
     def _update_usage_from_instance(self, context, instance, nodename,
-            is_removed=False, has_ocata_computes=False):
+            is_removed=False, require_allocation_refresh=False):
         """Update usage for a single instance."""
 
         uuid = instance['uuid']
@@ -1038,10 +1038,9 @@ class ResourceTracker(object):
                 self.pci_tracker.update_pci_for_instance(context,
                                                          instance,
                                                          sign=sign)
-            if has_ocata_computes:
-                LOG.debug("We're on a Pike compute host in a deployment "
-                          "with Ocata compute hosts. Auto-correcting "
-                          "allocations to handle Ocata-style assumptions.")
+            if require_allocation_refresh:
+                LOG.debug("Auto-correcting allocations to handle Ocata "
+                          "assumptions.")
                 self.reportclient.update_instance_allocation(cn, instance,
                                                              sign)
             else:
@@ -1135,10 +1134,16 @@ class ResourceTracker(object):
             context, 'nova-compute')
         has_ocata_computes = compute_version < 22
 
+        # Some drivers (ironic) still need the allocations to be
+        # fixed up, as they transition the way their inventory is reported.
+        require_allocation_refresh = (
+            has_ocata_computes or
+            self.driver.requires_allocation_refresh)
+
         for instance in instances:
             if instance.vm_state not in vm_states.ALLOW_RESOURCE_REMOVAL:
                 self._update_usage_from_instance(context, instance, nodename,
-                    has_ocata_computes=has_ocata_computes)
+                    require_allocation_refresh=require_allocation_refresh)
 
         self._remove_deleted_instances_allocations(context, cn)
 
@@ -1151,6 +1156,7 @@ class ResourceTracker(object):
         known_instances = set(self.tracked_instances.keys())
         allocations = self.reportclient.get_allocations_for_resource_provider(
                 cn.uuid) or {}
+        read_deleted_context = context.elevated(read_deleted='yes')
         for instance_uuid, alloc in allocations.items():
             if instance_uuid in known_instances:
                 LOG.debug("Instance %s actively managed on this compute host "
@@ -1158,9 +1164,23 @@ class ResourceTracker(object):
                           instance_uuid, alloc)
                 continue
             try:
-                instance = objects.Instance.get_by_uuid(context, instance_uuid,
+                instance = objects.Instance.get_by_uuid(read_deleted_context,
+                                                        instance_uuid,
                                                         expected_attrs=[])
             except exception.InstanceNotFound:
+                # The instance isn't even in the database. Either the scheduler
+                # _just_ created an allocation for it and we're racing with the
+                # creation in the cell database, or the instance was deleted
+                # and fully archived before we got a chance to run this. The
+                # former is far more likely than the latter. Avoid deleting
+                # allocations for a building instance here.
+                LOG.info("Instance %(uuid)s has allocations against this "
+                         "compute host but is not found in the database.",
+                         {'uuid': instance_uuid},
+                         exc_info=False)
+                continue
+
+            if instance.deleted:
                 # The instance is gone, so we definitely want to remove
                 # allocations associated with it.
                 # NOTE(jaypipes): This will not be true if/when we support

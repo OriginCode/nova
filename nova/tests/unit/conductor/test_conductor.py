@@ -1359,7 +1359,10 @@ class _BaseTaskTestCase(object):
             self.conductor_manager.rebuild_instance(context=self.context,
                                             instance=inst_obj,
                                             **rebuild_args)
-            reset_fd.assert_called_once_with()
+            if rebuild_args['recreate']:
+                reset_fd.assert_called_once_with()
+            else:
+                reset_fd.assert_not_called()
             select_dest_mock.assert_called_once_with(self.context,
                     fake_spec, [inst_obj.uuid])
             compute_args['host'] = expected_host
@@ -1454,7 +1457,22 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
         self.assertEqual(1, ephemeral[0].volume_size)
         return instance_uuid
 
-    def test_schedule_and_build_instances(self):
+    @mock.patch('nova.notifications.send_update_with_states')
+    def test_schedule_and_build_instances(self, mock_notify):
+        # NOTE(melwitt): This won't work with call_args because the call
+        # arguments are recorded as references and not as copies of objects.
+        # So even though the notify method was called with Instance._context
+        # targeted, by the time we assert with call_args, the target_cell
+        # context manager has already exited and the referenced Instance
+        # object's _context.db_connection has been restored to None.
+        def fake_notify(ctxt, instance, *args, **kwargs):
+            # Assert the instance object is targeted when going through the
+            # notification code.
+            self.assertIsNotNone(ctxt.db_connection)
+            self.assertIsNotNone(instance._context.db_connection)
+
+        mock_notify.side_effect = fake_notify
+
         instance_uuid = self._do_schedule_and_build_instances_test(
             self.params)
         cells = objects.CellMappingList.get_all(self.ctxt)
@@ -1744,7 +1762,11 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
         select_destinations.return_value = [{'host': 'fake-host',
                                              'nodename': 'nodesarestupid',
                                              'limits': None}]
-        self.conductor.schedule_and_build_instances(**self.params)
+        with mock.patch.object(self.conductor.scheduler_client,
+                               'reportclient') as mock_rc:
+            self.conductor.schedule_and_build_instances(**self.params)
+            mock_rc.delete_allocation_for_instance.assert_called_once_with(
+                inst_uuid)
         # we don't create the instance since the build request is gone
         self.assertFalse(inst_create.called)
         # we don't build the instance since we didn't create it

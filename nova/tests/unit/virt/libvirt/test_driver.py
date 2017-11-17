@@ -804,6 +804,8 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                         'Driver capabilities for '
                         '\'supports_extend_volume\' '
                         'is invalid')
+        self.assertFalse(drvr.requires_allocation_refresh,
+                         'Driver does not need allocation refresh')
 
     def create_fake_libvirt_mock(self, **kwargs):
         """Defining mocks for LibvirtDriver(libvirt is not used)."""
@@ -984,6 +986,23 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                 version_arg_found = True
                 break
         self.assertFalse(version_arg_found)
+
+    # NOTE(sdague): python2.7 and python3.5 have different behaviors
+    # when it comes to comparing against the sentinel, so
+    # has_min_version is needed to pass python3.5.
+    @mock.patch.object(nova.virt.libvirt.host.Host, "has_min_version",
+                       return_value=True)
+    @mock.patch.object(fakelibvirt.Connection, 'getVersion',
+                       return_value=mock.sentinel.qemu_version)
+    def test_qemu_image_version(self, mock_get_libversion, min_ver):
+        """Test that init_host sets qemu image version
+
+        A sentinel is used here so that we aren't chasing this value
+        against minimums that get raised over time.
+        """
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        drvr.init_host("dummyhost")
+        self.assertEqual(images.QEMU_VERSION, mock.sentinel.qemu_version)
 
     @mock.patch.object(fakelibvirt.Connection, 'getLibVersion',
                        return_value=versionutils.convert_version_to_int(
@@ -5093,6 +5112,49 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         self.assertFalse(
             any(isinstance(feature, vconfig.LibvirtConfigGuestFeatureKvmHidden)
                            for feature in cfg.features))
+
+    def _test_get_guest_config_disk_cachemodes(self, images_type):
+        # Verify that the configured cachemodes are propagated to the device
+        # configurations.
+        if images_type == 'flat':
+            cachemode = 'file=directsync'
+        elif images_type == 'lvm':
+            cachemode = 'block=writethrough'
+        elif images_type == 'rbd':
+            cachemode = 'network=writeback'
+        self.flags(disk_cachemodes=[cachemode], group='libvirt')
+
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        instance_ref = objects.Instance(**self.test_instance)
+        image_meta = objects.ImageMeta.from_dict(self.test_image_meta)
+        disk_info = blockinfo.get_disk_info(CONF.libvirt.virt_type,
+                                            instance_ref,
+                                            image_meta)
+        cfg = drvr._get_guest_config(instance_ref, [],
+                                     image_meta, disk_info)
+        for d in cfg.devices:
+            if isinstance(d, vconfig.LibvirtConfigGuestDisk):
+                expected = cachemode.split('=')
+                self.assertEqual(expected[0], d.source_type)
+                self.assertEqual(expected[1], d.driver_cache)
+
+    def test_get_guest_config_disk_cachemodes_file(self):
+        self.flags(images_type='flat', group='libvirt')
+        self._test_get_guest_config_disk_cachemodes('flat')
+
+    def test_get_guest_config_disk_cachemodes_block(self):
+        self.flags(images_type='lvm', group='libvirt')
+        self.flags(images_volume_group='vols', group='libvirt')
+        self._test_get_guest_config_disk_cachemodes('lvm')
+
+    @mock.patch.object(rbd_utils, 'rbd')
+    @mock.patch.object(rbd_utils, 'rados')
+    @mock.patch.object(rbd_utils.RBDDriver, 'get_mon_addrs',
+                       return_value=(mock.Mock(), mock.Mock()))
+    def test_get_guest_config_disk_cachemodes_network(
+            self, mock_get_mon_addrs, mock_rados, mock_rbd):
+        self.flags(images_type='rbd', group='libvirt')
+        self._test_get_guest_config_disk_cachemodes('rbd')
 
     @mock.patch.object(
         host.Host, "is_cpu_control_policy_capable", return_value=True)
@@ -11612,9 +11674,8 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                               return_value=service_mock),
             mock.patch.object(host.Host, "get_capabilities")):
 
-            drvr.init_host("wibble")
             self.assertRaises(exception.HypervisorUnavailable,
-                              drvr.get_num_instances)
+                              drvr.init_host, ("wibble",))
             self.assertTrue(service_mock.disabled)
 
     def test_service_resume_after_broken_connection(self):
@@ -16642,8 +16703,8 @@ class LibvirtDriverTestCase(test.NoDBTestCase):
         ins_ref = self._create_instance()
 
         self.mox.StubOutWithMock(self.drvr, "_cleanup_resize")
-        self.drvr._cleanup_resize(ins_ref,
-                             _fake_network_info(self, 1))
+        self.drvr._cleanup_resize(self.context, ins_ref,
+                                  _fake_network_info(self, 1))
 
         self.mox.ReplayAll()
         self.drvr.confirm_migration(self.context, "migration_ref", ins_ref,
@@ -16666,7 +16727,8 @@ class LibvirtDriverTestCase(test.NoDBTestCase):
             mock_exists.return_value = True
             mock_get_path.return_value = '/fake/inst'
 
-            drvr._cleanup_resize(ins_ref, _fake_network_info(self, 1))
+            drvr._cleanup_resize(
+                self.context, ins_ref, _fake_network_info(self, 1))
             mock_get_path.assert_called_once_with(ins_ref)
             mock_exec.assert_called_once_with('rm', '-rf', '/fake/inst_resize',
                                               delay_on_retry=True, attempts=5)
@@ -16684,6 +16746,8 @@ class LibvirtDriverTestCase(test.NoDBTestCase):
         drvr.image_backend.exists.return_value = False
 
         with test.nested(
+                mock.patch('nova.compute.utils.is_volume_backed_instance',
+                           return_value=False),
                 mock.patch.object(os.path, 'exists'),
                 mock.patch.object(libvirt_utils, 'get_instance_path'),
                 mock.patch.object(utils, 'execute'),
@@ -16691,16 +16755,55 @@ class LibvirtDriverTestCase(test.NoDBTestCase):
                 mock.patch.object(drvr, '_undefine_domain'),
                 mock.patch.object(drvr, 'unplug_vifs'),
                 mock.patch.object(drvr, 'unfilter_instance')
-        ) as (mock_exists, mock_get_path, mock_exec, mock_rmtree,
-              mock_undef, mock_unplug, mock_unfilter):
+        ) as (mock_volume_backed, mock_exists, mock_get_path,
+              mock_exec, mock_rmtree, mock_undef, mock_unplug, mock_unfilter):
             mock_exists.return_value = True
             mock_get_path.return_value = '/fake/inst'
 
-            drvr._cleanup_resize(ins_ref, fake_net)
+            drvr._cleanup_resize(self.context, ins_ref, fake_net)
             mock_get_path.assert_called_once_with(ins_ref)
             mock_exec.assert_called_once_with('rm', '-rf', '/fake/inst_resize',
                                               delay_on_retry=True, attempts=5)
             mock_rmtree.assert_called_once_with('/fake/inst')
+            mock_undef.assert_called_once_with(ins_ref)
+            mock_unplug.assert_called_once_with(ins_ref, fake_net)
+            mock_unfilter.assert_called_once_with(ins_ref, fake_net)
+
+    def test_cleanup_resize_not_same_host_volume_backed(self):
+        """Tests cleaning up after a resize is confirmed with a volume-backed
+        instance. The key point is that the instance base directory should not
+        be removed for volume-backed instances.
+        """
+        CONF.set_override('policy_dirs', [], group='oslo_policy')
+        host = 'not' + CONF.host
+        ins_ref = self._create_instance({'host': host})
+        fake_net = _fake_network_info(self, 1)
+
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
+        drvr.image_backend = mock.Mock()
+        drvr.image_backend.by_name.return_value = drvr.image_backend
+        drvr.image_backend.exists.return_value = False
+
+        with test.nested(
+                mock.patch('nova.compute.utils.is_volume_backed_instance',
+                           return_value=True),
+                mock.patch.object(os.path, 'exists'),
+                mock.patch.object(libvirt_utils, 'get_instance_path'),
+                mock.patch.object(utils, 'execute'),
+                mock.patch.object(shutil, 'rmtree'),
+                mock.patch.object(drvr, '_undefine_domain'),
+                mock.patch.object(drvr, 'unplug_vifs'),
+                mock.patch.object(drvr, 'unfilter_instance')
+        ) as (mock_volume_backed, mock_exists, mock_get_path,
+              mock_exec, mock_rmtree, mock_undef, mock_unplug, mock_unfilter):
+            mock_exists.return_value = True
+            mock_get_path.return_value = '/fake/inst'
+
+            drvr._cleanup_resize(self.context, ins_ref, fake_net)
+            mock_get_path.assert_called_once_with(ins_ref)
+            mock_exec.assert_called_once_with('rm', '-rf', '/fake/inst_resize',
+                                              delay_on_retry=True, attempts=5)
+            mock_rmtree.assert_not_called()
             mock_undef.assert_called_once_with(ins_ref)
             mock_unplug.assert_called_once_with(ins_ref, fake_net)
             mock_unfilter.assert_called_once_with(ins_ref, fake_net)
@@ -16723,7 +16826,8 @@ class LibvirtDriverTestCase(test.NoDBTestCase):
             mock_exists.return_value = True
             mock_get_path.return_value = '/fake/inst'
 
-            drvr._cleanup_resize(ins_ref, _fake_network_info(self, 1))
+            drvr._cleanup_resize(
+                self.context, ins_ref, _fake_network_info(self, 1))
             mock_get_path.assert_called_once_with(ins_ref)
             mock_exec.assert_called_once_with('rm', '-rf', '/fake/inst_resize',
                                               delay_on_retry=True, attempts=5)
@@ -16740,17 +16844,20 @@ class LibvirtDriverTestCase(test.NoDBTestCase):
         drvr.image_backend.exists.return_value = False
 
         with test.nested(
+                mock.patch('nova.compute.utils.is_volume_backed_instance',
+                           return_value=False),
                 mock.patch.object(os.path, 'exists'),
                 mock.patch.object(libvirt_utils, 'get_instance_path'),
                 mock.patch.object(utils, 'execute'),
                 mock.patch.object(shutil, 'rmtree'),
                 mock.patch.object(drvr.image_backend, 'remove_snap')) as (
-                mock_exists, mock_get_path, mock_exec, mock_rmtree,
-                mock_remove):
+                mock_volume_backed, mock_exists, mock_get_path,
+                mock_exec, mock_rmtree, mock_remove):
             mock_exists.return_value = True
             mock_get_path.return_value = '/fake/inst'
 
-            drvr._cleanup_resize(ins_ref, _fake_network_info(self, 1))
+            drvr._cleanup_resize(
+                self.context, ins_ref, _fake_network_info(self, 1))
             mock_get_path.assert_called_once_with(ins_ref)
             mock_exec.assert_called_once_with('rm', '-rf', '/fake/inst_resize',
                                               delay_on_retry=True, attempts=5)

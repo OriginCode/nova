@@ -60,6 +60,7 @@ from nova.tests.unit import conf_fixture
 from nova.tests.unit import policy_fixture
 from nova.tests import uuidsentinel as uuids
 from nova import utils
+from nova.virt import images
 
 
 CONF = cfg.CONF
@@ -302,6 +303,8 @@ class TestCase(testtools.TestCase):
 
         # Reset the traits sync flag
         objects.resource_provider._TRAITS_SYNCED = False
+        # Reset the global QEMU version flag.
+        images.QEMU_VERSION = None
 
         mox_fixture = self.useFixture(moxstubout.MoxStubout())
         self.mox = mox_fixture.mox
@@ -401,7 +404,9 @@ class TestCase(testtools.TestCase):
                                      cell_mapping=cell)
             hm.create()
             self.host_mappings[hm.host] = hm
-
+            if host is not None:
+                # Make sure that CONF.host is relevant to the right hostname
+                self.useFixture(nova_fixtures.ConfPatcher(host=host))
         svc = self.useFixture(
             nova_fixtures.ServiceFixture(name, host, **kwargs))
 
