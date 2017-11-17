@@ -4,6 +4,7 @@ nova (2:16.0.3-1) unstable; urgency=high
     - CVE-2017-16239 / OSSA-2017-005: Nova Filter Scheduler bypass through
       rebuild action. Applied upstream patch: Validate new image via scheduler
       during rebuild (Closes: #882009).
+  * Add Fix_quobyte_test_validate_volume_no_mtab_entry.patch.
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 17 Nov 2017 15:16:54 +0000
 
