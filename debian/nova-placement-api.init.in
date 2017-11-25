@@ -16,3 +16,5 @@ PROJECT_NAME=nova
 NAME=${PROJECT_NAME}-placement-api
 DAEMON=/usr/bin/uwsgi_python
 DAEMON_ARGS="--master --die-on-term --logto /var/log/nova/nova-placement-api.log --http-socket :8778 --wsgi-file /usr/bin/nova-placement-api"
+NO_OPENSTACK_CONFIG_FILE_DAEMON_ARG=yes
+NO_OPENSTACK_LOGFILE_DAEMON_ARG=yes
