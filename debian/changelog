@@ -1,6 +1,7 @@
 nova (2:16.0.3-3) UNRELEASED; urgency=medium
 
   * Fixed default_floating_pool option to ext-net.
+  * 4 workers by default for nova-placement-api.
 
  -- Thomas Goirand <zigo@debian.org>  Mon, 27 Nov 2017 16:36:27 +0100
 
