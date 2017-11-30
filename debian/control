@@ -8,7 +8,6 @@ Uploaders:
 Build-Depends:
  debhelper (>= 10),
  dh-python,
- dh-systemd,
  openstack-pkg-tools (>= 56~),
  po-debconf,
  python-all,
