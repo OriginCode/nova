@@ -4,6 +4,7 @@ nova (2:16.0.3-3) unstable; urgency=medium
   * 4 workers by default for nova-placement-api.
   * Rebuilt with openstack-pkg-tools >= 56.
   * Removed dh-systemd build-depends.
+  * Standards-Version is now 4.1.1.
 
  -- Thomas Goirand <zigo@debian.org>  Mon, 27 Nov 2017 16:36:27 +0100
 
