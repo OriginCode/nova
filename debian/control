@@ -9,7 +9,7 @@ Build-Depends:
  debhelper (>= 10),
  dh-python,
  dh-systemd,
- openstack-pkg-tools,
+ openstack-pkg-tools (>= 56~),
  po-debconf,
  python-all,
  python-pbr (>= 2.0.0),
