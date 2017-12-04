@@ -516,6 +516,7 @@ Depends:
  debconf,
  nova-common (= ${binary:Version}),
  python-openstackclient,
+ python-pastescript,
  q-text-as-data,
  uwsgi-plugin-python,
  ${misc:Depends},

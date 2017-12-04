@@ -1,3 +1,10 @@
+nova (2:16.0.3-4) unstable; urgency=medium
+
+  * Using --paste-logger when starting uwsgi for placement-api, and runtime
+    depends on python-pastescript.
+
+ -- Thomas Goirand <zigo@debian.org>  Mon, 04 Dec 2017 10:06:29 +0000
+
 nova (2:16.0.3-3) unstable; urgency=medium
 
   * Fixed default_floating_pool option to ext-net.
