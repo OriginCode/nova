@@ -1,3 +1,11 @@
+nova (2:16.0.3-5) unstable; urgency=high
+
+  * CVE-2017-17051/OSSA-2017-005.1 (errata for CVE-2017-16239/OSSA-2017-005):
+    Nova Filter Scheduler bypass through rebuild action. Apply upstream patch:
+    Refined fix for validating image on rebuild (Closes: #883621).
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 06 Dec 2017 12:24:45 +0100
+
 nova (2:16.0.3-4) unstable; urgency=medium
 
   * Using --paste-logger when starting uwsgi for placement-api, and runtime
