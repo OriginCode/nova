@@ -1,6 +1,17 @@
+nova (2:16.0.3-6) unstable; urgency=high
+
+  * CVE-2017-17051 / OSSA-2017-006: Nova FilterScheduler doubles resource
+    allocations during rebuild with new image. Applied upstream patch: Fix
+    doubling allocations on rebuild (Closes: 883621).
+    Note: previous upload was in fact only refining the patch for addressing
+    CVE-2017-16239, not CVE-2017-17051. This upload really fixes the bug for
+    CVE-2017-17051.
+
+ -- Thomas Goirand <zigo@debian.org>  Thu, 07 Dec 2017 09:29:15 +0100
+
 nova (2:16.0.3-5) unstable; urgency=high
 
-  * CVE-2017-17051/OSSA-2017-005.1 (errata for CVE-2017-16239/OSSA-2017-005):
+  * CVE-2017-16239/OSSA-2017-005.1 (errata for CVE-2017-16239/OSSA-2017-005):
     Nova Filter Scheduler bypass through rebuild action. Apply upstream patch:
     Refined fix for validating image on rebuild (Closes: #883621).
 
