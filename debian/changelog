@@ -1,3 +1,10 @@
+nova (2:16.0.3-7) unstable; urgency=medium
+
+  * Rebuilt with openstack-pkg-tools >= 59~, to make sure we're using allocated
+    UID/GID from #884178.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 12 Dec 2017 12:56:16 +0000
+
 nova (2:16.0.3-6) unstable; urgency=high
 
   * CVE-2017-17051 / OSSA-2017-006: Nova FilterScheduler doubles resource
