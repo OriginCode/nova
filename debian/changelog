@@ -1,3 +1,9 @@
+nova (2:16.0.3-9) unstable; urgency=medium
+
+  * Fixed [neutron]/tenant_name.
+
+ -- Thomas Goirand <zigo@debian.org>  Fri, 15 Dec 2017 13:58:57 +0100
+
 nova (2:16.0.3-8) unstable; urgency=medium
 
   * Rebuilt with openstack-pkg-tools >= 60~.
