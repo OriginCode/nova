@@ -1,3 +1,9 @@
+nova (2:16.0.3-10) unstable; urgency=medium
+
+  * Add explicit dependency on e2fsprogs (Closes: #887212, #887188).
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 24 Jan 2018 13:37:16 +0100
+
 nova (2:16.0.3-9) unstable; urgency=medium
 
   * Fixed [neutron]/tenant_name.

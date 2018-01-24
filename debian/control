@@ -103,8 +103,8 @@ Build-Depends-Indep:
  python-sphinxcontrib.seqdiag,
  python-sqlalchemy (>= 1.0.10),
  python-stevedore (>= 1.20.0),
- python-testscenarios,
  python-testresources,
+ python-testscenarios,
  python-testtools,
  python-tooz (>= 1.41.0),
  python-webob (>= 1.7.1),
@@ -583,6 +583,7 @@ Package: python-nova
 Architecture: all
 Section: python
 Depends:
+ e2fsprogs,
  openssh-client,
  openssl,
  python-babel,
