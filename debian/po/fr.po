@@ -7,10 +7,10 @@
 # Alban Vidal <alban.vidal@zordhak.fr>, 2017.
 msgid ""
 msgstr ""
-"Project-Id-Version: nova 2.14.0.0-4\n"
+"Project-Id-Version: nova 2_16.0.3-4\n"
 "Report-Msgid-Bugs-To: nova@packages.debian.org\n"
 "POT-Creation-Date: 2017-10-26 22:06+0000\n"
-"PO-Revision-Date: 2017-08-28 07:28+0100\n"
+"PO-Revision-Date: 2017-12-28 12:42+0100\n"
 "Last-Translator: Alban Vidal <alban.vidal@zordhak.fr>\n"
 "Language-Team: French <debian-l10n-french@lists.debian.org>\n"
 "Language: fr\n"
@@ -519,12 +519,11 @@ msgstr ""
 #. Type: boolean
 #. Description
 #: ../nova-placement-api.templates:1001
-#, fuzzy
 #| msgid "Register Nova in the keystone endpoint catalog?"
 msgid "Register Nova Placement API in the keystone endpoint catalog?"
 msgstr ""
-"Voulez-vous enregistrer Nova dans le catalogue de points d'accès de "
-"Keystone ?"
+"Voulez-vous enregistrer l'API Nova Placement dans le catalogue de points "
+"d'accès de Keystone ?"
 
 #. Type: select
 #. Description

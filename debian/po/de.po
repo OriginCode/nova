@@ -1,13 +1,13 @@
 # GERMAN TRANSLATION OF THE NOVA DEBCONF TEMPLATE.
 # Copyright (c) 2010 OpenStack LLC.
 # This file is distributed under the same license as the NOVA package.
-# Copyright of this file Erik Pfannenstein 2012, Chris Leick 2013-2014.
+# Copyright of this file Erik Pfannenstein 2012, Chris Leick 2013-2017.
 msgid ""
 msgstr ""
-"Project-Id-Version: nova 2014.1.3-6\n"
+"Project-Id-Version: nova 2:16.0.3-9\n"
 "Report-Msgid-Bugs-To: nova@packages.debian.org\n"
 "POT-Creation-Date: 2017-10-26 22:06+0000\n"
-"PO-Revision-Date: 2014-11-29 08:44+0200\n"
+"PO-Revision-Date: 2017-12-20 18:04+0200\n"
 "Last-Translator: Chris Leick <c.leick@vollbio.de>\n"
 "Language-Team: German <debian-l10n-german@lists.debian.org>\n"
 "Language: de\n"
@@ -171,13 +171,13 @@ msgid ""
 "Therefore Nova needs to know the Neutron admin tenant, username and password."
 msgstr ""
 "Nova muss mit Neutron über Keystone kommunizieren. Daher muss Nova den "
-"Tenant, Benutzernamen und das Passwort des Neuitron-Admins kennen."
+"Tenant, Benutzernamen und das Passwort des Neutron-Administrators kennen."
 
 #. Type: string
 #. Description
 #: ../nova-common.templates:10001
 msgid "Please enter the name of the admin tenant for Neutron."
-msgstr "Bitte geben Sie den Namen des Admin-Tenants für Neutron ein."
+msgstr "Bitte geben Sie den Namen des Administrator-Tenants für Neutron ein."
 
 #. Type: string
 #. Description
@@ -262,7 +262,7 @@ msgstr ""
 #. Description
 #: ../nova-common.templates:16001
 msgid "Metadata proxy shared secret:"
-msgstr ""
+msgstr "Gemeinsam benutztes Geheimnis des Metadaten-Proxys:"
 
 #. Type: password
 #. Description
@@ -272,6 +272,9 @@ msgid ""
 "through the Neutron metadata agent, which serves as a proxy to the Nova "
 "metadata REST API server."
 msgstr ""
+"VM-Instanzen verwenden Neutron, um dafür zu sorgen, dass ihre Metadaten im "
+"Netzwerkbetrieb durch den Neutron-Metadatenagent abgefragt werden. Er dient "
+"als Proxy zum Nova-Metadaten-REST-API-Server."
 
 #. Type: password
 #. Description
@@ -282,6 +285,10 @@ msgid ""
 "same shared password should be used when setting up the neutron-metadata-"
 "agent package."
 msgstr ""
+"Bitte geben Sie das Passwort ein, das benutzt werden soll, um Kommunikationen "
+"zwischen dem Neutron-Metadaten-Proxy-Agent und dem Nova-Metadaten-Server zu "
+"schützen. Dasselbe gemeinsam benutzte Passwort sollte beim Einrichten des "
+"Pakets »neutron-metadata-agent« verwendet werden."
 
 #. Type: string
 #. Description
@@ -374,18 +381,15 @@ msgstr ""
 #. Type: boolean
 #. Description
 #: ../nova-api.templates:1001 ../nova-placement-api.templates:1001
-#, fuzzy
-#| msgid ""
-#| "Note that you will need to have an up and running keystone server on "
-#| "which to connect using the Keystone auth token."
 msgid ""
 "Note that you will need to have an up and running keystone server on which "
 "to connect using a known admin project name, admin username and password. "
 "The admin auth token is not used anymore."
 msgstr ""
 "Beachten Sie, dass Sie einen laufenden Keystone-Server haben müssen, zu dem "
-"mittels des Keystone-Authentifizierungs-Tokens eine Verbindung hergestellt "
-"werden kann."
+"mittels eines bekannten Administratorprojektnamens, "
+"Administratorbenutzernamens und Passworts eine Verbindung hergestellt werden "
+"kann. Das Administratorauthentifizierungs-Token wird nicht mehr benutzt."
 
 #. Type: string
 #. Description
@@ -406,10 +410,8 @@ msgstr ""
 #. Type: string
 #. Description
 #: ../nova-api.templates:3001 ../nova-placement-api.templates:3001
-#, fuzzy
-#| msgid "Neutron admin tenant name:"
 msgid "Keystone admin name:"
-msgstr "Tenant-Name des Neutron-Admins:"
+msgstr "Keystone-Administratorname:"
 
 #. Type: string
 #. Description
@@ -424,22 +426,21 @@ msgid ""
 "To register the service endpoint, this package needs to know the Admin "
 "login, name, project name, and password to the Keystone server."
 msgstr ""
+"Zum Registrieren des Dienstendpunkts muss dieses Paket die "
+"Administratoranmeldung, den Namen, den Projektnamen und das Passwort des "
+"Keystone-Servers kennen."
 
 #. Type: string
 #. Description
 #: ../nova-api.templates:4001 ../nova-placement-api.templates:4001
-#, fuzzy
-#| msgid "Neutron admin tenant name:"
 msgid "Keystone admin project name:"
-msgstr "Tenant-Name des Neutron-Admins:"
+msgstr "Projektname des Keystone-Administrators:"
 
 #. Type: password
 #. Description
 #: ../nova-api.templates:5001 ../nova-placement-api.templates:5001
-#, fuzzy
-#| msgid "Neutron administrator password:"
 msgid "Keystone admin password:"
-msgstr "Passwort des Neutron-Administrators:"
+msgstr "Keystone-Administratorpasswort:"
 
 #. Type: string
 #. Description
@@ -490,32 +491,25 @@ msgstr ""
 #. Type: boolean
 #. Description
 #: ../nova-api.templates:8001
-#, fuzzy
-#| msgid "Set up a database for Nova?"
 msgid "Set up a database for Nova API?"
-msgstr "Datenbank für Nova einrichten?"
+msgstr "Datenbank für Nova-API einrichten?"
 
 #. Type: boolean
 #. Description
 #: ../nova-api.templates:8001
-#, fuzzy
-#| msgid ""
-#| "You can change this setting later on by running \"dpkg-reconfigure -plow "
-#| "nova-common\"."
 msgid ""
 "You can change this setting later on by running \"dpkg-reconfigure -plow "
 "nova-api\"."
 msgstr ""
 "Sie können diese Einstellung später durch Ausführen von »dpkg-reconfigure -"
-"plow nova-common« ändern."
+"plow nova-api« ändern."
 
 #. Type: boolean
 #. Description
 #: ../nova-placement-api.templates:1001
-#, fuzzy
-#| msgid "Register Nova in the keystone endpoint catalog?"
 msgid "Register Nova Placement API in the keystone endpoint catalog?"
-msgstr "Soll Nova im Keystone-Endpunktkatalog registriert werden?"
+msgstr ""
+"Soll das Nova-Platzierungs-API im Keystone-Endpunktkatalog registriert werden?"
 
 #. Type: select
 #. Description
@@ -536,7 +530,7 @@ msgstr ""
 "Nova Console unterstützt drei Konsolentypen. Eine ist speziell für Xen, sie "
 "heißt XVP (Xen-VNC-Proxy) und die anderen unterstützen KVM. Während das "
 "Protokoll SPICE normalerweise schneller als VNC ist, verlangt es außerdem, "
-"dass Ihr Browser Web-Sockets unterstützt und dies ist eine Funktionalität. "
+"dass Ihr Browser Web-Sockets unterstützt und dies ist eine Funktionalität, "
 "die nur von sehr neuen Browsern geboten wird."
 
 #. Type: select
@@ -544,39 +538,3 @@ msgstr ""
 #: ../nova-consoleproxy.templates:1001
 msgid "This can later be edited in /etc/default/nova-consoleproxy."
 msgstr "Dies kann später in /etc/default/nova-consoleproxy geändert werden."
-
-#~ msgid "Keystone Auth Token:"
-#~ msgstr "Keystone-Authentifizierungs-Token:"
-
-#~ msgid ""
-#~ "To configure its endpoint in Keystone, nova-api needs the Keystone auth "
-#~ "token."
-#~ msgstr ""
-#~ "Zur Konfiguration seines Endpunkts in Keystone benötigt »nova-api« das "
-#~ "Keystone-Authentifizierungs-Token."
-
-#~ msgid "Value for neutron_url:"
-#~ msgstr "Wert für »neutron_url«:"
-
-#~ msgid "Start nova services at boot?"
-#~ msgstr "Nova-Dienste beim Hochfahren starten?"
-
-# FIXME: non-personal writing style cause services are started automatically?
-#~ msgid ""
-#~ "Please choose whether you want to start Nova services when the machine is "
-#~ "booted up."
-#~ msgstr ""
-#~ "Bitte wählen Sie, ob die Nova-Dienste automatisch gestartet werden "
-#~ "sollen, wenn die Maschine hochgefahren wird."
-
-#~ msgid ""
-#~ "Enter the IP address that will be set in the rabbitmq_host directive of "
-#~ "nova.conf. If you are installing openstack-proxy-node, then the default "
-#~ "to use 127.0.0.1 is probably fine. If you are installing openstack-"
-#~ "compute-node, then enter the IP address of your proxy-node host."
-#~ msgstr ""
-#~ "Geben Sie die IP-Adresse ein, die in der Direktive »rabbitmq_host« von "
-#~ "nova.conf gesetzt werden wird. Falls Sie »openstack-proxy-node« "
-#~ "installieren, ist die Verwendung der Standardeinstellung 127.0.0.1 "
-#~ "wahrscheinlich richtig. alls Sie »openstack-compute-node« installieren, "
-#~ "geben Sie die IP-Adresse Ihres »proxy-node«-Rechners ein."

@@ -1,6 +1,10 @@
 nova (2:16.0.3-10) unstable; urgency=medium
 
   * Add explicit dependency on e2fsprogs (Closes: #887212, #887188).
+  * Updated / added debconf templates translations:
+    - nl.po (Closes: #882650).
+    - de.po (Closes: #885161).
+    - fr.po (Closes: #886208).
 
  -- Thomas Goirand <zigo@debian.org>  Wed, 24 Jan 2018 13:37:16 +0100
 
