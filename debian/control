@@ -112,7 +112,6 @@ Build-Depends-Indep:
  python-tooz (>= 1.58.0),
  python-webob (>= 1.7.1),
  python-websockify,
- python-whereto,
  python-wsgi-intercept (>= 1.4.1),
  sqlite3,
  subunit,
