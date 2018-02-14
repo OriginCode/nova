@@ -22,7 +22,7 @@
             "host_ip": "%(ip)s",
             "free_disk_gb": 1028,
             "free_ram_mb": 7680,
-            "hypervisor_hostname": "fake-mini",
+            "hypervisor_hostname": "host2",
             "hypervisor_type": "fake",
             "hypervisor_version": 1000,
             "id": "%(hypervisor_id)s",
@@ -36,7 +36,7 @@
                 "id": "%(service_id)s",
                 "disabled_reason": null
             },
-            "vcpus": 1,
+            "vcpus": 2,
             "vcpus_used": 0
         }
     ],

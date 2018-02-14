@@ -21,9 +21,7 @@ operating system, and exposes functionality over a web-based API.
    configuring-migrations.rst
    cpu-topologies.rst
    default-ports.rst
-   euca2ools.rst
    evacuate.rst
-   flavors2.rst
    flavors.rst
    huge-pages.rst
    live-migration-usage.rst

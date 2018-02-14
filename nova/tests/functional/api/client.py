@@ -220,7 +220,7 @@ class TestOpenStackClient(object):
             headers['Content-Type'] = 'application/json'
             kwargs['body'] = jsonutils.dumps(body)
 
-        kwargs.setdefault('check_response_status', [200, 201, 202])
+        kwargs.setdefault('check_response_status', [200, 201, 202, 204])
         return APIResponse(self.api_request(relative_uri, **kwargs))
 
     def api_put(self, relative_uri, body, **kwargs):
@@ -439,6 +439,9 @@ class TestOpenStackClient(object):
         return self.api_get('/servers/%s/os-interface' %
                             (server_id)).body['interfaceAttachments']
 
+    def attach_interface(self, server_id, post):
+        return self.api_post('/servers/%s/os-interface' % server_id, post)
+
     def detach_interface(self, server_id, port_id):
         return self.api_delete('/servers/%s/os-interface/%s' %
                                (server_id, port_id))
@@ -457,6 +460,13 @@ class TestOpenStackClient(object):
 
     def post_keypair(self, keypair):
         return self.api_post('/os-keypairs', keypair).body['keypair']
+
+    def delete_keypair(self, keypair_name):
+        self.api_delete('/os-keypairs/%s' % keypair_name)
+
+    def post_aggregate_action(self, aggregate_id, body):
+        return self.api_post(
+            '/os-aggregates/%s/action' % aggregate_id, body).body['aggregate']
 
     def get_active_migrations(self, server_id):
         return self.api_get('/servers/%s/migrations' %

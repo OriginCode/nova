@@ -22,7 +22,7 @@ from oslo_utils import excutils
 
 from nova.db import base
 from nova import hooks
-from nova.i18n import _, _LE
+from nova.i18n import _
 from nova.network import model as network_model
 from nova import objects
 
@@ -56,7 +56,7 @@ def update_instance_cache_with_nw_info(impl, context, instance,
         instance.info_cache = ic
     except Exception:
         with excutils.save_and_reraise_exception():
-            LOG.exception(_LE('Failed storing info cache'), instance=instance)
+            LOG.exception('Failed storing info cache', instance=instance)
 
 
 def refresh_cache(f):
@@ -185,8 +185,7 @@ class NetworkAPI(base.Base):
 
     def allocate_for_instance(self, context, instance, vpn,
                               requested_networks, macs=None,
-                              security_groups=None,
-                              dhcp_options=None, bind_host_id=None):
+                              security_groups=None, bind_host_id=None):
         """Allocates all network structures for an instance.
 
         :param context: The request context.
@@ -199,11 +198,6 @@ class NetworkAPI(base.Base):
             with requested_networks which is user supplied).
         :param security_groups: None or security groups to allocate for
             instance.
-        :param dhcp_options: None or a set of key/value pairs that should
-            determine the DHCP BOOTP response, eg. for PXE booting an instance
-            configured with the baremetal hypervisor. It is expected that these
-            are already formatted for the neutron v2 api.
-            See nova/virt/driver.py:dhcp_options_for_instance for an example.
         :param bind_host_id: the host ID to attach to the ports being created.
         :returns: network info as from get_instance_nw_info() below
         """
@@ -339,12 +333,15 @@ class NetworkAPI(base.Base):
         """Finish migrating the network of an instance."""
         raise NotImplementedError()
 
-    def setup_instance_network_on_host(self, context, instance, host):
+    def setup_instance_network_on_host(self, context, instance, host,
+                                       migration=None):
         """Setup network for specified instance on host.
 
         :param context: The request context.
         :param instance: nova.objects.instance.Instance object.
         :param host: The host which network should be setup for instance.
+        :param migration: The migration object if the instance is being
+                          tracked with a migration.
         """
         raise NotImplementedError()
 
@@ -370,3 +367,6 @@ class NetworkAPI(base.Base):
         :param index: The index on the instance for the VIF.
         """
         pass
+
+    def has_substr_port_filtering_extension(self, context):
+        return False

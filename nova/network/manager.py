@@ -45,7 +45,7 @@ import six
 import nova.conf
 from nova import context
 from nova import exception
-from nova.i18n import _, _LI, _LE, _LW
+from nova.i18n import _
 from nova import ipv6
 from nova import manager
 from nova.network import api as network_api
@@ -63,6 +63,24 @@ from nova import utils
 LOG = logging.getLogger(__name__)
 
 CONF = nova.conf.CONF
+
+
+def get_my_linklocal(interface):
+    try:
+        if_str = utils.execute(
+            'ip', '-f', 'inet6', '-o', 'addr', 'show', interface)
+        condition = '\s+inet6\s+([0-9a-f:]+)/\d+\s+scope\s+link'
+        links = [re.search(condition, x) for x in if_str[0].split('\n')]
+        address = [w.group(1) for w in links if w is not None]
+        if address[0] is not None:
+            return address[0]
+        else:
+            msg = _('Link Local address is not found.:%s') % if_str
+            raise exception.NovaException(msg)
+    except Exception as ex:
+        msg = _("Couldn't get Link Local IP of %(interface)s"
+                " :%(ex)s") % {'interface': interface, 'ex': ex}
+        raise exception.NovaException(msg)
 
 
 class RPCAllocateFixedIP(object):
@@ -250,7 +268,7 @@ class NetworkManager(manager.Manager):
                           network['uuid'], self.host)
                 dev = self.driver.get_dev(network)
                 self.driver.update_dns(ctxt, dev, network)
-            LOG.info(_LI('Configured network %(network)s on host %(host)s'),
+            LOG.info('Configured network %(network)s on host %(host)s',
                      {'network': network['uuid'], 'host': self.host})
 
     @periodic_task.periodic_task
@@ -424,7 +442,7 @@ class NetworkManager(manager.Manager):
 
         net_info = self.get_instance_nw_info(admin_context, instance_uuid,
                                              rxtx_factor, host)
-        LOG.info(_LI("Allocated network: '%s' for instance"), net_info,
+        LOG.info("Allocated network: '%s' for instance", net_info,
                  instance_uuid=instance_uuid)
         return net_info
 
@@ -486,7 +504,7 @@ class NetworkManager(manager.Manager):
         # deallocate vifs (mac addresses)
         objects.VirtualInterface.delete_by_instance_uuid(
                 read_deleted_context, instance_uuid)
-        LOG.info(_LI("Network deallocated for instance (fixed IPs: '%s')"),
+        LOG.info("Network deallocated for instance (fixed IPs: '%s')",
                  fixed_ips, instance_uuid=instance_uuid)
 
     @messaging.expected_exceptions(exception.InstanceNotFound)
@@ -521,13 +539,13 @@ class NetworkManager(manager.Manager):
         for fixed_ip in fixed_ips:
             vif = fixed_ip.virtual_interface
             if not vif:
-                LOG.warning(_LW('No VirtualInterface for FixedIP: %s'),
-                         str(fixed_ip.address), instance_uuid=instance_uuid)
+                LOG.warning('No VirtualInterface for FixedIP: %s',
+                            str(fixed_ip.address), instance_uuid=instance_uuid)
                 continue
 
             if not fixed_ip.network:
-                LOG.warning(_LW('No Network for FixedIP: %s'),
-                         str(fixed_ip.address), instance_uuid=instance_uuid)
+                LOG.warning('No Network for FixedIP: %s',
+                            str(fixed_ip.address), instance_uuid=instance_uuid)
                 continue
 
             if vif.uuid in vifs:
@@ -756,17 +774,17 @@ class NetworkManager(manager.Manager):
 
         domainref = objects.DNSDomain.get_by_domain(context, instance_domain)
         if domainref is None:
-            LOG.warning(_LW('instance-dns-zone not found |%s|.'),
-                     instance_domain, instance=instance)
+            LOG.warning('instance-dns-zone not found |%s|.',
+                        instance_domain, instance=instance)
             return True
         dns_zone = domainref.availability_zone
 
         instance_zone = instance.get('availability_zone')
         if dns_zone and (dns_zone != instance_zone):
-            LOG.warning(_LW('instance-dns-zone is |%(domain)s|, '
-                            'which is in availability zone |%(zone)s|. '
-                            'Instance is in zone |%(zone2)s|. '
-                            'No DNS record will be created.'),
+            LOG.warning('instance-dns-zone is |%(domain)s|, '
+                        'which is in availability zone |%(zone)s|. '
+                        'Instance is in zone |%(zone2)s|. '
+                        'No DNS record will be created.',
                         {'domain': instance_domain,
                          'zone': dns_zone,
                          'zone2': instance_zone},
@@ -801,9 +819,9 @@ class NetworkManager(manager.Manager):
             quotas.check_deltas(context, {'fixed_ips': 1}, quota_project)
         except exception.OverQuota as exc:
             count = exc.kwargs['usages']['fixed_ips']
-            LOG.warning(_LW("Quota exceeded for project %(pid)s, tried to "
-                            "allocate fixed IP. %(used)s of %(allowed)s are "
-                            "in use or are already reserved."),
+            LOG.warning("Quota exceeded for project %(pid)s, tried to "
+                        "allocate fixed IP. %(used)s of %(allowed)s are "
+                        "in use or are already reserved.",
                         {'pid': quota_project, 'used': count,
                          'allowed': exc.kwargs['quotas']['fixed_ips']},
                         instance_uuid=instance_id)
@@ -865,10 +883,10 @@ class NetworkManager(manager.Manager):
                         # outermost catch-all except block.
                         count = exc.kwargs['usages']['fixed_ips']
                         allowed = exc.kwargs['quotas']['fixed_ips']
-                        LOG.warning(_LW("Quota exceeded for project %(pid)s, "
-                                        "tried to allocate fixed IP. %(used)s "
-                                        "of %(allowed)s are in use or are "
-                                        "already reserved."),
+                        LOG.warning("Quota exceeded for project %(pid)s, "
+                                    "tried to allocate fixed IP. %(used)s "
+                                    "of %(allowed)s are in use or are "
+                                    "already reserved.",
                                     {'pid': quota_project, 'used': count,
                                      'allowed': allowed},
                                     instance_uuid=instance_id)
@@ -922,9 +940,9 @@ class NetworkManager(manager.Manager):
                     try:
                         f()
                     except Exception:
-                        LOG.warning(_LW('Error cleaning up fixed IP '
-                                        'allocation. Manual cleanup may '
-                                        'be required.'), exc_info=True)
+                        LOG.warning('Error cleaning up fixed IP '
+                                    'allocation. Manual cleanup may '
+                                    'be required.', exc_info=True)
 
     def deallocate_fixed_ip(self, context, address, host=None, teardown=True,
             instance=None):
@@ -969,15 +987,15 @@ class NetworkManager(manager.Manager):
                 #             so we log a message to help track down
                 #             the possible race.
                 if not vif_id:
-                    LOG.info(_LI("Unable to release %s because vif "
-                                 "doesn't exist"), address)
+                    LOG.info("Unable to release %s because vif doesn't exist",
+                             address)
                     return
 
                 vif = objects.VirtualInterface.get_by_id(context, vif_id)
 
                 if not vif:
-                    LOG.info(_LI("Unable to release %s because vif "
-                                 "object doesn't exist"), address)
+                    LOG.info("Unable to release %s because vif "
+                             "object doesn't exist", address)
                     return
 
                 # NOTE(cfb): Call teardown before release_dhcp to ensure
@@ -997,8 +1015,8 @@ class NetworkManager(manager.Manager):
                     # release_dhcp on the local driver
                     self.driver.release_dhcp(dev, address, vif.address)
                 except exception.NetworkDhcpReleaseFailed:
-                    LOG.error(_LE("Error releasing DHCP for IP %(address)s"
-                                  " with MAC %(mac_address)s"),
+                    LOG.error("Error releasing DHCP for IP %(address)s"
+                              " with MAC %(mac_address)s",
                               {'address': address,
                                'mac_address': vif.address},
                               instance=instance)
@@ -1028,12 +1046,12 @@ class NetworkManager(manager.Manager):
         fixed_ip = objects.FixedIP.get_by_address(context, address)
 
         if fixed_ip.instance_uuid is None:
-            LOG.warning(_LW('IP %s leased that is not associated'), fixed_ip)
+            LOG.warning('IP %s leased that is not associated', fixed_ip)
             return
         fixed_ip.leased = True
         fixed_ip.save()
         if not fixed_ip.allocated:
-            LOG.warning(_LW('IP |%s| leased that isn\'t allocated'), fixed_ip,
+            LOG.warning('IP |%s| leased that isn\'t allocated', fixed_ip,
                         instance_uuid=fixed_ip.instance_uuid)
 
     def release_fixed_ip(self, context, address, mac=None):
@@ -1042,10 +1060,10 @@ class NetworkManager(manager.Manager):
         fixed_ip = objects.FixedIP.get_by_address(context, address)
 
         if fixed_ip.instance_uuid is None:
-            LOG.warning(_LW('IP %s released that is not associated'), fixed_ip)
+            LOG.warning('IP %s released that is not associated', fixed_ip)
             return
         if not fixed_ip.leased:
-            LOG.warning(_LW('IP %s released that was not leased'), fixed_ip,
+            LOG.warning('IP %s released that was not leased', fixed_ip,
                         instance_uuid=fixed_ip.instance_uuid)
         else:
             fixed_ip.leased = False
@@ -1067,11 +1085,11 @@ class NetworkManager(manager.Manager):
                     LOG.debug('Found VIF: %s', vif,
                               instance_uuid=fixed_ip.instance_uuid)
                     if vif.instance_uuid != fixed_ip.instance_uuid:
-                        LOG.info(_LI("Ignoring request to release fixed IP "
-                                     "%(address)s with MAC %(mac)s since it "
-                                     "is now associated with a new instance "
-                                     "that is in the process of allocating "
-                                     "it's network."),
+                        LOG.info("Ignoring request to release fixed IP "
+                                 "%(address)s with MAC %(mac)s since it "
+                                 "is now associated with a new instance "
+                                 "that is in the process of allocating "
+                                 "it's network.",
                                  {'address': address, 'mac': mac},
                                  instance_uuid=fixed_ip.instance_uuid)
                         return
@@ -1155,10 +1173,9 @@ class NetworkManager(manager.Manager):
                 each_subnet_size = fixnet.size / kwargs["num_networks"]
                 if each_subnet_size > CONF.network_size:
                     subnet = 32 - int(math.log(CONF.network_size, 2))
-                    oversize_msg = _LW(
+                    LOG.warning(
                         'Subnet(s) too large, defaulting to /%s.'
-                        '  To override, specify network_size flag.') % subnet
-                    LOG.warning(oversize_msg)
+                        '  To override, specify network_size flag.', subnet)
                     kwargs["network_size"] = CONF.network_size
                 else:
                     kwargs["network_size"] = fixnet.size
@@ -1817,7 +1834,7 @@ class FlatDHCPManager(RPCAllocateFixedIP, floating_ips.FloatingIP,
             self.driver.update_dhcp(elevated, dev, network)
             if CONF.use_ipv6:
                 self.driver.update_ra(context, dev, network)
-                gateway = utils.get_my_linklocal(dev)
+                gateway = get_my_linklocal(dev)
                 network.gateway_v6 = gateway
                 network.save()
 
@@ -2084,7 +2101,7 @@ class VlanManager(RPCAllocateFixedIP, floating_ips.FloatingIP, NetworkManager):
                 self.driver.update_dhcp(elevated, dev, network)
             if CONF.use_ipv6:
                 self.driver.update_ra(context, dev, network)
-                gateway = utils.get_my_linklocal(dev)
+                gateway = get_my_linklocal(dev)
                 network.gateway_v6 = gateway
                 network.save()
 

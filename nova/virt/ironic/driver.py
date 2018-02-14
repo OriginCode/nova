@@ -76,7 +76,7 @@ _UNPROVISION_STATES = (ironic_states.ACTIVE, ironic_states.DEPLOYFAIL,
 
 _NODE_FIELDS = ('uuid', 'power_state', 'target_power_state', 'provision_state',
                 'target_provision_state', 'last_error', 'maintenance',
-                'properties', 'instance_uuid')
+                'properties', 'instance_uuid', 'traits')
 
 # Console state checking interval in seconds
 _CONSOLE_STATE_CHECKING_INTERVAL = 1
@@ -132,7 +132,8 @@ class IronicDriver(virt_driver.ComputeDriver):
     capabilities = {"has_imagecache": False,
                     "supports_recreate": False,
                     "supports_migrate_to_same_host": False,
-                    "supports_attach_interface": True
+                    "supports_attach_interface": True,
+                    "supports_multiattach": False
                     }
 
     # Needed for exiting instances to have allocations for custom resource
@@ -140,6 +141,9 @@ class IronicDriver(virt_driver.ComputeDriver):
     # TODO(johngarbutt) we should remove this once the resource class
     # migration has been completed.
     requires_allocation_refresh = True
+
+    # This driver is capable of rebalancing nodes between computes.
+    rebalances_nodes = True
 
     def __init__(self, virtapi, read_only=False):
         super(IronicDriver, self).__init__(virtapi)
@@ -167,7 +171,11 @@ class IronicDriver(virt_driver.ComputeDriver):
         self._migrated_instance_uuids = set()
 
     def _get_node(self, node_uuid):
-        """Get a node by its UUID."""
+        """Get a node by its UUID.
+
+           Some methods pass in variables named nodename, but are
+           actually UUID's.
+        """
         return self.ironicclient.call('node.get', node_uuid,
                                       fields=_NODE_FIELDS)
 
@@ -635,7 +643,9 @@ class IronicDriver(virt_driver.ComputeDriver):
     def node_is_available(self, nodename):
         """Confirms a Nova hypervisor node exists in the Ironic inventory.
 
-        :param nodename: The UUID of the node.
+        :param nodename: The UUID of the node. Parameter is called nodename
+                         even though it is a UUID to keep method signature
+                         the same as inherited class.
         :returns: True if the node exists, False if not.
 
         """
@@ -648,12 +658,15 @@ class IronicDriver(virt_driver.ComputeDriver):
         if not self.node_cache:
             # Empty cache, try to populate it.
             self._refresh_cache()
+
+        # nodename is the ironic node's UUID.
         if nodename in self.node_cache:
             return True
 
         # NOTE(comstud): Fallback and check Ironic. This case should be
         # rare.
         try:
+            # nodename is the ironic node's UUID.
             self._get_node(nodename)
             return True
         except ironic.exc.NotFound:
@@ -749,6 +762,7 @@ class IronicDriver(virt_driver.ComputeDriver):
         """Return a dict, keyed by resource class, of inventory information for
         the supplied node.
         """
+        # nodename is the ironic node's UUID.
         node = self._node_from_cache(nodename)
         # TODO(jaypipes): Completely remove the reporting of VCPU, MEMORY_MB,
         # and DISK_GB resource classes in early Queens when Ironic nodes will
@@ -799,6 +813,15 @@ class IronicDriver(virt_driver.ComputeDriver):
 
         return result
 
+    def get_traits(self, nodename):
+        """Get the traits for a given node.
+
+        :param nodename: the UUID of the node.
+        :returns: an iterable of traits for the supplied node.
+        """
+        node = self._node_from_cache(nodename)
+        return list(node.traits)
+
     def get_available_resource(self, nodename):
         """Retrieve resource information.
 
@@ -817,23 +840,24 @@ class IronicDriver(virt_driver.ComputeDriver):
             # cache, let's try to populate it.
             self._refresh_cache()
 
+        # nodename is the ironic node's UUID.
         node = self._node_from_cache(nodename)
         return self._node_resource(node)
 
-    def _node_from_cache(self, nodename):
+    def _node_from_cache(self, node_uuid):
         """Returns a node from the cache, retrieving the node from Ironic API
         if the node doesn't yet exist in the cache.
         """
         cache_age = time.time() - self.node_cache_time
-        if nodename in self.node_cache:
+        if node_uuid in self.node_cache:
             LOG.debug("Using cache for node %(node)s, age: %(age)s",
-                      {'node': nodename, 'age': cache_age})
-            return self.node_cache[nodename]
+                      {'node': node_uuid, 'age': cache_age})
+            return self.node_cache[node_uuid]
         else:
             LOG.debug("Node %(node)s not found in cache, age: %(age)s",
-                      {'node': nodename, 'age': cache_age})
-            node = self._get_node(nodename)
-            self.node_cache[nodename] = node
+                      {'node': node_uuid, 'age': cache_age})
+            node = self._get_node(node_uuid)
+            self.node_cache[node_uuid] = node
             return node
 
     def get_info(self, instance):
@@ -843,7 +867,7 @@ class IronicDriver(virt_driver.ComputeDriver):
         with) NOSTATE and all resources == 0.
 
         :param instance: the instance object.
-        :returns: a InstanceInfo object
+        :returns: an InstanceInfo object
         """
         try:
             node = self._validate_instance_and_node(instance)
@@ -866,10 +890,7 @@ class IronicDriver(virt_driver.ComputeDriver):
                         {'instance': instance.uuid,
                          'node': instance.node})
 
-        return hardware.InstanceInfo(state=map_power_state(node.power_state),
-                                     max_mem_kb=memory_kib,
-                                     mem_kb=memory_kib,
-                                     num_cpu=num_cpu)
+        return hardware.InstanceInfo(state=map_power_state(node.power_state))
 
     def deallocate_networks_on_reschedule(self, instance):
         """Does the driver want networks deallocated on reschedule?
@@ -981,7 +1002,8 @@ class IronicDriver(virt_driver.ComputeDriver):
                 return base64.b64encode(compressed.read())
 
     def spawn(self, context, instance, image_meta, injected_files,
-              admin_password, network_info=None, block_device_info=None):
+              admin_password, allocations, network_info=None,
+              block_device_info=None):
         """Deploy an instance.
 
         :param context: The security context.
@@ -991,6 +1013,10 @@ class IronicDriver(virt_driver.ComputeDriver):
         :param injected_files: User files to inject into instance.
         :param admin_password: Administrator password to set in
             instance.
+        :param allocations: Information about resources allocated to the
+                            instance via placement, of the form returned by
+                            SchedulerReportClient.get_allocations_for_consumer.
+                            Ignored by this driver.
         :param network_info: Instance network information.
         :param block_device_info: Instance block device
             information.
@@ -1046,7 +1072,6 @@ class IronicDriver(virt_driver.ComputeDriver):
 
         # prepare for the deploy
         try:
-            self._plug_vifs(node, instance, network_info)
             self._start_firewall(instance, network_info)
         except Exception:
             with excutils.save_and_reraise_exception():
@@ -1430,6 +1455,7 @@ class IronicDriver(virt_driver.ComputeDriver):
         :param network_info: Instance network information.
 
         """
+        # instance.node is the ironic node's UUID.
         node = self._get_node(instance.node)
         self._plug_vifs(node, instance, network_info)
 
@@ -1440,6 +1466,7 @@ class IronicDriver(virt_driver.ComputeDriver):
         :param network_info: Instance network information.
 
         """
+        # instance.node is the ironic node's UUID.
         node = self._get_node(instance.node)
         self._unplug_vifs(node, instance, network_info)
 
@@ -1482,7 +1509,7 @@ class IronicDriver(virt_driver.ComputeDriver):
         self.unplug_vifs(instance, [vif])
 
     def rebuild(self, context, instance, image_meta, injected_files,
-                admin_password, bdms, detach_block_devices,
+                admin_password, allocations, bdms, detach_block_devices,
                 attach_block_devices, network_info=None,
                 recreate=False, block_device_info=None,
                 preserve_ephemeral=False):
@@ -1501,10 +1528,13 @@ class IronicDriver(virt_driver.ComputeDriver):
         :param image_meta: Image object returned by nova.image.glance
             that defines the image from which to boot this instance. Ignored
             by this driver.
-        :param injected_files: User files to inject into instance. Ignored
-            by this driver.
+        :param injected_files: User files to inject into instance.
         :param admin_password: Administrator password to set in
             instance. Ignored by this driver.
+        :param allocations: Information about resources allocated to the
+                            instance via placement, of the form returned by
+                            SchedulerReportClient.get_allocations_for_consumer.
+                            Ignored by this driver.
         :param bdms: block-device-mappings to use for rebuild. Ignored
             by this driver.
         :param detach_block_devices: function to detach block devices. See
@@ -1535,10 +1565,33 @@ class IronicDriver(virt_driver.ComputeDriver):
         self._add_instance_info_to_node(node, instance, image_meta,
                                         instance.flavor, preserve_ephemeral)
 
+        # Config drive
+        configdrive_value = None
+        if configdrive.required_by(instance):
+            extra_md = {}
+            if admin_password:
+                extra_md['admin_pass'] = admin_password
+
+            try:
+                configdrive_value = self._generate_configdrive(
+                    context, instance, node, network_info, extra_md=extra_md,
+                    files=injected_files)
+            except Exception as e:
+                with excutils.save_and_reraise_exception():
+                    msg = ("Failed to build configdrive: %s" %
+                           six.text_type(e))
+                    LOG.error(msg, instance=instance)
+                    raise exception.InstanceDeployFailure(msg)
+
+            LOG.info("Config drive for instance %(instance)s on "
+                     "baremetal node %(node)s created.",
+                     {'instance': instance['uuid'], 'node': node_uuid})
+
         # Trigger the node rebuild/redeploy.
         try:
             self.ironicclient.call("node.set_provision_state",
-                              node_uuid, ironic_states.REBUILD)
+                              node_uuid, ironic_states.REBUILD,
+                              configdrive=configdrive_value)
         except (exception.NovaException,         # Retry failed
                 ironic.exc.InternalServerError,  # Validations
                 ironic.exc.BadRequest) as e:     # Maintenance
@@ -1738,6 +1791,44 @@ class IronicDriver(virt_driver.ComputeDriver):
     def need_legacy_block_device_info(self):
         return False
 
+    def prepare_networks_before_block_device_mapping(self, instance,
+                                                     network_info):
+        """Prepare networks before the block devices are mapped to instance.
+
+        Plug VIFs before block device preparation. In case where storage
+        network is managed by neutron and a MAC address is specified as a
+        volume connector to a node, we can get the IP address assigned to
+        the connector. An IP address of volume connector may be required by
+        some volume backend drivers. For getting the IP address, VIFs need to
+        be plugged before block device preparation so that a VIF is assigned to
+        a MAC address.
+        """
+
+        try:
+            self.plug_vifs(instance, network_info)
+        except Exception:
+            with excutils.save_and_reraise_exception():
+                LOG.error("Error preparing deploy for instance "
+                          "%(instance)s on baremetal node %(node)s.",
+                          {'instance': instance.uuid,
+                           'node': instance.node},
+                          instance=instance)
+
+    def clean_networks_preparation(self, instance, network_info):
+        """Clean networks preparation when block device mapping is failed.
+
+        Unplug VIFs when block device preparation is failed.
+        """
+
+        try:
+            self.unplug_vifs(instance, network_info)
+        except Exception as e:
+            LOG.warning('Error detaching VIF from node %(node)s '
+                        'after deploy failed; %(reason)s',
+                        {'node': instance.node,
+                         'reason': six.text_type(e)},
+                        instance=instance)
+
     def get_volume_connector(self, instance):
         """Get connector information for the instance for attaching to volumes.
 
@@ -1753,8 +1844,14 @@ class IronicDriver(virt_driver.ComputeDriver):
                 'host': hostname
             }
 
+        An IP address is set if a volume connector with type ip is assigned to
+        a node. An IP address is also set if a node has a volume connector with
+        type mac. An IP address is got from a VIF attached to an ironic port
+        or portgroup with the MAC address. Otherwise, an IP address of one
+        of VIFs is used.
+
         :param instance: nova instance
-        :returns: A connector information dictionary
+        :return: A connector information dictionary
         """
         node = self.ironicclient.call("node.get", instance.node)
         properties = self._parse_node_properties(node)
@@ -1765,8 +1862,13 @@ class IronicDriver(virt_driver.ComputeDriver):
             values.setdefault(conn.type, []).append(conn.connector_id)
         props = {}
 
-        if values.get('ip'):
-            props['ip'] = props['host'] = values['ip'][0]
+        ip = self._get_volume_connector_ip(instance, node, values)
+        if ip:
+            LOG.debug('Volume connector IP address for node %(node)s is '
+                      '%(ip)s.',
+                      {'node': node.uuid, 'ip': ip},
+                      instance=instance)
+            props['ip'] = props['host'] = ip
         if values.get('iqn'):
             props['initiator'] = values['iqn'][0]
         if values.get('wwpn'):
@@ -1780,3 +1882,56 @@ class IronicDriver(virt_driver.ComputeDriver):
         # we should at least set the value to False.
         props['multipath'] = False
         return props
+
+    def _get_volume_connector_ip(self, instance, node, values):
+        if values.get('ip'):
+            LOG.debug('Node %s has an IP address for volume connector',
+                      node.uuid, instance=instance)
+            return values['ip'][0]
+
+        vif_id = self._get_vif_from_macs(node, values.get('mac', []), instance)
+
+        # retrieve VIF and get the IP address
+        nw_info = instance.get_network_info()
+        if vif_id:
+            fixed_ips = [ip for vif in nw_info if vif['id'] == vif_id
+                         for ip in vif.fixed_ips()]
+        else:
+            fixed_ips = [ip for vif in nw_info for ip in vif.fixed_ips()]
+        fixed_ips_v4 = [ip for ip in fixed_ips if ip['version'] == 4]
+        if fixed_ips_v4:
+            return fixed_ips_v4[0]['address']
+        elif fixed_ips:
+            return fixed_ips[0]['address']
+        return None
+
+    def _get_vif_from_macs(self, node, macs, instance):
+        """Get a VIF from specified MACs.
+
+        Retrieve ports and portgroups which have specified MAC addresses and
+        return a UUID of a VIF attached to a port or a portgroup found first.
+
+        :param node: The node object.
+        :param mac: A list of MAC addresses of volume connectors.
+        :param instance: nova instance, used for logging.
+        :return: A UUID of a VIF assigned to one of the MAC addresses.
+        """
+        for mac in macs:
+            for method in ['portgroup.list', 'port.list']:
+                ports = self.ironicclient.call(method,
+                                               node=node.uuid,
+                                               address=mac,
+                                               detail=True)
+                for p in ports:
+                    vif_id = (p.internal_info.get('tenant_vif_port_id') or
+                              p.extra.get('vif_port_id'))
+                    if vif_id:
+                        LOG.debug('VIF %(vif)s for volume connector is '
+                                  'retrieved with MAC %(mac)s of node '
+                                  '%(node)s',
+                                  {'vif': vif_id,
+                                   'mac': mac,
+                                   'node': node.uuid},
+                                  instance=instance)
+                        return vif_id
+        return None

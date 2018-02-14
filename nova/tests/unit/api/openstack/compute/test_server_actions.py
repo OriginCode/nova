@@ -17,13 +17,13 @@ import mock
 from oslo_utils import uuidutils
 import webob
 
-from nova.api.openstack.compute import extension_info
 from nova.api.openstack.compute import servers as servers_v21
 from nova.compute import api as compute_api
 from nova.compute import task_states
 from nova.compute import vm_states
 import nova.conf
 from nova import exception
+from nova import image
 from nova.image import glance
 from nova import objects
 from nova import test
@@ -96,9 +96,10 @@ class ServerActionsControllerTestV21(test.TestCase):
         self.req = fakes.HTTPRequest.blank('')
         self.context = self.req.environ['nova.context']
 
+        self.image_api = image.API()
+
     def _get_controller(self):
-        ext_info = extension_info.LoadedExtensionInfo()
-        return self.servers.ServersController(extension_info=ext_info)
+        return self.servers.ServersController()
 
     def _set_fake_extension(self):
         pass
@@ -898,8 +899,8 @@ class ServerActionsControllerTestV21(test.TestCase):
 
         location = response.headers['Location']
         self.assertEqual(self.image_url + '123' if self.image_url else
-                         glance.generate_image_url('123'),
-                         location)
+            self.image_api.generate_image_url('123', self.context),
+            location)
 
     def test_create_image_v2_45(self):
         """Tests the createImage server action API with the 2.45 microversion
@@ -1000,7 +1001,8 @@ class ServerActionsControllerTestV21(test.TestCase):
 
             location = response.headers['Location']
             image_id = location.replace(self.image_url or
-                                        glance.generate_image_url(''), '')
+                 self.image_api.generate_image_url('', self.context),
+                                        '')
             image = image_service.show(None, image_id)
 
             self.assertEqual(image['name'], 'snapshot_of_volume_backed')
@@ -1147,7 +1149,7 @@ class ServerActionsControllerTestV21(test.TestCase):
 
         location = response.headers['Location']
         self.assertEqual(self.image_url + '123' if self.image_url else
-                            glance.generate_image_url('123'), location)
+            self.image_api.generate_image_url('123', self.context), location)
 
     def test_create_image_with_too_much_metadata(self):
         body = {

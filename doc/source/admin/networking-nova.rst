@@ -129,9 +129,6 @@ single ``nova-network`` service provides a default gateway for VMs and hosts a
 single DHCP server (dnsmasq). In multi-host mode, each compute node runs its
 own ``nova-network`` service. In both cases, all traffic between VMs and the
 internet flows through ``nova-network``. Each mode has benefits and drawbacks.
-For more on this, see the Network Topology section in the `OpenStack Operations
-Guide
-<https://docs.openstack.org/ops-guide/arch-network-design.html#network-topology>`__.
 
 All networking options require network connectivity to be already set up
 between OpenStack physical nodes. OpenStack does not configure any physical
@@ -191,9 +188,7 @@ configuration option:
    dnsmasq_config_file=/etc/dnsmasq-nova.conf
 
 For more information about creating a dnsmasq configuration file, see the
-`OpenStack Configuration Reference
-<https://docs.openstack.org/ocata/config-reference/>`__, and `the dnsmasq
-documentation
+:doc:`/configuration/config`, and `the dnsmasq documentation
 <http://www.thekelleys.org.uk/dnsmasq/docs/dnsmasq.conf.example>`__.
 
 Dnsmasq also acts as a caching DNS server for instances. You can specify the
@@ -310,6 +305,8 @@ command:
      - (StrOpt) Backend to use for IPv6 generation
    * - use_ipv6 = False
      - (BoolOpt) Use IPv6
+
+.. _metadata-service:
 
 Metadata service
 ~~~~~~~~~~~~~~~~
@@ -525,14 +522,12 @@ Enable ping and SSH on VMs
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 You need to enable ``ping`` and ``ssh`` on your VMs for network access.  This
-can be done with either the :command:`nova` or :command:`euca2ools` commands.
+can be done with the :command:`openstack` command.
 
 .. note::
 
    Run these commands as root only if the credentials used to interact with
-   ``nova-api`` are in ``/root/.bashrc``. If the EC2 credentials in the
-   ``.bashrc`` file are for an unprivileged user, you must run these commands
-   as that user instead.
+   ``nova-api`` are in ``/root/.bashrc``.
 
 Enable ping and SSH with :command:`openstack security group rule create`
 commands:
@@ -541,13 +536,6 @@ commands:
 
    $ openstack security group rule create --protocol icmp default
    $ openstack security group rule create --protocol tcp --dst-port 22:22 default
-
-Enable ping and SSH with ``euca2ools``:
-
-.. code-block:: console
-
-   $ euca-authorize -P icmp -t -1:-1 -s 0.0.0.0/0 default
-   $ euca-authorize -P tcp -p 22 -s 0.0.0.0/0 default
 
 If you have run these commands and still cannot ping or SSH your instances,
 check the number of running ``dnsmasq`` processes, there should be two. If not,
@@ -564,7 +552,8 @@ Configure public (floating) IP addresses
 This section describes how to configure floating IP addresses with
 ``nova-network``. For information about doing this with OpenStack Networking,
 see `L3-routing-and-NAT
-<https://docs.openstack.org/admin-guide/networking-adv-features.html#l3-routing-and-nat>`_.
+<https://docs.openstack.org/neutron/latest/admin/archives/adv-features.html
+#l3-routing-and-nat>`_.
 
 Private and public IP addresses
 -------------------------------
@@ -706,9 +695,9 @@ perform floating IP operations:
      # openstack floating ip delete CIDR
 
 For more information about how administrators can associate floating IPs with
-instances, see `Manage IP addresses
-<https://docs.openstack.org/admin-guide/cli-admin-manage-ip-addresses.html>`__
-in the OpenStack Administrator Guide.
+instances, see `ip floating
+<https://docs.openstack.org/python-openstackclient/latest/cli/command-objects/
+ip-floating.html>`__ in the python-openstackclient User Documentation.
 
 Automatically add floating IPs
 ------------------------------
@@ -904,7 +893,7 @@ Temporarily disable firewall
 Problem
 -------
 
-Networking issues prevent administrators accessing or reaching VM's through
+Networking issues prevent administrators accessing or reaching VMs through
 various pathways.
 
 Solution
@@ -1004,10 +993,11 @@ Solution
 --------
 
 Try loading the ``vhost_net`` kernel module as a workaround for this issue (see
-`bug #997978
-<https://bugs.launchpad.net/ubuntu/+source/libvirt/+bug/997978/>`__) . This
-kernel module may also `improve network performance
-<http://www.linux-kvm.org/page/VhostNet>`__ on KVM. To load the kernel module:
+`bug #997978`_) . This kernel module may also `improve network performance`_
+on KVM. To load the kernel module:
+
+.. _`bug #997978`: https://bugs.launchpad.net/ubuntu/+source/libvirt/+bug/997978/
+.. _`improve network performance`: http://www.linux-kvm.org/page/VhostNet
 
 .. code-block:: console
 

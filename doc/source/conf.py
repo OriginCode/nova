@@ -45,6 +45,8 @@ extensions = ['sphinx.ext.autodoc',
               'oslo_policy.sphinxext',
               'ext.versioned_notifications',
               'ext.feature_matrix',
+              'sphinxcontrib.actdiag',
+              'sphinxcontrib.seqdiag',
               ]
 
 # openstackdocstheme options
@@ -57,6 +59,12 @@ sample_config_basename = '_static/nova'
 
 policy_generator_config_file = '../../etc/nova/nova-policy-generator.conf'
 sample_policy_basename = '_static/nova'
+
+actdiag_html_image_format = 'SVG'
+actdiag_antialias = True
+
+seqdiag_html_image_format = 'SVG'
+seqdiag_antialias = True
 
 todo_include_todos = True
 
@@ -115,7 +123,6 @@ _man_pages = [
     ('nova-console', u'Cloud controller fabric'),
     ('nova-consoleauth', u'Cloud controller fabric'),
     ('nova-dhcpbridge', u'Cloud controller fabric'),
-    ('nova-idmapshift', u'Cloud controller fabric'),
     ('nova-manage', u'Cloud controller fabric'),
     ('nova-network', u'Cloud controller fabric'),
     ('nova-novncproxy', u'Cloud controller fabric'),
@@ -159,3 +166,58 @@ latex_documents = [
     ('index', 'Nova.tex', u'Nova Documentation',
      u'OpenStack Foundation', 'manual'),
 ]
+
+# -- Custom extensions --------------------------------------------------------
+
+
+def monkey_patch_blockdiag():
+    """Monkey patch the blockdiag library.
+
+    The default word wrapping in blockdiag is poor, and breaks on a fixed
+    text width rather than on word boundaries. There's a patch submitted to
+    resolve this [1]_ but it's unlikely to merge anytime soon.
+
+    TODO: Remove this once blockdiag is bumped to 1.6, which will hopefully
+    include the fix.
+
+    .. [1] https://bitbucket.org/blockdiag/blockdiag/pull-requests/16/
+    """
+    from blockdiag.imagedraw import textfolder
+
+    def splitlabel(text):
+        """Split text to lines as generator.
+
+        Every line will be stripped. If text includes characters "\n\n", treat
+        as line separator. Ignore '\n' to allow line wrapping.
+        """
+        lines = [x.strip() for x in text.splitlines()]
+        out = []
+
+        for line in lines:
+            if line:
+                out.append(line)
+            else:
+                yield ' '.join(out)
+                out = []
+
+        yield ' '.join(out)
+
+    def splittext(metrics, text, bound, measure='width'):
+        folded = [' ']
+        for word in text.split():
+            # Try appending the word to the last line
+            tryline = ' '.join([folded[-1], word]).strip()
+            textsize = metrics.textsize(tryline)
+            if getattr(textsize, measure) > bound:
+                # Start a new line. Appends `word` even if > bound.
+                folded.append(word)
+            else:
+                folded[-1] = tryline
+        return folded
+
+    # monkey patch those babies
+    textfolder.splitlabel = splitlabel
+    textfolder.splittext = splittext
+
+
+monkey_patch_blockdiag()

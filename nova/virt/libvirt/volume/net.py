@@ -77,14 +77,14 @@ class LibvirtNetVolumeDriver(libvirt_volume.LibvirtBaseVolumeDriver):
         elif CONF.libvirt.rbd_secret_uuid:
             # Anyone relying on falling back to nova config is probably having
             # this work accidentally and we'll remove that support in the
-            # 16.0.0 Pike release.
+            # 17.0.0 Queens release.
             # NOTE(mriedem): We'll have to be extra careful about this in case
             # the reason we got here is due to an old volume connection created
             # before we started preferring the Cinder settings in Ocata.
             LOG.warning('Falling back to Nova configuration values for '
                         'RBD authentication. Cinder should be configured '
                         'for auth with Ceph volumes. This fallback will '
-                        'be dropped in the Nova 16.0.0 Pike release.')
+                        'be dropped in the Nova 17.0.0 Queens release.')
             # use the nova config values
             conf.auth_username = CONF.libvirt.rbd_user
             conf.auth_secret_uuid = CONF.libvirt.rbd_secret_uuid
@@ -127,8 +127,8 @@ class LibvirtNetVolumeDriver(libvirt_volume.LibvirtBaseVolumeDriver):
             self._set_auth_config_iscsi(conf, netdisk_properties)
         return conf
 
-    def disconnect_volume(self, connection_info, disk_dev, instance):
+    def disconnect_volume(self, connection_info, instance):
         """Detach the volume from instance_name."""
         super(LibvirtNetVolumeDriver,
-              self).disconnect_volume(connection_info, disk_dev, instance)
+              self).disconnect_volume(connection_info, instance)
         self._delete_secret_by_name(connection_info)

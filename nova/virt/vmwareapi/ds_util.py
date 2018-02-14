@@ -169,7 +169,9 @@ def _get_allowed_datastores(data_stores, datastore_regex):
                                datastore_regex,
                                ALL_SUPPORTED_DS_TYPES):
             allowed.append(ds_obj.Datastore(ref=obj_content.obj,
-                                            name=propdict['summary.name']))
+                                    name=propdict['summary.name'],
+                                    capacity=propdict['summary.capacity'],
+                                    freespace=propdict['summary.freeSpace']))
 
     return allowed
 
@@ -188,7 +190,8 @@ def get_available_datastores(session, cluster=None, datastore_regex=None):
             "get_properties_for_a_collection_of_objects",
             "Datastore", data_store_mors,
             ["summary.type", "summary.name", "summary.accessible",
-            "summary.maintenanceMode"])
+             "summary.maintenanceMode", "summary.capacity",
+             "summary.freeSpace"])
 
     allowed = []
     while data_stores:
@@ -456,8 +459,8 @@ def _filter_datastores_matching_storage_policy(session, data_stores,
 
 def _update_datacenter_cache_from_objects(session, dcs):
     """Updates the datastore/datacenter cache."""
-    while dcs:
-        for dco in dcs.objects:
+    with vutil.WithRetrieval(session.vim, dcs) as dc_objs:
+        for dco in dc_objs:
             dc_ref = dco.obj
             ds_refs = []
             prop_dict = vm_util.propset_dict(dco.propSet)
@@ -474,7 +477,6 @@ def _update_datacenter_cache_from_objects(session, dcs):
             for ds_ref in ds_refs:
                 _DS_DC_MAPPING[ds_ref] = DcInfo(ref=dc_ref, name=name,
                                                 vmFolder=vmFolder)
-        dcs = session._call_method(vutil, 'continue_retrieval', dcs)
 
 
 def get_dc_info(session, ds_ref):

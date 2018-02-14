@@ -24,13 +24,11 @@ from oslo_context import context as common_context
 from oslo_log import log
 from oslo_utils import excutils
 from oslo_utils import timeutils
-import six
 
 import nova.conf
 import nova.context
 from nova import exception
-from nova.i18n import _LE
-from nova.image import glance
+from nova import image as image_api
 from nova import network
 from nova.network import model as network_model
 from nova.notifications.objects import base as notification_base
@@ -47,6 +45,8 @@ LOG = log.getLogger(__name__)
 CONF = nova.conf.CONF
 
 
+# TODO(mriedem): Remove this when CONF.monkey_patch, CONF.monkey_patch_modules
+# and CONF.default_publisher_id are removed in Rocky.
 def notify_decorator(name, fn):
     """Decorator for notify which is used from utils.monkey_patch().
 
@@ -78,21 +78,6 @@ def notify_decorator(name, fn):
 
         return fn(*args, **kwarg)
     return wrapped_func
-
-
-def send_api_fault(url, status, exception):
-    """Send an api.fault notification."""
-
-    if not CONF.notifications.notify_on_api_faults:
-        return
-
-    payload = {'url': url, 'exception': six.text_type(exception),
-               'status': status}
-
-    rpc.get_notifier('api').error(common_context.get_current() or
-                                  nova.context.get_admin_context(),
-                                  'api.fault',
-                                  payload)
 
 
 def send_update(context, old_instance, new_instance, service="compute",
@@ -142,8 +127,8 @@ def send_update(context, old_instance, new_instance, service="compute",
                       'instance could not be found and was most likely '
                       'deleted.', instance=new_instance)
         except Exception:
-            LOG.exception(_LE("Failed to send state update notification"),
-                    instance=new_instance)
+            LOG.exception("Failed to send state update notification",
+                          instance=new_instance)
 
 
 def send_update_with_states(context, instance, old_vm_state, new_vm_state,
@@ -185,8 +170,8 @@ def send_update_with_states(context, instance, old_vm_state, new_vm_state,
                       'instance could not be found and was most likely '
                       'deleted.', instance=instance)
         except Exception:
-            LOG.exception(_LE("Failed to send state update notification"),
-                    instance=instance)
+            LOG.exception("Failed to send state update notification",
+                          instance=instance)
 
 
 def _compute_states_payload(instance, old_vm_state=None,
@@ -238,7 +223,7 @@ def send_instance_update_notification(context, instance, old_vm_state=None,
     payload["audit_period_ending"] = null_safe_isotime(audit_end)
 
     # add bw usage info:
-    bw = bandwidth_usage(instance, audit_start)
+    bw = bandwidth_usage(context, instance, audit_start)
     payload["bandwidth"] = bw
 
     # add old display name if it is changed
@@ -254,7 +239,7 @@ def send_instance_update_notification(context, instance, old_vm_state=None,
 @rpc.if_notifications_enabled
 def _send_versioned_instance_update(context, instance, payload, host, service):
 
-    def _map_legacy_service_to_binary(legacy_service):
+    def _map_legacy_service_to_source(legacy_service):
         if not legacy_service.startswith('nova-'):
             return 'nova-' + service
         else:
@@ -290,7 +275,7 @@ def _send_versioned_instance_update(context, instance, payload, host, service):
             action=fields.NotificationAction.UPDATE),
         publisher=notification_base.NotificationPublisher(
                 host=host or CONF.host,
-                binary=_map_legacy_service_to_binary(service)),
+                source=_map_legacy_service_to_source(service)),
         payload=versioned_payload)
     notification.emit(context)
 
@@ -314,12 +299,12 @@ def audit_period_bounds(current_period=False):
     return (audit_start, audit_end)
 
 
-def bandwidth_usage(instance_ref, audit_start,
+def bandwidth_usage(context, instance_ref, audit_start,
         ignore_missing_network_data=True):
     """Get bandwidth usage information for the instance for the
     specified audit period.
     """
-    admin_context = nova.context.get_admin_context(read_deleted='yes')
+    admin_context = context.elevated(read_deleted='yes')
 
     def _get_nwinfo_old_skool():
         """Support for getting network info without objects."""
@@ -335,7 +320,7 @@ def bandwidth_usage(instance_ref, audit_start,
         except Exception:
             try:
                 with excutils.save_and_reraise_exception():
-                    LOG.exception(_LE('Failed to get nw_info'),
+                    LOG.exception('Failed to get nw_info',
                                   instance=instance_ref)
             except Exception:
                 if ignore_missing_network_data:
@@ -409,7 +394,8 @@ def info_from_instance(context, instance, network_info,
         modifications.
 
     """
-    image_ref_url = glance.generate_image_url(instance.image_ref)
+    image_ref_url = image_api.API().generate_image_url(instance.image_ref,
+                                                       context)
 
     instance_type = instance.get_flavor()
     instance_type_name = instance_type.get('name', '')

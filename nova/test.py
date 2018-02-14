@@ -29,6 +29,7 @@ import contextlib
 import copy
 import datetime
 import inspect
+import itertools
 import os
 import pprint
 import sys
@@ -209,6 +210,9 @@ class TestCase(testtools.TestCase):
     USES_DB_SELF = False
     REQUIRES_LOCKING = False
 
+    # Setting to True makes the test use the RPCFixture.
+    STUB_RPC = True
+
     # The number of non-cell0 cells to create. This is only used in the
     # base class when USES_DB is True.
     NUMBER_OF_CELLS = 1
@@ -226,7 +230,8 @@ class TestCase(testtools.TestCase):
         self.useFixture(fixtures.TempHomeDir())
         self.useFixture(log_fixture.get_logging_handle_error_fixture())
 
-        self.useFixture(nova_fixtures.OutputStreamCapture())
+        self.output = nova_fixtures.OutputStreamCapture()
+        self.useFixture(self.output)
 
         self.stdlog = nova_fixtures.StandardLogging()
         self.useFixture(self.stdlog)
@@ -250,7 +255,9 @@ class TestCase(testtools.TestCase):
                                 group='oslo_concurrency')
 
         self.useFixture(conf_fixture.ConfFixture(CONF))
-        self.useFixture(nova_fixtures.RPCFixture('nova.test'))
+
+        if self.STUB_RPC:
+            self.useFixture(nova_fixtures.RPCFixture('nova.test'))
 
         # we cannot set this in the ConfFixture as oslo only registers the
         # notification opts at the first instantiation of a Notifier that
@@ -301,8 +308,9 @@ class TestCase(testtools.TestCase):
         # caching of that value.
         utils._IS_NEUTRON = None
 
-        # Reset the traits sync flag
+        # Reset the traits sync and rc cache flags
         objects.resource_provider._TRAITS_SYNCED = False
+        objects.resource_provider._RC_CACHE = None
         # Reset the global QEMU version flag.
         images.QEMU_VERSION = None
 
@@ -318,6 +326,9 @@ class TestCase(testtools.TestCase):
         openstack_driver.DRIVER_CACHE = {}
 
         self.useFixture(nova_fixtures.ForbidNewLegacyNotificationFixture())
+
+        # NOTE(mikal): make sure we don't load a privsep helper accidentally
+        self.useFixture(nova_fixtures.PrivsepNoHelperFixture())
 
     def _setup_cells(self):
         """Setup a normal cellsv2 environment.
@@ -412,6 +423,26 @@ class TestCase(testtools.TestCase):
 
         return svc.service
 
+    def restart_compute_service(self, compute):
+        """Restart a compute service in a realistic way.
+
+        :param:compute: the nova-compute service to be restarted
+        """
+
+        # NOTE(gibi): The service interface cannot be used to simulate a real
+        # service restart as the manager object will not be recreated after a
+        # service.stop() and service.start() therefore the manager state will
+        # survive. For example the resource tracker will not be recreated after
+        # a stop start. The service.kill() call cannot help as it deletes
+        # the service from the DB which is unrealistic and causes that some
+        # operation that refers to the killed host (e.g. evacuate) fails.
+        # So this helper method tries to simulate a better compute service
+        # restart by cleaning up some of the internal state of the compute
+        # manager.
+        compute.stop()
+        compute.manager._resource_tracker = None
+        compute.start()
+
     def assertJsonEqual(self, expected, observed, message=''):
         """Asserts that 2 complex data structures are json equivalent.
 
@@ -446,7 +477,15 @@ class TestCase(testtools.TestCase):
             if isinstance(expected, dict) and isinstance(observed, dict):
                 self.assertEqual(
                     len(expected), len(observed),
-                    'path: %s. Dict lengths are not equal' % path)
+                    ('path: %s. Different dict key sets\n'
+                     'expected=%s\n'
+                     'observed=%s\n'
+                     'difference=%s') %
+                    (path,
+                     sorted(expected.keys()),
+                     sorted(observed.keys()),
+                     list(set(expected.keys()).symmetric_difference(
+                         set(observed.keys())))))
                 expected_keys = sorted(expected)
                 observed_keys = sorted(observed)
                 self.assertEqual(
@@ -458,7 +497,15 @@ class TestCase(testtools.TestCase):
                       isinstance(observed, (list, tuple, set))):
                 self.assertEqual(
                     len(expected), len(observed),
-                    'path: %s. List lengths are not equal' % path)
+                    ('path: %s. Different list items\n'
+                     'expected=%s\n'
+                     'observed=%s\n'
+                     'difference=%s') %
+                    (path,
+                     sorted(expected, key=sort_key),
+                     sorted(observed, key=sort_key),
+                     [a for a in itertools.chain(expected, observed) if
+                      (a not in expected) or (a not in observed)]))
 
                 expected_values_iter = iter(sorted(expected, key=sort_key))
                 observed_values_iter = iter(sorted(observed, key=sort_key))

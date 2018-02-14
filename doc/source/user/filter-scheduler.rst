@@ -154,25 +154,6 @@ There are many standard filter classes which may be used
   a set of instances.
 * |RetryFilter| - filters hosts that have been attempted for scheduling.
   Only passes hosts that have not been previously attempted.
-* |TrustedFilter| (EXPERIMENTAL) - filters hosts based on their trust.  Only
-  passes hosts that meet the trust requirements specified in the instance
-  properties.
-
-  .. warning:: TrustedFilter is deprecated for removal in the 17.0.0 Queens
-     release. There is no replacement planned for this filter. It has been
-     marked experimental since its inception. It is incomplete and not tested.
-
-* |TypeAffinityFilter| - Only passes hosts that are not already running an
-  instance of the requested type.
-
-  .. warning:: TypeAffinityFilter is deprecated for removal in the
-    17.0.0 Queens release. There is no replacement planned for this
-    filter. It is fundamentally flawed in that it relies on the
-    ``flavors.id`` primary key and if a flavor "changed", i.e. deleted
-    and re-created with new values, it will result in this filter
-    thinking it is a different flavor, thus breaking the usefulness of
-    this filter.
-
 * |AggregateTypeAffinityFilter| - limits instance_type by aggregate.
    This filter passes hosts if no instance_type key is set or
    the instance_type aggregate metadata value contains the name of the
@@ -304,19 +285,11 @@ exception even if the problem is related to 1:N compute nodes. If you see that
 case in the scheduler logs, then your problem is most likely related to a
 compute problem and you should check the compute logs.
 
-The |TrustedFilter| filters hosts based on their trust.  Only passes hosts
-that match the trust requested in the ``extra_specs`` for the flavor. The key
-for this filter must be scope format as ``trust:trusted_host``, where ``trust``
-is the scope of the key and ``trusted_host`` is the actual key value.
-The value of this pair (``trusted``/``untrusted``) must match the
-integrity of a host (obtained from the Attestation service) before it is
-passed by the |TrustedFilter|.
-
 The |NUMATopologyFilter| considers the NUMA topology that was specified for the instance
 through the use of flavor extra_specs in combination with the image properties, as
 described in detail in the related nova-spec document:
 
-* http://git.openstack.org/cgit/openstack/nova-specs/tree/specs/juno/virt-driver-numa-placement.rst
+* http://git.openstack.org/cgit/openstack/nova-specs/tree/specs/juno/implemented/virt-driver-numa-placement.rst
 
 and try to match it with the topology exposed by the host, accounting for the
 ``ram_allocation_ratio`` and ``cpu_allocation_ratio`` for over-subscription. The
@@ -344,10 +317,10 @@ The default values for these settings in nova.conf are:
 ::
 
     --filter_scheduler.available_filters=nova.scheduler.filters.all_filters
-    --filter_scheduler.enabled_filters=RamFilter,ComputeFilter,AvailabilityZoneFilter,ComputeCapabilitiesFilter,ImagePropertiesFilter,ServerGroupAntiAffinityFilter,ServerGroupAffinityFilter
+    --filter_scheduler.enabled_filters=ComputeFilter,AvailabilityZoneFilter,ComputeCapabilitiesFilter,ImagePropertiesFilter,ServerGroupAntiAffinityFilter,ServerGroupAffinityFilter
 
 With this configuration, all filters in ``nova.scheduler.filters``
-would be available, and by default the |RamFilter|, |ComputeFilter|,
+would be available, and by default the |ComputeFilter|,
 |AvailabilityZoneFilter|, |ComputeCapabilitiesFilter|,
 |ImagePropertiesFilter|, |ServerGroupAntiAffinityFilter|,
 and |ServerGroupAffinityFilter| would be used.
@@ -501,8 +474,6 @@ in :mod:`nova.tests.scheduler`.
 .. |DifferentHostFilter| replace:: :class:`DifferentHostFilter <nova.scheduler.filters.affinity_filter.DifferentHostFilter>`
 .. |SameHostFilter| replace:: :class:`SameHostFilter <nova.scheduler.filters.affinity_filter.SameHostFilter>`
 .. |RetryFilter| replace:: :class:`RetryFilter <nova.scheduler.filters.retry_filter.RetryFilter>`
-.. |TrustedFilter| replace:: :class:`TrustedFilter <nova.scheduler.filters.trusted_filter.TrustedFilter>`
-.. |TypeAffinityFilter| replace:: :class:`TypeAffinityFilter <nova.scheduler.filters.type_filter.TypeAffinityFilter>`
 .. |AggregateTypeAffinityFilter| replace:: :class:`AggregateTypeAffinityFilter <nova.scheduler.filters.type_filter.AggregateTypeAffinityFilter>`
 .. |ServerGroupAntiAffinityFilter| replace:: :class:`ServerGroupAntiAffinityFilter <nova.scheduler.filters.affinity_filter.ServerGroupAntiAffinityFilter>`
 .. |ServerGroupAffinityFilter| replace:: :class:`ServerGroupAffinityFilter <nova.scheduler.filters.affinity_filter.ServerGroupAffinityFilter>`

@@ -494,9 +494,11 @@ class _TestRequestSpecObject(object):
 
     @mock.patch.object(request_spec.RequestSpec,
             '_get_by_instance_uuid_from_db')
-    def test_get_by_instance_uuid(self, get_by_uuid):
+    @mock.patch('nova.objects.InstanceGroup.get_by_uuid')
+    def test_get_by_instance_uuid(self, mock_get_ig, get_by_uuid):
         fake_spec = fake_request_spec.fake_db_spec()
         get_by_uuid.return_value = fake_spec
+        mock_get_ig.return_value = objects.InstanceGroup(name='fresh')
 
         req_obj = request_spec.RequestSpec.get_by_instance_uuid(self.context,
                 fake_spec['instance_uuid'])
@@ -517,6 +519,7 @@ class _TestRequestSpecObject(object):
         self.assertIsInstance(req_obj.retry, objects.SchedulerRetries)
         self.assertIsInstance(req_obj.limits, objects.SchedulerLimits)
         self.assertIsInstance(req_obj.instance_group, objects.InstanceGroup)
+        self.assertEqual('fresh', req_obj.instance_group.name)
 
     def _check_update_primitive(self, req_obj, changes):
         self.assertEqual(req_obj.instance_uuid, changes['instance_uuid'])
@@ -532,10 +535,13 @@ class _TestRequestSpecObject(object):
 
         # object fields
         for field in ['image', 'numa_topology', 'pci_requests', 'flavor',
-                'retry', 'limits', 'instance_group']:
+                'retry', 'limits']:
             self.assertEqual(
                     getattr(req_obj, field).obj_to_primitive(),
                     getattr(serialized_obj, field).obj_to_primitive())
+
+        self.assertIsNone(serialized_obj.instance_group.members)
+        self.assertIsNone(serialized_obj.instance_group.hosts)
 
     def test_create(self):
         req_obj = fake_request_spec.fake_spec_obj(remove_id=True)
@@ -576,6 +582,19 @@ class _TestRequestSpecObject(object):
 
         destroy_in_db.assert_called_once_with(req_obj._context,
                                               req_obj.instance_uuid)
+
+    @mock.patch.object(request_spec.RequestSpec, '_destroy_bulk_in_db')
+    def test_destroy_bulk(self, destroy_bulk_in_db):
+        uuids_to_be_deleted = []
+        for i in range(0, 5):
+            uuid = uuidutils.generate_uuid()
+            uuids_to_be_deleted.append(uuid)
+        destroy_bulk_in_db.return_value = 5
+        result = objects.RequestSpec.destroy_bulk(self.context,
+                                            uuids_to_be_deleted)
+        destroy_bulk_in_db.assert_called_once_with(self.context,
+                                            uuids_to_be_deleted)
+        self.assertEqual(5, result)
 
     def test_reset_forced_destinations(self):
         req_obj = fake_request_spec.fake_spec_obj()
