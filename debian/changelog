@@ -1,8 +1,12 @@
-nova (2:16.0.3-11) UNRELEASED; urgency=medium
+nova (2:17.0.0~rc1-1) UNRELEASED; urgency=medium
 
+  [ Ondřej Nový ]
   * d/control: Set Vcs-* to salsa.debian.org
 
- -- Ondřej Nový <onovy@debian.org>  Mon, 12 Feb 2018 10:38:28 +0100
+  [ Thomas Goirand ]
+  * New upstream release.
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 14 Feb 2018 16:22:02 +0100
 
 nova (2:16.0.3-10) unstable; urgency=medium
 
