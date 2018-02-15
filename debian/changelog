@@ -14,6 +14,7 @@ nova (2:17.0.0~rc1-1) UNRELEASED; urgency=medium
   * Using pkgos-dh_auto_test.
   * Removed usr/bin/nova-idmapshift (removed in Queens).
   * Removing debian/tmp/usr/etc after setup.py install.
+  * Generates policy.yaml using oslopolicy-sample-generator.
 
  -- Thomas Goirand <zigo@debian.org>  Wed, 14 Feb 2018 16:22:02 +0100
 

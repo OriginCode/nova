@@ -73,6 +73,10 @@ override_dh_install:
 		--namespace oslo.concurrency \
 		--namespace keystonemiddleware.auth_token
 
+	PYTHONPATH=$(CURDIR)/debian/tmp/usr/lib/python2.7/dist-packages oslopolicy-sample-generator \
+		--output-file=$(CURDIR)/debian/nova-common/usr/share/nova-common/policy.yaml \
+		--namespace nova
+
 	# Otherwise, this is set to the build dir
 	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf DEFAULT pybasedir /usr/lib/python2.7/dist-packages
 	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf DEFAULT bindir /usr/bin
