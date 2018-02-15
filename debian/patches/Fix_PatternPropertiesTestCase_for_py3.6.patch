@@ -1,0 +1,28 @@
+From: Chris Dent <cdent@anticdent.org>
+Date: Mon, 19 Feb 2018 11:06:45 +0000
+Description: Fix PatternPropertiesTestCase for py 3.6
+ A python version check was only checking for 3.5. As noted
+ in the pre-existing comment, an exception message is not a
+ particularly stable interface so specific-to-minor-version
+ check is maintained.
+Change-Id: I441b90e911fbac033e8cdea96114db22cba96ac5
+Closes-Bug: #1750355
+Origin: upstream, https://review.openstack.org/#/c/545798/
+Last-Update: 2018-02-20
+
+diff --git a/nova/tests/unit/test_api_validation.py b/nova/tests/unit/test_api_validation.py
+index 9e33121..7c6bad7 100644
+--- a/nova/tests/unit/test_api_validation.py
++++ b/nova/tests/unit/test_api_validation.py
+@@ -465,7 +465,7 @@ class PatternPropertiesTestCase(APIValidationTestCase):
+         # Note(jrosenboom): This is referencing an internal python error
+         # string, which is no stable interface. We need a patch in the
+         # jsonschema library in order to fix this properly.
+-        if sys.version[:3] == '3.5':
++        if sys.version[:3] in ['3.5', '3.6']:
+             detail = "expected string or bytes-like object"
+         else:
+             detail = "expected string or buffer"
+-- 
+cgit v1.1
+

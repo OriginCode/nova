@@ -3,7 +3,7 @@
 include /usr/share/openstack-pkg-tools/pkgos.make
 
 %:
-	dh $@ --buildsystem=python_distutils --with python2,sphinxdoc,systemd
+	dh $@ --buildsystem=python_distutils --with python3,sphinxdoc,systemd
 
 override_dh_auto_clean:
 	dh_auto_clean
@@ -31,15 +31,18 @@ override_dh_auto_build:
 	/usr/share/openstack-pkg-tools/pkgos_insert_include pkgos_func nova-placement-api.postinst
 	/usr/share/openstack-pkg-tools/pkgos_insert_include pkgos_func nova-compute-xen.postinst
 
+override_dh_python3:
+	dh_python3 --shebang=/usr/bin/python3
+
 override_dh_sphinxdoc:
 ifeq (,$(findstring nodoc, $(DEB_BUILD_OPTIONS)))
-	PYTHONPATH=. sphinx-build -b html doc/source $(CURDIR)/debian/nova-doc/usr/share/doc/nova-doc/html
+	PYTHONPATH=. python3 -m sphinx -b html doc/source $(CURDIR)/debian/nova-doc/usr/share/doc/nova-doc/html
 	dh_sphinxdoc -O--buildsystem=python_distutils
 endif
 
 override_dh_installman:
 ifeq (,$(findstring nodocs, $(DEB_BUILD_OPTIONS)))
-	PYTHONPATH=. sphinx-build -b man doc/source doc/build/man
+	PYTHONPATH=. python3 -m sphinx -b man doc/source doc/build/man
 	dh_installman -O--buildsystem=python_distutils
 endif
 
@@ -48,16 +51,16 @@ override_dh_auto_install:
 
 override_dh_install:
 	rm -rf $(CURDIR)/debian/tmp
-	python setup.py install -f --install-layout=deb --root=$(CURDIR)/debian/tmp
+	python3 setup.py install -f --install-layout=deb --root=$(CURDIR)/debian/tmp
 	rm -rf $(CURDIR)/debian/tmp/usr/etc
 
 	mkdir -p $(CURDIR)/debian/nova-common/etc/nova
-	PYTHONPATH=$(CURDIR)/debian/tmp/usr/lib/python2.7/dist-packages oslopolicy-sample-generator \
+	PYTHONPATH=$(CURDIR)/debian/tmp/usr/lib/python3/dist-packages oslopolicy-sample-generator \
 		--output-file=$(CURDIR)/debian/nova-common/etc/nova/policy.yaml \
 		--namespace nova
 
 	mkdir -p $(CURDIR)/debian/nova-common/usr/share/nova-common
-	PYTHONPATH=$(CURDIR)/debian/tmp/usr/lib/python2.7/dist-packages oslo-config-generator \
+	PYTHONPATH=$(CURDIR)/debian/tmp/usr/lib/python3/dist-packages oslo-config-generator \
 		--output-file=$(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf \
 		--wrap-width 140 \
 		--namespace nova.conf \
@@ -72,12 +75,12 @@ override_dh_install:
 		--namespace oslo.concurrency \
 		--namespace keystonemiddleware.auth_token
 
-	PYTHONPATH=$(CURDIR)/debian/tmp/usr/lib/python2.7/dist-packages oslopolicy-sample-generator \
+	PYTHONPATH=$(CURDIR)/debian/tmp/usr/lib/python3/dist-packages oslopolicy-sample-generator \
 		--output-file=$(CURDIR)/debian/nova-common/usr/share/nova-common/policy.yaml \
 		--namespace nova
 
 	# Otherwise, this is set to the build dir
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf DEFAULT pybasedir /usr/lib/python2.7/dist-packages
+	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf DEFAULT pybasedir /usr/lib/python3/dist-packages
 	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf DEFAULT bindir /usr/bin
 
 	# General needed fixes
@@ -133,18 +136,15 @@ override_dh_install:
 	done
 	install -D -m 0600 $(CURDIR)/debian/nova-compute-xen.conf.dist $(CURDIR)/debian/nova-compute-xen/usr/share/nova-compute-xen/nova-compute.conf
 	find $(CURDIR)/debian -name .gitignore -delete
-	cp $(CURDIR)/nova/db/sqlalchemy/migrate_repo/migrate.cfg $(CURDIR)/debian/python-nova/usr/lib/python2.7/dist-packages/nova/db/sqlalchemy/migrate_repo
+	cp $(CURDIR)/nova/db/sqlalchemy/migrate_repo/migrate.cfg $(CURDIR)/debian/python3-nova/usr/lib/python3/dist-packages/nova/db/sqlalchemy/migrate_repo
 
 override_dh_fixperms:
 	dh_fixperms -Xnova_sudoers
 	dh_fixperms -Xnova_tgt
-	rm -f $(CURDIR)/debian/python-nova/usr/share/pyshared/nova/CA/.gitignore
-	rm -f $(CURDIR)/debian/python-nova/usr/share/pyshared/nova/CA/projects/.gitignore
-	rm -f $(CURDIR)/debian/python-nova/usr/share/pyshared/nova/CA/reqs/.gitignore
 
 override_dh_auto_test:
 ifeq (,$(findstring nocheck, $(DEB_BUILD_OPTIONS)))
-	pkgos-dh_auto_test --no-py3 'nova\.tests\.unit\.(?!(.*virt.libvirt\.test_driver\.LibvirtConnTestCase\.test_spawn_with_config_drive.*|.*test_wsgi\.TestWSGIServerWithSSL.*))'
+	pkgos-dh_auto_test --no-py2 'nova\.tests\.unit\.(?!(.*virt.libvirt\.test_driver\.LibvirtConnTestCase\.test_spawn_with_config_drive.*|.*test_wsgi\.TestWSGIServerWithSSL.*))'
 endif
 
 # We use override_dh_installmenu because it's done in the sequence with dh,
@@ -157,3 +157,6 @@ override_dh_installmenu:
 	dh_installinit --name=nova-spicehtml5proxy
 	dh_installinit --name=nova-xenvncproxy
 	install -D -m 0644 $(CURDIR)/debian/nova-consoleproxy.mydefault $(CURDIR)/debian/nova-consoleproxy/usr/share/nova-consoleproxy/default
+
+override_dh_python3:
+	dh_python3 --shebang=/usr/bin/python3
