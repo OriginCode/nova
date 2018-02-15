@@ -15,6 +15,7 @@ nova (2:17.0.0~rc1-1) UNRELEASED; urgency=medium
   * Removed usr/bin/nova-idmapshift (removed in Queens).
   * Removing debian/tmp/usr/etc after setup.py install.
   * Generates policy.yaml using oslopolicy-sample-generator.
+  * Standards-Version is now 4.1.3.
 
  -- Thomas Goirand <zigo@debian.org>  Wed, 14 Feb 2018 16:22:02 +0100
 
