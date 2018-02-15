@@ -6,6 +6,11 @@ nova (2:17.0.0~rc1-1) UNRELEASED; urgency=medium
   [ Thomas Goirand ]
   * New upstream release.
   * Fixed (build-)depends for this release.
+  * Removed patches applied upstream:
+    - Add_nova-idmapshift_to_rootwrap_filters.patch
+    - Fix_quobyte_test_validate_volume_no_mtab_entry.patch
+    - CVE-2017-16239_Refined_fix_for_validating_image_on_rebuild.patch
+    - CVE-2017-17051_Fix_doubling_allocations_on_rebuild.patch
 
  -- Thomas Goirand <zigo@debian.org>  Wed, 14 Feb 2018 16:22:02 +0100
 
