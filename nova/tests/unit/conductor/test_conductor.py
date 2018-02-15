@@ -1407,10 +1407,6 @@ class _BaseTaskTestCase(object):
         migration = objects.Migration.get_by_id(self.context, migration.id)
         self.assertEqual('error', migration.status)
 
-        # Assert the migration status was updated.
-        migration = objects.Migration.get_by_id(self.context, migration.id)
-        self.assertEqual('error', migration.status)
-
     def test_rebuild_instance_evacuate_migration_record(self):
         inst_obj = self._create_fake_instance_obj()
         migration = objects.Migration(context=self.context,

@@ -17,8 +17,6 @@ import mock
 
 from keystoneauth1.adapter import Adapter
 from keystoneauth1 import exceptions as kse
-from keystoneauth1 import loading as ks_loading
-from keystoneauth1.session import Session
 import webob
 
 from nova.api.openstack import identity

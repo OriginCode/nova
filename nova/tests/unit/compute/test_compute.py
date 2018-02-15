@@ -6607,9 +6607,6 @@ class ComputeTestCase(BaseTestCase,
             mock_lmcf.return_value = False, False
             self.compute._rollback_live_migration(c, instance, 'foo',
                                                   migrate_data=migrate_data)
-            mock_remove_allocs.assert_called_once_with(
-                instance.uuid, dest_node.uuid, instance.user_id,
-                instance.project_id, test.MatchType(dict))
             mock_notify.assert_has_calls([
                 mock.call(c, instance, self.compute.host,
                           action='live_migration_rollback', phase='start',

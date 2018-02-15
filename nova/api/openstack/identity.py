@@ -16,13 +16,10 @@ from keystoneauth1 import exceptions as kse
 from oslo_log import log as logging
 import webob
 
-import nova.conf
 from nova.i18n import _
 from nova import utils
 
 
-
-CONF = nova.conf.CONF
 LOG = logging.getLogger(__name__)
 
 

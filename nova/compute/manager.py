@@ -4140,17 +4140,6 @@ class ComputeManager(manager.Manager):
                         exc_info, instance_type, request_spec,
                         filter_properties, host_list)
             finally:
-                if failed:
-                    # Since we hit a failure, we're either rescheduling or dead
-                    # and either way we need to cleanup any allocations created
-                    # by the scheduler for the destination node. Note that for
-                    # a resize to the same host, the scheduler will merge the
-                    # flavors, so here we'd be subtracting the new flavor from
-                    # the allocated resources on this node.
-                    rt = self._get_resource_tracker()
-                    rt.delete_allocation_for_failed_resize(
-                        instance, node, instance_type)
-
                 extra_usage_info = dict(
                         new_instance_type=instance_type.name,
                         new_instance_type_id=instance_type.id)
@@ -6265,10 +6254,6 @@ class ComputeManager(manager.Manager):
         # NOTE(timello): make sure we update available resources on source
         # host even before next periodic task.
         self.update_available_resource(ctxt)
-
-        rt = self._get_resource_tracker()
-        rt.delete_allocation_for_migrated_instance(
-            instance, source_node)
 
         self._update_scheduler_instance_info(ctxt, instance)
         self._notify_about_instance_usage(ctxt, instance,

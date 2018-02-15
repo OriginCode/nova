@@ -3849,42 +3849,6 @@ class LibvirtConnTestCase(test.NoDBTestCase,
                 self.assertEqual('spice', device.type)
                 self.assertIsNone(device.keymap)
 
-    def _test_get_guest_config_with_graphics(self):
-        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
-        instance_ref = objects.Instance(**self.test_instance)
-        image_meta = objects.ImageMeta.from_dict(self.test_image_meta)
-
-        disk_info = blockinfo.get_disk_info(CONF.libvirt.virt_type,
-                                            instance_ref,
-                                            image_meta)
-        cfg = drvr._get_guest_config(instance_ref, [],
-                                     image_meta, disk_info)
-        return cfg.devices
-
-    def test_get_guest_config_with_vnc_no_keymap(self):
-        self.flags(virt_type='kvm', group='libvirt')
-        self.flags(enabled=True, keymap=None, group='vnc')
-        self.flags(enabled=False, group='spice')
-        devices = self._test_get_guest_config_with_graphics()
-        for device in devices:
-            if device.root_name == 'graphics':
-                self.assertIsInstance(device,
-                                      vconfig.LibvirtConfigGuestGraphics)
-                self.assertEqual('vnc', device.type)
-                self.assertIsNone(device.keymap)
-
-    def test_get_guest_config_with_spice_no_keymap(self):
-        self.flags(virt_type='kvm', group='libvirt')
-        self.flags(enabled=True, keymap=None, group='spice')
-        self.flags(enabled=False, group='vnc')
-        devices = self._test_get_guest_config_with_graphics()
-        for device in devices:
-            if device.root_name == 'graphics':
-                self.assertIsInstance(device,
-                                      vconfig.LibvirtConfigGuestGraphics)
-                self.assertEqual('spice', device.type)
-                self.assertIsNone(device.keymap)
-
     @mock.patch.object(host.Host, 'get_guest')
     @mock.patch.object(libvirt_driver.LibvirtDriver,
                        '_get_serial_ports_from_guest')

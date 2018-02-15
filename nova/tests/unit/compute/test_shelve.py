@@ -197,10 +197,6 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
     @mock.patch('nova.compute.resource_tracker.ResourceTracker.'
                 'delete_allocation_for_shelve_offloaded_instance')
     @mock.patch.object(nova.compute.manager.ComputeManager,
-                       '_terminate_volume_connections')
-    @mock.patch('nova.compute.resource_tracker.ResourceTracker.'
-                'delete_allocation_for_shelve_offloaded_instance')
-    @mock.patch.object(nova.compute.manager.ComputeManager,
                        '_update_resource_tracker')
     @mock.patch.object(nova.compute.manager.ComputeManager,
                        '_get_power_state', return_value=123)

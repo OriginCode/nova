@@ -84,8 +84,6 @@ class _IntegratedTestBase(test.TestCase):
 
         self._setup_services()
 
-        self._setup_services()
-
         self.addCleanup(nova.tests.unit.image.fake.FakeImageService_reset)
 
     def _setup_compute_service(self):
