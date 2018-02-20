@@ -40,13 +40,6 @@ maintain_var_lib_nova_perms () {
 	if [ -z "$2" ]; then
 		# New install - blanket permissions
 		chown -R nova:nova /var/lib/nova/
-	elif dpkg --compare-versions "$2" lt "2011.3"; then
-		# Make sure the LXC rootfs mount points are excluded
-		# during upgrades from previous versions
-		find /var/lib/nova/ -name 'rootfs' -prune -o \
-			-group root -a -user nova -exec chown nova:nova {} \;
-		find /var/lib/nova/ -name 'rootfs' -prune -o \
-			-group nogroup -a -user nova -exec chown nova:nova {} \;
 	fi
 	chmod 0755 /var/lib/nova
 }
