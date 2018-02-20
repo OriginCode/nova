@@ -20,10 +20,15 @@ SYSTEMD_DOC="man:${NAME}(1)"
 if [ -r /etc/default/nova-consoleproxy ] ; then
 	. /etc/default/nova-consoleproxy
 else
-	exit 0
+	if [ -z "${INIT_TEMPLATE}" ] ; then
+		exit 0
+	fi
 fi
 
 # If SERVICE_FILE is set, we're generating the .service file, and we don't want to exit
 if ! [ "${NOVA_CONSOLE_PROXY_TYPE}" = "xenvnc" ] && [ -z "${SERVICE_FILE}" ] ; then
-	exit 0
+	# This is to prevent pkgos-gen-systemd-unit to exit
+	if [ -z "${INIT_TEMPLATE}" ] ; then
+		exit 0
+	fi
 fi
