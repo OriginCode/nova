@@ -19,6 +19,7 @@ nova (2:17.0.0~rc1-1) UNRELEASED; urgency=medium
   * Some clean-up in debian/rules.
   * Switched to Python 3.
   * Make sure service files are generated for consoleproxi daemons.
+  * nova-common.config: do not use /sbin/route, cat in /proc instead.
 
  -- Thomas Goirand <zigo@debian.org>  Wed, 14 Feb 2018 16:22:02 +0100
 
