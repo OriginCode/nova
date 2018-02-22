@@ -1,4 +1,4 @@
-nova (2:17.0.0~rc1-1) UNRELEASED; urgency=medium
+nova (2:17.0.0~rc1-1) experimental; urgency=medium
 
   [ Ondřej Nový ]
   * d/control: Set Vcs-* to salsa.debian.org
@@ -21,7 +21,7 @@ nova (2:17.0.0~rc1-1) UNRELEASED; urgency=medium
   * Make sure service files are generated for consoleproxi daemons.
   * nova-common.config: do not use /sbin/route, cat in /proc instead.
 
- -- Thomas Goirand <zigo@debian.org>  Wed, 14 Feb 2018 16:22:02 +0100
+ -- Thomas Goirand <zigo@debian.org>  Thu, 22 Feb 2018 15:38:30 +0000
 
 nova (2:16.0.3-10) unstable; urgency=medium
 
