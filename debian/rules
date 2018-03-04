@@ -29,9 +29,6 @@ override_dh_auto_build:
 	/usr/share/openstack-pkg-tools/pkgos_insert_include pkgos_func nova-placement-api.postinst
 	/usr/share/openstack-pkg-tools/pkgos_insert_include pkgos_func nova-compute-xen.postinst
 
-override_dh_python3:
-	dh_python3 --shebang=/usr/bin/python3
-
 override_dh_sphinxdoc:
 ifeq (,$(findstring nodoc, $(DEB_BUILD_OPTIONS)))
 	PYTHONPATH=. python3 -m sphinx -b html doc/source $(CURDIR)/debian/nova-doc/usr/share/doc/nova-doc/html
