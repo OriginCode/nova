@@ -5,6 +5,7 @@ nova (2:17.0.0-1) UNRELEASED; urgency=medium
   * Removed double-defined override_dh_python3.
   * Switched to openstack-pkg-tools >= 70~ provided debconf templates.
   * Using policy.json generated with --format json.
+  * Add Breaks:+Replaces: python-nova (Closes: #891681).
 
  -- Thomas Goirand <zigo@debian.org>  Tue, 06 Mar 2018 21:05:55 +0000
 

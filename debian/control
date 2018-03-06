@@ -659,6 +659,10 @@ Depends:
  sudo,
  ${misc:Depends},
  ${python3:Depends},
+Breaks:
+ python-nova,
+Replaces:
+ python-nova,
 Suggests:
  python3-suds (>= 0.4.0),
 Conflicts:
