@@ -1318,6 +1318,7 @@ class CinderFixture(fixtures.Fixture):
         self.swap_error = False
         self.swap_volume_instance_uuid = None
         self.swap_volume_instance_error_uuid = None
+        self.reserved_volumes = list()
         # This is a map of instance UUIDs mapped to a list of volume IDs.
         # This map gets updated on attach/detach operations.
         self.attachments = collections.defaultdict(list)
@@ -1378,20 +1379,15 @@ class CinderFixture(fixtures.Fixture):
                     break
             else:
                 # This is a test that does not care about the actual details.
+                reserved_volume = (volume_id in self.reserved_volumes)
                 volume = {
-                    'status': 'available',
+                    'status': 'attaching' if reserved_volume else 'available',
                     'display_name': 'TEST2',
                     'attach_status': 'detached',
                     'id': volume_id,
                     'multiattach': False,
                     'size': 1
                 }
-
-            # update the status based on existing attachments
-            has_attachment = any(
-                [volume['id'] in attachments
-                 for attachments in self.attachments.values()])
-            volume['status'] = 'attached' if has_attachment else 'detached'
 
             # Check for our special image-backed volume.
             if volume_id == self.IMAGE_BACKED_VOL:
@@ -1415,7 +1411,16 @@ class CinderFixture(fixtures.Fixture):
                                            new_volume_id, error):
             return {'save_volume_id': new_volume_id}
 
+        def fake_reserve_volume(self_api, context, volume_id):
+            self.reserved_volumes.append(volume_id)
+
         def fake_unreserve_volume(self_api, context, volume_id):
+            # NOTE(mnaser): It's possible that we unreserve a volume that was
+            #               never reserved (ex: instance.volume_attach.error
+            #               notification tests)
+            if volume_id in self.reserved_volumes:
+                self.reserved_volumes.remove(volume_id)
+
             # Signaling that swap_volume has encountered the error
             # from initialize_connection and is working on rolling back
             # the reservation on SWAP_ERR_NEW_VOL.
@@ -1437,6 +1442,12 @@ class CinderFixture(fixtures.Fixture):
 
         def fake_detach(_self, context, volume_id, instance_uuid=None,
                         attachment_id=None):
+            # NOTE(mnaser): It's possible that we unreserve a volume that was
+            #               never reserved (ex: instance.volume_attach.error
+            #               notification tests)
+            if volume_id in self.reserved_volumes:
+                self.reserved_volumes.remove(volume_id)
+
             if instance_uuid is not None:
                 # If the volume isn't attached to this instance it will
                 # result in a ValueError which indicates a broken test or
@@ -1460,7 +1471,7 @@ class CinderFixture(fixtures.Fixture):
             'nova.volume.cinder.API.migrate_volume_completion',
             fake_migrate_volume_completion)
         self.test.stub_out('nova.volume.cinder.API.reserve_volume',
-                           lambda *args, **kwargs: None)
+                           fake_reserve_volume)
         self.test.stub_out('nova.volume.cinder.API.roll_detaching',
                            lambda *args, **kwargs: None)
         self.test.stub_out('nova.volume.cinder.API.terminate_connection',
@@ -1566,12 +1577,6 @@ class CinderFixtureNewAttachFlow(fixtures.Fixture):
                     'multiattach': volume_id == self.MULTIATTACH_VOL,
                     'size': 1
                 }
-
-            # update the status based on existing attachments
-            has_attachment = any(
-                [volume['id'] in attachments
-                 for attachments in self.attachments.values()])
-            volume['status'] = 'attached' if has_attachment else 'detached'
 
             # Check for our special image-backed volume.
             if volume_id == self.IMAGE_BACKED_VOL:
