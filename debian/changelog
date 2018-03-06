@@ -2,6 +2,8 @@ nova (2:17.0.0~rc1-3) UNRELEASED; urgency=medium
 
   * Fix keystone_authtoken defaults.
   * Removed double-defined override_dh_python3.
+  * Switched to openstack-pkg-tools >= 70~ provided debconf templates.
+  * Using policy.json generated with --format json.
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 02 Mar 2018 14:48:27 +0000
 
