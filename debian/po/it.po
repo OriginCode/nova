@@ -6,7 +6,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova\n"
 "Report-Msgid-Bugs-To: nova@packages.debian.org\n"
-"POT-Creation-Date: 2017-10-26 22:06+0000\n"
+"POT-Creation-Date: 2018-03-06 20:20+0000\n"
 "PO-Revision-Date: 2014-08-02 13:11+0200\n"
 "Last-Translator: Beatrice Torracca <beatricet@libero.it>\n"
 "Language-Team: Italian <debian-l10n-italian@lists.debian.org>\n"
@@ -17,100 +17,15 @@ msgstr ""
 "Plural-Forms: nplurals=2; plural=(n != 1);\n"
 "X-Generator: Virtaal 0.7.1\n"
 
-#. Type: string
-#. Description
-#: ../nova-common.templates:2001
-msgid "Auth server hostname:"
-msgstr "Nome host del server di autenticazione:"
-
-#. Type: string
-#. Description
-#: ../nova-common.templates:2001
-msgid ""
-"Please specify the URL of your Nova authentication server. Typically this is "
-"also the URL of your OpenStack Identity Service (Keystone)."
-msgstr ""
-"Specificare l'URL del server di autenticazione Nova. Tipicamente, è anche "
-"l'URL dell'OpenStack Identity Service (Keystone)."
-
-#. Type: string
-#. Description
-#: ../nova-common.templates:3001
-msgid "Auth server tenant name:"
-msgstr "Nome del locatario («tenant») per il server di autenticazione:"
-
-#. Type: string
-#. Description
-#: ../nova-common.templates:4001
-msgid "Auth server username:"
-msgstr "Nome utente per il server di autenticazione:"
-
-#. Type: password
-#. Description
-#: ../nova-common.templates:5001
-msgid "Auth server password:"
-msgstr "Password per il server di autenticazione:"
-
-#. Type: boolean
-#. Description
-#: ../nova-common.templates:6001
-msgid "Set up a database for Nova?"
-msgstr "Impostare un database per Nova?"
-
-#. Type: boolean
-#. Description
-#: ../nova-common.templates:6001 ../nova-api.templates:8001
-msgid ""
-"No database has been set up for Nova to use. If you want to set one up now, "
-"please make sure you have all needed information:"
-msgstr ""
-"Non è stato impostato alcun database per l'uso da parte di Nova. Se si "
-"desidera impostarne uno ora assicurarsi di avere tutte le informazioni "
-"necessarie:"
-
-#. Type: boolean
-#. Description
-#: ../nova-common.templates:6001 ../nova-api.templates:8001
-msgid ""
-" * the host name of the database server (which must allow TCP\n"
-"   connections from this machine);\n"
-" * a username and password to access the database;\n"
-" * the type of database management software you want to use."
-msgstr ""
-" * il nome host del server di database (che deve permettere le connessioni\n"
-"   TCP da questa macchina);\n"
-" * un nome utente e una password per accedere al database;\n"
-" * il tipo di software di gestione del database che si desidera usare."
-
-#. Type: boolean
-#. Description
-#: ../nova-common.templates:6001 ../nova-api.templates:8001
-msgid ""
-"If you don't choose this option, no database will be set up and Nova will "
-"use regular SQLite support."
-msgstr ""
-"Se non si sceglie questa opzione, non verrà impostato alcun database e Nova "
-"userà il regolare supporto SQLite."
-
-#. Type: boolean
-#. Description
-#: ../nova-common.templates:6001
-msgid ""
-"You can change this setting later on by running \"dpkg-reconfigure -plow "
-"nova-common\"."
-msgstr ""
-"È possibile cambiare questa impostazione successivamente eseguendo \"dpkg-"
-"reconfigure -plow nova-common\"."
-
 #. Type: multiselect
 #. Description
-#: ../nova-common.templates:7001
+#: ../nova-common.templates.in:2001
 msgid "API to activate:"
 msgstr "API da attivare:"
 
 #. Type: multiselect
 #. Description
-#: ../nova-common.templates:7001
+#: ../nova-common.templates.in:2001
 msgid ""
 "Openstack Nova supports different API services, each of them binding on a "
 "different port. Select which one nova-api should support."
@@ -120,7 +35,7 @@ msgstr ""
 
 #. Type: multiselect
 #. Description
-#: ../nova-common.templates:7001
+#: ../nova-common.templates.in:2001
 msgid ""
 "If it is a compute node that you are setting-up, then you only need to run "
 "the metadata API server. If you run Cinder, then you don't need osapi_volume "
@@ -134,37 +49,37 @@ msgstr ""
 
 #. Type: string
 #. Description
-#: ../nova-common.templates:8001
+#: ../nova-common.templates.in:3001
 msgid "Value for my_ip:"
 msgstr "Valore per my_ip:"
 
 #. Type: string
 #. Description
-#: ../nova-common.templates:8001
+#: ../nova-common.templates.in:3001
 msgid "This value will be stored in the my_ip directive of nova.conf."
 msgstr "Questo valore verrà memorizzato nella direttiva my_ip di nova.conf."
 
 #. Type: string
 #. Description
-#: ../nova-common.templates:9001
+#: ../nova-common.templates.in:4001
 msgid "Neutron server URL:"
 msgstr "URL del server Neutron:"
 
 #. Type: string
 #. Description
-#: ../nova-common.templates:9001
+#: ../nova-common.templates.in:4001
 msgid "Please enter the URL of the Neutron server."
 msgstr "Inserire l'URL del server Neutron."
 
 #. Type: string
 #. Description
-#: ../nova-common.templates:10001
+#: ../nova-common.templates.in:5001
 msgid "Neutron admin tenant name:"
 msgstr "Nome del locatario («tenant») per l'amministrazione di Neutron:"
 
 #. Type: string
 #. Description
-#: ../nova-common.templates:10001
+#: ../nova-common.templates.in:5001
 msgid ""
 "Nova needs to be able to communicate with Neutron through Keystone. "
 "Therefore Nova needs to know the Neutron admin tenant, username and password."
@@ -175,96 +90,44 @@ msgstr ""
 
 #. Type: string
 #. Description
-#: ../nova-common.templates:10001
+#: ../nova-common.templates.in:5001
 msgid "Please enter the name of the admin tenant for Neutron."
 msgstr ""
 "Inserire il nome del locatario («tenant») di amministrazione per Neutron."
 
 #. Type: string
 #. Description
-#: ../nova-common.templates:11001
+#: ../nova-common.templates.in:6001
 msgid "Neutron administrator username:"
 msgstr "Nome utente dell'amministratore di Neutron:"
 
 #. Type: string
 #. Description
-#: ../nova-common.templates:11001
+#: ../nova-common.templates.in:6001
 msgid "Please enter the username of the Neutron administrator."
 msgstr "Inserire il nome utente dell'amministratore di Neutron."
 
 #. Type: password
 #. Description
-#: ../nova-common.templates:12001
+#: ../nova-common.templates.in:7001
 msgid "Neutron administrator password:"
 msgstr "Password dell'amministratore di Neutron:"
 
 #. Type: password
 #. Description
-#: ../nova-common.templates:12001
+#: ../nova-common.templates.in:7001
 msgid "Please enter the password of the Neutron administrator."
 msgstr "Inserire la password dell'amministratore di Neutron."
 
-#. Type: string
-#. Description
-#: ../nova-common.templates:13001
-msgid "IP address of your RabbitMQ host:"
-msgstr "Indirizzo IP dell'host RabbitMQ:"
-
-#. Type: string
-#. Description
-#. Type: string
-#. Description
 #. Type: password
 #. Description
-#: ../nova-common.templates:13001 ../nova-common.templates:14001
-#: ../nova-common.templates:15001
-msgid ""
-"In order to interoperate with other components of OpenStack, this package "
-"needs to connect to a central RabbitMQ server."
-msgstr ""
-"Per poter funzionare insieme agli altri componenti di OpenStack, questo "
-"pacchetto deve connettersi al server RabbitMQ centrale."
-
-#. Type: string
-#. Description
-#: ../nova-common.templates:13001
-msgid "Please specify the IP address of that server."
-msgstr "Inserire l'indirizzo IP di tale server."
-
-#. Type: string
-#. Description
-#: ../nova-common.templates:14001
-msgid "Username for connection to the RabbitMQ server:"
-msgstr "Nome utente per la connessione al server RabbitMQ:"
-
-#. Type: string
-#. Description
-#: ../nova-common.templates:14001
-msgid "Please specify the username used to connect to the RabbitMQ server."
-msgstr ""
-"Specificare il nome utente da usare per connettersi al server RabbitMQ."
-
-#. Type: password
-#. Description
-#: ../nova-common.templates:15001
-msgid "Password for connection to the RabbitMQ server:"
-msgstr "Password per la connessione al server RabbitMQ:"
-
-#. Type: password
-#. Description
-#: ../nova-common.templates:15001
-msgid "Please specify the password used to connect to the RabbitMQ server."
-msgstr "Specificare la password da usare per connettersi al server RabbitMQ."
-
-#. Type: password
-#. Description
-#: ../nova-common.templates:16001
+#: ../nova-common.templates.in:8001
 msgid "Metadata proxy shared secret:"
 msgstr ""
 
 #. Type: password
 #. Description
-#: ../nova-common.templates:16001
+#: ../nova-common.templates.in:8001
 msgid ""
 "VM instances using Neutron to handle networking retrieve their metadata "
 "through the Neutron metadata agent, which serves as a proxy to the Nova "
@@ -273,7 +136,7 @@ msgstr ""
 
 #. Type: password
 #. Description
-#: ../nova-common.templates:16001
+#: ../nova-common.templates.in:8001
 msgid ""
 "Please enter the password that should be used to protect communications "
 "between the Neutron metadata proxy agent and the Nova metadata server. The "
@@ -281,210 +144,9 @@ msgid ""
 "agent package."
 msgstr ""
 
-#. Type: string
-#. Description
-#: ../nova-compute-xen.templates:2001
-msgid "Address of the XenAPI dom0:"
-msgstr "Indirizzo del dom0 XenAPI:"
-
-#. Type: string
-#. Description
-#: ../nova-compute-xen.templates:2001
-msgid ""
-"Nova Compute Xen needs to know the address of the server running XenAPI. You "
-"can enter an IP address, or a fully qualified domain name if it resolves "
-"correctly."
-msgstr ""
-"È necessario che Nova Compute Xen conosca l'indirizzo del server che esegue "
-"XenAPI. Si può inserire un indirizzo IP o un nome di dominio pienamente "
-"qualificato se viene risolto in modo corretto."
-
-#. Type: string
-#. Description
-#: ../nova-compute-xen.templates:2001
-msgid ""
-"This may be a server running Citrix XenServer, the CentOS Xen Cloud Platform "
-"(XCP) appliance installed from an ISO image, or even the Kronos Project's "
-"XCP (available in Debian and Ubuntu as the package xcp-xapi)."
-msgstr ""
-"Può essere un server con in esecuzione Citrix XenServer, l'appliance CentOS "
-"Xen Cloud Platform (XCP) installata da un'immagine ISO o persino l'XCP del "
-"Kronos Project (disponibile in Debian e Ubuntu come pacchetto xcp-xapi)."
-
-#. Type: string
-#. Description
-#. Type: string
-#. Description
-#. Type: password
-#. Description
-#: ../nova-compute-xen.templates:2001 ../nova-compute-xen.templates:3001
-#: ../nova-compute-xen.templates:4001
-msgid "This can later be edited in /etc/nova/nova-compute.conf."
-msgstr "Può essere modificato in seguito in /etc/nova/nova-compute.conf."
-
-#. Type: string
-#. Description
-#: ../nova-compute-xen.templates:3001
-msgid "Username to connect to XenAPI:"
-msgstr "Nome utente per connettersi a XenAPI:"
-
-#. Type: string
-#. Description
-#: ../nova-compute-xen.templates:3001
-msgid "Please enter the username used to connect to your XenAPI (XCP server)."
-msgstr ""
-"Inserire il nome utente per connettersi al proprio XenAPI (server XCP)."
-
-#. Type: password
-#. Description
-#: ../nova-compute-xen.templates:4001
-msgid "Password to connect to XenAPI:"
-msgstr "Password per connettersi a XenAPI:"
-
-#. Type: password
-#. Description
-#: ../nova-compute-xen.templates:4001
-msgid "Please enter the password used to connect to your XenAPI (XCP server)."
-msgstr "Inserire la password per connettersi al proprio XenAPI (server XCP)."
-
 #. Type: boolean
 #. Description
-#: ../nova-api.templates:1001
-msgid "Register Nova in the keystone endpoint catalog?"
-msgstr "Registrare Nova nel catalogo dei punti terminali di Keystone?"
-
-#. Type: boolean
-#. Description
-#: ../nova-api.templates:1001 ../nova-placement-api.templates:1001
-msgid ""
-"Each Openstack services (each API) should be registered in order to be "
-"accessible. This is done using \"keystone service-create\" and \"keystone "
-"endpoint-create\". Select if you want to run these commands now."
-msgstr ""
-"Ogni servizio OpenStack (ogni API) dovrebbe essere registrato per poter "
-"essere accessibile. Ciò viene fatto usando «keystone service-create» e "
-"«keystone endpoint-create». Scegliere se si desidera eseguire ora questi "
-"comandi."
-
-#. Type: boolean
-#. Description
-#: ../nova-api.templates:1001 ../nova-placement-api.templates:1001
-#, fuzzy
-#| msgid ""
-#| "Note that you will need to have an up and running keystone server on "
-#| "which to connect using the Keystone auth token."
-msgid ""
-"Note that you will need to have an up and running keystone server on which "
-"to connect using a known admin project name, admin username and password. "
-"The admin auth token is not used anymore."
-msgstr ""
-"Notare che sarà necessario avere un server keystone in funzione a cui "
-"connettersi usando il token di autorizzazione Keystone."
-
-#. Type: string
-#. Description
-#: ../nova-api.templates:2001 ../nova-placement-api.templates:2001
-msgid "Keystone IP address:"
-msgstr "Indirizzo IP di Keystone:"
-
-#. Type: string
-#. Description
-#: ../nova-api.templates:2001 ../nova-placement-api.templates:2001
-msgid ""
-"Enter the IP address of your keystone server, so that nova-api can contact "
-"Keystone to do the Nova service and endpoint creation."
-msgstr ""
-"Inserire l'indirizzo IP del server Keystone, in modo che nova-api possa "
-"contattare Keystone per effettuare la creazione del servizio e del punto "
-"terminale Nova."
-
-#. Type: string
-#. Description
-#: ../nova-api.templates:3001 ../nova-placement-api.templates:3001
-#, fuzzy
-#| msgid "Neutron admin tenant name:"
-msgid "Keystone admin name:"
-msgstr "Nome del locatario («tenant») per l'amministrazione di Neutron:"
-
-#. Type: string
-#. Description
-#. Type: string
-#. Description
-#. Type: password
-#. Description
-#: ../nova-api.templates:3001 ../nova-api.templates:4001
-#: ../nova-api.templates:5001 ../nova-placement-api.templates:3001
-#: ../nova-placement-api.templates:4001 ../nova-placement-api.templates:5001
-msgid ""
-"To register the service endpoint, this package needs to know the Admin "
-"login, name, project name, and password to the Keystone server."
-msgstr ""
-
-#. Type: string
-#. Description
-#: ../nova-api.templates:4001 ../nova-placement-api.templates:4001
-#, fuzzy
-#| msgid "Neutron admin tenant name:"
-msgid "Keystone admin project name:"
-msgstr "Nome del locatario («tenant») per l'amministrazione di Neutron:"
-
-#. Type: password
-#. Description
-#: ../nova-api.templates:5001 ../nova-placement-api.templates:5001
-#, fuzzy
-#| msgid "Neutron administrator password:"
-msgid "Keystone admin password:"
-msgstr "Password dell'amministratore di Neutron:"
-
-#. Type: string
-#. Description
-#: ../nova-api.templates:6001 ../nova-placement-api.templates:6001
-msgid "Nova endpoint IP address:"
-msgstr "Indirizzo IP del punto terminale Nova:"
-
-#. Type: string
-#. Description
-#: ../nova-api.templates:6001 ../nova-placement-api.templates:6001
-msgid ""
-"Enter the IP address that will be used to contact Nova (eg: the Nova "
-"endpoint IP address)."
-msgstr ""
-"Inserire l'indirizzo IP che verrà usato per contattare Nova (es.: "
-"l'indirizzo IP del punto terminale Nova)."
-
-#. Type: string
-#. Description
-#: ../nova-api.templates:6001 ../nova-placement-api.templates:6001
-msgid ""
-"This IP address should be accessible from the clients that will use this "
-"service, so if you are installing a public cloud, this should be a public IP "
-"address."
-msgstr ""
-"Questo indirizzo IP dovrebbe essere accessibile dai client che useranno il "
-"servizio, perciò se si sta installando una cloud pubblica, questo dovrebbe "
-"essere un indirizzo IP pubblico."
-
-#. Type: string
-#. Description
-#: ../nova-api.templates:7001 ../nova-placement-api.templates:7001
-msgid "Name of the region to register:"
-msgstr "Nome della regione da registrare:"
-
-#. Type: string
-#. Description
-#: ../nova-api.templates:7001 ../nova-placement-api.templates:7001
-msgid ""
-"Openstack can be used using availability zones, with each region "
-"representing a location. Please enter the zone that you wish to use when "
-"registering the endpoint."
-msgstr ""
-"OpenStack può essere usato utilizzando le zone di disponibilità, con ogni "
-"regione che rappresenta una posizione. Inserire la zona che si desidera "
-"usare durante la registrazione del punto terminale."
-
-#. Type: boolean
-#. Description
-#: ../nova-api.templates:8001
+#: ../nova-api.templates.in:1001
 #, fuzzy
 #| msgid "Set up a database for Nova?"
 msgid "Set up a database for Nova API?"
@@ -492,7 +154,42 @@ msgstr "Impostare un database per Nova?"
 
 #. Type: boolean
 #. Description
-#: ../nova-api.templates:8001
+#: ../nova-api.templates.in:1001
+msgid ""
+"No database has been set up for Nova to use. If you want to set one up now, "
+"please make sure you have all needed information:"
+msgstr ""
+"Non è stato impostato alcun database per l'uso da parte di Nova. Se si "
+"desidera impostarne uno ora assicurarsi di avere tutte le informazioni "
+"necessarie:"
+
+#. Type: boolean
+#. Description
+#: ../nova-api.templates.in:1001
+msgid ""
+" * the host name of the database server (which must allow TCP\n"
+"   connections from this machine);\n"
+" * a username and password to access the database;\n"
+" * the type of database management software you want to use."
+msgstr ""
+" * il nome host del server di database (che deve permettere le connessioni\n"
+"   TCP da questa macchina);\n"
+" * un nome utente e una password per accedere al database;\n"
+" * il tipo di software di gestione del database che si desidera usare."
+
+#. Type: boolean
+#. Description
+#: ../nova-api.templates.in:1001
+msgid ""
+"If you don't choose this option, no database will be set up and Nova will "
+"use regular SQLite support."
+msgstr ""
+"Se non si sceglie questa opzione, non verrà impostato alcun database e Nova "
+"userà il regolare supporto SQLite."
+
+#. Type: boolean
+#. Description
+#: ../nova-api.templates.in:1001
 #, fuzzy
 #| msgid ""
 #| "You can change this setting later on by running \"dpkg-reconfigure -plow "
@@ -503,14 +200,6 @@ msgid ""
 msgstr ""
 "È possibile cambiare questa impostazione successivamente eseguendo \"dpkg-"
 "reconfigure -plow nova-common\"."
-
-#. Type: boolean
-#. Description
-#: ../nova-placement-api.templates:1001
-#, fuzzy
-#| msgid "Register Nova in the keystone endpoint catalog?"
-msgid "Register Nova Placement API in the keystone endpoint catalog?"
-msgstr "Registrare Nova nel catalogo dei punti terminali di Keystone?"
 
 #. Type: select
 #. Description
@@ -540,36 +229,3 @@ msgstr ""
 msgid "This can later be edited in /etc/default/nova-consoleproxy."
 msgstr "Può essere modificato in seguito in /etc/default/nova-consoleproxy."
 
-#~ msgid "Keystone Auth Token:"
-#~ msgstr "Token di autenticazione Keystone:"
-
-#~ msgid ""
-#~ "To configure its endpoint in Keystone, nova-api needs the Keystone auth "
-#~ "token."
-#~ msgstr ""
-#~ "Per configurare il proprio punto terminale in Keystone, nova-api ha "
-#~ "bisogno del token di autenticazione Keystone."
-
-#~| msgid "Value for my_ip:"
-#~ msgid "Value for neutron_url:"
-#~ msgstr "Valore per my_ip:"
-
-#~ msgid "Start nova services at boot?"
-#~ msgstr "Far partire i servizi Nova all'avvio?"
-
-#~ msgid ""
-#~ "Please choose whether you want to start Nova services when the machine is "
-#~ "booted up."
-#~ msgstr "Scegliere se far partire i servizi Nova all'avvio della macchina."
-
-#~ msgid ""
-#~ "Enter the IP address that will be set in the rabbitmq_host directive of "
-#~ "nova.conf. If you are installing openstack-proxy-node, then the default "
-#~ "to use 127.0.0.1 is probably fine. If you are installing openstack-"
-#~ "compute-node, then enter the IP address of your proxy-node host."
-#~ msgstr ""
-#~ "Inserire l'indirizzo IP che verrà impostato nella direttiva rabbitmq_host "
-#~ "di nova.conf. Se si sta installando openstack-proxy-node, allora "
-#~ "l'impostazione predefinita che usa 127.0.0.1 va probabilmente bene. Se si "
-#~ "sta installando openstack-compute-node, allora inserire l'indirizzo IP "
-#~ "dell'host proxy-node."

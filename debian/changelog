@@ -1,8 +1,19 @@
-nova (2:17.0.0~rc1-3) unstable; urgency=medium
+nova (2:17.0.0-2) unstable; urgency=medium
 
   * Fixed nova-placement-api must use uwsgi_python3 not uwsgi_python.
 
  -- Thomas Goirand <zigo@debian.org>  Sat, 10 Mar 2018 21:59:00 +0100
+
+nova (2:17.0.0-1) unstable; urgency=medium
+
+  * New upstream release.
+  * Fix keystone_authtoken defaults.
+  * Removed double-defined override_dh_python3.
+  * Switched to openstack-pkg-tools >= 70~ provided debconf templates.
+  * Using policy.json generated with --format json.
+  * Add Breaks:+Replaces: python-nova (Closes: #891681).
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 06 Mar 2018 21:05:55 +0000
 
 nova (2:17.0.0~rc1-2) unstable; urgency=medium
 
