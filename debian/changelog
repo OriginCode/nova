@@ -1,3 +1,9 @@
+nova (2:17.0.0-3) UNRELEASED; urgency=medium
+
+  * Better default values for [neutron] section.
+
+ -- Thomas Goirand <zigo@debian.org>  Sun, 11 Mar 2018 11:32:47 +0000
+
 nova (2:17.0.0-2) unstable; urgency=medium
 
   * Fixed nova-placement-api must use uwsgi_python3 not uwsgi_python.
