@@ -1,9 +1,10 @@
-nova (2:17.0.0-3) UNRELEASED; urgency=medium
+nova (2:17.0.0-4) unstable; urgency=medium
 
   * Better default values for [neutron] section.
   * Correctly read/write [neutron] config.
+  * Fixed dbc postrm.
 
- -- Thomas Goirand <zigo@debian.org>  Sun, 11 Mar 2018 11:32:47 +0000
+ -- Thomas Goirand <zigo@debian.org>  Mon, 26 Mar 2018 17:54:04 +0000
 
 nova (2:17.0.0-2) unstable; urgency=medium
 
