@@ -1,3 +1,9 @@
+nova (2:17.0.3-1) UNRELEASED; urgency=medium
+
+  * New upstream version
+
+ -- Michal Arbet <michal.arbet@ultimum.io>  Thu, 26 Apr 2018 08:38:15 +0100
+
 nova (2:17.0.0-4) unstable; urgency=medium
 
   * Better default values for [neutron] section.
