@@ -697,7 +697,7 @@ class ComputeManager(manager.Manager):
             cn_uuid = compute_nodes[migration.source_node]
 
             if not scheduler_utils.remove_allocation_from_compute(
-                    instance, cn_uuid, self.reportclient):
+                    context, instance, cn_uuid, self.reportclient):
                 LOG.error("Failed to clean allocation of evacuated instance "
                           "on the source node %s",
                           cn_uuid, instance=instance)
@@ -1133,7 +1133,7 @@ class ComputeManager(manager.Manager):
         # NOTE(sbauza): We want the compute node to hard fail if it won't be
         # able to provide its resources to the placement API, or it will not
         # be able to be eligible as a destination.
-        if CONF.placement.os_region_name is None:
+        if CONF.placement.region_name is None:
             raise exception.PlacementNotConfigured()
 
         self.driver.init_host(host=self.host)
@@ -1849,7 +1849,7 @@ class ComputeManager(manager.Manager):
                     instance=instance)
                 self._cleanup_allocated_networks(context, instance,
                     requested_networks)
-                self._cleanup_volumes(context, instance.uuid,
+                self._cleanup_volumes(context, instance,
                     block_device_mapping, raise_exc=False)
                 compute_utils.add_instance_fault_from_exc(context,
                         instance, e, sys.exc_info(),
@@ -1865,12 +1865,21 @@ class ComputeManager(manager.Manager):
             retry['exc_reason'] = e.kwargs['reason']
             # NOTE(comstud): Deallocate networks if the driver wants
             # us to do so.
+            # NOTE(mriedem): Always deallocate networking when using Neutron.
+            # This is to unbind any ports that the user supplied in the server
+            # create request, or delete any ports that nova created which were
+            # meant to be bound to this host. This check intentionally bypasses
+            # the result of deallocate_networks_on_reschedule because the
+            # default value in the driver is False, but that method was really
+            # only meant for Ironic and should be removed when nova-network is
+            # removed (since is_neutron() will then always be True).
             # NOTE(vladikr): SR-IOV ports should be deallocated to
             # allow new sriov pci devices to be allocated on a new host.
             # Otherwise, if devices with pci addresses are already allocated
             # on the destination host, the instance will fail to spawn.
             # info_cache.network_info should be present at this stage.
             if (self.driver.deallocate_networks_on_reschedule(instance) or
+                utils.is_neutron() or
                 self.deallocate_sriov_ports_on_reschedule(instance)):
                 self._cleanup_allocated_networks(context, instance,
                         requested_networks)
@@ -1909,7 +1918,7 @@ class ComputeManager(manager.Manager):
             LOG.exception(e.format_message(), instance=instance)
             self._cleanup_allocated_networks(context, instance,
                     requested_networks)
-            self._cleanup_volumes(context, instance.uuid,
+            self._cleanup_volumes(context, instance,
                     block_device_mapping, raise_exc=False)
             compute_utils.add_instance_fault_from_exc(context, instance,
                     e, sys.exc_info())
@@ -1923,7 +1932,7 @@ class ComputeManager(manager.Manager):
                           instance=instance)
             self._cleanup_allocated_networks(context, instance,
                     requested_networks)
-            self._cleanup_volumes(context, instance.uuid,
+            self._cleanup_volumes(context, instance,
                     block_device_mapping, raise_exc=False)
             compute_utils.add_instance_fault_from_exc(context, instance,
                     e, sys.exc_info())
@@ -2223,7 +2232,8 @@ class ComputeManager(manager.Manager):
 
         try:
             resources['allocations'] = (
-                self.reportclient.get_allocations_for_consumer(instance.uuid))
+                self.reportclient.get_allocations_for_consumer(context,
+                                                               instance.uuid))
         except Exception:
             LOG.exception('Failure retrieving placement allocations',
                           instance=instance)
@@ -2424,14 +2434,27 @@ class ComputeManager(manager.Manager):
                     self.host, action=fields.NotificationAction.SHUTDOWN,
                     phase=fields.NotificationPhase.END, bdms=bdms)
 
-    def _cleanup_volumes(self, context, instance_uuid, bdms, raise_exc=True):
+    def _cleanup_volumes(self, context, instance, bdms, raise_exc=True,
+                         detach=True):
         exc_info = None
-
         for bdm in bdms:
-            LOG.debug("terminating bdm %s", bdm,
-                      instance_uuid=instance_uuid)
+            if detach and bdm.volume_id:
+                try:
+                    LOG.debug("Detaching volume: %s", bdm.volume_id,
+                              instance_uuid=instance.uuid)
+                    destroy = bdm.delete_on_termination
+                    self._detach_volume(context, bdm, instance,
+                                        destroy_bdm=destroy)
+                except Exception as exc:
+                    exc_info = sys.exc_info()
+                    LOG.warning('Failed to detach volume: %(volume_id)s '
+                                'due to %(exc)s',
+                                {'volume_id': bdm.volume_id, 'exc': exc})
+
             if bdm.volume_id and bdm.delete_on_termination:
                 try:
+                    LOG.debug("Deleting volume: %s", bdm.volume_id,
+                              instance_uuid=instance.uuid)
                     self.volume_api.delete(context, bdm.volume_id)
                 except Exception as exc:
                     exc_info = sys.exc_info()
@@ -2483,8 +2506,14 @@ class ComputeManager(manager.Manager):
         #             future to set an instance fault the first time
         #             and to only ignore the failure if the instance
         #             is already in ERROR.
-        self._cleanup_volumes(context, instance.uuid, bdms,
-                raise_exc=False)
+
+        # NOTE(ameeda): The volumes already detached during the above
+        #               _shutdown_instance() call and this is why
+        #               detach is not requested from _cleanup_volumes()
+        #               in this case
+
+        self._cleanup_volumes(context, instance, bdms,
+                raise_exc=False, detach=False)
         # if a delete task succeeded, always update vm state and task
         # state without expecting task state to be DELETING
         instance.vm_state = vm_states.DELETED
@@ -2830,23 +2859,14 @@ class ComputeManager(manager.Manager):
 
         LOG.info("Rebuilding instance", instance=instance)
 
-        # NOTE(gyee): there are three possible scenarios.
-        #
-        #   1. instance is being rebuilt on the same node. In this case,
-        #      recreate should be False and scheduled_node should be None.
-        #   2. instance is being rebuilt on a node chosen by the
-        #      scheduler (i.e. evacuate). In this case, scheduled_node should
-        #      be specified and recreate should be True.
-        #   3. instance is being rebuilt on a node chosen by the user. (i.e.
-        #      force evacuate). In this case, scheduled_node is not specified
-        #      and recreate is set to True.
-        #
-        # For scenarios #2 and #3, we must do rebuild claim as server is
-        # being evacuated to a different node.
         rt = self._get_resource_tracker()
-        if recreate or scheduled_node is not None:
+        if recreate:
+            # This is an evacuation to a new host, so we need to perform a
+            # resource claim.
             rebuild_claim = rt.rebuild_claim
         else:
+            # This is a rebuild to the same host, so we don't need to make
+            # a claim since the instance is already on this host.
             rebuild_claim = claims.NopClaim
 
         image_meta = {}
@@ -2902,7 +2922,7 @@ class ComputeManager(manager.Manager):
                 # on the same host (not evacuate) uses the NopClaim which will
                 # not raise ComputeResourcesUnavailable.
                 rt.delete_allocation_for_evacuated_instance(
-                    instance, scheduled_node, node_type='destination')
+                    context, instance, scheduled_node, node_type='destination')
                 self._notify_instance_rebuild_error(context, instance, e, bdms)
                 raise exception.BuildAbortException(
                     instance_uuid=instance.uuid, reason=e.format_message())
@@ -2916,7 +2936,8 @@ class ComputeManager(manager.Manager):
                 self._set_migration_status(migration, 'failed')
                 if recreate or scheduled_node is not None:
                     rt.delete_allocation_for_evacuated_instance(
-                        instance, scheduled_node, node_type='destination')
+                        context, instance, scheduled_node,
+                        node_type='destination')
                 self._notify_instance_rebuild_error(context, instance, e, bdms)
                 raise
             else:
@@ -3035,7 +3056,7 @@ class ComputeManager(manager.Manager):
                     context, instance, self.host, migration)
 
         allocations = self.reportclient.get_allocations_for_consumer(
-            instance.uuid)
+            context, instance.uuid)
 
         network_info = instance.get_network_info()
         if bdms is None:
@@ -3788,7 +3809,7 @@ class ComputeManager(manager.Manager):
                 # so, avoid doing the legacy behavior below.
                 mig_allocs = (
                     self.reportclient.get_allocations_for_consumer_by_provider(
-                        cn_uuid, migration.uuid))
+                        context, cn_uuid, migration.uuid))
                 if mig_allocs:
                     LOG.info(_('Source node %(node)s reverted migration '
                                '%(mig)s; not deleting migration-based '
@@ -3803,7 +3824,7 @@ class ComputeManager(manager.Manager):
             # accounting
             allocs = (
                 self.reportclient.get_allocations_for_consumer_by_provider(
-                    cn_uuid, migration.uuid))
+                    context, cn_uuid, migration.uuid))
             if allocs:
                 # NOTE(danms): The source did migration-based allocation
                 # accounting, so we should let the source node rejigger
@@ -3832,7 +3853,7 @@ class ComputeManager(manager.Manager):
         # any shared providers in the case of a confirm_resize operation and
         # the source host and shared providers for a revert_resize operation..
         if not scheduler_utils.remove_allocation_from_compute(
-                instance, cn_uuid, self.reportclient, flavor):
+                context, instance, cn_uuid, self.reportclient, flavor):
             LOG.error("Failed to save manipulated allocation",
                       instance=instance)
 
@@ -4002,7 +4023,7 @@ class ComputeManager(manager.Manager):
         # Fetch the original allocation that the instance had on the source
         # node, which are now held by the migration
         orig_alloc = self.reportclient.get_allocations_for_consumer(
-            migration.uuid)
+            context, migration.uuid)
         if not orig_alloc:
             # NOTE(danms): This migration did not do per-migration allocation
             # accounting, so nothing to do here.
@@ -4213,6 +4234,15 @@ class ComputeManager(manager.Manager):
         This is initiated from the destination host's ``prep_resize`` routine
         and runs on the source host.
         """
+        try:
+            self._resize_instance(context, instance, image, migration,
+                                  instance_type, clean_shutdown)
+        except Exception:
+            with excutils.save_and_reraise_exception():
+                self._revert_allocation(context, instance, migration)
+
+    def _resize_instance(self, context, instance, image,
+                         migration, instance_type, clean_shutdown):
         with self._error_out_instance_on_exception(context, instance), \
              errors_out_migration_ctxt(migration):
             network_info = self.network_api.get_instance_nw_info(context,
@@ -4437,6 +4467,20 @@ class ComputeManager(manager.Manager):
         Sets up the newly transferred disk and turns on the instance at its
         new host machine.
 
+        """
+        try:
+            self._finish_resize_helper(context, disk_info, image, instance,
+                                       migration)
+        except Exception:
+            with excutils.save_and_reraise_exception():
+                self._revert_allocation(context, instance, migration)
+
+    def _finish_resize_helper(self, context, disk_info, image, instance,
+                              migration):
+        """Completes the migration process.
+
+        The caller must revert the instance's allocations if the migration
+        process failed.
         """
         bdms = objects.BlockDeviceMappingList.get_by_instance_uuid(
             context, instance.uuid)
@@ -4881,7 +4925,7 @@ class ComputeManager(manager.Manager):
         limits = filter_properties.get('limits', {})
 
         allocations = self.reportclient.get_allocations_for_consumer(
-            instance.uuid)
+            context, instance.uuid)
 
         shelved_image_ref = instance.image_ref
         if image:
@@ -4914,8 +4958,11 @@ class ComputeManager(manager.Manager):
                 # instance claim will not remove the allocations.
                 rt.reportclient.delete_allocation_for_instance(context,
                                                                instance.uuid)
-                # FIXME: Umm, shouldn't we be rolling back volume connections
-                # and port bindings?
+                # FIXME: Umm, shouldn't we be rolling back port bindings too?
+                self._terminate_volume_connections(context, instance, bdms)
+                # The reverts_task_state decorator on unshelve_instance will
+                # eventually save these updates.
+                self._nil_out_instance_obj_host_and_node(instance)
 
         if image:
             instance.image_ref = shelved_image_ref
@@ -5448,18 +5495,21 @@ class ComputeManager(manager.Manager):
             # currently implementing swap_volume, will modify the contents of
             # new_cinfo when connect_volume is called. This is then saved to
             # the BDM in swap_volume for future use outside of this flow.
-            LOG.debug("swap_volume: Calling driver volume swap with "
-                      "connection infos: new: %(new_cinfo)s; "
-                      "old: %(old_cinfo)s",
-                      {'new_cinfo': new_cinfo, 'old_cinfo': old_cinfo},
-                      instance=instance)
+            msg = ("swap_volume: Calling driver volume swap with "
+                   "connection infos: new: %(new_cinfo)s; "
+                   "old: %(old_cinfo)s" %
+                   {'new_cinfo': new_cinfo, 'old_cinfo': old_cinfo})
+            # Both new and old info might contain password
+            LOG.debug(strutils.mask_password(msg), instance=instance)
+
             self.driver.swap_volume(context, old_cinfo, new_cinfo, instance,
                                     mountpoint, resize_to)
             if new_attachment_id:
                 self.volume_api.attachment_complete(context, new_attachment_id)
-            LOG.debug("swap_volume: Driver volume swap returned, new "
-                      "connection_info is now : %(new_cinfo)s",
-                      {'new_cinfo': new_cinfo})
+            msg = ("swap_volume: Driver volume swap returned, new "
+                   "connection_info is now : %(new_cinfo)s" %
+                   {'new_cinfo': new_cinfo})
+            LOG.debug(strutils.mask_password(msg))
         except Exception as ex:
             failed = True
             with excutils.save_and_reraise_exception():
@@ -6269,7 +6319,7 @@ class ComputeManager(manager.Manager):
             migration = migrate_data.migration
             rc = self.scheduler_client.reportclient
             # Check to see if our migration has its own allocations
-            allocs = rc.get_allocations_for_consumer(migration.uuid)
+            allocs = rc.get_allocations_for_consumer(ctxt, migration.uuid)
         else:
             # We didn't have data on a migration, which means we can't
             # look up to see if we had new-style migration-based
@@ -6294,7 +6344,7 @@ class ComputeManager(manager.Manager):
             # attempt to clean up any doubled per-instance allocation
             rt = self._get_resource_tracker()
             rt.delete_allocation_for_migrated_instance(
-                instance, source_node)
+                ctxt, instance, source_node)
 
     def _consoles_enabled(self):
         """Returns whether a console is enable."""
@@ -7361,7 +7411,7 @@ class ComputeManager(manager.Manager):
                     try:
                         self._shutdown_instance(context, instance, bdms,
                                                 notify=False)
-                        self._cleanup_volumes(context, instance.uuid, bdms)
+                        self._cleanup_volumes(context, instance, bdms)
                     except Exception as e:
                         LOG.warning("Periodic cleanup failed to delete "
                                     "instance: %s",

@@ -2189,7 +2189,8 @@ class API(base.Base):
             instance.save(expected_task_state=[None])
 
     @check_instance_lock
-    @check_instance_state(must_have_launched=False)
+    @check_instance_state(task_state=None,
+                          must_have_launched=False)
     def force_delete(self, context, instance):
         """Force delete an instance in any vm_state/task_state."""
         self._delete(context, instance, 'force_delete', self._do_force_delete,
@@ -2855,9 +2856,45 @@ class API(base.Base):
         if instance.root_device_name:
             properties['root_device_name'] = instance.root_device_name
 
+        bdms = objects.BlockDeviceMappingList.get_by_instance_uuid(
+                context, instance.uuid)
+
+        mapping = []  # list of BDM dicts that can go into the image properties
+        # Do some up-front filtering of the list of BDMs from
+        # which we are going to create snapshots.
+        volume_bdms = []
+        for bdm in bdms:
+            if bdm.no_device:
+                continue
+            if bdm.is_volume:
+                # These will be handled below.
+                volume_bdms.append(bdm)
+            else:
+                mapping.append(bdm.get_image_mapping())
+
+        # Check limits in Cinder before creating snapshots to avoid going over
+        # quota in the middle of a list of volumes. This is a best-effort check
+        # but concurrently running snapshot requests from the same project
+        # could still fail to create volume snapshots if they go over limit.
+        if volume_bdms:
+            limits = self.volume_api.get_absolute_limits(context)
+            total_snapshots_used = limits['totalSnapshotsUsed']
+            max_snapshots = limits['maxTotalSnapshots']
+            # -1 means there is unlimited quota for snapshots
+            if (max_snapshots > -1 and
+                    len(volume_bdms) + total_snapshots_used > max_snapshots):
+                LOG.debug('Unable to create volume snapshots for instance. '
+                          'Currently has %s snapshots, requesting %s new '
+                          'snapshots, with a limit of %s.',
+                          total_snapshots_used, len(volume_bdms),
+                          max_snapshots, instance=instance)
+                raise exception.OverQuota(overs='snapshots')
+
         quiesced = False
         if instance.vm_state == vm_states.ACTIVE:
             try:
+                LOG.info("Attempting to quiesce instance before volume "
+                         "snapshot.", instance=instance)
                 self.compute_rpcapi.quiesce_instance(context, instance)
                 quiesced = True
             except (exception.InstanceQuiesceNotSupported,
@@ -2871,17 +2908,10 @@ class API(base.Base):
                              {'reason': err},
                              instance=instance)
 
-        bdms = objects.BlockDeviceMappingList.get_by_instance_uuid(
-                context, instance.uuid)
-
         @wrap_instance_event(prefix='api')
         def snapshot_instance(self, context, instance, bdms):
-            mapping = []
-            for bdm in bdms:
-                if bdm.no_device:
-                    continue
-
-                if bdm.is_volume:
+            try:
+                for bdm in volume_bdms:
                     # create snapshot based on volume_id
                     volume = self.volume_api.get(context, bdm.volume_id)
                     # NOTE(yamahata): Should we wait for snapshot creation?
@@ -2889,20 +2919,28 @@ class API(base.Base):
                     #                 short time, it doesn't matter for now.
                     name = _('snapshot for %s') % image_meta['name']
                     LOG.debug('Creating snapshot from volume %s.',
-                              volume['id'],
-                              instance=instance)
+                              volume['id'], instance=instance)
                     snapshot = self.volume_api.create_snapshot_force(
-                        context, volume['id'], name,
-                        volume['display_description'])
+                        context, volume['id'],
+                        name, volume['display_description'])
                     mapping_dict = block_device.snapshot_from_bdm(
-                        snapshot['id'],
-                        bdm)
+                        snapshot['id'], bdm)
                     mapping_dict = mapping_dict.get_image_mapping()
-                else:
-                    mapping_dict = bdm.get_image_mapping()
-
-                mapping.append(mapping_dict)
-            return mapping
+                    mapping.append(mapping_dict)
+                return mapping
+            # NOTE(tasker): No error handling is done in the above for loop.
+            # This means that if the snapshot fails and throws an exception
+            # the traceback will skip right over the unquiesce needed below.
+            # Here, catch any exception, unquiesce the instance, and raise the
+            # error so that the calling function can do what it needs to in
+            # order to properly treat a failed snap.
+            except Exception:
+                with excutils.save_and_reraise_exception():
+                    if quiesced:
+                        LOG.info("Unquiescing instance after volume snapshot "
+                                 "failure.", instance=instance)
+                        self.compute_rpcapi.unquiesce_instance(
+                            context, instance, mapping)
 
         self._record_action_start(context, instance,
                                   instance_actions.CREATE_IMAGE)

@@ -76,7 +76,7 @@ _UNPROVISION_STATES = (ironic_states.ACTIVE, ironic_states.DEPLOYFAIL,
 
 _NODE_FIELDS = ('uuid', 'power_state', 'target_power_state', 'provision_state',
                 'target_provision_state', 'last_error', 'maintenance',
-                'properties', 'instance_uuid', 'traits')
+                'properties', 'instance_uuid', 'traits', 'resource_class')
 
 # Console state checking interval in seconds
 _CONSOLE_STATE_CHECKING_INTERVAL = 1
@@ -768,7 +768,8 @@ class IronicDriver(virt_driver.ComputeDriver):
         # and DISK_GB resource classes in early Queens when Ironic nodes will
         # *always* return the custom resource class that represents the
         # baremetal node class in an atomic, singular unit.
-        if self._node_resources_unavailable(node):
+        if (not self._node_resources_used(node) and
+            self._node_resources_unavailable(node)):
             # TODO(dtantsur): report resources as reserved instead of reporting
             # an empty inventory
             LOG.debug('Node %(node)s is not ready for a deployment, '

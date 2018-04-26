@@ -1283,6 +1283,11 @@ class _ComputeAPIUnitTestMixIn(object):
                         delete_type='delete')
                 mock_local_delete.assert_not_called()
 
+    def test_delete_forced_when_task_state_is_not_none(self):
+        for vm_state in self._get_vm_states():
+            self._test_delete('force_delete', vm_state=vm_state,
+                              task_state=task_states.RESIZE_MIGRATING)
+
     def test_delete_fast_if_host_not_set(self):
         self.useFixture(fixtures.AllServicesCurrent())
         inst = self._create_instance_obj()
@@ -3043,7 +3048,8 @@ class _ComputeAPIUnitTestMixIn(object):
                                                           instance)
 
     def _test_snapshot_volume_backed(self, quiesce_required, quiesce_fails,
-                                     vm_state=vm_states.ACTIVE):
+                                     vm_state=vm_states.ACTIVE,
+                                     snapshot_fails=False, limits=None):
         fake_sys_meta = {'image_min_ram': '11',
                          'image_min_disk': '22',
                          'image_container_format': 'ami',
@@ -3089,6 +3095,8 @@ class _ComputeAPIUnitTestMixIn(object):
             return {'id': volume_id, 'display_description': ''}
 
         def fake_volume_create_snapshot(context, volume_id, name, description):
+            if snapshot_fails:
+                raise exception.OverQuota(overs="snapshots")
             return {'id': '%s-snapshot' % volume_id}
 
         def fake_quiesce_instance(context, instance):
@@ -3099,6 +3107,11 @@ class _ComputeAPIUnitTestMixIn(object):
 
         def fake_unquiesce_instance(context, instance, mapping=None):
             quiesced[1] = True
+
+        def fake_get_absolute_limits(context):
+            if limits is not None:
+                return limits
+            return {"totalSnapshotsUsed": 0, "maxTotalSnapshots": 10}
 
         self.stub_out('nova.objects.BlockDeviceMappingList'
                       '.get_by_instance_uuid',
@@ -3148,13 +3161,24 @@ class _ComputeAPIUnitTestMixIn(object):
              'destination_type': 'volume', 'delete_on_termination': False,
              'tag': None})
 
+        limits_patcher = mock.patch.object(
+            self.compute_api.volume_api, 'get_absolute_limits',
+            side_effect=fake_get_absolute_limits)
+        limits_patcher.start()
+        self.addCleanup(limits_patcher.stop)
+
         with test.nested(
                 mock.patch.object(compute_api.API, '_record_action_start'),
                 mock.patch.object(compute_utils, 'EventReporter')) as (
                 mock_record, mock_event):
             # All the db_only fields and the volume ones are removed
-            self.compute_api.snapshot_volume_backed(
-                self.context, instance, 'test-snapshot')
+            if snapshot_fails:
+                self.assertRaises(exception.OverQuota,
+                                  self.compute_api.snapshot_volume_backed,
+                                  self.context, instance, "test-snapshot")
+            else:
+                self.compute_api.snapshot_volume_backed(
+                    self.context, instance, 'test-snapshot')
 
         self.assertEqual(quiesce_expected, quiesced[0])
         self.assertEqual(quiesce_expected, quiesced[1])
@@ -3187,7 +3211,9 @@ class _ComputeAPIUnitTestMixIn(object):
                  'guest_format': 'swap', 'delete_on_termination': True,
                  'tag': None})
         instance_bdms.append(bdm)
-        expect_meta['properties']['block_device_mapping'].append(
+        # The non-volume image mapping will go at the front of the list
+        # because the volume BDMs are processed separately.
+        expect_meta['properties']['block_device_mapping'].insert(0,
             {'guest_format': 'swap', 'boot_index': -1, 'no_device': False,
              'image_id': None, 'volume_id': None, 'disk_bus': None,
              'volume_size': None, 'source_type': 'blank',
@@ -3204,8 +3230,13 @@ class _ComputeAPIUnitTestMixIn(object):
                 mock_record, mock_event):
             # Check that the mappings from the image properties are not
             # included
-            self.compute_api.snapshot_volume_backed(
-                self.context, instance, 'test-snapshot')
+            if snapshot_fails:
+                self.assertRaises(exception.OverQuota,
+                                  self.compute_api.snapshot_volume_backed,
+                                  self.context, instance, "test-snapshot")
+            else:
+                self.compute_api.snapshot_volume_backed(
+                    self.context, instance, 'test-snapshot')
 
         self.assertEqual(quiesce_expected, quiesced[0])
         self.assertEqual(quiesce_expected, quiesced[1])
@@ -3222,6 +3253,29 @@ class _ComputeAPIUnitTestMixIn(object):
 
     def test_snapshot_volume_backed_with_quiesce(self):
         self._test_snapshot_volume_backed(True, False)
+
+    def test_snapshot_volume_backed_with_quiesce_create_snap_fails(self):
+        self._test_snapshot_volume_backed(quiesce_required=True,
+                                          quiesce_fails=False,
+                                          snapshot_fails=True)
+
+    def test_snapshot_volume_backed_unlimited_quota(self):
+        """Tests that there is unlimited quota on volume snapshots so we
+        don't perform a quota check.
+        """
+        limits = {'maxTotalSnapshots': -1, 'totalSnapshotsUsed': 0}
+        self._test_snapshot_volume_backed(
+            quiesce_required=False, quiesce_fails=False, limits=limits)
+
+    def test_snapshot_volume_backed_over_quota_before_snapshot(self):
+        """Tests that the up-front check on quota fails before actually
+        attempting to snapshot any volumes.
+        """
+        limits = {'maxTotalSnapshots': 1, 'totalSnapshotsUsed': 1}
+        self.assertRaises(exception.OverQuota,
+                          self._test_snapshot_volume_backed,
+                          quiesce_required=False, quiesce_fails=False,
+                          limits=limits)
 
     def test_snapshot_volume_backed_with_quiesce_skipped(self):
         self._test_snapshot_volume_backed(False, True)

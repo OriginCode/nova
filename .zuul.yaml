@@ -63,6 +63,12 @@
     timeout: 3600
 
 - job:
+    name: nova-cells-v1
+    parent: nova-dsvm-base
+    run: playbooks/legacy/nova-cells-v1/run.yaml
+    post-run: playbooks/legacy/nova-cells-v1/post.yaml
+
+- job:
     name: nova-lvm
     parent: nova-dsvm-base
     description: |
@@ -82,7 +88,6 @@
       Pike Ubuntu Cloud Archive because volume multiattach support with
       the libvirt driver only works with qemu<2.10 or libvirt>=3.10 which
       won't work with the Pike UCA.
-    branches: ^(?!stable/(newton|ocata|pike)).*$
     run: playbooks/legacy/nova-multiattach/run.yaml
     post-run: playbooks/legacy/nova-multiattach/post.yaml
 
@@ -90,11 +95,13 @@
     # Please try to keep the list of job names sorted alphabetically.
     check:
       jobs:
+        - nova-cells-v1
         - nova-multiattach
         - nova-tox-functional
         - nova-tox-functional-py35
     gate:
       jobs:
+        - nova-cells-v1
         - nova-multiattach
         - nova-tox-functional
         - nova-tox-functional-py35

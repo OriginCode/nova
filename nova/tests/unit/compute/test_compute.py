@@ -4622,6 +4622,7 @@ class ComputeTestCase(BaseTestCase,
         # ensure that task_state is reverted after a failed operation.
         migration = objects.Migration(context=self.context.elevated())
         migration.instance_uuid = 'b48316c5-71e8-45e4-9884-6c78055b9b13'
+        migration.uuid = mock.sentinel.uuid
         migration.new_instance_type_id = '1'
         instance_type = objects.Flavor()
 
@@ -6953,7 +6954,7 @@ class ComputeTestCase(BaseTestCase,
         mock_shutdown.assert_has_calls([
             mock.call(ctxt, inst1, bdms, notify=False),
             mock.call(ctxt, inst2, bdms, notify=False)])
-        mock_cleanup.assert_called_once_with(ctxt, inst2['uuid'], bdms)
+        mock_cleanup.assert_called_once_with(ctxt, inst2, bdms)
         mock_get_uuid.assert_has_calls([
             mock.call(ctxt, inst1.uuid, use_slave=True),
             mock.call(ctxt, inst2.uuid, use_slave=True)])

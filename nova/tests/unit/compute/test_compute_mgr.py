@@ -277,7 +277,10 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
         self.assertFalse(mock_log.error.called)
 
     @mock.patch('nova.compute.utils.notify_about_instance_action')
-    def test_delete_instance_without_info_cache(self, mock_notify):
+    @mock.patch('nova.compute.manager.ComputeManager.'
+                '_detach_volume')
+    def test_delete_instance_without_info_cache(self, mock_detach,
+                                                mock_notify):
         instance = fake_instance.fake_instance_obj(
                 self.context,
                 uuid=uuids.instance,
@@ -725,7 +728,7 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
             self.compute.init_host()
 
             mock_remove_allocation.assert_called_once_with(
-                deleted_instance.uuid, uuids.our_node_uuid,
+                self.context, deleted_instance.uuid, uuids.our_node_uuid,
                 deleted_instance.user_id, deleted_instance.project_id,
                 mock.sentinel.my_resources)
 
@@ -3595,8 +3598,8 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
             get_node.assert_called_once_with(
                 self.context, our_host, migration.source_node)
             remove_allocation.assert_called_once_with(
-                instance_2.uuid, uuids.our_node_uuid, uuids.user_id,
-                uuids.project_id, mock.sentinel.resources)
+                self.context, instance_2.uuid, uuids.our_node_uuid,
+                uuids.user_id, uuids.project_id, mock.sentinel.resources)
 
     def test_destroy_evacuated_instances_node_deleted(self):
         our_host = self.compute.host
@@ -3672,8 +3675,8 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
             # but only instance_2 is deallocated as the compute node for
             # instance_1 is already deleted
             remove_allocation.assert_called_once_with(
-                instance_2.uuid, uuids.our_node_uuid, uuids.user_id,
-                uuids.project_id, mock.sentinel.resources)
+                self.context, instance_2.uuid, uuids.our_node_uuid,
+                uuids.user_id, uuids.project_id, mock.sentinel.resources)
 
             self.assertEqual(2, get_node.call_count)
 
@@ -3711,6 +3714,7 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
         # Tests that we fail init_host if the placement section is
         # configured incorrectly.
         self.flags(os_region_name=None, group='placement')
+        self.flags(region_name=None, group='placement')
         self.assertRaises(exception.PlacementNotConfigured,
                           self.compute.init_host)
 
@@ -3759,7 +3763,9 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
         self.assertRaises(test.TestingException, do_test)
         set_error.assert_called_once_with(self.context, instance)
 
-    def test_cleanup_volumes(self):
+    @mock.patch('nova.compute.manager.ComputeManager.'
+                '_detach_volume')
+    def test_cleanup_volumes(self, mock_detach):
         instance = fake_instance.fake_instance_obj(self.context)
         bdm_do_not_delete_dict = fake_block_device.FakeDbBlockDeviceDict(
             {'volume_id': 'fake-id1', 'source_type': 'image',
@@ -3772,11 +3778,17 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
 
         with mock.patch.object(self.compute.volume_api,
                 'delete') as volume_delete:
-            self.compute._cleanup_volumes(self.context, instance.uuid, bdms)
+            self.compute._cleanup_volumes(self.context, instance, bdms)
+            calls = [mock.call(self.context, bdm, instance,
+                               destroy_bdm=bdm.delete_on_termination)
+                     for bdm in bdms]
+            self.assertEqual(calls, mock_detach.call_args_list)
             volume_delete.assert_called_once_with(self.context,
                     bdms[1].volume_id)
 
-    def test_cleanup_volumes_exception_do_not_raise(self):
+    @mock.patch('nova.compute.manager.ComputeManager.'
+                '_detach_volume')
+    def test_cleanup_volumes_exception_do_not_raise(self, mock_detach):
         instance = fake_instance.fake_instance_obj(self.context)
         bdm_dict1 = fake_block_device.FakeDbBlockDeviceDict(
             {'volume_id': 'fake-id1', 'source_type': 'image',
@@ -3790,12 +3802,17 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
         with mock.patch.object(self.compute.volume_api,
                 'delete',
                 side_effect=[test.TestingException(), None]) as volume_delete:
-            self.compute._cleanup_volumes(self.context, instance.uuid, bdms,
+            self.compute._cleanup_volumes(self.context, instance, bdms,
                     raise_exc=False)
             calls = [mock.call(self.context, bdm.volume_id) for bdm in bdms]
             self.assertEqual(calls, volume_delete.call_args_list)
+            calls = [mock.call(self.context, bdm, instance,
+                               destroy_bdm=True) for bdm in bdms]
+            self.assertEqual(calls, mock_detach.call_args_list)
 
-    def test_cleanup_volumes_exception_raise(self):
+    @mock.patch('nova.compute.manager.ComputeManager.'
+                '_detach_volume')
+    def test_cleanup_volumes_exception_raise(self, mock_detach):
         instance = fake_instance.fake_instance_obj(self.context)
         bdm_dict1 = fake_block_device.FakeDbBlockDeviceDict(
             {'volume_id': 'fake-id1', 'source_type': 'image',
@@ -3810,10 +3827,31 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
                 'delete',
                 side_effect=[test.TestingException(), None]) as volume_delete:
             self.assertRaises(test.TestingException,
-                    self.compute._cleanup_volumes, self.context, instance.uuid,
+                    self.compute._cleanup_volumes, self.context, instance,
                     bdms)
             calls = [mock.call(self.context, bdm.volume_id) for bdm in bdms]
             self.assertEqual(calls, volume_delete.call_args_list)
+            calls = [mock.call(self.context, bdm, instance,
+                               destroy_bdm=bdm.delete_on_termination)
+                     for bdm in bdms]
+            self.assertEqual(calls, mock_detach.call_args_list)
+
+    @mock.patch('nova.compute.manager.ComputeManager._detach_volume',
+                side_effect=exception.CinderConnectionFailed(reason='idk'))
+    def test_cleanup_volumes_detach_fails_raise_exc(self, mock_detach):
+        instance = fake_instance.fake_instance_obj(self.context)
+        bdms = block_device_obj.block_device_make_list(
+            self.context,
+            [fake_block_device.FakeDbBlockDeviceDict(
+                {'volume_id': uuids.volume_id,
+                 'source_type': 'volume',
+                 'destination_type': 'volume',
+                 'delete_on_termination': False})])
+        self.assertRaises(exception.CinderConnectionFailed,
+                          self.compute._cleanup_volumes, self.context,
+                          instance, bdms)
+        mock_detach.assert_called_once_with(
+            self.context, bdms[0], instance, destroy_bdm=False)
 
     def test_stop_instance_task_state_none_power_state_shutdown(self):
         # Tests that stop_instance doesn't puke when the instance power_state
@@ -3923,10 +3961,13 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
             self.assertFalse(
                 rt.delete_allocation_for_evacuated_instance.called)
 
+    @mock.patch('nova.context.RequestContext.elevated')
     @mock.patch('nova.compute.utils.add_instance_fault_from_exc')
     @mock.patch.object(manager.ComputeManager,
                        '_error_out_instance_on_exception')
-    def test_rebuild_driver_error_evacuate(self, mock_error, mock_aiffe):
+    def test_rebuild_driver_error_evacuate(self, mock_error, mock_aiffe,
+                                           mock_elevated):
+        mock_elevated.return_value = self.context
         instance = fake_instance.fake_instance_obj(self.context)
         ex = test.TestingException('foo')
         with mock.patch.object(self.compute, '_get_resource_tracker') as mrt:
@@ -3935,7 +3976,7 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
                               recreate=True, scheduled_node='foo')
             rt = mrt.return_value
             delete_alloc = rt.delete_allocation_for_evacuated_instance
-            delete_alloc.assert_called_once_with(instance, 'foo',
+            delete_alloc.assert_called_once_with(self.context, instance, 'foo',
                                                  node_type='destination')
 
     @mock.patch('nova.context.RequestContext.elevated')
@@ -4018,7 +4059,7 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
         mock_validate_policy.assert_called_once_with(
             elevated_context, instance, {'group': [uuids.group]})
         mock_delete_allocation.assert_called_once_with(
-            instance, 'fake-node', node_type='destination')
+            elevated_context, instance, 'fake-node', node_type='destination')
         mock_notify.assert_called_once_with(
             elevated_context, instance, 'fake-mini', action='rebuild',
             bdms=None, exception=exc, phase='error')
@@ -4664,7 +4705,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
         mock_clean_net.assert_called_once_with(self.context, self.instance,
                 self.requested_networks)
         mock_clean_vol.assert_called_once_with(self.context,
-                self.instance.uuid, self.block_device_mapping, raise_exc=False)
+                self.instance, self.block_device_mapping, raise_exc=False)
         mock_add.assert_called_once_with(self.context, self.instance,
                 mock.ANY, mock.ANY)
         mock_nil.assert_called_once_with(self.instance)
@@ -4684,6 +4725,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
     def test_rescheduled_exception(self, mock_hooks, mock_build_run,
                                    mock_build, mock_set, mock_nil,
                                    mock_save, mock_start, mock_finish):
+        self.flags(use_neutron=False)
         self._do_build_instance_update(mock_save, reschedule_update=True)
         mock_build_run.side_effect = exception.RescheduledException(reason='',
                 instance_uuid=self.instance.uuid)
@@ -4769,6 +4811,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
             mock_macs_for_instance, mock_event_finish,
             mock_event_start, mock_ins_save,
             mock_build_ins, mock_build_and_run):
+        self.flags(use_neutron=False)
         instance = fake_instance.fake_instance_obj(self.context,
                 vm_state=vm_states.ACTIVE,
                 system_metadata={'network_allocated': 'True'},
@@ -4799,6 +4842,54 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
             self.filter_properties, {})
         mock_cleanup_network.assert_called_once_with(
             self.context, instance, self.compute.host)
+        mock_build_ins.assert_called_once_with(self.context,
+            [instance], self.image, self.filter_properties,
+            self.admin_pass, self.injected_files, self.requested_networks,
+            self.security_groups, self.block_device_mapping,
+            request_spec={}, host_lists=[fake_host_list])
+
+    @mock.patch.object(manager.ComputeManager, '_build_and_run_instance')
+    @mock.patch.object(manager.ComputeManager, '_cleanup_allocated_networks')
+    @mock.patch.object(conductor_api.ComputeTaskAPI, 'build_instances')
+    @mock.patch.object(objects.Instance, 'save')
+    @mock.patch.object(objects.InstanceActionEvent, 'event_start')
+    @mock.patch.object(objects.InstanceActionEvent,
+                       'event_finish_with_failure')
+    @mock.patch.object(virt_driver.ComputeDriver, 'macs_for_instance')
+    def test_rescheduled_exception_with_network_allocated_with_neutron(self,
+            mock_macs_for_instance, mock_event_finish, mock_event_start,
+            mock_ins_save, mock_build_ins, mock_cleanup_network,
+            mock_build_and_run):
+        """Tests that we always cleanup allocated networks for the instance
+        when using neutron and before we reschedule off the failed host.
+        """
+        instance = fake_instance.fake_instance_obj(self.context,
+                vm_state=vm_states.ACTIVE,
+                system_metadata={'network_allocated': 'True'},
+                expected_attrs=['metadata', 'system_metadata', 'info_cache'])
+        mock_ins_save.return_value = instance
+        mock_macs_for_instance.return_value = []
+        mock_build_and_run.side_effect = exception.RescheduledException(
+            reason='', instance_uuid=self.instance.uuid)
+
+        self.compute._do_build_and_run_instance(self.context, instance,
+            self.image, request_spec={},
+            filter_properties=self.filter_properties,
+            injected_files=self.injected_files,
+            admin_password=self.admin_pass,
+            requested_networks=self.requested_networks,
+            security_groups=self.security_groups,
+            block_device_mapping=self.block_device_mapping, node=self.node,
+            limits=self.limits, host_list=fake_host_list)
+
+        mock_build_and_run.assert_called_once_with(self.context,
+            instance,
+            self.image, self.injected_files, self.admin_pass,
+            self.requested_networks, self.security_groups,
+            self.block_device_mapping, self.node, self.limits,
+            self.filter_properties, {})
+        mock_cleanup_network.assert_called_once_with(
+            self.context, instance, self.requested_networks)
         mock_build_ins.assert_called_once_with(self.context,
             [instance], self.image, self.filter_properties,
             self.admin_pass, self.injected_files, self.requested_networks,
@@ -4901,7 +4992,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
         mock_clean_net.assert_called_once_with(self.context, self.instance,
                 self.requested_networks)
         mock_clean_vol.assert_called_once_with(self.context,
-                self.instance.uuid, self.block_device_mapping,
+                self.instance, self.block_device_mapping,
                 raise_exc=False)
         mock_add.assert_called_once_with(self.context, self.instance,
                 mock.ANY, mock.ANY, fault_message=mock.ANY)
@@ -4925,6 +5016,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
             mock_build_run, mock_build, mock_deallocate, mock_nil,
             mock_clean_net, mock_save, mock_start,
             mock_finish):
+        self.flags(use_neutron=False)
         self._do_build_instance_update(mock_save, reschedule_update=True)
         mock_build_run.side_effect = exception.RescheduledException(reason='',
                 instance_uuid=self.instance.uuid)
@@ -5049,7 +5141,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
         self._assert_build_instance_update(mock_save)
         if cleanup_volumes:
             mock_clean_vol.assert_called_once_with(self.context,
-                    self.instance.uuid, self.block_device_mapping,
+                    self.instance, self.block_device_mapping,
                     raise_exc=False)
         if nil_out_host_and_node:
             mock_nil.assert_called_once_with(self.instance)
@@ -5368,6 +5460,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
     def test_reschedule_on_resources_unavailable(self, mock_claim,
                 mock_build, mock_nil, mock_save, mock_start,
                 mock_finish, mock_notify):
+        self.flags(use_neutron=False)
         reason = 'resource unavailable'
         exc = exception.ComputeResourcesUnavailable(reason=reason)
         mock_claim.side_effect = exc
@@ -5601,7 +5694,8 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
         except Exception as e:
             self.assertIsInstance(e, exception.BuildAbortException)
 
-        self.mock_get_allocs.assert_called_once_with(self.instance.uuid)
+        self.mock_get_allocs.assert_called_once_with(self.context,
+                                                     self.instance.uuid)
         mock_net_wait.assert_called_once_with(do_raise=False)
 
     @mock.patch.object(manager.ComputeManager, '_build_networks_for_instance')
@@ -5994,6 +6088,7 @@ class ComputeManagerMigrationTestCase(test.NoDBTestCase):
                 expected_attrs=['metadata', 'system_metadata', 'info_cache'])
         self.migration = objects.Migration(
             context=self.context.elevated(),
+            uuid=mock.sentinel.uuid,
             instance_uuid=self.instance.uuid,
             new_instance_type_id=7,
             dest_compute=None,
@@ -6393,7 +6488,7 @@ class ComputeManagerMigrationTestCase(test.NoDBTestCase):
             rt.get_node_uuid.assert_called_once_with(mock.sentinel.node)
             remove = mock_rc.remove_provider_from_instance_allocation
             remove.assert_called_once_with(
-                instance.uuid, rt.get_node_uuid.return_value,
+                self.context, instance.uuid, rt.get_node_uuid.return_value,
                 instance.user_id, instance.project_id,
                 mock_resources.return_value)
         do_it()
@@ -6448,7 +6543,8 @@ class ComputeManagerMigrationTestCase(test.NoDBTestCase):
                                                        'src')
             self.assertFalse(mock_report.delete_allocation_for_instance.called)
             ga.assert_called_once_with(
-                mock_rt().get_node_uuid.return_value, self.migration.uuid)
+                self.context, mock_rt().get_node_uuid.return_value,
+                self.migration.uuid)
 
             old = mock_report.remove_provider_from_instance_allocation
             if new_rules:
@@ -6482,7 +6578,8 @@ class ComputeManagerMigrationTestCase(test.NoDBTestCase):
                                                        'dst')
             self.assertFalse(mock_report.delete_allocation_for_instance.called)
             cn_uuid = mock_rt().get_node_uuid.return_value
-            ga.assert_called_once_with(cn_uuid, self.migration.uuid)
+            ga.assert_called_once_with(self.context, cn_uuid,
+                                       self.migration.uuid)
 
             old = mock_report.remove_provider_from_instance_allocation
             if new_rules:
@@ -7022,7 +7119,8 @@ class ComputeManagerMigrationTestCase(test.NoDBTestCase):
             # ...so we should have called the old style delete
             mock_delete.assert_not_called()
             fn = mock_rt.return_value.delete_allocation_for_migrated_instance
-            fn.assert_called_once_with(self.instance, self.instance.node)
+            fn.assert_called_once_with(self.context, self.instance,
+                                       self.instance.node)
 
     def test_post_live_migration_legacy(self):
         # We have no migrate_data...
@@ -7044,7 +7142,8 @@ class ComputeManagerMigrationTestCase(test.NoDBTestCase):
             # ...so we should have called the old style delete
             mock_delete.assert_not_called()
             fn = mock_rt.return_value.delete_allocation_for_migrated_instance
-            fn.assert_called_once_with(self.instance, self.instance.node)
+            fn.assert_called_once_with(self.context, self.instance,
+                                       self.instance.node)
 
     def test_post_live_migration_cinder_v3_api(self):
         # Because live migration has succeeded, _post_live_migration
