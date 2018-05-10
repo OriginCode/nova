@@ -520,7 +520,7 @@ Depends:
  python3-openstackclient,
  python3-pastescript,
  q-text-as-data,
- uwsgi-plugin-python,
+ uwsgi-plugin-python3,
  ${misc:Depends},
  ${ostack-lsb-base},
  ${python3:Depends},
