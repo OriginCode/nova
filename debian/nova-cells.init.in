@@ -18,3 +18,5 @@ PATH=/sbin:/usr/sbin:/bin:/usr/bin
 DESC="OpenStack Compute Cells"
 PROJECT_NAME=nova
 NAME=${PROJECT_NAME}-cells
+SYSTEMD_TYPE=notify
+SYSTEMD_NOTIFY_ACCESS=all

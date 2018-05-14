@@ -1,3 +1,9 @@
+nova (2:17.0.3-5) unstable; urgency=medium
+
+  * Switch to Type=notify for nova-{api,cells,compute,consoleauth,scheduler}.
+
+ -- Thomas Goirand <zigo@debian.org>  Mon, 14 May 2018 15:21:05 +0200
+
 nova (2:17.0.3-4) unstable; urgency=medium
 
   * nova-placement-api runtime depends on uwsgi-python3, not python 2.

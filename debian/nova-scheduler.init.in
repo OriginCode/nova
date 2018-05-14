@@ -17,3 +17,5 @@ DESC="OpenStack Compute Scheduler"
 PROJECT_NAME=nova
 NAME=${PROJECT_NAME}-scheduler
 SYSTEMD_DOC="man:${NAME}(1)"
+SYSTEMD_TYPE=notify
+SYSTEMD_NOTIFY_ACCESS=all
