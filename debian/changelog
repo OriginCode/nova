@@ -1,3 +1,9 @@
+nova (2:17.0.3-6) unstable; urgency=medium
+
+  * Add qemu-block-extra as runtime depends to nova-compute-{qemu,kvm}.
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 16 May 2018 11:13:31 +0200
+
 nova (2:17.0.3-5) unstable; urgency=medium
 
   * Switch to Type=notify for nova-{api,cells,compute,consoleauth,scheduler}.
