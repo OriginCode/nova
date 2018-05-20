@@ -1,3 +1,11 @@
+nova (2:17.0.3-7) unstable; urgency=medium
+
+  * Enable SSL support for nova-placement-api, and use a uwsgi .ini file,
+    which is a way more convenient for deployer to use rather than editing
+    /etc/init.d/nova-placement-api.
+
+ -- Thomas Goirand <zigo@debian.org>  Sun, 20 May 2018 16:47:47 +0200
+
 nova (2:17.0.3-6) unstable; urgency=medium
 
   * Add qemu-block-extra as runtime depends to nova-compute-{qemu,kvm}.

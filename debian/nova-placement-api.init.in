@@ -14,7 +14,35 @@
 DESC="OpenStack Compute Placement API"
 PROJECT_NAME=nova
 NAME=${PROJECT_NAME}-placement-api
+if [ -d /etc/nova/ssl/private ] ; then
+	KEY_FILE=$(find /etc/nova/ssl/private -type f -iname '*.pem' | head -n 1)
+fi
+
+if [ -e /usr/local/share/ca-certificates/puppet_openstack.crt ] ; then
+	CERT_FILE=/usr/local/share/ca-certificates/puppet_openstack.crt
+else
+	if [ -d /etc/nova/ssl/public ] ; then
+		CERT_FILE=$(find /etc/nova/ssl/private -type f -iname '*.crt' | head -n 1)
+	fi
+fi
+
+# Sid doesn't have /usr/bin/uwsgi_python3, so we need
+# to search for a more specific daemon name. For stretch
+# /usr/bin/uwsgi_python3 is fine.
+for i in 3 35 36 37 38 39 ; do
+	if [ -x /usr/bin/uwsgi_python${i} ] ; then
+		DAEMON=/usr/bin/uwsgi_python${i}
+	fi
+done
+
+if [ -n ${KEY_FILE} ] && [ -n ${CRT_FILE} ] ; then
+	DAEMON_ARGS="--https-socket 0.0.0.0:8778,${CERT_FILE},${KEY_FILE}"
+else
+	DAEMON_ARGS="--http-socket :8778"
+fi
+
+
 DAEMON=/usr/bin/uwsgi_python3
-DAEMON_ARGS="--master --paste-logger -p 4 --die-on-term --logto /var/log/nova/nova-placement-api.log --http-socket :8778 --wsgi-file /usr/bin/nova-placement-api --rem-header Content-Length"
+DAEMON_ARGS="${DAEMON_ARGS} --ini /etc/nova/nova-placement-api-uwsgi.ini"
 NO_OPENSTACK_CONFIG_FILE_DAEMON_ARG=yes
 NO_OPENSTACK_LOGFILE_DAEMON_ARG=yes
