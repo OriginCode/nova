@@ -35,7 +35,7 @@ for i in 3 35 36 37 38 39 ; do
 	fi
 done
 
-if [ -n ${KEY_FILE} ] && [ -n ${CRT_FILE} ] ; then
+if [ $(echo ${KEY_FILE} | grep \.pem$) ] && [ $(echo ${CERT_FILE} | grep \.pem$) ] ; then
 	DAEMON_ARGS="--https-socket 0.0.0.0:8778,${CERT_FILE},${KEY_FILE}"
 else
 	DAEMON_ARGS="--http-socket :8778"
