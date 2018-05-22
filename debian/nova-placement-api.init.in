@@ -15,14 +15,14 @@ DESC="OpenStack Compute Placement API"
 PROJECT_NAME=nova
 NAME=${PROJECT_NAME}-placement-api
 if [ -d /etc/nova/ssl/private ] ; then
-	KEY_FILE=$(find /etc/nova/ssl/private -type f -iname '*.pem' | head -n 1)
+	KEY_FILE=$(find /etc/nova/ssl/private -type f -iname '*.pem' 2>/dev/null | head -n 1)
 fi
 
 if [ -e /usr/local/share/ca-certificates/puppet_openstack.crt ] ; then
 	CERT_FILE=/usr/local/share/ca-certificates/puppet_openstack.crt
 else
 	if [ -d /etc/nova/ssl/public ] ; then
-		CERT_FILE=$(find /etc/nova/ssl/private -type f -iname '*.crt' | head -n 1)
+		CERT_FILE=$(find /etc/nova/ssl/private -type f -iname '*.crt' 2>/dev/null | head -n 1)
 	fi
 fi
 
@@ -35,7 +35,7 @@ for i in 3 35 36 37 38 39 ; do
 	fi
 done
 
-if [ $(echo ${KEY_FILE} | grep \.pem$) ] && [ $(echo ${CERT_FILE} | grep \.crt$) ] ; then
+if echo "${KEY_FILE}" | grep -q \.pem$ ] && echo "${CERT_FILE}" | grep \.crt$ ; then
 	DAEMON_ARGS="--https-socket 0.0.0.0:8778,${CERT_FILE},${KEY_FILE}"
 else
 	DAEMON_ARGS="--http-socket :8778"
