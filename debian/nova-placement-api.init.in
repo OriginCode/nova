@@ -11,7 +11,7 @@
 # Description:       Frontend Nova Placement API server
 ### END INIT INFO
 
-DESC="OpenStack Compute Placement API"
+DESC="OpenStack Nova Placement API"
 PROJECT_NAME=nova
 NAME=${PROJECT_NAME}-placement-api
 if [ -d /etc/nova/ssl/private ] ; then

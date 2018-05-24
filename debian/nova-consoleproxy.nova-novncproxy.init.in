@@ -12,10 +12,7 @@
 ### END INIT INFO
 
 # Authors: Julien Danjou <acid@debian.org> & Thomas Goirand <zigo@debian.org>
-
-# PATH should only include /usr/* if it runs after the mountnfs.sh script
-PATH=/sbin:/usr/sbin:/bin:/usr/bin
-DESC="OpenStack Compute novncproxy"
+DESC="OpenStack Nova NoVNC Proxy"
 PROJECT_NAME=nova
 NAME=${PROJECT_NAME}-novncproxy
 SYSTEMD_DOC="man:${NAME}(1)"

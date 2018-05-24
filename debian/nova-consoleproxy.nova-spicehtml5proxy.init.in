@@ -12,10 +12,7 @@
 ### END INIT INFO
 
 # Author: Thomas Goirand <zigo@debian.org>
-
-# PATH should only include /usr/* if it runs after the mountnfs.sh script
-PATH=/sbin:/usr/sbin:/bin:/usr/bin
-DESC="OpenStack Compute Spice HTML5 Proxy"
+DESC="OpenStack Nova SPICE HTML5 Proxy"
 PROJECT_NAME=nova
 NAME=${PROJECT_NAME}-spicehtml5proxy
 

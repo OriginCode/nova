@@ -14,8 +14,7 @@
 # Author: Julien Danjou <acid@debian.org>
 
 # PATH should only include /usr/* if it runs after the mountnfs.sh script
-PATH=/sbin:/usr/sbin:/bin:/usr/bin
-DESC="OpenStack Compute API"
+DESC="OpenStack Nova API"
 PROJECT_NAME=nova
 NAME=${PROJECT_NAME}-api
 SYSTEMD_DOC="man:${NAME}(1)"

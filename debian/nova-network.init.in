@@ -12,8 +12,7 @@
 ### END INIT INFO
 
 # Author: Thomas Goirand <zigo@debian.org>
-
-DESC="OpenStack Compute Network"
+DESC="OpenStack Nova Network"
 PROJECT_NAME=nova
 NAME=${PROJECT_NAME}-network
 SYSTEMD_DOC="man:${NAME}(1)"
