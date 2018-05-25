@@ -1,6 +1,7 @@
-nova (2:17.0.3-9) UNRELEASED; urgency=medium
+nova (2:17.0.3-9) unstable; urgency=medium
 
   * Fixed startup description.
+  * Switched to openstack-pkg-tools >= 80~ UWSGI handling, adding ipv6 support.
 
  -- Thomas Goirand <zigo@debian.org>  Thu, 24 May 2018 17:06:27 +0200
 
