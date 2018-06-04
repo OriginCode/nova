@@ -1,6 +1,7 @@
 nova (2:17.0.3-10) unstable; urgency=medium
 
   * Removed euca2ools from build-depends.
+  * Do not call dh_auto_clean, use python3 setup.py clean.
 
  -- Thomas Goirand <zigo@debian.org>  Mon, 04 Jun 2018 09:37:38 +0200
 
