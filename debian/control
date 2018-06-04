@@ -17,7 +17,6 @@ Build-Depends:
 Build-Depends-Indep:
  bandit (>= 0.13.2),
  bpython,
- euca2ools,
  genisoimage,
  git,
  ipython,
