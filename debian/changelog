@@ -1,3 +1,9 @@
+nova (2:17.0.3-12) UNRELEASED; urgency=medium
+
+  * Refreshed patches.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 05 Jun 2018 09:33:02 +0200
+
 nova (2:17.0.3-11) unstable; urgency=medium
 
   * Add missin rights in nova-common.sudoers:

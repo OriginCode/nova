@@ -10,11 +10,11 @@ Closes-Bug: #1750355
 Origin: upstream, https://review.openstack.org/#/c/545798/
 Last-Update: 2018-02-20
 
-diff --git a/nova/tests/unit/test_api_validation.py b/nova/tests/unit/test_api_validation.py
-index 9e33121..7c6bad7 100644
---- a/nova/tests/unit/test_api_validation.py
-+++ b/nova/tests/unit/test_api_validation.py
-@@ -465,7 +465,7 @@ class PatternPropertiesTestCase(APIValidationTestCase):
+Index: nova/nova/tests/unit/test_api_validation.py
+===================================================================
+--- nova.orig/nova/tests/unit/test_api_validation.py
++++ nova/nova/tests/unit/test_api_validation.py
+@@ -458,7 +458,7 @@ class PatternPropertiesTestCase(APIValid
          # Note(jrosenboom): This is referencing an internal python error
          # string, which is no stable interface. We need a patch in the
          # jsonschema library in order to fix this properly.
@@ -23,6 +23,3 @@ index 9e33121..7c6bad7 100644
              detail = "expected string or bytes-like object"
          else:
              detail = "expected string or buffer"
--- 
-cgit v1.1
-

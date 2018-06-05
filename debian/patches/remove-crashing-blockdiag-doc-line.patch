@@ -5,9 +5,11 @@ Author: Thomas Goirand <zigo@debian.org>
 Forwarded: not-needed
 Last-Update: 2018-02-20
 
---- nova-17.0.0~rc1.orig/doc/source/reference/notifications.rst
-+++ nova-17.0.0~rc1/doc/source/reference/notifications.rst
-@@ -334,7 +334,6 @@ Existing versioned notifications
+Index: nova/doc/source/reference/notifications.rst
+===================================================================
+--- nova.orig/doc/source/reference/notifications.rst
++++ nova/doc/source/reference/notifications.rst
+@@ -342,7 +342,6 @@ Existing versioned notifications
  .. This is a reference anchor used in the main index page.
  .. _versioned_notification_samples:
  
