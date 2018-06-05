@@ -3,3 +3,4 @@ clean-up-build_requests-table-on-upgrades.patch
 python3-fix-for-sphinx-doc.patch
 Fix_PatternPropertiesTestCase_for_py3.6.patch
 remove-crashing-blockdiag-doc-line.patch
+make-nova-reproducible.patch

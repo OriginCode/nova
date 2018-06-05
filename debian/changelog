@@ -1,6 +1,7 @@
-nova (2:17.0.3-12) UNRELEASED; urgency=medium
+nova (2:17.0.3-12) unstable; urgency=medium
 
   * Refreshed patches.
+  * Add make-nova-reproducible.patch (Closes: #892420).
 
  -- Thomas Goirand <zigo@debian.org>  Tue, 05 Jun 2018 09:33:02 +0200
 

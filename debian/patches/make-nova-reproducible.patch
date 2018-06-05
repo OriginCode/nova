@@ -1,0 +1,15 @@
+Description: Make patch reproducible
+Author: Chris Lamb <lamby@debian.org>
+Forwarded: https://review.openstack.org/551269
+Last-Update: 2018-06-05
+
+--- nova-17.0.3.orig/nova/conf/paths.py
++++ nova-17.0.3/nova/conf/paths.py
+@@ -22,6 +22,7 @@ from oslo_config import cfg
+ 
+ ALL_OPTS = [
+     cfg.StrOpt('pybasedir',
++        sample_default='<Path>',
+         default=os.path.abspath(os.path.join(os.path.dirname(__file__),
+                                              '../../')),
+         help="""
