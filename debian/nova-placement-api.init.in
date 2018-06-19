@@ -11,7 +11,7 @@
 # Description:       Frontend Nova Placement API server
 ### END INIT INFO
 
-DESC="OpenStack Nova Placement API"
+DESC="OpenStack Nova Placement API (nova-placement-api)"
 PROJECT_NAME=nova
 NAME=${PROJECT_NAME}-placement-api
 UWSGI_PORT=8778

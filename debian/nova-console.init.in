@@ -12,7 +12,7 @@
 ### END INIT INFO
 
 # Author: Julien Danjou <acid@debian.org>
-DESC="OpenStack Nova Console"
+DESC="OpenStack Nova Console (nova-console)"
 PROJECT_NAME=nova
 NAME=${PROJECT_NAME}-console
 SYSTEMD_DOC="man:${NAME}(1)"

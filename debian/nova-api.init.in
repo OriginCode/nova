@@ -14,7 +14,7 @@
 # Author: Julien Danjou <acid@debian.org>
 
 # PATH should only include /usr/* if it runs after the mountnfs.sh script
-DESC="OpenStack Nova API"
+DESC="OpenStack Nova API (nova-api)"
 PROJECT_NAME=nova
 NAME=${PROJECT_NAME}-api
 SYSTEMD_DOC="man:${NAME}(1)"

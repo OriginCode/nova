@@ -14,7 +14,7 @@
 # Author: Julien Danjou <acid@debian.org>
 
 # PATH should only include /usr/* if it runs after the mountnfs.sh script
-DESC="OpenStack Nova Cells"
+DESC="OpenStack Nova Cells (nova-cells)"
 PROJECT_NAME=nova
 NAME=${PROJECT_NAME}-cells
 SYSTEMD_TYPE=notify

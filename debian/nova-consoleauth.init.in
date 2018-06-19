@@ -12,7 +12,7 @@
 ### END INIT INFO
 
 # AUthor: Thomas Goirand <zigo@debian.org>
-DESC="OpenStack Nova Console Auth"
+DESC="OpenStack Nova Console Auth (nova-consoleauth)"
 PROJECT_NAME=nova
 NAME=${PROJECT_NAME}-consoleauth
 SYSTEMD_DOC="man:${NAME}(1)"

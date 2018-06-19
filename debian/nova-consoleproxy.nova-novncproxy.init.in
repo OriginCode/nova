@@ -12,7 +12,7 @@
 ### END INIT INFO
 
 # Authors: Julien Danjou <acid@debian.org> & Thomas Goirand <zigo@debian.org>
-DESC="OpenStack Nova NoVNC Proxy"
+DESC="OpenStack Nova NoVNC Proxy (nova-novncproxy)"
 PROJECT_NAME=nova
 NAME=${PROJECT_NAME}-novncproxy
 SYSTEMD_DOC="man:${NAME}(1)"

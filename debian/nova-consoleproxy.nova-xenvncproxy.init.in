@@ -10,7 +10,7 @@
 ### END INIT INFO
 
 # Authors: Thomas Goirand <zigo@debian.org>
-DESC="OpenStack Nova XVP VNC proxy"
+DESC="OpenStack Nova XVP VNC proxy (nova-xvpvncproxy)"
 PROJECT_NAME=nova
 NAME=${PROJECT_NAME}-xvpvncproxy
 SYSTEMD_DOC="man:${NAME}(1)"

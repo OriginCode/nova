@@ -15,7 +15,7 @@
 # Author: Julien Danjou <acid@debian.org>, Thomas Goirand <zigo@debian.org>
 
 # PATH should only include /usr/* if it runs after the mountnfs.sh script
-DESC="OpenStack Nova Compute"
+DESC="OpenStack Nova Compute (nova-compute)"
 PROJECT_NAME=nova
 NAME=${PROJECT_NAME}-compute
 SYSTEMD_DOC="man:${NAME}(1)"

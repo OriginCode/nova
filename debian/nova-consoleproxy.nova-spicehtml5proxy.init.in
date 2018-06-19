@@ -12,7 +12,7 @@
 ### END INIT INFO
 
 # Author: Thomas Goirand <zigo@debian.org>
-DESC="OpenStack Nova SPICE HTML5 Proxy"
+DESC="OpenStack Nova SPICE HTML5 Proxy (nova-spicehtml5proxy)"
 PROJECT_NAME=nova
 NAME=${PROJECT_NAME}-spicehtml5proxy
 
