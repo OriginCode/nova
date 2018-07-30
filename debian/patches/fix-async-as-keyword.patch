@@ -1,0 +1,258 @@
+Description: Fix async as a keyword
+Author: Corey Bryant <corey.bryant@canonical.com>
+Origin: upstream, https://review.openstack.org/#/c/584365/
+Last-Update: 2018-07-30
+
+--- nova-17.0.3.orig/nova/api/openstack/compute/migrate_server.py
++++ nova-17.0.3/nova/api/openstack/compute/migrate_server.py
+@@ -82,7 +82,7 @@ class MigrateServerController(wsgi.Contr
+         host = body["os-migrateLive"]["host"]
+         block_migration = body["os-migrateLive"]["block_migration"]
+         force = None
+-        async = api_version_request.is_supported(req, min_version='2.34')
++        async_ = api_version_request.is_supported(req, min_version='2.34')
+         if api_version_request.is_supported(req, min_version='2.30'):
+             force = self._get_force_param_for_live_migration(body, host)
+         if api_version_request.is_supported(req, min_version='2.25'):
+@@ -103,7 +103,8 @@ class MigrateServerController(wsgi.Contr
+         instance = common.get_instance(self.compute_api, context, id)
+         try:
+             self.compute_api.live_migrate(context, instance, block_migration,
+-                                          disk_over_commit, host, force, async)
++                                          disk_over_commit, host, force,
++                                          async_)
+         except exception.InstanceUnknownCell as e:
+             raise exc.HTTPNotFound(explanation=e.format_message())
+         except (exception.NoValidHost,
+@@ -117,7 +118,7 @@ class MigrateServerController(wsgi.Contr
+                 exception.HypervisorUnavailable,
+                 exception.MigrationPreCheckError,
+                 exception.LiveMigrationWithOldNovaNotSupported) as ex:
+-            if async:
++            if async_:
+                 with excutils.save_and_reraise_exception():
+                     LOG.error("Unexpected exception received from "
+                               "conductor during pre-live-migration checks "
+--- nova-17.0.3.orig/nova/compute/api.py
++++ nova-17.0.3/nova/compute/api.py
+@@ -4193,7 +4193,7 @@ class API(base.Base):
+     @check_instance_cell
+     @check_instance_state(vm_state=[vm_states.ACTIVE, vm_states.PAUSED])
+     def live_migrate(self, context, instance, block_migration,
+-                     disk_over_commit, host_name, force=None, async=False):
++                     disk_over_commit, host_name, force=None, async_=False):
+         """Migrate a server lively to a new host."""
+         LOG.debug("Going to try to live migrate instance to %s",
+                   host_name or "another host", instance=instance)
+@@ -4244,7 +4244,7 @@ class API(base.Base):
+             self.compute_task_api.live_migrate_instance(context, instance,
+                 host_name, block_migration=block_migration,
+                 disk_over_commit=disk_over_commit,
+-                request_spec=request_spec, async=async)
++                request_spec=request_spec, async_=async_)
+         except oslo_exceptions.MessagingTimeout as messaging_timeout:
+             with excutils.save_and_reraise_exception():
+                 # NOTE(pkoniszewski): It is possible that MessagingTimeout
+--- nova-17.0.3.orig/nova/conductor/api.py
++++ nova-17.0.3/nova/conductor/api.py
+@@ -99,9 +99,9 @@ class ComputeTaskAPI(object):
+ 
+     def live_migrate_instance(self, context, instance, host_name,
+                               block_migration, disk_over_commit,
+-                              request_spec=None, async=False):
++                              request_spec=None, async_=False):
+         scheduler_hint = {'host': host_name}
+-        if async:
++        if async_:
+             self.conductor_compute_rpcapi.live_migrate_instance(
+                 context, instance, scheduler_hint, block_migration,
+                 disk_over_commit, request_spec)
+--- nova-17.0.3.orig/nova/db/sqlalchemy/api.py
++++ nova-17.0.3/nova/db/sqlalchemy/api.py
+@@ -217,7 +217,7 @@ def select_db_reader_mode(f):
+         use_slave = keyed_args.get('use_slave', False)
+ 
+         if use_slave:
+-            reader_mode = get_context_manager(context).async
++            reader_mode = get_context_manager(context).async_
+         else:
+             reader_mode = get_context_manager(context).reader
+ 
+--- nova-17.0.3.orig/nova/tests/unit/api/openstack/compute/test_migrate_server.py
++++ nova-17.0.3/nova/tests/unit/api/openstack/compute/test_migrate_server.py
+@@ -36,7 +36,7 @@ class MigrateServerTestsV21(admin_only_a
+     _api_version = '2.1'
+     disk_over_commit = False
+     force = None
+-    async = False
++    async_ = False
+     host_name = None
+ 
+     def setUp(self):
+@@ -64,7 +64,7 @@ class MigrateServerTestsV21(admin_only_a
+                                '_migrate_live': 'live_migrate'}
+         body_map = {'_migrate_live': self._get_migration_body(host='hostname')}
+         args_map = {'_migrate_live': ((False, self.disk_over_commit,
+-                                       'hostname', self.force, self.async),
++                                       'hostname', self.force, self.async_),
+                                       {}),
+                     '_migrate': ((), {'host_name': self.host_name})}
+         self._test_actions(['_migrate', '_migrate_live'], body_map=body_map,
+@@ -76,7 +76,7 @@ class MigrateServerTestsV21(admin_only_a
+                                '_migrate_live': 'live_migrate'}
+         body_map = {'_migrate_live': self._get_migration_body(host=None)}
+         args_map = {'_migrate_live': ((False, self.disk_over_commit, None,
+-                                       self.force, self.async),
++                                       self.force, self.async_),
+                                       {}),
+                     '_migrate': ((), {'host_name': None})}
+         self._test_actions(['_migrate', '_migrate_live'], body_map=body_map,
+@@ -95,7 +95,7 @@ class MigrateServerTestsV21(admin_only_a
+         body_map = {'_migrate_live':
+                     self._get_migration_body(host='hostname')}
+         args_map = {'_migrate_live': ((False, self.disk_over_commit,
+-                                       'hostname', self.force, self.async),
++                                       'hostname', self.force, self.async_),
+                                       {}),
+                     '_migrate': ((), {'host_name': self.host_name})}
+         exception_arg = {'_migrate': 'migrate',
+@@ -112,7 +112,7 @@ class MigrateServerTestsV21(admin_only_a
+         body_map = {'_migrate_live':
+                     self._get_migration_body(host='hostname')}
+         args_map = {'_migrate_live': ((False, self.disk_over_commit,
+-                                       'hostname', self.force, self.async),
++                                       'hostname', self.force, self.async_),
+                                       {}),
+                     '_migrate': ((), {'host_name': self.host_name})}
+         self._test_actions_with_locked_instance(
+@@ -141,7 +141,7 @@ class MigrateServerTestsV21(admin_only_a
+         instance = self._stub_instance_get()
+         self.compute_api.live_migrate(self.context, instance, False,
+                                       self.disk_over_commit, 'hostname',
+-                                      self.force, self.async)
++                                      self.force, self.async_)
+ 
+         self.mox.ReplayAll()
+         live_migrate_method = self.controller._migrate_live
+@@ -214,7 +214,7 @@ class MigrateServerTestsV21(admin_only_a
+         instance = self._stub_instance_get(uuid=uuid)
+         self.compute_api.live_migrate(self.context, instance, False,
+                                       self.disk_over_commit,
+-                                      'hostname', self.force, self.async
++                                      'hostname', self.force, self.async_
+                                       ).AndRaise(fake_exc)
+         self.mox.ReplayAll()
+ 
+@@ -322,7 +322,7 @@ class MigrateServerTestsV225(MigrateServ
+         body_map = {'_migrate_live': {'os-migrateLive': {'host': 'hostname',
+                                       'block_migration': 'auto'}}}
+         args_map = {'_migrate_live': ((None, None, 'hostname', self.force,
+-                                       self.async), {})}
++                                       self.async_), {})}
+         self._test_actions(['_migrate_live'], body_map=body_map,
+                            method_translations=method_translations,
+                            args_map=args_map)
+@@ -359,7 +359,7 @@ class MigrateServerTestsV230(MigrateServ
+                                       'block_migration': 'auto',
+                                       'force': litteral_force}}}
+         args_map = {'_migrate_live': ((None, None, 'hostname', force,
+-                                       self.async), {})}
++                                       self.async_), {})}
+         self._test_actions(['_migrate_live'], body_map=body_map,
+                            method_translations=method_translations,
+                            args_map=args_map)
+@@ -379,7 +379,7 @@ class MigrateServerTestsV230(MigrateServ
+ 
+ 
+ class MigrateServerTestsV234(MigrateServerTestsV230):
+-    async = True
++    async_ = True
+ 
+     def setUp(self):
+         super(MigrateServerTestsV234, self).setUp()
+@@ -441,7 +441,7 @@ class MigrateServerTestsV234(MigrateServ
+         instance = self._stub_instance_get()
+         self.compute_api.live_migrate(self.context, instance, None,
+                                       self.disk_over_commit, 'hostname',
+-                                      self.force, self.async).AndRaise(exc)
++                                      self.force, self.async_).AndRaise(exc)
+ 
+         self.mox.ReplayAll()
+         body = {'os-migrateLive':
+@@ -458,7 +458,7 @@ class MigrateServerTestsV234(MigrateServ
+         instance = self._stub_instance_get()
+         self.compute_api.live_migrate(self.context, instance, None,
+                                       self.disk_over_commit, 'hostname',
+-                                      self.force, self.async).AndRaise(exc)
++                                      self.force, self.async_).AndRaise(exc)
+ 
+         self.mox.ReplayAll()
+         body = {'os-migrateLive':
+--- nova-17.0.3.orig/nova/tests/unit/compute/test_compute.py
++++ nova-17.0.3/nova/tests/unit/compute/test_compute.py
+@@ -11092,7 +11092,7 @@ class ComputeAPITestCase(BaseTestCase):
+                                           block_migration=True,
+                                           disk_over_commit=True,
+                                           host_name='fake_dest_host',
+-                                          force=force, async=False)
++                                          force=force, async_=False)
+ 
+             record_action_start.assert_called_once_with(self.context, instance,
+                                                         'live-migration')
+@@ -11104,7 +11104,7 @@ class ComputeAPITestCase(BaseTestCase):
+                 self.context, instance, host,
+                 block_migration=True,
+                 disk_over_commit=True,
+-                request_spec=fake_spec, async=False)
++                request_spec=fake_spec, async_=False)
+ 
+             delete_tokens_for_instance.assert_called_once_with(
+                 self.context, instance.uuid)
+--- nova-17.0.3.orig/nova/tests/unit/compute/test_compute_api.py
++++ nova-17.0.3/nova/tests/unit/compute/test_compute_api.py
+@@ -2528,7 +2528,7 @@ class _ComputeAPIUnitTestMixIn(object):
+                                          block_migration=True,
+                                          disk_over_commit=True,
+                                          request_spec=fake_spec,
+-                                         async=False)
++                                         async_=False)
+ 
+     def _get_volumes_for_test_swap_volume(self):
+         volumes = {}
+--- nova-17.0.3.orig/nova/tests/unit/virt/libvirt/test_guest.py
++++ nova-17.0.3/nova/tests/unit/virt/libvirt/test_guest.py
+@@ -687,7 +687,7 @@ class GuestBlockTestCase(test.NoDBTestCa
+         self.domain.blockJobAbort.assert_called_once_with('vda', flags=0)
+ 
+     def test_abort_job_async(self):
+-        self.gblock.abort_job(async=True)
++        self.gblock.abort_job(async_=True)
+         self.domain.blockJobAbort.assert_called_once_with(
+             'vda', flags=fakelibvirt.VIR_DOMAIN_BLOCK_JOB_ABORT_ASYNC)
+ 
+--- nova-17.0.3.orig/nova/virt/libvirt/guest.py
++++ nova-17.0.3/nova/virt/libvirt/guest.py
+@@ -741,18 +741,18 @@ class BlockDevice(object):
+         self._guest = guest
+         self._disk = disk
+ 
+-    def abort_job(self, async=False, pivot=False):
++    def abort_job(self, async_=False, pivot=False):
+         """Request to cancel a live block device job
+ 
+-        :param async: Cancel the block device job (e.g. 'copy' or
+-                      'commit'), and return as soon as possible, without
+-                      waiting for job completion
++        :param async_: Cancel the block device job (e.g. 'copy' or
++                       'commit'), and return as soon as possible, without
++                       waiting for job completion
+         :param pivot: Pivot to the destination image when ending a
+                       'copy' or "active commit" (meaning: merging the
+                       contents of current active disk into its backing
+                       file) job
+         """
+-        flags = async and libvirt.VIR_DOMAIN_BLOCK_JOB_ABORT_ASYNC or 0
++        flags = async_ and libvirt.VIR_DOMAIN_BLOCK_JOB_ABORT_ASYNC or 0
+         flags |= pivot and libvirt.VIR_DOMAIN_BLOCK_JOB_ABORT_PIVOT or 0
+         self._guest._domain.blockJobAbort(self._disk, flags=flags)
+ 
