@@ -1,10 +1,8 @@
-nova (2:17.0.3-14) UNRELEASED; urgency=medium
+nova (2:17.0.3-13) UNRELEASED; urgency=medium
 
   * Fixed init script description.
-  * Add python3-ceph runtime depends. Note: this is for the moment incompatible
-    with Sid that doesn't have it.
 
- -- Thomas Goirand <zigo@debian.org>  Wed, 20 Jun 2018 13:54:16 +0200
+ -- Thomas Goirand <zigo@debian.org>  Tue, 19 Jun 2018 10:24:00 +0200
 
 nova (2:17.0.3-12) unstable; urgency=medium
 
