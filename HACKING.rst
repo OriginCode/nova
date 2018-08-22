@@ -2,7 +2,7 @@ Nova Style Commandments
 =======================
 
 - Step 1: Read the OpenStack Style Commandments
-  http://docs.openstack.org/developer/hacking/
+  https://docs.openstack.org/hacking/latest/
 - Step 2: Read on
 
 Nova Specific Commandments
@@ -66,6 +66,8 @@ Nova Specific Commandments
 - [N357] Use oslo_utils.uuidutils or uuidsentinel(in case of test cases) to
   generate UUID instead of uuid4().
 - [N358] Return must always be followed by a space when returning a value.
+- [N359] Check for redundant import aliases.
+- [N360] Yield must always be followed by a space when yielding a value.
 
 Creating Unit Tests
 -------------------

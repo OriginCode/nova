@@ -152,7 +152,7 @@ class TestNeutronDriver(test.NoDBTestCase):
         with mock.patch.object(neutronv20, 'find_resourceid_by_name_or_id',
                                return_value=expected_sg_id):
             observed_sg = sg_api.get(self.context, name=sg_name)
-        expected_sg['security_group']['project_id'] = self.context.tenant
+        expected_sg['security_group']['project_id'] = self.context.project_id
         del expected_sg['security_group']['tenant_id']
         self.assertEqual(expected_sg['security_group'], observed_sg)
         self.mocked_client.show_security_group.assert_called_once_with(
@@ -304,6 +304,19 @@ class TestNeutronDriver(test.NoDBTestCase):
             id=mock.ANY)
         self.assertEqual(sorted([sg1_id, sg2_id]),
             sorted(self.mocked_client.list_security_groups.call_args[1]['id']))
+
+    def test_instances_security_group_bindings_port_not_found(self):
+        server_id = 'c5a20e8d-c4b0-47cf-9dca-ebe4f758acb1'
+        servers = [{'id': server_id}]
+
+        self.mocked_client.list_ports.side_effect = n_exc.PortNotFoundClient()
+
+        sg_api = neutron_driver.SecurityGroupAPI()
+        result = sg_api.get_instances_security_groups_bindings(
+                                  self.context, servers)
+        self.mocked_client.list_ports.assert_called_once_with(
+            device_id=[server_id])
+        self.assertEqual({}, result)
 
     def _test_instances_security_group_bindings_scale(self, num_servers):
         max_query = 150

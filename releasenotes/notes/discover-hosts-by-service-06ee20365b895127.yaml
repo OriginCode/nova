@@ -1,5 +1,5 @@
 ---
-fixes:
+features:
   - |
     The nova-manage discover_hosts command now has a ``--by-service`` option which
     allows discovering hosts in a cell purely by the presence of a nova-compute

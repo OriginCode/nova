@@ -18,13 +18,15 @@ from oslo_utils import timeutils
 from oslo_utils import uuidutils
 import webob
 
+from nova.api.openstack.placement import errors
+from nova.api.openstack.placement import exception
 from nova.api.openstack.placement import microversion
+from nova.api.openstack.placement.objects import resource_provider as rp_obj
+from nova.api.openstack.placement.policies import resource_provider as policies
 from nova.api.openstack.placement.schemas import resource_provider as rp_schema
 from nova.api.openstack.placement import util
 from nova.api.openstack.placement import wsgi_wrapper
-from nova import exception
 from nova.i18n import _
-from nova.objects import resource_provider as rp_obj
 
 
 def _serialize_links(environ, resource_provider):
@@ -78,6 +80,7 @@ def create_resource_provider(req):
     header pointing to the newly created resource provider.
     """
     context = req.environ['placement.context']
+    context.can(policies.CREATE)
     schema = rp_schema.POST_RESOURCE_PROVIDER_SCHEMA
     want_version = req.environ[microversion.MICROVERSION_ENVIRON]
     if want_version.matches((1, 14)):
@@ -96,7 +99,8 @@ def create_resource_provider(req):
                           for column in exc.columns])
         raise webob.exc.HTTPConflict(
             _('Conflicting resource provider %(duplicate)s already exists.') %
-            {'duplicate': duplicate})
+            {'duplicate': duplicate},
+            comment=errors.DUPLICATE_NAME)
     except exception.ObjectActionError as exc:
         raise webob.exc.HTTPBadRequest(
             _('Unable to create resource provider "%(name)s", %(rp_uuid)s: '
@@ -105,8 +109,16 @@ def create_resource_provider(req):
 
     req.response.location = util.resource_provider_url(
         req.environ, resource_provider)
-    req.response.status = 201
-    req.response.content_type = None
+    if want_version.matches(min_version=(1, 20)):
+        req.response.body = encodeutils.to_utf8(jsonutils.dumps(
+            _serialize_provider(req.environ, resource_provider, want_version)))
+        req.response.content_type = 'application/json'
+        modified = util.pick_last_modified(None, resource_provider)
+        req.response.last_modified = modified
+        req.response.cache_control = 'no-cache'
+    else:
+        req.response.status = 201
+        req.response.content_type = None
     return req.response
 
 
@@ -118,6 +130,7 @@ def delete_resource_provider(req):
     """
     uuid = util.wsgi_path_item(req.environ, 'uuid')
     context = req.environ['placement.context']
+    context.can(policies.DELETE)
     # The containing application will catch a not found here.
     try:
         resource_provider = rp_obj.ResourceProvider.get_by_uuid(
@@ -126,10 +139,16 @@ def delete_resource_provider(req):
     except exception.ResourceProviderInUse as exc:
         raise webob.exc.HTTPConflict(
             _('Unable to delete resource provider %(rp_uuid)s: %(error)s') %
-            {'rp_uuid': uuid, 'error': exc})
+            {'rp_uuid': uuid, 'error': exc},
+            comment=errors.PROVIDER_IN_USE)
     except exception.NotFound as exc:
         raise webob.exc.HTTPNotFound(
             _("No resource provider with uuid %s found for delete") % uuid)
+    except exception.CannotDeleteParentResourceProvider as exc:
+        raise webob.exc.HTTPConflict(
+            _("Unable to delete parent resource provider %(rp_uuid)s: "
+              "It has child resource providers.") % {'rp_uuid': uuid},
+            comment=errors.PROVIDER_CANNOT_DELETE_PARENT)
     req.response.status = 204
     req.response.content_type = None
     return req.response
@@ -145,9 +164,10 @@ def get_resource_provider(req):
     """
     want_version = req.environ[microversion.MICROVERSION_ENVIRON]
     uuid = util.wsgi_path_item(req.environ, 'uuid')
-    # The containing application will catch a not found here.
     context = req.environ['placement.context']
+    context.can(policies.SHOW)
 
+    # The containing application will catch a not found here.
     resource_provider = rp_obj.ResourceProvider.get_by_uuid(
         context, uuid)
 
@@ -171,48 +191,49 @@ def list_resource_providers(req):
     a collection of resource providers.
     """
     context = req.environ['placement.context']
+    context.can(policies.LIST)
     want_version = req.environ[microversion.MICROVERSION_ENVIRON]
 
     schema = rp_schema.GET_RPS_SCHEMA_1_0
-    if want_version.matches((1, 14)):
+    if want_version.matches((1, 18)):
+        schema = rp_schema.GET_RPS_SCHEMA_1_18
+    elif want_version.matches((1, 14)):
         schema = rp_schema.GET_RPS_SCHEMA_1_14
     elif want_version.matches((1, 4)):
         schema = rp_schema.GET_RPS_SCHEMA_1_4
     elif want_version.matches((1, 3)):
         schema = rp_schema.GET_RPS_SCHEMA_1_3
 
+    allow_forbidden = want_version.matches((1, 22))
+
     util.validate_query_params(req, schema)
 
     filters = {}
-    for attr in ['uuid', 'name', 'member_of', 'in_tree']:
+    # special handling of member_of qparam since we allow multiple member_of
+    # params at microversion 1.24.
+    if 'member_of' in req.GET:
+        filters['member_of'] = util.normalize_member_of_qs_params(req)
+
+    qpkeys = ('uuid', 'name', 'in_tree', 'resources', 'required')
+    for attr in qpkeys:
         if attr in req.GET:
             value = req.GET[attr]
-            # special case member_of to always make its value a
-            # list, either by accepting the single value, or if it
-            # starts with 'in:' splitting on ','.
-            # NOTE(cdent): This will all change when we start using
-            # JSONSchema validation of query params.
-            if attr == 'member_of':
-                if value.startswith('in:'):
-                    value = value[3:].split(',')
-                else:
-                    value = [value]
-                # Make sure the values are actually UUIDs.
-                for aggr_uuid in value:
-                    if not uuidutils.is_uuid_like(aggr_uuid):
-                        raise webob.exc.HTTPBadRequest(
-                            _('Invalid uuid value: %(uuid)s') %
-                            {'uuid': aggr_uuid})
+            if attr == 'resources':
+                value = util.normalize_resources_qs_param(value)
+            elif attr == 'required':
+                value = util.normalize_traits_qs_param(
+                    value, allow_forbidden=allow_forbidden)
             filters[attr] = value
-    if 'resources' in req.GET:
-        resources = util.normalize_resources_qs_param(req.GET['resources'])
-        filters['resources'] = resources
     try:
         resource_providers = rp_obj.ResourceProviderList.get_all_by_filters(
             context, filters)
     except exception.ResourceClassNotFound as exc:
         raise webob.exc.HTTPBadRequest(
             _('Invalid resource class in resources parameter: %(error)s') %
+            {'error': exc})
+    except exception.TraitNotFound as exc:
+        raise webob.exc.HTTPBadRequest(
+            _('Invalid trait(s) in "required" parameter: %(error)s') %
             {'error': exc})
 
     response = req.response
@@ -236,6 +257,7 @@ def update_resource_provider(req):
     """
     uuid = util.wsgi_path_item(req.environ, 'uuid')
     context = req.environ['placement.context']
+    context.can(policies.UPDATE)
     want_version = req.environ[microversion.MICROVERSION_ENVIRON]
 
     # The containing application will catch a not found here.
@@ -257,7 +279,8 @@ def update_resource_provider(req):
     except db_exc.DBDuplicateEntry as exc:
         raise webob.exc.HTTPConflict(
             _('Conflicting resource provider %(name)s already exists.') %
-            {'name': data['name']})
+            {'name': data['name']},
+            comment=errors.DUPLICATE_NAME)
     except exception.ObjectActionError as exc:
         raise webob.exc.HTTPBadRequest(
             _('Unable to save resource provider %(rp_uuid)s: %(error)s') %

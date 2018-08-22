@@ -41,9 +41,11 @@ Response
   - id: version_id
   - min_version: version_min
   - max_version: version_max
+  - status: version_status
+  - links: version_links
 
 Response Example
 ----------------
 
-.. literalinclude:: get-root.json
+.. literalinclude:: ./samples/root/get-root.json
    :language: javascript

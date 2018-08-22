@@ -20,9 +20,7 @@ from oslo_log import log as logging
 
 from nova.objects import fields
 from nova import test
-from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional.test_servers import ServersTestBase
-from nova.tests.unit import fake_network
 from nova.tests.unit.virt.libvirt import fake_libvirt_utils
 from nova.tests.unit.virt.libvirt import fakelibvirt
 
@@ -67,8 +65,6 @@ class SRIOVServersTest(ServersTestBase):
            fakelibvirt))
         self.useFixture(fakelibvirt.FakeLibvirtFixture())
 
-        self.useFixture(nova_fixtures.PlacementFixture())
-
         self.compute_started = False
 
     def _setup_compute_service(self):
@@ -85,10 +81,10 @@ class SRIOVServersTest(ServersTestBase):
 
     def _get_connection(self, host_info, pci_info):
         fake_connection = fakelibvirt.Connection('qemu:///system',
-                                                 version=1002009,
-                                                 hv_version=2001000,
-                                                 host_info=host_info,
-                                                 pci_info=pci_info)
+                                version=fakelibvirt.FAKE_LIBVIRT_VERSION,
+                                hv_version=fakelibvirt.FAKE_QEMU_VERSION,
+                                host_info=host_info,
+                                pci_info=pci_info)
         return fake_connection
 
     def _run_build_test(self, flavor_id, filter_mock, end_status='ACTIVE'):
@@ -96,8 +92,6 @@ class SRIOVServersTest(ServersTestBase):
         if not self.compute_started:
             self.compute = self.start_service('compute', host='test_compute0')
             self.compute_started = True
-
-        fake_network.set_stub_network_methods(self)
 
         # Create server
         good_server = self._build_server(flavor_id)

@@ -32,9 +32,14 @@ from oslo_log import log as logging
 
 from nova.cells import rpcapi as cells_rpcapi
 import nova.conf
+from nova.db import constants
 
 
 CONF = nova.conf.CONF
+# NOTE(cdent): These constants are re-defined in this module to preserve
+# existing references to them.
+MAX_INT = constants.MAX_INT
+SQL_SP_FLOAT_MAX = constants.SQL_SP_FLOAT_MAX
 
 _BACKEND_MAPPING = {'sqlalchemy': 'nova.db.sqlalchemy.api'}
 
@@ -43,17 +48,6 @@ IMPL = concurrency.TpoolDbapiWrapper(CONF, backend_mapping=_BACKEND_MAPPING)
 
 LOG = logging.getLogger(__name__)
 
-# The maximum value a signed INT type may have
-MAX_INT = 0x7FFFFFFF
-
-# NOTE(dosaboy): This is supposed to represent the maximum value that we can
-# place into a SQL single precision float so that we can check whether values
-# are oversize. Postgres and MySQL both define this as their max whereas Sqlite
-# uses dynamic typing so this would not apply. Different dbs react in different
-# ways to oversize values e.g. postgres will raise an exception while mysql
-# will round off the value. Nevertheless we may still want to know prior to
-# insert whether the value is oversize or not.
-SQL_SP_FLOAT_MAX = 3.40282e+38
 
 ###################
 
@@ -775,6 +769,11 @@ def instance_get_all(context, columns_to_join=None):
     return IMPL.instance_get_all(context, columns_to_join=columns_to_join)
 
 
+def instance_get_all_uuids_by_host(context, host):
+    """Get a list of instance uuids on host."""
+    return IMPL.instance_get_all_uuids_by_host(context, host)
+
+
 def instance_get_all_by_filters(context, filters, sort_key='created_at',
                                 sort_dir='desc', limit=None, marker=None,
                                 columns_to_join=None):
@@ -904,65 +903,6 @@ def instance_remove_security_group(context, instance_id, security_group_id):
 
 
 ####################
-
-
-def instance_group_create(context, values, policies=None, members=None):
-    """Create a new group.
-
-    Each group will receive a unique uuid. This will be used for access to the
-    group.
-    """
-    return IMPL.instance_group_create(context, values, policies, members)
-
-
-def instance_group_get(context, group_uuid):
-    """Get a specific group by id."""
-    return IMPL.instance_group_get(context, group_uuid)
-
-
-def instance_group_get_by_instance(context, instance_uuid):
-    """Get the group an instance is a member of."""
-    return IMPL.instance_group_get_by_instance(context, instance_uuid)
-
-
-def instance_group_update(context, group_uuid, values):
-    """Update the attributes of an group."""
-    return IMPL.instance_group_update(context, group_uuid, values)
-
-
-def instance_group_delete(context, group_uuid):
-    """Delete an group."""
-    return IMPL.instance_group_delete(context, group_uuid)
-
-
-def instance_group_get_all(context):
-    """Get all groups."""
-    return IMPL.instance_group_get_all(context)
-
-
-def instance_group_get_all_by_project_id(context, project_id):
-    """Get all groups for a specific project_id."""
-    return IMPL.instance_group_get_all_by_project_id(context, project_id)
-
-
-def instance_group_members_add(context, group_uuid, members,
-                               set_delete=False):
-    """Add members to the group."""
-    return IMPL.instance_group_members_add(context, group_uuid, members,
-                                           set_delete=set_delete)
-
-
-def instance_group_member_delete(context, group_uuid, instance_id):
-    """Delete a specific member from the group."""
-    return IMPL.instance_group_member_delete(context, group_uuid, instance_id)
-
-
-def instance_group_members_get(context, group_uuid):
-    """Get the members from the group."""
-    return IMPL.instance_group_members_get(context, group_uuid)
-
-
-###################
 
 
 def instance_info_cache_get(context, instance_uuid):
@@ -1521,77 +1461,6 @@ def console_get(context, console_id, instance_uuid=None):
 ##################
 
 
-def flavor_create(context, values, projects=None):
-    """Create a new instance type."""
-    return IMPL.flavor_create(context, values, projects=projects)
-
-
-def flavor_get_all(context, inactive=False, filters=None, sort_key='flavorid',
-                   sort_dir='asc', limit=None, marker=None):
-    """Get all instance flavors."""
-    return IMPL.flavor_get_all(
-        context, inactive=inactive, filters=filters, sort_key=sort_key,
-        sort_dir=sort_dir, limit=limit, marker=marker)
-
-
-def flavor_get(context, id):
-    """Get instance type by id."""
-    return IMPL.flavor_get(context, id)
-
-
-def flavor_get_by_name(context, name):
-    """Get instance type by name."""
-    return IMPL.flavor_get_by_name(context, name)
-
-
-def flavor_get_by_flavor_id(context, id, read_deleted=None):
-    """Get instance type by flavor id."""
-    return IMPL.flavor_get_by_flavor_id(context, id, read_deleted)
-
-
-def flavor_destroy(context, flavor_id):
-    """Delete an instance type."""
-    return IMPL.flavor_destroy(context, flavor_id)
-
-
-def flavor_access_get_by_flavor_id(context, flavor_id):
-    """Get flavor access by flavor id."""
-    return IMPL.flavor_access_get_by_flavor_id(context, flavor_id)
-
-
-def flavor_access_add(context, flavor_id, project_id):
-    """Add flavor access for project."""
-    return IMPL.flavor_access_add(context, flavor_id, project_id)
-
-
-def flavor_access_remove(context, flavor_id, project_id):
-    """Remove flavor access for project."""
-    return IMPL.flavor_access_remove(context, flavor_id, project_id)
-
-
-def flavor_extra_specs_get(context, flavor_id):
-    """Get all extra specs for an instance type."""
-    return IMPL.flavor_extra_specs_get(context, flavor_id)
-
-
-def flavor_extra_specs_delete(context, flavor_id, key):
-    """Delete the given extra specs item."""
-    IMPL.flavor_extra_specs_delete(context, flavor_id, key)
-
-
-def flavor_extra_specs_update_or_create(context, flavor_id,
-                                               extra_specs):
-    """Create or update instance type extra specs.
-
-    This adds or modifies the key/value pairs specified in the
-    extra specs dict argument
-    """
-    IMPL.flavor_extra_specs_update_or_create(context, flavor_id,
-                                                    extra_specs)
-
-####################
-
-
 def pci_device_get_by_addr(context, node_id, dev_addr):
     """Get PCI device by address."""
     return IMPL.pci_device_get_by_addr(context, node_id, dev_addr)
@@ -1785,91 +1654,6 @@ def s3_image_get_by_uuid(context, image_uuid):
 def s3_image_create(context, image_uuid):
     """Create local s3 image represented by provided uuid."""
     return IMPL.s3_image_create(context, image_uuid)
-
-
-####################
-
-
-def aggregate_create(context, values, metadata=None):
-    """Create a new aggregate with metadata."""
-    return IMPL.aggregate_create(context, values, metadata)
-
-
-def aggregate_get(context, aggregate_id):
-    """Get a specific aggregate by id."""
-    return IMPL.aggregate_get(context, aggregate_id)
-
-
-def aggregate_get_by_host(context, host, key=None):
-    """Get a list of aggregates that host belongs to."""
-    return IMPL.aggregate_get_by_host(context, host, key)
-
-
-def aggregate_get_by_uuid(context, uuid):
-    """Get a specific aggregate by uuid."""
-    return IMPL.aggregate_get_by_uuid(context, uuid)
-
-
-def aggregate_metadata_get_by_host(context, host, key=None):
-    """Get metadata for all aggregates that host belongs to.
-
-    Returns a dictionary where each value is a set, this is to cover the case
-    where there two aggregates have different values for the same key.
-    Optional key filter
-    """
-    return IMPL.aggregate_metadata_get_by_host(context, host, key)
-
-
-def aggregate_get_by_metadata_key(context, key):
-    return IMPL.aggregate_get_by_metadata_key(context, key)
-
-
-def aggregate_update(context, aggregate_id, values):
-    """Update the attributes of an aggregates.
-
-    If values contains a metadata key, it updates the aggregate metadata too.
-    """
-    return IMPL.aggregate_update(context, aggregate_id, values)
-
-
-def aggregate_delete(context, aggregate_id):
-    """Delete an aggregate."""
-    return IMPL.aggregate_delete(context, aggregate_id)
-
-
-def aggregate_get_all(context):
-    """Get all aggregates."""
-    return IMPL.aggregate_get_all(context)
-
-
-def aggregate_metadata_add(context, aggregate_id, metadata, set_delete=False):
-    """Add/update metadata. If set_delete=True, it adds only."""
-    IMPL.aggregate_metadata_add(context, aggregate_id, metadata, set_delete)
-
-
-def aggregate_metadata_get(context, aggregate_id):
-    """Get metadata for the specified aggregate."""
-    return IMPL.aggregate_metadata_get(context, aggregate_id)
-
-
-def aggregate_metadata_delete(context, aggregate_id, key):
-    """Delete the given metadata key."""
-    IMPL.aggregate_metadata_delete(context, aggregate_id, key)
-
-
-def aggregate_host_add(context, aggregate_id, host):
-    """Add host to the aggregate."""
-    IMPL.aggregate_host_add(context, aggregate_id, host)
-
-
-def aggregate_host_get_all(context, aggregate_id):
-    """Get hosts for the specified aggregate."""
-    return IMPL.aggregate_host_get_all(context, aggregate_id)
-
-
-def aggregate_host_delete(context, aggregate_id, host):
-    """Delete the given host from the aggregate."""
-    IMPL.aggregate_host_delete(context, aggregate_id, host)
 
 
 ####################

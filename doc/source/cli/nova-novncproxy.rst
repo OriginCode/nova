@@ -7,28 +7,28 @@ Websocket novnc Proxy for OpenStack Nova noVNC consoles
 -------------------------------------------------------
 
 :Author: openstack@lists.openstack.org
-:Date:   2012-09-27
 :Copyright: OpenStack Foundation
-:Version: 2012.1
 :Manual section: 1
 :Manual group: cloud computing
 
 Synopsis
 ========
 
+::
+
   nova-novncproxy [options]
 
 Description
 ===========
 
-`nova-novncproxy` is a server daemon that serves the Nova noVNC Websocket Proxy
-service, which provides a websocket proxy that is compatible with OpenStack
-Nova noVNC consoles.
+:program:`nova-novncproxy` is a server daemon that serves the Nova noVNC
+Websocket Proxy service, which provides a websocket proxy that is compatible
+with OpenStack Nova noVNC consoles.
 
 Options
 =======
 
- **General options**
+**General options**
 
 Files
 =====
@@ -41,7 +41,7 @@ Files
 See Also
 ========
 
-* `OpenStack Nova <https://docs.openstack.org/nova/latest/>`__
+* :nova-doc:`OpenStack Nova <>`
 
 Bugs
 ====

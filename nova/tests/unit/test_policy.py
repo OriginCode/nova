@@ -22,7 +22,6 @@ from oslo_policy import policy as oslo_policy
 from oslo_serialization import jsonutils
 import requests_mock
 
-import nova.conf
 from nova import context
 from nova import exception
 from nova import policy
@@ -30,8 +29,6 @@ from nova import test
 from nova.tests.unit import fake_policy
 from nova.tests.unit import policy_fixture
 from nova import utils
-
-CONF = nova.conf.CONF
 
 
 class PolicyFileTestCase(test.NoDBTestCase):
@@ -305,7 +302,6 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-cells:sync_instances",
 "os_compute_api:os-evacuate",
 "os_compute_api:os-extended-server-attributes",
-"os_compute_api:os-fixed-ips",
 "os_compute_api:os-flavor-access:remove_tenant_access",
 "os_compute_api:os-flavor-access:add_tenant_access",
 "os_compute_api:os-flavor-extra-specs:create",
@@ -315,10 +311,6 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-flavor-manage:create",
 "os_compute_api:os-flavor-manage:update",
 "os_compute_api:os-flavor-manage:delete",
-"os_compute_api:os-floating-ips-bulk",
-"os_compute_api:os-floating-ip-dns:domain:delete",
-"os_compute_api:os-floating-ip-dns:domain:update",
-"os_compute_api:os-fping:all_tenants",
 "os_compute_api:os-hosts",
 "os_compute_api:os-hypervisors",
 "os_compute_api:os-instance-actions:events",
@@ -381,12 +373,15 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:servers:create",
 "os_compute_api:servers:create:attach_network",
 "os_compute_api:servers:create:attach_volume",
+"os_compute_api:servers:create:trusted_certs",
+"os_compute_api:servers:create:zero_disk_flavor",
 "os_compute_api:servers:create_image",
 "os_compute_api:servers:delete",
 "os_compute_api:servers:detail",
 "os_compute_api:servers:index",
 "os_compute_api:servers:reboot",
 "os_compute_api:servers:rebuild",
+"os_compute_api:servers:rebuild:trusted_certs",
 "os_compute_api:servers:resize",
 "os_compute_api:servers:revert_resize",
 "os_compute_api:servers:show",
@@ -411,10 +406,8 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:flavors",
 "os_compute_api:os-flavor-extra-specs:index",
 "os_compute_api:os-flavor-extra-specs:show",
-"os_compute_api:os-floating-ip-dns",
 "os_compute_api:os-floating-ip-pools",
 "os_compute_api:os-floating-ips",
-"os_compute_api:os-fping",
 "os_compute_api:image-size",
 "os_compute_api:os-instance-actions",
 "os_compute_api:os-keypairs",
@@ -438,7 +431,6 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-server-groups:delete",
 "os_compute_api:os-shelve:shelve",
 "os_compute_api:os-shelve:unshelve",
-"os_compute_api:os-virtual-interfaces",
 "os_compute_api:os-volumes",
 "os_compute_api:os-volumes-attachments:index",
 "os_compute_api:os-volumes-attachments:show",

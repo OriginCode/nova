@@ -36,8 +36,8 @@ If you are new to Nova, please read this first: :ref:`getting_involved`.
 Dates overview
 ==============
 
-For Queens, please see:
-https://wiki.openstack.org/wiki/Nova/Queens_Release_Schedule
+For Rocky, please see:
+https://wiki.openstack.org/wiki/Nova/Rocky_Release_Schedule
 
 .. note: Throughout this document any link which references the name of a
          release cycle in the link can usually be changed to the name of the
@@ -102,9 +102,9 @@ Why we have a Spec Freeze:
 
 By the freeze date, we expect all blueprints that will be approved for the
 cycle to be listed on launchpad and all relevant specs to be merged.
-For Queens, blueprints can be found at
-https://blueprints.launchpad.net/nova/queens and specs at
-https://specs.openstack.org/openstack/nova-specs/specs/queens/index.html
+For Rocky, blueprints can be found at
+https://blueprints.launchpad.net/nova/rocky and specs at
+https://specs.openstack.org/openstack/nova-specs/specs/rocky/index.html
 
 Starting with Liberty, we are keeping a backlog open for submission at all
 times.
@@ -131,7 +131,7 @@ Non-priority Feature Freeze
 This is a Nova specific process.
 
 This only applies to low priority blueprints in this list:
-https://blueprints.launchpad.net/nova/queens
+https://blueprints.launchpad.net/nova/rocky
 
 We currently have a very finite amount of review bandwidth. In order to
 make code review time for the agreed community wide priorities, we have
@@ -157,7 +157,7 @@ http://lists.openstack.org/pipermail/openstack-dev/2015-July/070920.html
 Exception process:
 
 -  Please add request in here:
-   https://etherpad.openstack.org/p/queens-nova-non-priority-feature-freeze
+   https://etherpad.openstack.org/p/rocky-nova-non-priority-feature-freeze
    (ideally with core reviewers to sponsor your patch, normally the
    folks who have already viewed those patches)
 -  make sure you make your request before the end of the feature freeze
@@ -223,9 +223,7 @@ when you create the bug report).
 When do I need a blueprint vs a spec?
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-For more details see:
-
--  https://docs.openstack.org/nova/latest/contributor/blueprints.html
+For more details refer to :doc:`/contributor/blueprints`.
 
 To understand this question, we need to understand why blueprints and
 specs are useful.
@@ -238,7 +236,7 @@ But here is the rough idea:
    with limited deployer and doc impact, it probably doesn't need a
    spec.
 
-If you are unsure, please ask johnthetubaguy on IRC, or one of the other
+If you are unsure, please ask the PTL on IRC, or one of the other
 nova-drivers.
 
 How do I get my blueprint approved?
@@ -256,7 +254,7 @@ So you need your blueprint approved? Here is how:
 -  if you need a spec, then please submit a nova-spec for review, see:
    https://docs.openstack.org/infra/manual/developers.html
 
-Got any more questions? Contact johnthetubaguy or one of the other
+Got any more questions? Contact the PTL or one of the other
 nova-specs-core who are awake at the same time as you. IRC is best as
 you will often get an immediate response, if they are too busy send
 him/her an email.
@@ -382,7 +380,7 @@ For blueprint and spec features, do everything for blueprint-only
 features and also:
 
 -  If it's a project or subteam priority, add it to:
-   https://etherpad.openstack.org/p/queens-nova-priorities-tracking
+   https://etherpad.openstack.org/p/rocky-nova-priorities-tracking
 -  Ensure your spec is approved for the current release cycle.
 
 If your code is a project or subteam priority, the cores interested in
@@ -426,8 +424,7 @@ Interoperable API, supporting a vibrant ecosystem
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 An interoperable API that gives users on-demand access to compute
-resources is at the heart of Nova's mission:
-https://docs.openstack.org/nova/latest/contributor/project-scope.html#mission
+resources is at the heart of :ref:`nova's mission <nova-mission>`.
 
 Nova has a vibrant ecosystem of tools built on top of the current Nova
 API. All features should be designed to work with all technology
@@ -788,7 +785,7 @@ get, and increase the velocity of getting code merged.
 
 The first part is for subgroups to show they can do a great job of
 recommending patches. This is starting in here:
-https://etherpad.openstack.org/p/queens-nova-priorities-tracking
+https://etherpad.openstack.org/p/rocky-nova-priorities-tracking
 
 Ideally this would be done with gerrit user "tags" rather than an
 etherpad. There are some investigations by sdague in how feasible it
@@ -910,9 +907,8 @@ this technique during M.
 Feature Classification
 ~~~~~~~~~~~~~~~~~~~~~~
 
-This is a look at moving forward this effort:
-
--  https://docs.openstack.org/nova/latest/user/support-matrix.html
+This is a look at moving forward the :doc:`support matrix effort
+</user/support-matrix>`.
 
 The things we need to cover:
 

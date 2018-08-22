@@ -12,6 +12,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 from oslo_log import log as logging
+from oslo_utils import excutils
 from oslo_versionedobjects import exception as ovo_exception
 
 from nova import exception
@@ -53,7 +54,18 @@ class EventType(NotificationObject):
     # Version 1.7: REMOVE_FIXED_IP replaced with INTERFACE_DETACH in
     #              NotificationActionField enum
     # Version 1.8: IMPORT value is added to NotificationActionField enum
-    VERSION = '1.8'
+    # Version 1.9: ADD_MEMBER value is added to NotificationActionField enum
+    # Version 1.10: UPDATE_METADATA value is added to the
+    #               NotificationActionField enum
+    # Version 1.11: LOCK is added to NotificationActionField enum
+    # Version 1.12: UNLOCK is added to NotificationActionField enum
+    # Version 1.13: REBUILD_SCHEDULED value is added to the
+    #               NotificationActionField enum
+    # Version 1.14: UPDATE_PROP value is added to the NotificationActionField
+    #               enum
+    # Version 1.15: LIVE_MIGRATION_FORCE_COMPLETE is added to the
+    #               NotificationActionField enum
+    VERSION = '1.15'
 
     fields = {
         'object': fields.StringField(nullable=False),
@@ -133,6 +145,11 @@ class NotificationPayloadBase(NotificationObject):
                 # properly initialized or the payload field needs to be defined
                 # as nullable
                 setattr(self, key, None)
+            except Exception:
+                with excutils.save_and_reraise_exception():
+                    LOG.error('Failed trying to populate attribute "%s" '
+                              'using field: %s', key, field)
+
         self.populated = True
 
         # the schema population will create changed fields but we don't need

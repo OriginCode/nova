@@ -381,13 +381,22 @@ class HackingTestCase(test.NoDBTestCase):
                                 expected_errors=[(1, 0, "N335")])
 
     def test_api_version_decorator_check_no_errors(self):
-        code = """
-               class ControllerClass():
-                   @wsgi.api_version("2.5")
-                   def my_method():
-                       pass
-               """
-        self._assert_has_no_errors(code, checks.check_api_version_decorator)
+        codelist = [
+            """
+            class ControllerClass():
+                @wsgi.api_version("2.5")
+                def my_method():
+                    pass
+            """,
+            """
+            @some_other_decorator
+            @mock.patch('foo', return_value=api_versions.APIVersion("2.5"))
+            def my_method():
+                pass
+            """]
+        for code in codelist:
+            self._assert_has_no_errors(
+                code, checks.check_api_version_decorator)
 
     def test_trans_add(self):
 
@@ -772,13 +781,61 @@ class HackingTestCase(test.NoDBTestCase):
         self._assert_has_no_errors(code, checks.check_uuid4)
 
     def test_return_followed_by_space(self):
-        self.assertEqual(1, len(list(checks.return_followed_by_space(
-            "return(42)"))))
-        self.assertEqual(1, len(list(checks.return_followed_by_space(
-            "return(' some string ')"))))
-        self.assertEqual(0, len(list(checks.return_followed_by_space(
-            "return 42"))))
-        self.assertEqual(0, len(list(checks.return_followed_by_space(
-            "return ' some string '"))))
-        self.assertEqual(0, len(list(checks.return_followed_by_space(
-            "return (int('40') + 2)"))))
+        code = """
+                  return(42)
+                  return(a, b)
+                  return(' some string ')
+               """
+        errors = [(1, 0, 'N358'), (2, 0, 'N358'), (3, 0, 'N358')]
+        self._assert_has_errors(code, checks.return_followed_by_space,
+                                expected_errors=errors)
+        code = """
+                  return
+                  return 42
+                  return (a, b)
+                  return a, b
+                  return ' some string '
+               """
+        self._assert_has_no_errors(code, checks.return_followed_by_space)
+
+    def test_no_redundant_import_alias(self):
+        code = """
+                  from x import y as y
+                  import x as x
+                  import x.y.z as z
+                  import x.y.z as y.z
+               """
+        errors = [(x + 1, 0, 'N359') for x in range(4)]
+        self._assert_has_errors(code, checks.no_redundant_import_alias,
+                                expected_errors=errors)
+        code = """
+                  from x import y
+                  import x
+                  from x.y import z
+                  from a import bcd as cd
+                  import ab.cd.efg as fg
+                  import ab.cd.efg as d.efg
+               """
+        self._assert_has_no_errors(code, checks.no_redundant_import_alias)
+
+    def test_yield_followed_by_space(self):
+        code = """
+                  yield(x, y)
+                  yield{"type": "test"}
+                  yield[a, b, c]
+                  yield"test"
+                  yield'test'
+               """
+        errors = [(x + 1, 0, 'N360') for x in range(5)]
+        self._assert_has_errors(code, checks.yield_followed_by_space,
+                                expected_errors=errors)
+        code = """
+                  yield x
+                  yield (x, y)
+                  yield {"type": "test"}
+                  yield [a, b, c]
+                  yield "test"
+                  yield 'test'
+                  yieldx_func(a, b)
+               """
+        self._assert_has_no_errors(code, checks.yield_followed_by_space)

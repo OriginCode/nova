@@ -27,19 +27,12 @@ from webob import exc
 
 from nova.api.openstack import api_version_request
 from nova.api.openstack import common
-from nova.api.openstack.compute import block_device_mapping
-from nova.api.openstack.compute import block_device_mapping_v1
-from nova.api.openstack.compute import config_drive
 from nova.api.openstack.compute import helpers
-from nova.api.openstack.compute import keypairs
-from nova.api.openstack.compute import multiple_create
-from nova.api.openstack.compute import scheduler_hints
 from nova.api.openstack.compute.schemas import servers as schema_servers
-from nova.api.openstack.compute import security_groups
-from nova.api.openstack.compute import user_data
 from nova.api.openstack.compute.views import servers as views_servers
 from nova.api.openstack import wsgi
 from nova.api import validation
+from nova import block_device
 from nova import compute
 from nova.compute import flavors
 from nova.compute import utils as compute_utils
@@ -66,52 +59,6 @@ class ServersController(wsgi.Controller):
 
     _view_builder_class = views_servers.ViewBuilder
 
-    schema_server_create = schema_servers.base_create
-    schema_server_update = schema_servers.base_update
-    schema_server_rebuild = schema_servers.base_rebuild
-
-    schema_server_create_v20 = schema_servers.base_create_v20
-    schema_server_update_v20 = schema_servers.base_update_v20
-    schema_server_rebuild_v20 = schema_servers.base_rebuild_v20
-
-    schema_server_create_v219 = schema_servers.base_create_v219
-    schema_server_update_v219 = schema_servers.base_update_v219
-    schema_server_rebuild_v219 = schema_servers.base_rebuild_v219
-    schema_server_rebuild_v254 = schema_servers.base_rebuild_v254
-    schema_server_rebuild_v257 = schema_servers.base_rebuild_v257
-
-    schema_server_create_v232 = schema_servers.base_create_v232
-    schema_server_create_v237 = schema_servers.base_create_v237
-    schema_server_create_v242 = schema_servers.base_create_v242
-    schema_server_create_v252 = schema_servers.base_create_v252
-    schema_server_create_v257 = schema_servers.base_create_v257
-
-    # NOTE(alex_xu): Please do not add more items into this list. This list
-    # should be removed in the future.
-    schema_func_list = [
-        block_device_mapping.get_server_create_schema,
-        block_device_mapping_v1.get_server_create_schema,
-        config_drive.get_server_create_schema,
-        keypairs.get_server_create_schema,
-        multiple_create.get_server_create_schema,
-        scheduler_hints.get_server_create_schema,
-        security_groups.get_server_create_schema,
-        user_data.get_server_create_schema,
-    ]
-
-    # NOTE(alex_xu): Please do not add more items into this list. This list
-    # should be removed in the future.
-    server_create_func_list = [
-        block_device_mapping.server_create,
-        block_device_mapping_v1.server_create,
-        config_drive.server_create,
-        keypairs.server_create,
-        multiple_create.server_create,
-        scheduler_hints.server_create,
-        security_groups.server_create,
-        user_data.server_create,
-    ]
-
     @staticmethod
     def _add_location(robj):
         # Just in case...
@@ -129,17 +76,6 @@ class ServersController(wsgi.Controller):
 
         super(ServersController, self).__init__(**kwargs)
         self.compute_api = compute.API()
-
-        # TODO(alex_xu): The final goal is that merging all of
-        # extended json-schema into server main json-schema.
-        self._create_schema(self.schema_server_create_v257, '2.57')
-        self._create_schema(self.schema_server_create_v252, '2.52')
-        self._create_schema(self.schema_server_create_v242, '2.42')
-        self._create_schema(self.schema_server_create_v237, '2.37')
-        self._create_schema(self.schema_server_create_v232, '2.32')
-        self._create_schema(self.schema_server_create_v219, '2.19')
-        self._create_schema(self.schema_server_create, '2.1')
-        self._create_schema(self.schema_server_create_v20, '2.0')
 
     @wsgi.expected_errors((400, 403))
     @validation.query_schema(schema_servers.query_params_v226, '2.26')
@@ -207,8 +143,16 @@ class ServersController(wsgi.Controller):
                 search_opts['task_state'] = task_state
 
         if 'changes-since' in search_opts:
-            search_opts['changes-since'] = timeutils.parse_isotime(
-                search_opts['changes-since'])
+            try:
+                search_opts['changes-since'] = timeutils.parse_isotime(
+                    search_opts['changes-since'])
+            except ValueError:
+                # NOTE: This error handling is for V2.0 API to pass the
+                # experimental jobs at the gate. V2.1 API covers this case
+                # with JSON-Schema and it is a hard burden to apply it to
+                # v2.0 API at this time.
+                msg = _("Invalid filter field: changes-since.")
+                raise exc.HTTPBadRequest(explanation=msg)
 
         # By default, compute's get_all() will return deleted instances.
         # If an admin hasn't specified a 'deleted' search option, we need
@@ -296,6 +240,8 @@ class ServersController(wsgi.Controller):
                 expected_attrs.append('services')
             if api_version_request.is_supported(req, '2.26'):
                 expected_attrs.append("tags")
+            if api_version_request.is_supported(req, '2.63'):
+                expected_attrs.append("trusted_certs")
 
             # merge our expected attrs with what the view builder needs for
             # showing details
@@ -337,6 +283,8 @@ class ServersController(wsgi.Controller):
         if is_detail:
             if api_version_request.is_supported(req, '2.26'):
                 expected_attrs.append("tags")
+            if api_version_request.is_supported(req, '2.63'):
+                expected_attrs.append("trusted_certs")
             expected_attrs = self._view_builder.get_show_expected_attrs(
                                                             expected_attrs)
         instance = common.get_instance(self.compute_api, context,
@@ -441,14 +389,16 @@ class ServersController(wsgi.Controller):
 
     @wsgi.response(202)
     @wsgi.expected_errors((400, 403, 409))
-    @validation.schema(schema_server_create_v20, '2.0', '2.0')
-    @validation.schema(schema_server_create, '2.1', '2.18')
-    @validation.schema(schema_server_create_v219, '2.19', '2.31')
-    @validation.schema(schema_server_create_v232, '2.32', '2.36')
-    @validation.schema(schema_server_create_v237, '2.37', '2.41')
-    @validation.schema(schema_server_create_v242, '2.42', '2.51')
-    @validation.schema(schema_server_create_v252, '2.52', '2.56')
-    @validation.schema(schema_server_create_v257, '2.57')
+    @validation.schema(schema_servers.base_create_v20, '2.0', '2.0')
+    @validation.schema(schema_servers.base_create, '2.1', '2.18')
+    @validation.schema(schema_servers.base_create_v219, '2.19', '2.31')
+    @validation.schema(schema_servers.base_create_v232, '2.32', '2.32')
+    @validation.schema(schema_servers.base_create_v233, '2.33', '2.36')
+    @validation.schema(schema_servers.base_create_v237, '2.37', '2.41')
+    @validation.schema(schema_servers.base_create_v242, '2.42', '2.51')
+    @validation.schema(schema_servers.base_create_v252, '2.52', '2.56')
+    @validation.schema(schema_servers.base_create_v257, '2.57', '2.62')
+    @validation.schema(schema_servers.base_create_v263, '2.63')
     def create(self, req, body):
         """Creates a new server for a given user."""
         context = req.environ['nova.context']
@@ -462,10 +412,40 @@ class ServersController(wsgi.Controller):
         # Arguments to be passed to instance create function
         create_kwargs = {}
 
-        # TODO(alex_xu): This is for back-compatible with stevedore
-        # extension interface. But the final goal is that merging
-        # all of extended code into ServersController.
-        self._create_by_func_list(server_dict, create_kwargs, body)
+        create_kwargs['user_data'] = server_dict.get('user_data')
+        # NOTE(alex_xu): The v2.1 API compat mode, we strip the spaces for
+        # keypair create. But we didn't strip spaces at here for
+        # backward-compatible some users already created keypair and name with
+        # leading/trailing spaces by legacy v2 API.
+        create_kwargs['key_name'] = server_dict.get('key_name')
+        create_kwargs['config_drive'] = server_dict.get('config_drive')
+        security_groups = server_dict.get('security_groups')
+        if security_groups is not None:
+            create_kwargs['security_groups'] = [
+                sg['name'] for sg in security_groups if sg.get('name')]
+            create_kwargs['security_groups'] = list(
+                set(create_kwargs['security_groups']))
+
+        scheduler_hints = {}
+        if 'os:scheduler_hints' in body:
+            scheduler_hints = body['os:scheduler_hints']
+        elif 'OS-SCH-HNT:scheduler_hints' in body:
+            scheduler_hints = body['OS-SCH-HNT:scheduler_hints']
+        create_kwargs['scheduler_hints'] = scheduler_hints
+
+        # min_count and max_count are optional.  If they exist, they may come
+        # in as strings.  Verify that they are valid integers and > 0.
+        # Also, we want to default 'min_count' to 1, and default
+        # 'max_count' to be 'min_count'.
+        min_count = int(server_dict.get('min_count', 1))
+        max_count = int(server_dict.get('max_count', min_count))
+        return_id = server_dict.get('return_reservation_id', False)
+        if min_count > max_count:
+            msg = _('min_count must be <= max_count')
+            raise exc.HTTPBadRequest(explanation=msg)
+        create_kwargs['min_count'] = min_count
+        create_kwargs['max_count'] = max_count
+        create_kwargs['return_reservation_id'] = return_id
 
         availability_zone = server_dict.pop("availability_zone", None)
 
@@ -481,6 +461,14 @@ class ServersController(wsgi.Controller):
             'availability_zone': availability_zone}
         context.can(server_policies.SERVERS % 'create', target)
 
+        # Skip policy check for 'create:trusted_certs' if no trusted
+        # certificate IDs were provided.
+        trusted_certs = server_dict.get('trusted_image_certificates', None)
+        if trusted_certs:
+            create_kwargs['trusted_certs'] = trusted_certs
+            context.can(server_policies.SERVERS % 'create:trusted_certs',
+                        target=target)
+
         # TODO(Shao He, Feng) move this policy check to os-availability-zone
         # extension after refactor it.
         parse_az = self.compute_api.parse_availability_zone
@@ -492,14 +480,48 @@ class ServersController(wsgi.Controller):
         if host or node:
             context.can(server_policies.SERVERS % 'create:forced_host', {})
 
+        # NOTE(danms): Don't require an answer from all cells here, as
+        # we assume that if a cell isn't reporting we won't schedule into
+        # it anyway. A bit of a gamble, but a reasonable one.
         min_compute_version = service_obj.get_minimum_version_all_cells(
             nova_context.get_admin_context(), ['nova-compute'])
         supports_device_tagging = (min_compute_version >=
                                    DEVICE_TAGGING_MIN_COMPUTE_VERSION)
 
+        block_device_mapping_legacy = server_dict.get('block_device_mapping',
+                                                      [])
+        block_device_mapping_v2 = server_dict.get('block_device_mapping_v2',
+                                                  [])
+
+        if block_device_mapping_legacy and block_device_mapping_v2:
+            expl = _('Using different block_device_mapping syntaxes '
+                     'is not allowed in the same request.')
+            raise exc.HTTPBadRequest(explanation=expl)
+
+        if block_device_mapping_legacy:
+            for bdm in block_device_mapping_legacy:
+                if 'delete_on_termination' in bdm:
+                    bdm['delete_on_termination'] = strutils.bool_from_string(
+                        bdm['delete_on_termination'])
+            create_kwargs[
+                'block_device_mapping'] = block_device_mapping_legacy
+            # Sets the legacy_bdm flag if we got a legacy block device mapping.
+            create_kwargs['legacy_bdm'] = True
+        elif block_device_mapping_v2:
+            image_href = server_dict.get('imageRef')
+            image_uuid_specified = image_href is not None
+            try:
+                block_device_mapping = [
+                    block_device.BlockDeviceDict.from_api(bdm_dict,
+                        image_uuid_specified)
+                    for bdm_dict in block_device_mapping_v2]
+            except exception.InvalidBDMFormat as e:
+                raise exc.HTTPBadRequest(explanation=e.format_message())
+            create_kwargs['block_device_mapping'] = block_device_mapping
+            # Unset the legacy_bdm flag if we got a block device mapping.
+            create_kwargs['legacy_bdm'] = False
+
         block_device_mapping = create_kwargs.get("block_device_mapping")
-        # TODO(Shao He, Feng) move this policy check to os-block-device-mapping
-        # extension after refactor it.
         if block_device_mapping:
             context.can(server_policies.SERVERS % 'create:attach_volume',
                         target)
@@ -565,7 +587,8 @@ class ServersController(wsgi.Controller):
         except exception.ConfigDriveInvalidValue:
             msg = _("Invalid config_drive provided.")
             raise exc.HTTPBadRequest(explanation=msg)
-        except exception.ExternalNetworkAttachForbidden as error:
+        except (exception.BootFromVolumeRequiredForZeroDiskFlavor,
+                exception.ExternalNetworkAttachForbidden) as error:
             raise exc.HTTPForbidden(explanation=error.format_message())
         except messaging.RemoteError as err:
             msg = "%(err_type)s: %(err_msg)s" % {'err_type': err.exc_type,
@@ -623,13 +646,15 @@ class ServersController(wsgi.Controller):
                 exception.RealtimeMaskNotFoundOrInvalid,
                 exception.SnapshotNotFound,
                 exception.UnableToAutoAllocateNetwork,
-                exception.MultiattachNotSupportedOldMicroversion) as error:
+                exception.MultiattachNotSupportedOldMicroversion,
+                exception.CertificateValidationFailed) as error:
             raise exc.HTTPBadRequest(explanation=error.format_message())
         except (exception.PortInUse,
                 exception.InstanceExists,
                 exception.NetworkAmbiguous,
                 exception.NoUniqueMatch,
-                exception.MultiattachSupportNotYetAvailable) as error:
+                exception.MultiattachSupportNotYetAvailable,
+                exception.CertificateValidationNotYetAvailable) as error:
             raise exc.HTTPConflict(explanation=error.format_message())
 
         # If the caller wanted a reservation_id, return it
@@ -645,30 +670,6 @@ class ServersController(wsgi.Controller):
         robj = wsgi.ResponseObject(server)
 
         return self._add_location(robj)
-
-    # NOTE(gmann): Parameter 'req_body' is placed to handle scheduler_hint
-    # extension for V2.1. No other extension supposed to use this as
-    # it will be removed soon.
-    def _create_by_func_list(self, server_dict,
-                             create_kwargs, req_body):
-        for func in self.server_create_func_list:
-            func(server_dict, create_kwargs, req_body)
-
-    def _create_schema(self, create_schema, version):
-        for schema_func in self.schema_func_list:
-            self._create_schema_by_func(create_schema, version, schema_func)
-
-    def _create_schema_by_func(self, create_schema, version, schema_func):
-        schema = schema_func(version)
-
-        if (schema_func.__module__ ==
-                'nova.api.openstack.compute.scheduler_hints'):
-            # NOTE(oomichi): The request parameter position of scheduler-hint
-            # extension is different from the other extensions, so here handles
-            # the difference.
-            create_schema['properties'].update(schema)
-        else:
-            create_schema['properties']['server']['properties'].update(schema)
 
     def _delete(self, context, req, instance_uuid):
         instance = self._get_server(context, req, instance_uuid)
@@ -687,9 +688,9 @@ class ServersController(wsgi.Controller):
             self.compute_api.delete(context, instance)
 
     @wsgi.expected_errors(404)
-    @validation.schema(schema_server_update_v20, '2.0', '2.0')
-    @validation.schema(schema_server_update, '2.1', '2.18')
-    @validation.schema(schema_server_update_v219, '2.19')
+    @validation.schema(schema_servers.base_update_v20, '2.0', '2.0')
+    @validation.schema(schema_servers.base_update, '2.1', '2.18')
+    @validation.schema(schema_servers.base_update_v219, '2.19')
     def update(self, req, id, body):
         """Update server then pass on to version-specific controller."""
 
@@ -880,11 +881,12 @@ class ServersController(wsgi.Controller):
     @wsgi.response(202)
     @wsgi.expected_errors((400, 403, 404, 409))
     @wsgi.action('rebuild')
-    @validation.schema(schema_server_rebuild_v20, '2.0', '2.0')
-    @validation.schema(schema_server_rebuild, '2.1', '2.18')
-    @validation.schema(schema_server_rebuild_v219, '2.19', '2.53')
-    @validation.schema(schema_server_rebuild_v254, '2.54', '2.56')
-    @validation.schema(schema_server_rebuild_v257, '2.57')
+    @validation.schema(schema_servers.base_rebuild_v20, '2.0', '2.0')
+    @validation.schema(schema_servers.base_rebuild, '2.1', '2.18')
+    @validation.schema(schema_servers.base_rebuild_v219, '2.19', '2.53')
+    @validation.schema(schema_servers.base_rebuild_v254, '2.54', '2.56')
+    @validation.schema(schema_servers.base_rebuild_v257, '2.57', '2.62')
+    @validation.schema(schema_servers.base_rebuild_v263, '2.63')
     def _action_rebuild(self, req, id, body):
         """Rebuild an instance with the given attributes."""
         rebuild_dict = body['rebuild']
@@ -895,9 +897,9 @@ class ServersController(wsgi.Controller):
 
         context = req.environ['nova.context']
         instance = self._get_server(context, req, id)
-        context.can(server_policies.SERVERS % 'rebuild',
-                    target={'user_id': instance.user_id,
-                            'project_id': instance.project_id})
+        target = {'user_id': instance.user_id,
+                  'project_id': instance.project_id}
+        context.can(server_policies.SERVERS % 'rebuild', target=target)
         attr_map = {
             'name': 'display_name',
             'description': 'display_description',
@@ -919,6 +921,19 @@ class ServersController(wsgi.Controller):
         if include_user_data and 'user_data' in rebuild_dict:
             kwargs['user_data'] = rebuild_dict['user_data']
 
+        # Skip policy check for 'rebuild:trusted_certs' if no trusted
+        # certificate IDs were provided.
+        if ((api_version_request.is_supported(req, min_version='2.63'))
+                # Note that this is different from server create since with
+                # rebuild a user can unset/reset the trusted certs by
+                # specifying trusted_image_certificates=None, similar to
+                # key_name.
+                and ('trusted_image_certificates' in rebuild_dict)):
+            kwargs['trusted_certs'] = rebuild_dict.get(
+                'trusted_image_certificates')
+            context.can(server_policies.SERVERS % 'rebuild:trusted_certs',
+                        target=target)
+
         for request_attribute, instance_attribute in attr_map.items():
             try:
                 if request_attribute == 'name':
@@ -936,7 +951,8 @@ class ServersController(wsgi.Controller):
                                      image_href,
                                      password,
                                      **kwargs)
-        except exception.InstanceIsLocked as e:
+        except (exception.InstanceIsLocked,
+                exception.CertificateValidationNotYetAvailable) as e:
             raise exc.HTTPConflict(explanation=e.format_message())
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
@@ -959,7 +975,8 @@ class ServersController(wsgi.Controller):
                 exception.FlavorDiskTooSmall,
                 exception.FlavorMemoryTooSmall,
                 exception.InvalidMetadata,
-                exception.AutoDiskConfigDisabledByImage) as error:
+                exception.AutoDiskConfigDisabledByImage,
+                exception.CertificateValidationFailed) as error:
             raise exc.HTTPBadRequest(explanation=error.format_message())
 
         instance = self._get_server(context, req, id, is_detail=True)
@@ -984,7 +1001,6 @@ class ServersController(wsgi.Controller):
     @wsgi.response(202)
     @wsgi.expected_errors((400, 403, 404, 409))
     @wsgi.action('createImage')
-    @common.check_snapshots_enabled
     @validation.schema(schema_servers.create_image, '2.0', '2.0')
     @validation.schema(schema_servers.create_image, '2.1')
     def _action_create_image(self, req, id, body):
@@ -1136,8 +1152,6 @@ class ServersController(wsgi.Controller):
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
                 'trigger_crash_dump', id)
-        except exception.TriggerCrashDumpNotSupported as e:
-            raise webob.exc.HTTPBadRequest(explanation=e.format_message())
 
 
 def remove_invalid_options(context, search_options, allowed_search_options):

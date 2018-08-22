@@ -14,7 +14,7 @@ import datetime
 
 from nova.compute import instance_list
 from nova import context
-from nova import db
+from nova.db import api as db
 from nova import exception
 from nova import objects
 from nova import test
@@ -426,6 +426,23 @@ class InstanceListTestCase(test.TestCase):
         expected_no_fault = len(self.instances) - expected_faults
         faults = [inst['fault'] for inst in insts]
         self.assertEqual(expected_no_fault, faults.count(None))
+
+    def test_instance_list_minimal_cells(self):
+        """Get a list of instances with a subset of cell mappings."""
+        last_cell = self.cells[-1]
+        with context.target_cell(self.context, last_cell) as cctxt:
+            last_cell_instances = db.instance_get_all(cctxt)
+            last_cell_uuids = [inst['uuid'] for inst in last_cell_instances]
+
+        instances = list(
+            instance_list.get_instances_sorted(self.context, {},
+                                               None, None, [],
+                                               ['uuid'], ['asc'],
+                                               cell_mappings=self.cells[:-1]))
+        found_uuids = [inst['hostname'] for inst in instances]
+        had_uuids = [inst['hostname'] for inst in self.instances
+                     if inst['uuid'] not in last_cell_uuids]
+        self.assertEqual(sorted(had_uuids), sorted(found_uuids))
 
 
 class TestInstanceListObjects(test.TestCase):

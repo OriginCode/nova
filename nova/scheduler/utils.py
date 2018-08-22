@@ -22,17 +22,18 @@ import sys
 from oslo_log import log as logging
 import oslo_messaging as messaging
 from oslo_serialization import jsonutils
+from six.moves.urllib import parse
 
 from nova.api.openstack.placement import lib as placement_lib
 from nova.compute import flavors
 from nova.compute import utils as compute_utils
 import nova.conf
 from nova import exception
-from nova.i18n import _, _LE, _LW
+from nova.i18n import _
 from nova import objects
 from nova.objects import base as obj_base
-from nova.objects import fields
 from nova.objects import instance as obj_instance
+from nova import rc_fields as fields
 from nova import rpc
 
 
@@ -40,7 +41,7 @@ LOG = logging.getLogger(__name__)
 
 CONF = nova.conf.CONF
 
-GroupDetails = collections.namedtuple('GroupDetails', ['hosts', 'policies',
+GroupDetails = collections.namedtuple('GroupDetails', ['hosts', 'policy',
                                                        'members'])
 
 
@@ -56,6 +57,14 @@ class ResourceRequest(object):
     def __init__(self):
         # { ident: RequestGroup }
         self._rg_by_id = {}
+        self._group_policy = None
+        # Default to the configured limit but _limit can be
+        # set to None to indicate "no limit".
+        self._limit = CONF.scheduler.max_placement_results
+
+    def __str__(self):
+        return ', '.join(sorted(
+            list(str(rg) for rg in list(self._rg_by_id.values()))))
 
     def get_request_group(self, ident):
         if ident not in self._rg_by_id:
@@ -80,25 +89,37 @@ class ResourceRequest(object):
             LOG.warning(
                 "Resource amounts must be nonnegative integers. Received "
                 "'%(val)s' for key resources%(groupid)s.",
-                {"groupid": groupid, "val": amount})
+                {"groupid": groupid or '', "val": amount})
             return
         self.get_request_group(groupid).resources[rclass] = amount
 
     def _add_trait(self, groupid, trait_name, trait_type):
-        # Currently the only valid value for a trait entry is 'required'.
-        trait_vals = ('required',)
-        # Ensure the value is supported.
-        if trait_type not in trait_vals:
+        # Currently the only valid values for a trait entry are 'required'
+        # and 'forbidden'
+        trait_vals = ('required', 'forbidden')
+        if trait_type == 'required':
+            self.get_request_group(groupid).required_traits.add(trait_name)
+        elif trait_type == 'forbidden':
+            self.get_request_group(groupid).forbidden_traits.add(trait_name)
+        else:
             LOG.warning(
                 "Only (%(tvals)s) traits are supported. Received '%(val)s' "
                 "for key trait%(groupid)s.",
-                {"tvals": ', '.join(trait_vals), "groupid": groupid,
+                {"tvals": ', '.join(trait_vals), "groupid": groupid or '',
                  "val": trait_type})
+        return
+
+    def _add_group_policy(self, policy):
+        # The only valid values for group_policy are 'none' and 'isolate'.
+        if policy not in ('none', 'isolate'):
+            LOG.warning(
+                "Invalid group_policy '%s'. Valid values are 'none' and "
+                "'isolate'.", policy)
             return
-        self.get_request_group(groupid).required_traits.add(trait_name)
+        self._group_policy = policy
 
     @classmethod
-    def from_extra_specs(cls, extra_specs):
+    def from_extra_specs(cls, extra_specs, req=None):
         """Processes resources and traits in numbered groupings in extra_specs.
 
         Examines extra_specs for items of the following forms:
@@ -107,12 +128,27 @@ class ResourceRequest(object):
             "trait:$TRAIT_NAME": "required"
             "trait$N:$TRAIT_NAME": "required"
 
+        Does *not* yet handle member_of[$N].
+
         :param extra_specs: The flavor extra_specs dict.
+        :param req: the ResourceRequest object to add the requirements to or
+               None to create a new ResourceRequest
         :return: A ResourceRequest object representing the resources and
                  required traits in the extra_specs.
         """
-        ret = cls()
+        # TODO(efried): Handle member_of[$N], which will need to be reconciled
+        # with destination.aggregates handling in resources_from_request_spec
+
+        if req is not None:
+            ret = req
+        else:
+            ret = cls()
+
         for key, val in extra_specs.items():
+            if key == 'group_policy':
+                ret._add_group_policy(val)
+                continue
+
             match = cls.XS_KEYPAT.match(key)
             if not match:
                 continue
@@ -129,6 +165,31 @@ class ResourceRequest(object):
             # Process "trait[$N]"
             elif prefix == cls.XS_TRAIT_PREFIX:
                 ret._add_trait(suffix, name, val)
+
+        return ret
+
+    @classmethod
+    def from_image_props(cls, image_meta_props, req=None):
+        """Processes image properties and adds trait requirements to the
+           ResourceRequest
+
+        :param image_meta_props: The ImageMetaProps object.
+        :param req: the ResourceRequest object to add the requirements to or
+               None to create a new ResourceRequest
+        :return: A ResourceRequest object representing the required traits on
+                the image.
+        """
+        if req is not None:
+            ret = req
+        else:
+            ret = cls()
+
+        if 'traits_required' in image_meta_props:
+            for trait in image_meta_props.traits_required:
+                # required traits from the image are always added to the
+                # unnumbered request group, granular request groups are not
+                # supported in image traits
+                ret._add_trait(None, trait, "required")
 
         return ret
 
@@ -178,6 +239,54 @@ class ResourceRequest(object):
                 if resource_dict[rclass] == 0:
                     resource_dict.pop(rclass)
         self._clean_empties()
+
+    def to_querystring(self):
+        """Produce a querystring of the form expected by
+        GET /allocation_candidates.
+        """
+        # NOTE(efried): The sorting herein is not necessary for the API; it is
+        # to make testing easier and logging/debugging predictable.
+        def to_queryparams(request_group, suffix):
+            res = request_group.resources
+            required_traits = request_group.required_traits
+            forbidden_traits = request_group.forbidden_traits
+            aggregates = request_group.member_of
+
+            resource_query = ",".join(
+                sorted("%s:%s" % (rc, amount)
+                       for (rc, amount) in res.items()))
+            qs_params = [('resources%s' % suffix, resource_query)]
+
+            # Assemble required and forbidden traits, allowing for either/both
+            # to be empty.
+            required_val = ','.join(
+                sorted(required_traits) +
+                ['!%s' % ft for ft in sorted(forbidden_traits)])
+            if required_val:
+                qs_params.append(('required%s' % suffix, required_val))
+            if aggregates:
+                aggs = []
+                # member_ofN is a list of lists.  We need a tuple of
+                # ('member_ofN', 'in:uuid,uuid,...') for each inner list.
+                for agglist in aggregates:
+                    aggs.append(('member_of%s' % suffix,
+                                 'in:' + ','.join(sorted(agglist))))
+                qs_params.extend(sorted(aggs))
+            return qs_params
+
+        if self._limit is not None:
+            qparams = [('limit', self._limit)]
+        else:
+            qparams = []
+        if self._group_policy is not None:
+            qparams.append(('group_policy', self._group_policy))
+        for ident, rg in self._rg_by_id.items():
+            # [('resourcesN', 'rclass:amount,rclass:amount,...'),
+            #  ('requiredN', 'trait_name,!trait_name,...'),
+            #  ('member_ofN', 'in:uuid,uuid,...'),
+            #  ('member_ofN', 'in:uuid,uuid,...')]
+            qparams.extend(to_queryparams(rg, ident or ''))
+        return parse.urlencode(sorted(qparams))
 
 
 def build_request_spec(image, instances, instance_type=None):
@@ -285,17 +394,22 @@ def merge_resources(original_resources, new_resources, sign=1):
 
 
 def resources_from_request_spec(spec_obj):
-    """Given a RequestSpec object, returns a ResourceRequest of the resources
-    and traits it represents.
+    """Given a RequestSpec object, returns a ResourceRequest of the resources,
+    traits, and aggregates it represents.
     """
     spec_resources = {
         fields.ResourceClass.VCPU: spec_obj.vcpus,
         fields.ResourceClass.MEMORY_MB: spec_obj.memory_mb,
     }
 
-    requested_disk_mb = (1024 * (spec_obj.root_gb +
-                                 spec_obj.ephemeral_gb) +
+    requested_disk_mb = ((1024 * spec_obj.ephemeral_gb) +
                          spec_obj.swap)
+
+    if 'is_bfv' not in spec_obj or not spec_obj.is_bfv:
+        # Either this is not a BFV instance, or we are not sure,
+        # so ask for root_gb allocation
+        requested_disk_mb += (1024 * spec_obj.root_gb)
+
     # NOTE(sbauza): Disk request is expressed in MB but we count
     # resources in GB. Since there could be a remainder of the division
     # by 1024, we need to ceil the result to the next bigger Gb so we
@@ -329,9 +443,27 @@ def resources_from_request_spec(spec_obj):
         # Start with an empty one
         res_req = ResourceRequest()
 
+    # Process any image properties
+    if 'image' in spec_obj and 'properties' in spec_obj.image:
+        res_req = ResourceRequest.from_image_props(spec_obj.image.properties,
+                                                   req=res_req)
+
     # Add the (remaining) items from the spec_resources to the sharing group
     for rclass, amount in spec_resources.items():
         res_req.get_request_group(None).resources[rclass] = amount
+
+    if 'requested_destination' in spec_obj:
+        destination = spec_obj.requested_destination
+        if destination and destination.aggregates:
+            grp = res_req.get_request_group(None)
+            grp.member_of = [tuple(ored.split(','))
+                             for ored in destination.aggregates]
+
+    # Don't limit allocation candidates when using force_hosts or force_nodes.
+    if 'force_hosts' in spec_obj and spec_obj.force_hosts:
+        res_req._limit = None
+    if 'force_nodes' in spec_obj and spec_obj.force_nodes:
+        res_req._limit = None
 
     return res_req
 
@@ -518,6 +650,7 @@ def populate_retry(filter_properties, instance_uuid):
     if (max_attempts == 1 or len(force_hosts) == 1
                            or len(force_nodes) == 1):
         # re-scheduling is disabled.
+        LOG.debug('Re-scheduling is disabled.')
         return
 
     # retry is enabled, update attempt count:
@@ -554,12 +687,10 @@ def _log_compute_error(instance_uuid, retry):
         return  # no previously attempted hosts, skip
 
     last_host, last_node = hosts[-1]
-    LOG.error(_LE('Error from last host: %(last_host)s (node %(last_node)s):'
-                  ' %(exc)s'),
-              {'last_host': last_host,
-               'last_node': last_node,
-               'exc': exc},
-              instance_uuid=instance_uuid)
+    LOG.error(
+        'Error from last host: %(last_host)s (node %(last_node)s): %(exc)s',
+        {'last_host': last_host, 'last_node': last_node, 'exc': exc},
+        instance_uuid=instance_uuid)
 
 
 def _add_retry_host(filter_properties, host, node):
@@ -600,10 +731,9 @@ def parse_options(opts, sep='=', converter=str, name=""):
         else:
             bad.append(opt)
     if bad:
-        LOG.warning(_LW("Ignoring the invalid elements of the option "
-                        "%(name)s: %(options)s"),
-                    {'name': name,
-                     'options': ", ".join(bad)})
+        LOG.warning("Ignoring the invalid elements of the option "
+                    "%(name)s: %(options)s",
+                    {'name': name, 'options': ", ".join(bad)})
     return good
 
 
@@ -665,29 +795,28 @@ def _get_group_details(context, instance_uuid, user_group_hosts=None):
 
     policies = set(('anti-affinity', 'affinity', 'soft-affinity',
                     'soft-anti-affinity'))
-    if any((policy in policies) for policy in group.policies):
-        if not _SUPPORTS_AFFINITY and 'affinity' in group.policies:
+    if group.policy in policies:
+        if not _SUPPORTS_AFFINITY and 'affinity' == group.policy:
             msg = _("ServerGroupAffinityFilter not configured")
             LOG.error(msg)
             raise exception.UnsupportedPolicyException(reason=msg)
-        if not _SUPPORTS_ANTI_AFFINITY and 'anti-affinity' in group.policies:
+        if not _SUPPORTS_ANTI_AFFINITY and 'anti-affinity' == group.policy:
             msg = _("ServerGroupAntiAffinityFilter not configured")
             LOG.error(msg)
             raise exception.UnsupportedPolicyException(reason=msg)
-        if (not _SUPPORTS_SOFT_AFFINITY
-                and 'soft-affinity' in group.policies):
+        if (not _SUPPORTS_SOFT_AFFINITY and 'soft-affinity' == group.policy):
             msg = _("ServerGroupSoftAffinityWeigher not configured")
             LOG.error(msg)
             raise exception.UnsupportedPolicyException(reason=msg)
         if (not _SUPPORTS_SOFT_ANTI_AFFINITY
-                and 'soft-anti-affinity' in group.policies):
+                and 'soft-anti-affinity' == group.policy):
             msg = _("ServerGroupSoftAntiAffinityWeigher not configured")
             LOG.error(msg)
             raise exception.UnsupportedPolicyException(reason=msg)
         group_hosts = set(group.get_hosts())
         user_hosts = set(user_group_hosts) if user_group_hosts else set()
         return GroupDetails(hosts=user_hosts | group_hosts,
-                            policies=group.policies, members=group.members)
+                            policy=group.policy, members=group.members)
 
 
 def setup_instance_group(context, request_spec):
@@ -705,7 +834,7 @@ def setup_instance_group(context, request_spec):
     group_info = _get_group_details(context, instance_uuid, group_hosts)
     if group_info is not None:
         request_spec.instance_group.hosts = list(group_info.hosts)
-        request_spec.instance_group.policies = group_info.policies
+        request_spec.instance_group.policy = group_info.policy
         request_spec.instance_group.members = group_info.members
 
 
@@ -727,11 +856,11 @@ def retry_on_timeout(retries=1):
                 except messaging.MessagingTimeout:
                     attempt += 1
                     if attempt <= retries:
-                        LOG.warning(_LW(
+                        LOG.warning(
                             "Retrying %(name)s after a MessagingTimeout, "
-                            "attempt %(attempt)s of %(retries)s."),
-                                 {'attempt': attempt, 'retries': retries,
-                                  'name': func.__name__})
+                            "attempt %(attempt)s of %(retries)s.",
+                            {'attempt': attempt, 'retries': retries,
+                             'name': func.__name__})
                     else:
                         raise
         return wrapped

@@ -11,15 +11,18 @@
 #    under the License.
 """Deployment handling for Placmenent API."""
 
+from microversion_parse import middleware as mp_middleware
 import oslo_middleware
 from oslo_middleware import cors
 
-from nova.api import openstack as common_api
 from nova.api.openstack.placement import auth
+from nova.api.openstack.placement import db_api
+from nova.api.openstack.placement import fault_wrap
 from nova.api.openstack.placement import handler
 from nova.api.openstack.placement import microversion
+from nova.api.openstack.placement.objects import resource_provider
 from nova.api.openstack.placement import requestlog
-from nova import objects
+from nova.api.openstack.placement import util
 
 
 # TODO(cdent): NAME points to the config project being used, so for
@@ -27,12 +30,7 @@ from nova import objects
 NAME = "nova"
 
 
-# Make sure that objects are registered for this running of the
-# placement API.
-objects.register_all()
-
-
-def deploy(conf, project_name):
+def deploy(conf):
     """Assemble the middleware pipeline leading to the placement app."""
     if conf.api.auth_strategy == 'noauth2':
         auth_middleware = auth.NoAuthMiddleware
@@ -55,11 +53,15 @@ def deploy(conf, project_name):
 
     context_middleware = auth.PlacementKeystoneContext
     req_id_middleware = oslo_middleware.RequestId
-    microversion_middleware = microversion.MicroversionMiddleware
-    fault_wrap = common_api.FaultWrapper
+    microversion_middleware = mp_middleware.MicroversionMiddleware
+    fault_middleware = fault_wrap.FaultWrapper
     request_log = requestlog.RequestLog
 
     application = handler.PlacementHandler()
+    # configure microversion middleware in the old school way
+    application = microversion_middleware(
+        application, microversion.SERVICE_TYPE, microversion.VERSIONS,
+        json_error_formatter=util.json_error_formatter)
 
     # NOTE(cdent): The ordering here is important. The list is ordered
     # from the inside out. For a single request req_id_middleware is called
@@ -69,8 +71,7 @@ def deploy(conf, project_name):
     # order the request went in. This order ensures that log messages
     # all see the same contextual information including request id and
     # authentication information.
-    for middleware in (microversion_middleware,
-                       fault_wrap,
+    for middleware in (fault_middleware,
                        request_log,
                        context_middleware,
                        auth_middleware,
@@ -80,9 +81,40 @@ def deploy(conf, project_name):
         if middleware:
             application = middleware(application)
 
+    # NOTE(mriedem): Ignore scope check UserWarnings from oslo.policy.
+    if not conf.oslo_policy.enforce_scope:
+        import warnings
+        warnings.filterwarnings('ignore',
+                                message="Policy .* failed scope check",
+                                category=UserWarning)
+
     return application
 
 
+def update_database():
+    """Do any database updates required at process boot time, such as
+    updating the traits table.
+    """
+    ctx = db_api.DbContext()
+    resource_provider.ensure_trait_sync(ctx)
+    resource_provider.ensure_rc_cache(ctx)
+
+
+# NOTE(cdent): Althought project_name is no longer used because of the
+# resolution of https://bugs.launchpad.net/nova/+bug/1734491, loadapp()
+# is considered a public interface for the creation of a placement
+# WSGI app so must maintain its interface. The canonical placement WSGI
+# app is created by init_application in wsgi.py, but this is not
+# required and in fact can be limiting. loadapp() may be used from
+# fixtures or arbitrary WSGI frameworks and loaders.
 def loadapp(config, project_name=NAME):
-    application = deploy(config, project_name)
+    """WSGI application creator for placement.
+
+    :param config: An olso_config.cfg.ConfigOpts containing placement
+                   configuration.
+    :param project_name: oslo_config project name. Ignored, preserved for
+                         backwards compatibility
+    """
+    application = deploy(config)
+    update_database()
     return application

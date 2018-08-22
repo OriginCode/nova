@@ -181,7 +181,6 @@ class ContextTestCase(test.NoDBTestCase):
         values2 = ctx.to_dict()
         expected_values = {'auth_token': None,
                            'domain': None,
-                           'instance_lock_checked': False,
                            'is_admin': False,
                            'is_admin_project': True,
                            'project_id': 222,
@@ -241,7 +240,7 @@ class ContextTestCase(test.NoDBTestCase):
                                                mock.sentinel.target)
 
     @mock.patch('nova.rpc.create_transport')
-    @mock.patch('nova.db.create_context_manager')
+    @mock.patch('nova.db.api.create_context_manager')
     def test_target_cell(self, mock_create_ctxt_mgr, mock_rpc):
         mock_create_ctxt_mgr.return_value = mock.sentinel.cdb
         mock_rpc.return_value = mock.sentinel.cmq
@@ -261,7 +260,7 @@ class ContextTestCase(test.NoDBTestCase):
         self.assertEqual(mock.sentinel.mq_conn, ctxt.mq_connection)
 
     @mock.patch('nova.rpc.create_transport')
-    @mock.patch('nova.db.create_context_manager')
+    @mock.patch('nova.db.api.create_context_manager')
     def test_target_cell_unset(self, mock_create_ctxt_mgr, mock_rpc):
         """Tests that passing None as the mapping will temporarily
         untarget any previously set cell context.
@@ -306,7 +305,7 @@ class ContextTestCase(test.NoDBTestCase):
         self.assertFalse(ctxt.is_admin)
 
     @mock.patch('nova.rpc.create_transport')
-    @mock.patch('nova.db.create_context_manager')
+    @mock.patch('nova.db.api.create_context_manager')
     def test_target_cell_caching(self, mock_create_cm, mock_create_tport):
         mock_create_cm.return_value = mock.sentinel.db_conn_obj
         mock_create_tport.return_value = mock.sentinel.mq_conn_obj

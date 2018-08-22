@@ -16,7 +16,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova VERSION\n"
 "Report-Msgid-Bugs-To: https://bugs.launchpad.net/openstack-i18n/\n"
-"POT-Creation-Date: 2018-02-28 15:53+0000\n"
+"POT-Creation-Date: 2018-07-13 03:26+0000\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
@@ -66,14 +66,6 @@ msgstr ""
 "код выхода: %(code)r\n"
 "stdout: %(stdout)r\n"
 "stderr: %(stderr)r"
-
-#, python-format
-msgid ""
-"%(event_type)s is not a versioned notification and not whitelisted. See ./"
-"doc/source/notification.rst"
-msgstr ""
-"%(event_type)s не является уведомлением с поддержкой версий и не входит в "
-"белый список. См. ./doc/source/notification.rst"
 
 #, python-format
 msgid "%(field)s should not be part of the updates."
@@ -502,15 +494,6 @@ msgid "Cannot attach one or more volumes to multiple instances"
 msgstr "Невозможно подключить один или несколько томов нескольким экземплярам"
 
 #, python-format
-msgid ""
-"Cannot block migrate instance %(uuid)s with mapped volumes. Selective block "
-"device migration feature requires libvirt version %(libvirt_ver)s"
-msgstr ""
-"Блочный перенос экземпляра %(uuid)s  со связанными томами невозможен. Для "
-"выборочного переноса блочного устройства требуется libvirt версии "
-"%(libvirt_ver)s"
-
-#, python-format
 msgid "Cannot call %(method)s on orphaned %(objtype)s object"
 msgstr "Невозможно вызвать %(method)s в неприсвоенном объекте %(objtype)s"
 
@@ -817,15 +800,6 @@ msgstr "Стратегия PBM по умолчанию является обяз
 #, python-format
 msgid "Deleted %(records)d records from table '%(table_name)s'."
 msgstr "Из таблицы '%(table_name)s' удалены записи (%(records)d)."
-
-msgid "Deleting by fixed_range is not supported with the NeutronManager"
-msgstr "Удаление по fixed_range не поддерживается в NeutronManager"
-
-#, python-format
-msgid "Destination host:%s must be in the same aggregate as the source server"
-msgstr ""
-"Хост назначения:%s должен находиться в том же множестве, что и исходный "
-"сервер"
 
 #, python-format
 msgid "Detected existing vlan with id %(vlan)d"
@@ -1198,20 +1172,8 @@ msgstr ""
 "%(network_id)s."
 
 #, python-format
-msgid "Fixed IP %s has been deleted"
-msgstr "Фиксированный IP %s удален"
-
-#, python-format
 msgid "Fixed IP %s is already in use."
 msgstr "Фиксированный IP-адрес %s уже используется."
-
-#, python-format
-msgid "Fixed IP %s not found"
-msgstr "Фиксированный IP %s не найден"
-
-#, python-format
-msgid "Fixed IP %s not valid"
-msgstr "Фиксированный IP-адрес %s недопустим"
 
 #, python-format
 msgid ""
@@ -1377,10 +1339,6 @@ msgstr ""
 "Запрещено превышать значение разновидности для числа последовательных "
 "портов, передаваемого в метаданные образа."
 
-#, python-format
-msgid "Found no PIF for device %s"
-msgstr "Не найден PIF для устройства %s"
-
 msgid "Found no disk to snapshot."
 msgstr "Не найден диск для создания моментальной копии."
 
@@ -1519,22 +1477,6 @@ msgstr ""
 
 msgid "Image that the instance was started with could not be found."
 msgstr "Образ, с помощью которого запущен экземпляр, не найден."
-
-#, python-format
-msgid ""
-"Image vCPU limits %(sockets)d:%(cores)d:%(threads)d exceeds permitted "
-"%(maxsockets)d:%(maxcores)d:%(maxthreads)d"
-msgstr ""
-"Превышены ограничения VCPU образа %(sockets)d:%(cores)d:%(threads)d "
-"%(maxsockets)d:%(maxcores)d:%(maxthreads)d"
-
-#, python-format
-msgid ""
-"Image vCPU topology %(sockets)d:%(cores)d:%(threads)d exceeds permitted "
-"%(maxsockets)d:%(maxcores)d:%(maxthreads)d"
-msgstr ""
-"Превышена топология VCPU образа %(sockets)d:%(cores)d:%(threads)d "
-"%(maxsockets)d:%(maxcores)d:%(maxthreads)d"
 
 #, python-format
 msgid "Image's config drive option '%(config_drive)s' is invalid"
@@ -1718,9 +1660,6 @@ msgstr "Повторное создание экземпляра не подде
 msgid "Instance rollback performed due to: %s"
 msgstr "Выполнен откат экземпляра вследствие: %s"
 
-msgid "Instance snapshots are not permitted at this time."
-msgstr "Снимки копии в настоящий момент недопустимы."
-
 #, python-format
 msgid ""
 "Insufficient Space on Volume Group %(vg)s. Only %(free_space)db available, "
@@ -1863,10 +1802,6 @@ msgstr "Неверный фильтр is_public [%s]"
 
 msgid "Invalid key_name provided."
 msgstr "Предоставлен недопустимый key_name."
-
-#, python-format
-msgid "Invalid libvirt version %(version)s"
-msgstr "Недопустимая версия libvirt: %(version)s"
 
 #, python-format
 msgid "Invalid memory page size '%(pagesize)s'"
@@ -2035,19 +1970,9 @@ msgstr "Ограничения поддерживаются только в vCen
 msgid "Link Local address is not found.:%s"
 msgstr "Не найден локальный адрес линии связи: %s"
 
-msgid "Listing virtual interfaces is not supported by this cloud."
-msgstr "Перечисление виртуальных интерфейсов не поддерживается в этом облаке."
-
 #, python-format
 msgid "Live migration %(id)s for server %(uuid)s is not in progress."
 msgstr "Оперативный перенос %(id)s для сервера %(uuid)s не выполняется."
-
-msgid ""
-"Live migration with API v2.25 requires all the Mitaka upgrade to be complete "
-"before it is available."
-msgstr ""
-"Оперативная миграция с API v2.25 возможна только после полного обновления "
-"Mitaka."
 
 #, python-format
 msgid "Malformed message body: %(reason)s"
@@ -2539,14 +2464,6 @@ msgid "Number of Rows Archived"
 msgstr "Число архивированных строк"
 
 #, python-format
-msgid ""
-"Number of serial ports '%(num_ports)s' specified in '%(property)s' isn't "
-"valid."
-msgstr ""
-"Число последовательных портов %(num_ports)s, указанное в %(property)s, не "
-"допустимо."
-
-#, python-format
 msgid "OVS configuration failed with: %(inner_exception)s."
 msgstr "Ошибка настройки OVS: %(inner_exception)s."
 
@@ -2616,14 +2533,6 @@ msgstr "Устройство PCI %(id)s не найдено"
 #, python-format
 msgid "PCI device request %(requests)s failed"
 msgstr "Запрос устройства PCI %(requests)s не выполнен"
-
-#, python-format
-msgid ""
-"PIF %(pif_uuid)s for network %(bridge)s has VLAN id %(pif_vlan)d. Expected "
-"%(vlan_num)d"
-msgstr ""
-"PIF %(pif_uuid)s для сети %(bridge)s имеет ИД VLAN %(pif_vlan)d. Ожидался "
-"%(vlan_num)d"
 
 #, python-format
 msgid "PIF %s does not contain IP address"
@@ -2820,9 +2729,6 @@ msgstr ""
 "хотя бы одним 1 vCPU реального времени и 1 обычным vCPU. См. hw:"
 "cpu_realtime_mask или hw_cpu_realtime_mask"
 
-msgid "Realtime policy not supported by hypervisor"
-msgstr "Стратегия реального времени не поддерживается гипервизором"
-
 msgid "Request body and URI mismatch"
 msgstr "Тело запроса и URI не совпадают"
 
@@ -2912,19 +2818,6 @@ msgstr "Имя корневого элемента должно быть %(name)
 #, python-format
 msgid "Rule (%s) not found"
 msgstr "Правило (%s) не найдено"
-
-#, python-format
-msgid "Running Nova with parallels virt_type requires libvirt version %s"
-msgstr ""
-"Для выполнения Nova одновременно с virt_type требуется версия libvirt %s"
-
-#, python-format
-msgid ""
-"Running Nova with qemu/kvm virt_type on %(arch)s requires libvirt version "
-"%(libvirt_ver)s and qemu version %(qemu_ver)s, or greater"
-msgstr ""
-"Для работы Nova с qemu/kvm virt_type на %(arch)s требуется libvirt версии не "
-"ниже %(libvirt_ver)s и qemu версии не ниже %(qemu_ver)s"
 
 #, python-format
 msgid "Running batches of %i until complete"
@@ -3412,9 +3305,6 @@ msgstr "Значения Тип и Код должны быть целыми ч�
 
 msgid "UEFI is not supported"
 msgstr "UEFI не поддерживается"
-
-msgid "UUID is required to delete Neutron Networks"
-msgstr "Требуется UUID для удаления сетей Neutron"
 
 #, python-format
 msgid ""
@@ -3974,9 +3864,6 @@ msgstr "нефиксированный IP не найден"
 #, python-format
 msgid "fmt=%(fmt)s backed by: %(backing_file)s"
 msgstr "fmt=%(fmt)s backed by: %(backing_file)s"
-
-msgid "fping utility is not found."
-msgstr "Утилита fping не найдена."
 
 #, python-format
 msgid "href %s does not contain version"

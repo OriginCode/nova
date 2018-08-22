@@ -13,6 +13,8 @@
 import mock
 
 from nova.compute import instance_list
+from nova.compute import multi_cell_list
+from nova import context as nova_context
 from nova import objects
 from nova import test
 from nova.tests import fixtures
@@ -53,7 +55,7 @@ class TestInstanceList(test.NoDBTestCase):
         self.assertEqual(['created_at', 'id', 'uuid'], ctx.sort_keys)
         self.assertEqual(['desc', 'desc', 'asc'], ctx.sort_dirs)
 
-    @mock.patch('nova.db.instance_get_all_by_filters_sort')
+    @mock.patch('nova.db.api.instance_get_all_by_filters_sort')
     @mock.patch('nova.objects.CellMappingList.get_all')
     def test_get_instances_sorted(self, mock_cells, mock_inst):
         mock_cells.return_value = self.cells
@@ -77,3 +79,86 @@ class TestInstanceList(test.NoDBTestCase):
         insts_two = [inst['hostname'] for inst in insts]
 
         self.assertEqual(insts_one, insts_two)
+
+    @mock.patch('nova.objects.BuildRequestList.get_by_filters')
+    @mock.patch('nova.compute.instance_list.get_instances_sorted')
+    @mock.patch('nova.objects.CellMappingList.get_by_project_id')
+    def test_user_gets_subset_of_cells(self, mock_cm, mock_gi, mock_br):
+        self.flags(instance_list_per_project_cells=True, group='api')
+        mock_gi.return_value = []
+        mock_br.return_value = []
+        user_context = nova_context.RequestContext('fake', 'fake')
+        instance_list.get_instance_objects_sorted(
+            user_context, {}, None, None, [], None, None)
+        mock_gi.assert_called_once_with(user_context, {}, None, None, [],
+                                        None, None,
+                                        cell_mappings=mock_cm.return_value)
+
+    @mock.patch('nova.objects.BuildRequestList.get_by_filters')
+    @mock.patch('nova.compute.instance_list.get_instances_sorted')
+    @mock.patch('nova.objects.CellMappingList.get_by_project_id')
+    def test_admin_gets_all_cells(self, mock_cm, mock_gi, mock_br):
+        mock_gi.return_value = []
+        mock_br.return_value = []
+        admin_context = nova_context.RequestContext('fake', 'fake',
+                                                    is_admin=True)
+        instance_list.get_instance_objects_sorted(
+            admin_context, {}, None, None, [], None, None)
+        mock_gi.assert_called_once_with(admin_context, {}, None, None, [],
+                                        None, None,
+                                        cell_mappings=None)
+        mock_cm.assert_not_called()
+
+    @mock.patch('nova.objects.BuildRequestList.get_by_filters')
+    @mock.patch('nova.compute.instance_list.get_instances_sorted')
+    @mock.patch('nova.objects.CellMappingList.get_by_project_id')
+    def test_user_gets_all_cells(self, mock_cm, mock_gi, mock_br):
+        self.flags(instance_list_per_project_cells=False, group='api')
+        mock_gi.return_value = []
+        mock_br.return_value = []
+        user_context = nova_context.RequestContext('fake', 'fake')
+        instance_list.get_instance_objects_sorted(
+            user_context, {}, None, None, [], None, None)
+        mock_gi.assert_called_once_with(user_context, {}, None, None, [],
+                                        None, None,
+                                        cell_mappings=None)
+
+    @mock.patch('nova.objects.BuildRequestList.get_by_filters')
+    @mock.patch('nova.compute.instance_list.get_instances_sorted')
+    @mock.patch('nova.objects.CellMappingList.get_by_project_id')
+    def test_admin_gets_all_cells_anyway(self, mock_cm, mock_gi, mock_br):
+        self.flags(instance_list_per_project_cells=True, group='api')
+        mock_gi.return_value = []
+        mock_br.return_value = []
+        admin_context = nova_context.RequestContext('fake', 'fake',
+                                                    is_admin=True)
+        instance_list.get_instance_objects_sorted(
+            admin_context, {}, None, None, [], None, None)
+        mock_gi.assert_called_once_with(admin_context, {}, None, None, [],
+                                        None, None,
+                                        cell_mappings=None)
+        mock_cm.assert_not_called()
+
+    @mock.patch('nova.context.scatter_gather_cells')
+    def test_get_instances_with_down_cells(self, mock_sg):
+        inst_cell0 = self.insts[uuids.cell0]
+        # storing the uuids of the instances from the up cell
+        uuid_initial = [inst['uuid'] for inst in inst_cell0]
+
+        instances = (multi_cell_list.RecordWrapper(self.context, inst)
+                     for inst in inst_cell0)
+
+        # creating one up cell and two down cells
+        ret_val = {}
+        ret_val[uuids.cell0] = instances
+        ret_val[uuids.cell1] = nova_context.raised_exception_sentinel
+        ret_val[uuids.cell2] = nova_context.did_not_respond_sentinel
+        mock_sg.return_value = ret_val
+
+        res = instance_list.get_instances_sorted(self.context, {}, None, None,
+                                                 [], None, None)
+
+        uuid_final = [inst['uuid'] for inst in res]
+
+        # return the results from the up cell, ignoring the down cell.
+        self.assertEqual(uuid_initial, uuid_final)

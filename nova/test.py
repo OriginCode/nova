@@ -45,12 +45,14 @@ from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import timeutils
 from oslo_versionedobjects import fixture as ovo_fixture
+from oslotest import mock_fixture
 from oslotest import moxstubout
 import six
 import testtools
 
+from nova.api.openstack.placement.objects import resource_provider
 from nova import context
-from nova import db
+from nova.db import api as db
 from nova import exception
 from nova.network import manager as network_manager
 from nova.network.security_group import openstack_driver
@@ -288,6 +290,7 @@ class TestCase(testtools.TestCase):
             # NOTE(danms): Full database setup involves a cell0, cell1,
             # and the relevant mappings.
             self.useFixture(nova_fixtures.Database(database='api'))
+            self.useFixture(nova_fixtures.Database(database='placement'))
             self._setup_cells()
             self.useFixture(nova_fixtures.DefaultFlavorsFixture())
         elif not self.USES_DB_SELF:
@@ -309,8 +312,11 @@ class TestCase(testtools.TestCase):
         utils._IS_NEUTRON = None
 
         # Reset the traits sync and rc cache flags
-        objects.resource_provider._TRAITS_SYNCED = False
-        objects.resource_provider._RC_CACHE = None
+        def _reset_traits():
+            resource_provider._TRAITS_SYNCED = False
+        _reset_traits()
+        self.addCleanup(_reset_traits)
+        resource_provider._RC_CACHE = None
         # Reset the global QEMU version flag.
         images.QEMU_VERSION = None
 
@@ -320,6 +326,8 @@ class TestCase(testtools.TestCase):
         self.addCleanup(self._clear_attrs)
         self.useFixture(fixtures.EnvironmentVariable('http_proxy'))
         self.policy = self.useFixture(policy_fixture.PolicyFixture())
+        self.placement_policy = self.useFixture(
+            policy_fixture.PlacementPolicyFixture())
 
         self.useFixture(nova_fixtures.PoisonFunctions())
 
@@ -329,6 +337,12 @@ class TestCase(testtools.TestCase):
 
         # NOTE(mikal): make sure we don't load a privsep helper accidentally
         self.useFixture(nova_fixtures.PrivsepNoHelperFixture())
+        self.useFixture(mock_fixture.MockAutospecFixture())
+
+        # FIXME(danms): Disable this for all tests by default to avoid breaking
+        # any that depend on default/previous ordering
+        self.flags(build_failure_weight_multiplier=0.0,
+                   group='filter_scheduler')
 
     def _setup_cells(self):
         """Setup a normal cellsv2 environment.
@@ -404,12 +418,14 @@ class TestCase(testtools.TestCase):
             CONF.set_override(k, v, group)
 
     def start_service(self, name, host=None, **kwargs):
+        cell = None
         if name == 'compute' and self.USES_DB:
             # NOTE(danms): We need to create the HostMapping first, because
             # otherwise we'll fail to update the scheduler while running
             # the compute node startup routines below.
             ctxt = context.get_context()
-            cell = self.cell_mappings[kwargs.pop('cell', CELL1_NAME)]
+            cell_name = kwargs.pop('cell', CELL1_NAME) or CELL1_NAME
+            cell = self.cell_mappings[cell_name]
             hm = objects.HostMapping(context=ctxt,
                                      host=host or name,
                                      cell_mapping=cell)
@@ -419,7 +435,7 @@ class TestCase(testtools.TestCase):
                 # Make sure that CONF.host is relevant to the right hostname
                 self.useFixture(nova_fixtures.ConfPatcher(host=host))
         svc = self.useFixture(
-            nova_fixtures.ServiceFixture(name, host, **kwargs))
+            nova_fixtures.ServiceFixture(name, host, cell=cell, **kwargs))
 
         return svc.service
 
@@ -560,8 +576,8 @@ class TestCase(testtools.TestCase):
                          baseclass)
 
         for name in sorted(implmethods.keys()):
-            baseargs = inspect.getargspec(basemethods[name])
-            implargs = inspect.getargspec(implmethods[name])
+            baseargs = utils.getargspec(basemethods[name])
+            implargs = utils.getargspec(implmethods[name])
 
             self.assertEqual(baseargs, implargs,
                              "%s args don't match base class %s" %
@@ -585,7 +601,7 @@ class APICoverage(object):
 
 @six.add_metaclass(abc.ABCMeta)
 class SubclassSignatureTestCase(testtools.TestCase):
-    """Ensure all overriden methods of all subclasses of the class
+    """Ensure all overridden methods of all subclasses of the class
     under test exactly match the signature of the base class.
 
     A subclass of SubclassSignatureTestCase should define a method
@@ -635,7 +651,7 @@ class SubclassSignatureTestCase(testtools.TestCase):
                 # instead.
                 method = getattr(method, '__wrapped__')
 
-            argspecs[name] = inspect.getargspec(method)
+            argspecs[name] = utils.getargspec(method)
 
         return argspecs
 

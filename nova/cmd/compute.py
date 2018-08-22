@@ -37,14 +37,12 @@ from nova import utils
 from nova import version
 
 CONF = nova.conf.CONF
-LOG = logging.getLogger('nova.compute')
 
 
 def main():
     config.parse_args(sys.argv)
     logging.setup(CONF, 'nova')
     priv_context.init(root_helper=shlex.split(utils.get_root_helper()))
-    utils.monkey_patch()
     objects.register_all()
     gmr_opts.set_defaults(CONF)
     # Ensure os-vif objects are registered and plugins loaded

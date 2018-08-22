@@ -255,6 +255,11 @@ class VolumeAttachFailed(Invalid):
                 "Reason: %(reason)s")
 
 
+class VolumeDetachFailed(Invalid):
+    msg_fmt = _("Volume %(volume_id)s could not be detached. "
+                "Reason: %(reason)s")
+
+
 class MultiattachNotSupportedByVirtDriver(NovaException):
     # This exception indicates the compute hosting the instance does not
     # support multiattach volumes. This should generally be considered a
@@ -298,21 +303,17 @@ class VolumeEncryptionNotSupported(Invalid):
                 "volume %(volume_id)s")
 
 
-class TaggedAttachmentNotSupported(Invalid):
-    msg_fmt = _("Tagged device attachment is not yet available.")
-
-
-class VolumeTaggedAttachNotSupported(TaggedAttachmentNotSupported):
+class VolumeTaggedAttachNotSupported(Invalid):
     msg_fmt = _("Tagged volume attachment is not supported for this server "
                 "instance.")
 
 
-class VolumeTaggedAttachToShelvedNotSupported(TaggedAttachmentNotSupported):
+class VolumeTaggedAttachToShelvedNotSupported(VolumeTaggedAttachNotSupported):
     msg_fmt = _("Tagged volume attachment is not supported for "
                 "shelved-offloaded instances.")
 
 
-class NetworkInterfaceTaggedAttachNotSupported(TaggedAttachmentNotSupported):
+class NetworkInterfaceTaggedAttachNotSupported(Invalid):
     msg_fmt = _("Tagged network interface attachment is not supported for "
                 "this server instance.")
 
@@ -689,6 +690,10 @@ class ImageDeleteConflict(NovaException):
     msg_fmt = _("Conflict deleting image. Reason: %(reason)s.")
 
 
+class ImageHandlerUnsupported(NovaException):
+    msg_fmt = _("Error: unsupported image handler %(image_handler)s.")
+
+
 class PreserveEphemeralNotSupported(Invalid):
     msg_fmt = _("The current driver does not support "
                 "preserving ephemeral partitions.")
@@ -864,6 +869,16 @@ class PortNotFree(Invalid):
 class PortBindingFailed(Invalid):
     msg_fmt = _("Binding failed for port %(port_id)s, please check neutron "
                 "logs for more information.")
+
+
+class PortBindingDeletionFailed(NovaException):
+    msg_fmt = _("Failed to delete binding for port %(port_id)s and host "
+                "%(host)s.")
+
+
+class PortBindingActivationFailed(NovaException):
+    msg_fmt = _("Failed to activate binding for port %(port_id)s and host "
+                "%(host)s.")
 
 
 class PortUpdateFailed(Invalid):
@@ -1157,6 +1172,12 @@ class InvalidMigrationState(Invalid):
                 "migration is in this state.")
 
 
+class AbortQueuedLiveMigrationNotYetSupported(NovaException):
+    msg_fmt = _("Aborting live migration %(migration_id)s with status "
+                "%(status)s is not yet supported for this instance.")
+    code = 409
+
+
 class ConsoleLogOutputException(NovaException):
     msg_fmt = _("Console log output could not be retrieved for instance "
                 "%(instance_id)s. Reason: %(reason)s")
@@ -1334,10 +1355,6 @@ class MigrationPreCheckError(MigrationError):
     msg_fmt = _("Migration pre-check error: %(reason)s")
 
 
-class MigrationPreCheckClientException(MigrationError):
-    msg_fmt = _("Client exception during Migration Pre check: %(reason)s")
-
-
 class MigrationSchedulerRPCError(MigrationError):
     msg_fmt = _("Migration select destinations error: %(reason)s")
 
@@ -1397,12 +1414,21 @@ class VolumeSmallerThanMinDisk(FlavorDiskTooSmall):
                 "size is %(image_min_disk)i bytes.")
 
 
+class BootFromVolumeRequiredForZeroDiskFlavor(Forbidden):
+    msg_fmt = _("Only volume-backed servers are allowed for flavors with "
+                "zero disk.")
+
+
 class InsufficientFreeMemory(NovaException):
     msg_fmt = _("Insufficient free memory on compute node to start %(uuid)s.")
 
 
 class NoValidHost(NovaException):
     msg_fmt = _("No valid host was found. %(reason)s")
+
+
+class RequestFilterFailed(NovaException):
+    msg_fmt = _("Scheduling failed: %(reason)s")
 
 
 class MaxRetriesExceeded(NoValidHost):
@@ -1601,8 +1627,8 @@ class CryptoCRLFileNotFound(FileNotFound):
     msg_fmt = _("The CRL file for %(project)s could not be found")
 
 
-class InstanceRecreateNotSupported(Invalid):
-    msg_fmt = _('Instance recreate is not supported.')
+class InstanceEvacuateNotSupported(Invalid):
+    msg_fmt = _('Instance evacuate is not supported.')
 
 
 class DBNotAllowed(NovaException):
@@ -1817,9 +1843,9 @@ class InvalidWatchdogAction(Invalid):
     msg_fmt = _("Provided watchdog action (%(action)s) is not supported.")
 
 
-class LiveMigrationWithOldNovaNotSupported(NovaException):
-    msg_fmt = _("Live migration with API v2.25 requires all the Mitaka "
-                "upgrade to be complete before it is available.")
+class LiveMigrationNotSubmitted(NovaException):
+    msg_fmt = _("Failed to submit live migration %(migration_uuid)s for "
+                "instance %(instance_uuid)s for processing.")
 
 
 class SelectionObjectsWithOldRPCVersionNotSupported(NovaException):
@@ -1838,13 +1864,17 @@ class UnshelveException(NovaException):
 
 
 class ImageVCPULimitsRangeExceeded(Invalid):
-    msg_fmt = _("Image vCPU limits %(sockets)d:%(cores)d:%(threads)d "
-                "exceeds permitted %(maxsockets)d:%(maxcores)d:%(maxthreads)d")
+    msg_fmt = _('Image vCPU topology limits (sockets=%(image_sockets)d, '
+                'cores=%(image_cores)d, threads=%(image_threads)d) exceeds '
+                'the limits of the flavor (sockets=%(flavor_sockets)d, '
+                'cores=%(flavor_cores)d, threads=%(flavor_threads)d)')
 
 
 class ImageVCPUTopologyRangeExceeded(Invalid):
-    msg_fmt = _("Image vCPU topology %(sockets)d:%(cores)d:%(threads)d "
-                "exceeds permitted %(maxsockets)d:%(maxcores)d:%(maxthreads)d")
+    msg_fmt = _('Image vCPU topology (sockets=%(image_sockets)d, '
+                'cores=%(image_cores)d, threads=%(image_threads)d) exceeds '
+                'the limits of the flavor or image (sockets=%(max_sockets)d, '
+                'cores=%(max_cores)d, threads=%(max_threads)d)')
 
 
 class ImageVCPULimitsRangeImpossible(Invalid):
@@ -1911,8 +1941,8 @@ class SocketPortInUseException(NovaException):
 
 
 class ImageSerialPortNumberInvalid(Invalid):
-    msg_fmt = _("Number of serial ports '%(num_ports)s' specified in "
-                "'%(property)s' isn't valid.")
+    msg_fmt = _("Number of serial ports specified in flavor is invalid: "
+                "expected an integer, got '%(num_ports)s'")
 
 
 class ImageSerialPortNumberExceedFlavorValue(Invalid):
@@ -2073,15 +2103,6 @@ class LibguestfsCannotReadKernel(Invalid):
     msg_fmt = _("Libguestfs does not have permission to read host kernel.")
 
 
-class MaxDBRetriesExceeded(NovaException):
-    msg_fmt = _("Max retries of DB transaction exceeded attempting to "
-                "perform %(action)s.")
-
-
-class RealtimePolicyNotSupported(Invalid):
-    msg_fmt = _("Realtime policy not supported by hypervisor")
-
-
 class RealtimeMaskNotFoundOrInvalid(Invalid):
     msg_fmt = _("Realtime policy needs vCPU(s) mask configured with at least "
                 "1 RT vCPU and 1 ordinary vCPU. See hw:cpu_realtime_mask "
@@ -2102,30 +2123,14 @@ class AttachInterfaceNotSupported(Invalid):
                 "instance %(instance_uuid)s.")
 
 
-class InstanceDiagnosticsNotSupported(Invalid):
-    msg_fmt = _("Instance diagnostics are not supported by compute node.")
-
-
 class InvalidReservedMemoryPagesOption(Invalid):
     msg_fmt = _("The format of the option 'reserved_huge_pages' is invalid. "
                 "(found '%(conf)s') Please refer to the nova "
                 "config-reference.")
 
 
-class ConcurrentUpdateDetected(NovaException):
-    msg_fmt = _("Another thread concurrently updated the data. "
-                "Please retry your update")
-
-
-class ResourceClassNotFound(NotFound):
-    msg_fmt = _("No such resource class %(resource_class)s.")
-
-
-class CannotDeleteParentResourceProvider(NovaException):
-    msg_fmt = _("Cannot delete resource provider that is a parent of "
-                "another. Delete child providers first.")
-
-
+# An exception with this name is used on both sides of the placement/
+# nova interaction.
 class ResourceProviderInUse(NovaException):
     msg_fmt = _("Resource provider has allocations.")
 
@@ -2157,6 +2162,19 @@ class ResourceProviderUpdateFailed(NovaException):
                 "%(error)s")
 
 
+class ResourceProviderNotFound(NotFound):
+    msg_fmt = _("No such resource provider %(name_or_uuid)s.")
+
+
+class ResourceProviderSyncFailed(NovaException):
+    msg_fmt = _("Failed to synchronize the placement service with resource "
+                "provider information supplied by the compute host.")
+
+
+class PlacementAPIConnectFailure(NovaException):
+    msg_fmt = _("Unable to communicate with the Placement API.")
+
+
 class PlacementAPIConflict(NovaException):
     """Any 409 error from placement APIs should use (a subclass of) this
     exception.
@@ -2173,29 +2191,8 @@ class ResourceProviderUpdateConflict(PlacementAPIConflict):
                 "provider %(uuid)s (generation %(generation)d): %(error)s")
 
 
-class InventoryWithResourceClassNotFound(NotFound):
-    msg_fmt = _("No inventory of class %(resource_class)s found.")
-
-
 class InvalidResourceClass(Invalid):
     msg_fmt = _("Resource class '%(resource_class)s' invalid.")
-
-
-class ResourceClassExists(NovaException):
-    msg_fmt = _("Resource class %(resource_class)s already exists.")
-
-
-class ResourceClassInUse(Invalid):
-    msg_fmt = _("Cannot delete resource class %(resource_class)s. "
-                "Class is in use in inventory.")
-
-
-class ResourceClassCannotDeleteStandard(Invalid):
-    msg_fmt = _("Cannot delete standard resource class %(resource_class)s.")
-
-
-class ResourceClassCannotUpdateStandard(Invalid):
-    msg_fmt = _("Cannot update standard resource class %(resource_class)s.")
 
 
 class InvalidResourceAmount(Invalid):
@@ -2207,29 +2204,13 @@ class InvalidInventory(Invalid):
                 "resource provider '%(resource_provider)s' invalid.")
 
 
+# An exception with this name is used on both sides of the placement/
+# nova interaction.
 class InventoryInUse(InvalidInventory):
     # NOTE(mriedem): This message cannot change without impacting the
     # nova.scheduler.client.report._RE_INV_IN_USE regex.
     msg_fmt = _("Inventory for '%(resource_classes)s' on "
                 "resource provider '%(resource_provider)s' in use.")
-
-
-class InvalidInventoryCapacity(InvalidInventory):
-    msg_fmt = _("Invalid inventory for '%(resource_class)s' on "
-                "resource provider '%(resource_provider)s'. "
-                "The reserved value is greater than or equal to total.")
-
-
-class InvalidAllocationCapacityExceeded(InvalidInventory):
-    msg_fmt = _("Unable to create allocation for '%(resource_class)s' on "
-                "resource provider '%(resource_provider)s'. The requested "
-                "amount would exceed the capacity.")
-
-
-class InvalidAllocationConstraintsViolated(InvalidInventory):
-    msg_fmt = _("Unable to create allocation for '%(resource_class)s' on "
-                "resource provider '%(resource_provider)s'. The requested "
-                "amount would violate inventory constraints.")
 
 
 class UnsupportedPointerModelRequested(Invalid):
@@ -2252,12 +2233,6 @@ class NeutronAdminCredentialConfigurationInvalid(Invalid):
     msg_fmt = _("Networking client is experiencing an unauthorized exception.")
 
 
-class PlacementNotConfigured(NovaException):
-    msg_fmt = _("This compute is not configured to talk to the placement "
-                "service. Configure the [placement] section of nova.conf "
-                "and restart the service.")
-
-
 class InvalidEmulatorThreadsPolicy(Invalid):
     msg_fmt = _("CPU emulator threads option requested is invalid, "
                 "given: '%(requested)s', available: '%(available)s'.")
@@ -2268,25 +2243,13 @@ class BadRequirementEmulatorThreadsPolicy(Invalid):
                 "CPU policy option.")
 
 
+class InvalidNetworkNUMAAffinity(Invalid):
+    msg_fmt = _("Invalid NUMA network affinity configured: %(reason)s")
+
+
 class PowerVMAPIFailed(NovaException):
     msg_fmt = _("PowerVM API failed to complete for instance=%(inst_name)s.  "
                 "%(reason)s")
-
-
-class TraitNotFound(NotFound):
-    msg_fmt = _("No such trait(s): %(names)s.")
-
-
-class TraitExists(NovaException):
-    msg_fmt = _("The Trait %(name)s already exists")
-
-
-class TraitCannotDeleteStandard(Invalid):
-    msg_fmt = _("Cannot delete standard trait %(name)s.")
-
-
-class TraitInUse(Invalid):
-    msg_fmt = _("The trait %(name)s is in use by a resource provider.")
 
 
 class TraitRetrievalFailed(NovaException):
@@ -2304,3 +2267,100 @@ class CannotMigrateWithTargetHost(NovaException):
 
 class CannotMigrateToSameHost(NovaException):
     msg_fmt = _("Cannot migrate to the host where the server exists.")
+
+
+class VirtDriverNotReady(NovaException):
+    msg_fmt = _("Virt driver is not ready.")
+
+
+class InstanceDiskMappingFailed(NovaException):
+    msg_fmt = _("Failed to map boot disk of instance %(instance_name)s to "
+                "the management partition from any Virtual I/O Server.")
+
+
+class NewMgmtMappingNotFoundException(NovaException):
+    msg_fmt = _("Failed to find newly-created mapping of storage element "
+                "%(stg_name)s from Virtual I/O Server %(vios_name)s to the "
+                "management partition.")
+
+
+class NoDiskDiscoveryException(NovaException):
+    msg_fmt = _("Having scanned SCSI bus %(bus)x on the management partition, "
+                "disk with UDID %(udid)s failed to appear after %(polls)d "
+                "polls over %(timeout)d seconds.")
+
+
+class UniqueDiskDiscoveryException(NovaException):
+    msg_fmt = _("Expected to find exactly one disk on the management "
+                "partition at %(path_pattern)s; found %(count)d.")
+
+
+class DeviceDeletionException(NovaException):
+    msg_fmt = _("Device %(devpath)s is still present on the management "
+                "partition after attempting to delete it. Polled %(polls)d "
+                "times over %(timeout)d seconds.")
+
+
+class OptRequiredIfOtherOptValue(NovaException):
+    msg_fmt = _("The %(then_opt)s option is required if %(if_opt)s is "
+                "specified as '%(if_value)s'.")
+
+
+class AllocationCreateFailed(NovaException):
+    msg_fmt = _('Failed to create allocations for instance %(instance)s '
+                'against resource provider %(provider)s.')
+
+
+class AllocationUpdateFailed(NovaException):
+    msg_fmt = _('Failed to update allocations for instance %(instance)s. '
+                'Error: %(error)s')
+
+
+class TooManyComputesForHost(NovaException):
+    msg_fmt = _('Unexpected number of compute node records '
+                '(%(num_computes)d) found for host %(host)s. There should '
+                'only be a one-to-one mapping.')
+
+
+class CertificateValidationFailed(NovaException):
+    msg_fmt = _("Image signature certificate validation failed for "
+                "certificate: %(cert_uuid)s. %(reason)s")
+
+
+class CertificateValidationNotYetAvailable(NovaException):
+    msg_fmt = _("Image signature certificate validation support is "
+                "not yet available.")
+    code = 409
+
+
+class InstanceRescueFailure(NovaException):
+    msg_fmt = _("Failed to move instance to rescue mode: %(reason)s")
+
+
+class InstanceUnRescueFailure(NovaException):
+    msg_fmt = _("Failed to unrescue instance: %(reason)s")
+
+
+class IronicAPIVersionNotAvailable(NovaException):
+    msg_fmt = _('Ironic API version %(version)s is not available.')
+
+
+class ZVMDriverException(NovaException):
+    msg_fmt = _("ZVM Driver has error: %(error)s")
+
+
+class ZVMConnectorError(ZVMDriverException):
+    msg_fmt = _("zVM Cloud Connector request failed: %(results)s")
+
+    def __init__(self, message=None, **kwargs):
+        """Exception for zVM ConnectorClient calls.
+
+        :param results: The object returned from ZVMConnector.send_request.
+        """
+        super(ZVMConnectorError, self).__init__(message=message, **kwargs)
+
+        results = kwargs.get('results', {})
+        self.overallRC = results.get('overallRC')
+        self.rc = results.get('rc')
+        self.rs = results.get('rs')
+        self.errmsg = results.get('errmsg')

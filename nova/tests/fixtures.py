@@ -22,11 +22,14 @@ from contextlib import contextmanager
 import copy
 import logging as std_logging
 import os
+import random
 import warnings
 
 import fixtures
+from keystoneauth1 import adapter as ka
 from keystoneauth1 import session as ks
 import mock
+from neutronclient.common import exceptions as neutron_client_exc
 from oslo_concurrency import lockutils
 from oslo_config import cfg
 import oslo_messaging as messaging
@@ -37,8 +40,9 @@ from requests import adapters
 from wsgi_intercept import interceptor
 
 from nova.api.openstack.compute import tenant_networks
-from nova.api.openstack.placement import deploy as placement_deploy
+from nova.api.openstack.placement import db_api as placement_db
 from nova.api.openstack import wsgi_app
+from nova.api import wsgi
 from nova.compute import rpcapi as compute_rpcapi
 from nova import context
 from nova.db import migration
@@ -52,20 +56,20 @@ from nova import quota as nova_quota
 from nova import rpc
 from nova import service
 from nova.tests.functional.api import client
+from nova.tests.functional.api.openstack.placement.fixtures import placement
 from nova.tests import uuidsentinel
-from nova import wsgi
 
 _TRUE_VALUES = ('True', 'true', '1', 'yes')
 
 CONF = cfg.CONF
-DB_SCHEMA = {'main': "", 'api': ""}
+DB_SCHEMA = {'main': "", 'api': "", 'placement': ""}
 SESSION_CONFIGURED = False
 
 
 class ServiceFixture(fixtures.Fixture):
     """Run a service as a test fixture."""
 
-    def __init__(self, name, host=None, **kwargs):
+    def __init__(self, name, host=None, cell=None, **kwargs):
         name = name
         # If not otherwise specified, the host will default to the
         # name of the service. Some things like aggregates care that
@@ -73,12 +77,18 @@ class ServiceFixture(fixtures.Fixture):
         host = host or name
         kwargs.setdefault('host', host)
         kwargs.setdefault('binary', 'nova-%s' % name)
+        self.cell = cell
         self.kwargs = kwargs
 
     def setUp(self):
         super(ServiceFixture, self).setUp()
-        self.service = service.Service.create(**self.kwargs)
-        self.service.start()
+        self.ctxt = context.get_admin_context()
+        if self.cell:
+            context.set_target_cell(self.ctxt, self.cell)
+        with mock.patch('nova.context.get_admin_context',
+                        return_value=self.ctxt):
+            self.service = service.Service.create(**self.kwargs)
+            self.service.start()
         self.addCleanup(self.service.kill)
 
 
@@ -286,6 +296,9 @@ class SingleCellSimple(fixtures.Fixture):
             'nova.objects.CellMappingList._get_all_from_db',
             self._fake_cell_list))
         self.useFixture(fixtures.MonkeyPatch(
+            'nova.objects.CellMappingList._get_by_project_id_from_db',
+            self._fake_cell_list))
+        self.useFixture(fixtures.MonkeyPatch(
             'nova.objects.CellMapping._get_by_uuid_from_db',
             self._fake_cell_get))
         self.useFixture(fixtures.MonkeyPatch(
@@ -346,7 +359,8 @@ class SingleCellSimple(fixtures.Fixture):
                  'uuid': uuidsentinel.cell1,
                  'name': 'onlycell',
                  'transport_url': 'fake://nowhere/',
-                 'database_connection': 'sqlite:///'}]
+                 'database_connection': 'sqlite:///',
+                 'disabled': False}]
 
     @contextmanager
     def _fake_target_cell(self, context, target_cell):
@@ -474,13 +488,15 @@ class CellDatabases(fixtures.Fixture):
                                         executor='eventlet',
                                         serializer=serializer)
 
-    def _wrap_get_client(self, target, version_cap=None, serializer=None):
+    def _wrap_get_client(self, target, version_cap=None, serializer=None,
+                         call_monitor_timeout=None):
         """Mirror rpc.get_client() but with our special sauce."""
         serializer = CheatingSerializer(serializer)
         return messaging.RPCClient(rpc.TRANSPORT,
                                    target,
                                    version_cap=version_cap,
-                                   serializer=serializer)
+                                   serializer=serializer,
+                                   call_monitor_timeout=call_monitor_timeout)
 
     def add_cell_database(self, connection_str, default=False):
         """Add a cell database to the fixture.
@@ -559,7 +575,7 @@ class Database(fixtures.Fixture):
     def __init__(self, database='main', connection=None):
         """Create a database fixture.
 
-        :param database: The type of database, 'main' or 'api'
+        :param database: The type of database, 'main', 'api' or 'placement'
         :param connection: The connection string to use
         """
         super(Database, self).__init__()
@@ -568,6 +584,7 @@ class Database(fixtures.Fixture):
         global SESSION_CONFIGURED
         if not SESSION_CONFIGURED:
             session.configure(CONF)
+            placement_db.configure(CONF)
             SESSION_CONFIGURED = True
         self.database = database
         if database == 'main':
@@ -580,6 +597,8 @@ class Database(fixtures.Fixture):
                 self.get_engine = session.get_engine
         elif database == 'api':
             self.get_engine = session.get_api_engine
+        elif database == 'placement':
+            self.get_engine = placement_db.get_placement_engine
 
     def _cache_schema(self):
         global DB_SCHEMA
@@ -613,7 +632,7 @@ class DatabaseAtVersion(fixtures.Fixture):
         """Create a database fixture.
 
         :param version: Max version to sync to (or None for current)
-        :param database: The type of database, 'main' or 'api'
+        :param database: The type of database, 'main', 'api', 'placement'
         """
         super(DatabaseAtVersion, self).__init__()
         self.database = database
@@ -622,6 +641,8 @@ class DatabaseAtVersion(fixtures.Fixture):
             self.get_engine = session.get_engine
         elif database == 'api':
             self.get_engine = session.get_api_engine
+        elif database == 'placement':
+            self.get_engine = placement_db.get_placement_engine
 
     def cleanup(self):
         engine = self.get_engine()
@@ -646,7 +667,6 @@ class DefaultFlavorsFixture(fixtures.Fixture):
         defaults = {'rxtx_factor': 1.0, 'disabled': False, 'is_public': True,
                     'ephemeral_gb': 0, 'swap': 0}
         extra_specs = {
-            "hw:cpu_model": "SandyBridge",
             "hw:mem_page_size": "2048",
             "hw:cpu_policy": "dedicated"
         }
@@ -706,7 +726,7 @@ class RPCFixture(fixtures.Fixture):
         rpc.add_extra_exmods(*self.exmods)
         self.addCleanup(rpc.clear_extra_exmods)
         self.messaging_conf = messaging_conffixture.ConfFixture(CONF)
-        self.messaging_conf.transport_driver = 'fake'
+        self.messaging_conf.transport_url = 'fake:/'
         self.useFixture(self.messaging_conf)
         self.useFixture(fixtures.MonkeyPatch(
             'nova.rpc.create_transport', self._fake_create_transport))
@@ -746,6 +766,15 @@ class WarningsFixture(fixtures.Fixture):
         # about any deprecations coming from it
         warnings.filterwarnings('ignore',
             module='mox3.mox')
+        # NOTE(mriedem): Ignore scope check UserWarnings from oslo.policy.
+        warnings.filterwarnings('ignore',
+                                message="Policy .* failed scope check",
+                                category=UserWarning)
+
+        # NOTE(gibi): The UUIDFields emits a warning if the value is not a
+        # valid UUID. Let's escalate that to an exception in the test to
+        # prevent adding violations.
+        warnings.filterwarnings('error', message=".*invalid UUID.*")
 
         self.addCleanup(warnings.resetwarnings)
 
@@ -913,19 +942,17 @@ class PoisonFunctions(fixtures.Fixture):
         # causes trouble in tests. Make sure that if tests don't
         # properly patch it the test explodes.
 
-        # explicit import because MonkeyPatch doesn't magic import
-        # correctly if we are patching a method on a class in a
-        # module.
-        import nova.virt.libvirt.host  # noqa
-
         def evloop(*args, **kwargs):
             import sys
             warnings.warn("Forgot to disable libvirt event thread")
             sys.exit(1)
 
-        self.useFixture(fixtures.MonkeyPatch(
-            'nova.virt.libvirt.host.Host._init_events',
-            evloop))
+        # Don't poison the function if it's already mocked
+        import nova.virt.libvirt.host
+        if not isinstance(nova.virt.libvirt.host.Host._init_events, mock.Mock):
+            self.useFixture(fixtures.MockPatch(
+                'nova.virt.libvirt.host.Host._init_events',
+                side_effect=evloop))
 
 
 class IndirectionAPIFixture(fixtures.Fixture):
@@ -987,6 +1014,26 @@ class SpawnIsSynchronousFixture(fixtures.Fixture):
             'nova.utils.spawn', _FakeGreenThread))
 
 
+class SynchronousThreadPoolExecutorFixture(fixtures.Fixture):
+    """Make ThreadPoolExecutor.submit() synchronous.
+
+    The function passed to submit() will be executed and a mock.Mock
+    object will be returned as the Future where Future.result() will
+    return the result of the call to the submitted function.
+    """
+    def setUp(self):
+        super(SynchronousThreadPoolExecutorFixture, self).setUp()
+
+        def fake_submit(_self, fn, *args, **kwargs):
+            result = fn(*args, **kwargs)
+            future = mock.Mock(spec='concurrent.futures.Future')
+            future.return_value.result.return_value = result
+            return future
+        self.useFixture(fixtures.MonkeyPatch(
+            'concurrent.futures.ThreadPoolExecutor.submit',
+            fake_submit))
+
+
 class BannedDBSchemaOperations(fixtures.Fixture):
     """Ban some operations for migrations"""
     def __init__(self, banned_resources=None):
@@ -1039,6 +1086,9 @@ class AllServicesCurrent(fixtures.Fixture):
         self.useFixture(fixtures.MonkeyPatch(
             'nova.objects.Service.get_minimum_version_multi',
             self._fake_minimum))
+        self.useFixture(fixtures.MonkeyPatch(
+            'nova.objects.service.get_minimum_version_all_cells',
+            lambda *a, **k: service_obj.SERVICE_VERSION))
         compute_rpcapi.LAST_VERSION = None
 
     def _fake_minimum(self, *args, **kwargs):
@@ -1069,6 +1119,7 @@ class NeutronFixture(fixtures.Fixture):
         'admin_state_up': True,
         'tenant_id': tenant_id,
         'id': '3cb9bc59-5699-4588-a4b1-b87f96708bc6',
+        'shared': False,
     }
     subnet_1 = {
         'name': 'private-subnet',
@@ -1104,7 +1155,8 @@ class NeutronFixture(fixtures.Fixture):
                 'subnet_id': subnet_1['id']
             }
         ],
-        'tenant_id': tenant_id
+        'tenant_id': tenant_id,
+        'binding:vif_type': 'ovs'
     }
 
     port_2 = {
@@ -1119,7 +1171,8 @@ class NeutronFixture(fixtures.Fixture):
                 'subnet_id': subnet_1['id']
             }
         ],
-        'tenant_id': tenant_id
+        'tenant_id': tenant_id,
+        'binding:vif_type': 'ovs'
     }
 
     nw_info = [{
@@ -1184,14 +1237,6 @@ class NeutronFixture(fixtures.Fixture):
         super(NeutronFixture, self).setUp()
 
         self.test.stub_out(
-            'nova.network.neutronv2.api.API.'
-            'validate_networks',
-            lambda *args, **kwargs: 1)
-        self.test.stub_out(
-            'nova.network.neutronv2.api.API.'
-            'create_pci_requests_for_sriov_ports',
-            lambda *args, **kwargs: None)
-        self.test.stub_out(
             'nova.network.neutronv2.api.API.setup_networks_on_host',
             lambda *args, **kwargs: None)
         self.test.stub_out(
@@ -1244,8 +1289,20 @@ class NeutronFixture(fixtures.Fixture):
             if current_port['id'] == port:
                 self._ports.remove(current_port)
 
+    def show_network(self, network, **_params):
+        network = self._get_first_id_match(network, self._networks)
+        if network is None:
+            raise neutron_client_exc.NetworkNotFoundClient()
+        return {'network': network}
+
     def list_networks(self, retrieve_all=True, **_params):
-        return copy.deepcopy({'networks': self._networks})
+        networks = copy.deepcopy(self._networks)
+        if 'id' in _params:
+            networks = [x for x in networks if x['id'] in _params['id']]
+        if 'shared' in _params:
+            networks = [x for x in networks if x['shared'] ==
+                        _params['shared']]
+        return {'networks': networks}
 
     def list_ports(self, retrieve_all=True, **_params):
         return self._filter_ports(**_params)
@@ -1256,9 +1313,24 @@ class NeutronFixture(fixtures.Fixture):
     def list_floatingips(self, retrieve_all=True, **_params):
         return copy.deepcopy({'floatingips': self._floatingips})
 
-    def create_port(self, *args, **kwargs):
-        self._ports.append(copy.deepcopy(NeutronFixture.port_2))
-        return copy.deepcopy({'port': NeutronFixture.port_2})
+    def create_port(self, body=None):
+        if self._get_first_id_match(NeutronFixture.port_2['id'],
+                                    self._ports) is None:
+            # we need the double copy as port_2 is a class variable but
+            # self._ports is an instance variable
+            new_port = copy.deepcopy(NeutronFixture.port_2)
+            self._ports.append(new_port)
+        else:
+            new_port = copy.deepcopy(NeutronFixture.port_2)
+            # we need truly random uuids instead of named sentinels as some
+            # tests needs more than 3 ports
+            new_port.update({
+                'id': str(uuidutils.generate_uuid()),
+                'mac_address': '00:' + ':'.join(
+                    ['%02x' % random.randint(0, 255) for _ in range(5)]),
+            })
+            self._ports.append(new_port)
+        return {'port': copy.deepcopy(new_port)}
 
     def update_port(self, port_id, body=None):
         new_port = self._get_first_id_match(port_id, self._ports)
@@ -1268,6 +1340,10 @@ class NeutronFixture(fixtures.Fixture):
                 new_port[k] = v
 
         return {'port': new_port}
+
+    def show_quota(self, project_id):
+        # unlimited quota
+        return {'quota': {'port': -1}}
 
 
 class _NoopConductor(object):
@@ -1501,6 +1577,9 @@ class CinderFixtureNewAttachFlow(fixtures.Fixture):
     # This represents a bootable image-backed volume to test
     # boot-from-volume scenarios.
     IMAGE_BACKED_VOL = '6ca404f3-d844-4169-bb96-bc792f37de98'
+    # This represents a bootable image-backed volume with required traits
+    # as part of volume image metadata
+    IMAGE_WITH_TRAITS_BACKED_VOL = '6194fc02-c60e-4a01-a8e5-600798208b5f'
 
     def __init__(self, test):
         super(CinderFixtureNewAttachFlow, self).__init__()
@@ -1579,14 +1658,22 @@ class CinderFixtureNewAttachFlow(fixtures.Fixture):
                 }
 
             # Check for our special image-backed volume.
-            if volume_id == self.IMAGE_BACKED_VOL:
+            if volume_id in (self.IMAGE_BACKED_VOL,
+                             self.IMAGE_WITH_TRAITS_BACKED_VOL):
                 # Make it a bootable volume.
                 volume['bootable'] = True
-                # Add the image_id metadata.
-                volume['volume_image_metadata'] = {
-                    # There would normally be more image metadata in here...
-                    'image_id': '155d900f-4e14-4e4c-a73d-069cbf4541e6'
-                }
+                if volume_id == self.IMAGE_BACKED_VOL:
+                    # Add the image_id metadata.
+                    volume['volume_image_metadata'] = {
+                        # There would normally be more image metadata in here.
+                        'image_id': '155d900f-4e14-4e4c-a73d-069cbf4541e6'
+                    }
+                elif volume_id == self.IMAGE_WITH_TRAITS_BACKED_VOL:
+                    # Add the image_id metadata with traits.
+                    volume['volume_image_metadata'] = {
+                        'image_id': '155d900f-4e14-4e4c-a73d-069cbf4541e6',
+                        "trait:HW_CPU_X86_SGX": "required",
+                    }
 
             return volume
 
@@ -1667,8 +1754,12 @@ class PlacementApiClient(object):
         return client.APIResponse(
             self.fixture._fake_put(None, url, body, **kwargs))
 
+    def post(self, url, body, **kwargs):
+        return client.APIResponse(
+            self.fixture._fake_post(None, url, body, **kwargs))
 
-class PlacementFixture(fixtures.Fixture):
+
+class PlacementFixture(placement.PlacementFixture):
     """A fixture to placement operations.
 
     Runs a local WSGI server bound on a free port and having the Placement
@@ -1678,22 +1769,19 @@ class PlacementFixture(fixtures.Fixture):
 
     It's possible to ask for a specific token when running the fixtures so
     all calls would be passing this token.
-    """
 
-    def __init__(self, token='admin'):
-        self.token = token
+    Most of the time users of this fixture will also want the placement
+    database fixture (called first) as well:
+
+        self.useFixture(nova_fixtures.Database(database='placement'))
+
+    That is left as a manual step so tests may have fine grain control, and
+    because it is likely that these fixtures will continue to evolve as
+    the separation of nova and placement continues.
+    """
 
     def setUp(self):
         super(PlacementFixture, self).setUp()
-
-        self.useFixture(ConfPatcher(group='api', auth_strategy='noauth2'))
-        loader = placement_deploy.loadapp(CONF)
-        app = lambda: loader
-        host = uuidsentinel.placement_host
-        self.endpoint = 'http://%s/placement' % host
-        intercept = interceptor.RequestsInterceptor(app, url=self.endpoint)
-        intercept.install_intercept()
-        self.addCleanup(intercept.uninstall_intercept)
 
         # Turn off manipulation of socket_options in TCPKeepAliveAdapter
         # to keep wsgi-intercept happy. Replace it with the method
@@ -1702,7 +1790,7 @@ class PlacementFixture(fixtures.Fixture):
             'keystoneauth1.session.TCPKeepAliveAdapter.init_poolmanager',
             adapters.HTTPAdapter.init_poolmanager))
 
-        self._client = ks.Session(auth=None)
+        self._client = ka.Adapter(ks.Session(auth=None), raise_exc=False)
         # NOTE(sbauza): We need to mock the scheduler report client because
         # we need to fake Keystone by directly calling the endpoint instead
         # of looking up the service catalog, like we did for the OSAPIFixture.
@@ -1740,8 +1828,7 @@ class PlacementFixture(fixtures.Fixture):
         return self._client.get(
             url,
             endpoint_override=self.endpoint,
-            headers=headers,
-            raise_exc=False)
+            headers=headers)
 
     def _fake_post(self, *args, **kwargs):
         (url, data) = args[1:]
@@ -1757,8 +1844,7 @@ class PlacementFixture(fixtures.Fixture):
         return self._client.post(
             url, json=data,
             endpoint_override=self.endpoint,
-            headers=headers,
-            raise_exc=False)
+            headers=headers)
 
     def _fake_put(self, *args, **kwargs):
         (url, data) = args[1:]
@@ -1774,8 +1860,7 @@ class PlacementFixture(fixtures.Fixture):
         return self._client.put(
             url, json=data,
             endpoint_override=self.endpoint,
-            headers=headers,
-            raise_exc=False)
+            headers=headers)
 
     def _fake_delete(self, *args, **kwargs):
         (url,) = args[1:]
@@ -1785,8 +1870,7 @@ class PlacementFixture(fixtures.Fixture):
         return self._client.delete(
             url,
             endpoint_override=self.endpoint,
-            headers={'x-auth-token': self.token},
-            raise_exc=False)
+            headers={'x-auth-token': self.token})
 
 
 class UnHelperfulClientChannel(privsep_daemon._ClientChannel):

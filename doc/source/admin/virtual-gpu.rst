@@ -66,9 +66,7 @@ Configure a flavor to request one virtual GPU:
 The enabled vGPU types on the compute hosts are not exposed to API users.
 Flavors configured for vGPU support can be tied to host aggregates as a means
 to properly schedule those flavors onto the compute hosts that support them.
-See the `host aggregates`_ guide for more information.
-
-.. _host aggregates: https://docs.openstack.org/nova/latest/user/aggregates.html
+See the :doc:`/user/aggregates` for more information.
 
 Create instances with virtual GPU devices
 -----------------------------------------
@@ -172,7 +170,8 @@ Caveats
 
 .. note::
 
-       All the caveats are related to the Queens release
+   This information is correct as of the 17.0.0 Queens release. Where
+   improvements have been made or issues fixed, they are noted per item.
 
 For libvirt:
 
@@ -199,6 +198,8 @@ For libvirt:
   instance immediately after rescue. However, rebuilding the rescued instance
   only helps if there are other free vGPUs on the host.
 
+  .. note:: This has been resolved in the Rocky release [#]_.
+
 For XenServer:
 
 * Suspend and live migration with vGPUs attached depends on support from the
@@ -219,6 +220,7 @@ For XenServer:
   resize. If you want to migrate an instance, make sure to rebuild it after the
   migration.
 
+.. [#] https://bugs.launchpad.net/nova/+bug/1762688
 
 .. Links
 .. _Intel GVT-g: https://01.org/igvt-g

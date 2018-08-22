@@ -30,7 +30,6 @@ from oslo_db.sqlalchemy import enginefacade
 from oslo_db.sqlalchemy import update_match
 from oslo_db.sqlalchemy import utils as sqlalchemyutils
 from oslo_log import log as logging
-from oslo_utils import excutils
 from oslo_utils import importutils
 from oslo_utils import timeutils
 from oslo_utils import uuidutils
@@ -184,20 +183,6 @@ def require_instance_exists_using_uuid(f):
     return wrapper
 
 
-def require_aggregate_exists(f):
-    """Decorator to require the specified aggregate to exist.
-
-    Requires the wrapped function to use context and aggregate_id as
-    their first two arguments.
-    """
-
-    @functools.wraps(f)
-    def wrapper(context, aggregate_id, *args, **kwargs):
-        aggregate_get(context, aggregate_id)
-        return f(context, aggregate_id, *args, **kwargs)
-    return wrapper
-
-
 def select_db_reader_mode(f):
     """Decorator to select synchronous or asynchronous reader mode.
 
@@ -217,7 +202,7 @@ def select_db_reader_mode(f):
         use_slave = keyed_args.get('use_slave', False)
 
         if use_slave:
-            reader_mode = get_context_manager(context).async
+            reader_mode = get_context_manager(context).async_
         else:
             reader_mode = get_context_manager(context).reader
 
@@ -1761,6 +1746,7 @@ def instance_create(context, values):
         {'numa_topology': None,
          'pci_requests': None,
          'vcpu_model': None,
+         'trusted_certs': None,
          })
     instance_ref['extra'].update(values.pop('extra', {}))
     instance_ref.update(values)
@@ -1791,20 +1777,6 @@ def instance_create(context, values):
     instance_ref.fault = None
 
     return instance_ref
-
-
-def _instance_data_get_for_user(context, project_id, user_id):
-    result = model_query(context, models.Instance, (
-        func.count(models.Instance.id),
-        func.sum(models.Instance.vcpus),
-        func.sum(models.Instance.memory_mb))).\
-        filter_by(project_id=project_id)
-    if user_id:
-        result = result.filter_by(user_id=user_id).first()
-    else:
-        result = result.first()
-    # NOTE(vish): convert None to 0
-    return (result[0] or 0, result[1] or 0, result[2] or 0)
 
 
 @require_context
@@ -1840,9 +1812,6 @@ def instance_destroy(context, instance_uuid, constraint=None):
             soft_delete()
     model_query(context, models.InstanceSystemMetadata).\
             filter_by(instance_uuid=instance_uuid).\
-            soft_delete()
-    model_query(context, models.InstanceGroupMember).\
-            filter_by(instance_id=instance_uuid).\
             soft_delete()
     model_query(context, models.BlockDeviceMapping).\
             filter_by(instance_uuid=instance_uuid).\
@@ -2622,6 +2591,11 @@ def _instance_get_all_uuids_by_host(context, host):
 
 
 @pick_context_manager_reader
+def instance_get_all_uuids_by_host(context, host):
+    return _instance_get_all_uuids_by_host(context, host)
+
+
+@pick_context_manager_reader
 def instance_get_all_by_host_and_node(context, host, node,
                                       columns_to_join=None):
     if columns_to_join is None:
@@ -2998,7 +2972,7 @@ def instance_extra_get_by_instance_uuid(context, instance_uuid,
         filter_by(instance_uuid=instance_uuid)
     if columns is None:
         columns = ['numa_topology', 'pci_requests', 'flavor', 'vcpu_model',
-                   'migration_context']
+                   'trusted_certs', 'migration_context']
     for column in columns:
         query = query.options(undefer(column))
     instance_extra = query.first()
@@ -4588,325 +4562,6 @@ def console_get(context, console_id, instance_uuid=None):
 
 
 @pick_context_manager_writer
-def flavor_create(context, values, projects=None):
-    """Create a new instance type. In order to pass in extra specs,
-    the values dict should contain a 'extra_specs' key/value pair:
-
-    {'extra_specs' : {'k1': 'v1', 'k2': 'v2', ...}}
-
-    """
-    specs = values.get('extra_specs')
-    specs_refs = []
-    if specs:
-        for k, v in specs.items():
-            specs_ref = models.InstanceTypeExtraSpecs()
-            specs_ref['key'] = k
-            specs_ref['value'] = v
-            specs_refs.append(specs_ref)
-
-    values['extra_specs'] = specs_refs
-    instance_type_ref = models.InstanceTypes()
-    instance_type_ref.update(values)
-
-    if projects is None:
-        projects = []
-
-    try:
-        instance_type_ref.save(context.session)
-    except db_exc.DBDuplicateEntry as e:
-        if 'flavorid' in e.columns:
-            raise exception.FlavorIdExists(flavor_id=values['flavorid'])
-        raise exception.FlavorExists(name=values['name'])
-    except Exception as e:
-        raise db_exc.DBError(e)
-    for project in set(projects):
-        access_ref = models.InstanceTypeProjects()
-        access_ref.update({"instance_type_id": instance_type_ref.id,
-                           "project_id": project})
-        access_ref.save(context.session)
-
-    return _dict_with_extra_specs(instance_type_ref)
-
-
-def _dict_with_extra_specs(inst_type_query):
-    """Takes an instance or instance type query returned
-    by sqlalchemy and returns it as a dictionary, converting the
-    extra_specs entry from a list of dicts:
-
-    'extra_specs' : [{'key': 'k1', 'value': 'v1', ...}, ...]
-
-    to a single dict:
-
-    'extra_specs' : {'k1': 'v1'}
-
-    """
-    inst_type_dict = dict(inst_type_query)
-    extra_specs = {x['key']: x['value']
-                   for x in inst_type_query['extra_specs']}
-    inst_type_dict['extra_specs'] = extra_specs
-    return inst_type_dict
-
-
-def _flavor_get_query(context, read_deleted=None):
-    query = model_query(context, models.InstanceTypes,
-                       read_deleted=read_deleted).\
-                       options(joinedload('extra_specs'))
-    if not context.is_admin:
-        the_filter = [models.InstanceTypes.is_public == true()]
-        the_filter.extend([
-            models.InstanceTypes.projects.any(project_id=context.project_id)
-        ])
-        query = query.filter(or_(*the_filter))
-    return query
-
-
-@require_context
-@pick_context_manager_reader
-def flavor_get_all(context, inactive=False, filters=None,
-                   sort_key='flavorid', sort_dir='asc', limit=None,
-                   marker=None):
-    """Returns all flavors.
-    """
-    filters = filters or {}
-
-    # FIXME(sirp): now that we have the `disabled` field for flavors, we
-    # should probably remove the use of `deleted` to mark inactive. `deleted`
-    # should mean truly deleted, e.g. we can safely purge the record out of the
-    # database.
-    read_deleted = "yes" if inactive else "no"
-
-    query = _flavor_get_query(context, read_deleted=read_deleted)
-
-    if 'min_memory_mb' in filters:
-        query = query.filter(
-                models.InstanceTypes.memory_mb >= filters['min_memory_mb'])
-
-    if 'min_root_gb' in filters:
-        query = query.filter(
-                models.InstanceTypes.root_gb >= filters['min_root_gb'])
-
-    if 'disabled' in filters:
-        query = query.filter(
-                models.InstanceTypes.disabled == filters['disabled'])
-
-    if 'is_public' in filters and filters['is_public'] is not None:
-        the_filter = [models.InstanceTypes.is_public == filters['is_public']]
-        if filters['is_public'] and context.project_id is not None:
-            the_filter.extend([
-                models.InstanceTypes.projects.any(
-                    project_id=context.project_id, deleted=0)
-            ])
-        if len(the_filter) > 1:
-            query = query.filter(or_(*the_filter))
-        else:
-            query = query.filter(the_filter[0])
-
-    marker_row = None
-    if marker is not None:
-        marker_row = _flavor_get_query(context, read_deleted=read_deleted).\
-                    filter_by(flavorid=marker).\
-                    first()
-        if not marker_row:
-            raise exception.MarkerNotFound(marker=marker)
-
-    query = sqlalchemyutils.paginate_query(query, models.InstanceTypes, limit,
-                                           [sort_key, 'id'],
-                                           marker=marker_row,
-                                           sort_dir=sort_dir)
-
-    inst_types = query.all()
-
-    return [_dict_with_extra_specs(i) for i in inst_types]
-
-
-def _flavor_get_id_from_flavor_query(context, flavor_id):
-    return model_query(context, models.InstanceTypes,
-                       (models.InstanceTypes.id,),
-                       read_deleted="no").\
-                filter_by(flavorid=flavor_id)
-
-
-def _flavor_get_id_from_flavor(context, flavor_id):
-    result = _flavor_get_id_from_flavor_query(context, flavor_id).first()
-    if not result:
-        raise exception.FlavorNotFound(flavor_id=flavor_id)
-    return result[0]
-
-
-@require_context
-@pick_context_manager_reader
-def flavor_get(context, id):
-    """Returns a dict describing specific flavor."""
-    result = _flavor_get_query(context).\
-                        filter_by(id=id).\
-                        first()
-    if not result:
-        raise exception.FlavorNotFound(flavor_id=id)
-    return _dict_with_extra_specs(result)
-
-
-@require_context
-@pick_context_manager_reader
-def flavor_get_by_name(context, name):
-    """Returns a dict describing specific flavor."""
-    result = _flavor_get_query(context).\
-                        filter_by(name=name).\
-                        first()
-    if not result:
-        raise exception.FlavorNotFoundByName(flavor_name=name)
-    return _dict_with_extra_specs(result)
-
-
-@require_context
-@pick_context_manager_reader
-def flavor_get_by_flavor_id(context, flavor_id, read_deleted):
-    """Returns a dict describing specific flavor_id."""
-    result = _flavor_get_query(context, read_deleted=read_deleted).\
-                        filter_by(flavorid=flavor_id).\
-                        order_by(asc(models.InstanceTypes.deleted),
-                                 asc(models.InstanceTypes.id)).\
-                        first()
-    if not result:
-        raise exception.FlavorNotFound(flavor_id=flavor_id)
-    return _dict_with_extra_specs(result)
-
-
-@pick_context_manager_writer
-def flavor_destroy(context, flavor_id):
-    """Marks specific flavor as deleted."""
-    ref = model_query(context, models.InstanceTypes, read_deleted="no").\
-                filter_by(flavorid=flavor_id).\
-                first()
-    if not ref:
-        raise exception.FlavorNotFound(flavor_id=flavor_id)
-
-    ref.soft_delete(context.session)
-    model_query(context, models.InstanceTypeExtraSpecs, read_deleted="no").\
-            filter_by(instance_type_id=ref['id']).\
-            soft_delete()
-    model_query(context, models.InstanceTypeProjects, read_deleted="no").\
-            filter_by(instance_type_id=ref['id']).\
-            soft_delete()
-
-
-def _flavor_access_query(context):
-    return model_query(context, models.InstanceTypeProjects, read_deleted="no")
-
-
-@pick_context_manager_reader
-def flavor_access_get_by_flavor_id(context, flavor_id):
-    """Get flavor access list by flavor id."""
-    instance_type_id_subq = _flavor_get_id_from_flavor_query(context,
-                                                             flavor_id)
-    access_refs = _flavor_access_query(context).\
-                        filter_by(instance_type_id=instance_type_id_subq).\
-                        all()
-    return access_refs
-
-
-@pick_context_manager_writer
-def flavor_access_add(context, flavor_id, project_id):
-    """Add given tenant to the flavor access list."""
-    instance_type_id = _flavor_get_id_from_flavor(context, flavor_id)
-
-    access_ref = models.InstanceTypeProjects()
-    access_ref.update({"instance_type_id": instance_type_id,
-                       "project_id": project_id})
-    try:
-        access_ref.save(context.session)
-    except db_exc.DBDuplicateEntry:
-        raise exception.FlavorAccessExists(flavor_id=flavor_id,
-                                            project_id=project_id)
-    return access_ref
-
-
-@pick_context_manager_writer
-def flavor_access_remove(context, flavor_id, project_id):
-    """Remove given tenant from the flavor access list."""
-    instance_type_id = _flavor_get_id_from_flavor(context, flavor_id)
-
-    count = _flavor_access_query(context).\
-                    filter_by(instance_type_id=instance_type_id).\
-                    filter_by(project_id=project_id).\
-                    soft_delete(synchronize_session=False)
-    if count == 0:
-        raise exception.FlavorAccessNotFound(flavor_id=flavor_id,
-                                             project_id=project_id)
-
-
-def _flavor_extra_specs_get_query(context, flavor_id):
-    instance_type_id_subq = _flavor_get_id_from_flavor_query(context,
-                                                             flavor_id)
-
-    return model_query(context, models.InstanceTypeExtraSpecs,
-                       read_deleted="no").\
-                filter_by(instance_type_id=instance_type_id_subq)
-
-
-@require_context
-@pick_context_manager_reader
-def flavor_extra_specs_get(context, flavor_id):
-    rows = _flavor_extra_specs_get_query(context, flavor_id).all()
-    return {row['key']: row['value'] for row in rows}
-
-
-@require_context
-@pick_context_manager_writer
-def flavor_extra_specs_delete(context, flavor_id, key):
-    result = _flavor_extra_specs_get_query(context, flavor_id).\
-                     filter(models.InstanceTypeExtraSpecs.key == key).\
-                     soft_delete(synchronize_session=False)
-    # did not find the extra spec
-    if result == 0:
-        raise exception.FlavorExtraSpecsNotFound(
-                extra_specs_key=key, flavor_id=flavor_id)
-
-
-@require_context
-@pick_context_manager_writer
-def flavor_extra_specs_update_or_create(context, flavor_id, specs,
-                                               max_retries=10):
-    for attempt in range(max_retries):
-        try:
-            instance_type_id = _flavor_get_id_from_flavor(context, flavor_id)
-
-            spec_refs = model_query(context, models.InstanceTypeExtraSpecs,
-                                    read_deleted="no").\
-              filter_by(instance_type_id=instance_type_id).\
-              filter(models.InstanceTypeExtraSpecs.key.in_(specs.keys())).\
-              all()
-
-            existing_keys = set()
-            for spec_ref in spec_refs:
-                key = spec_ref["key"]
-                existing_keys.add(key)
-                with get_context_manager(context).writer.savepoint.using(
-                        context):
-                    spec_ref.update({"value": specs[key]})
-
-            for key, value in specs.items():
-                if key in existing_keys:
-                    continue
-                spec_ref = models.InstanceTypeExtraSpecs()
-                with get_context_manager(context).writer.savepoint.using(
-                        context):
-                    spec_ref.update({"key": key, "value": value,
-                                     "instance_type_id": instance_type_id})
-                    context.session.add(spec_ref)
-
-            return specs
-        except db_exc.DBDuplicateEntry:
-            # a concurrent transaction has been committed,
-            # try again unless this was the last attempt
-            if attempt == max_retries - 1:
-                raise exception.FlavorExtraSpecUpdateCreateFailed(
-                                    id=flavor_id, retries=max_retries)
-
-
-####################
-
-
-@pick_context_manager_writer
 def cell_create(context, values):
     cell = models.Cell()
     cell.update(values)
@@ -5351,309 +5006,6 @@ def s3_image_create(context, image_uuid):
 
 
 ####################
-
-
-def _aggregate_get_query(context, model_class, id_field=None, id=None,
-                         read_deleted=None):
-    columns_to_join = {models.Aggregate: ['_hosts', '_metadata']}
-
-    query = model_query(context, model_class, read_deleted=read_deleted)
-
-    for c in columns_to_join.get(model_class, []):
-        query = query.options(joinedload(c))
-
-    if id and id_field:
-        query = query.filter(id_field == id)
-
-    return query
-
-
-@pick_context_manager_writer
-def aggregate_create(context, values, metadata=None):
-    query = _aggregate_get_query(context,
-                                 models.Aggregate,
-                                 models.Aggregate.name,
-                                 values['name'],
-                                 read_deleted='no')
-    aggregate = query.first()
-    if not aggregate:
-        aggregate = models.Aggregate()
-        aggregate.update(values)
-        aggregate.save(context.session)
-        # We don't want these to be lazy loaded later.  We know there is
-        # nothing here since we just created this aggregate.
-        aggregate._hosts = []
-        aggregate._metadata = []
-    else:
-        raise exception.AggregateNameExists(aggregate_name=values['name'])
-    if metadata:
-        aggregate_metadata_add(context, aggregate.id, metadata)
-        # NOTE(pkholkin): '_metadata' attribute was updated during
-        # 'aggregate_metadata_add' method, so it should be expired and
-        # read from db
-        context.session.expire(aggregate, ['_metadata'])
-        aggregate._metadata
-
-    return aggregate
-
-
-@pick_context_manager_reader
-def aggregate_get(context, aggregate_id):
-    query = _aggregate_get_query(context,
-                                 models.Aggregate,
-                                 models.Aggregate.id,
-                                 aggregate_id)
-    aggregate = query.first()
-
-    if not aggregate:
-        raise exception.AggregateNotFound(aggregate_id=aggregate_id)
-
-    return aggregate
-
-
-@pick_context_manager_reader
-def aggregate_get_by_uuid(context, uuid):
-    query = _aggregate_get_query(context,
-                                 models.Aggregate,
-                                 models.Aggregate.uuid,
-                                 uuid)
-    aggregate = query.first()
-
-    if not aggregate:
-        raise exception.AggregateNotFound(aggregate_id=uuid)
-
-    return aggregate
-
-
-@pick_context_manager_reader
-def aggregate_get_by_host(context, host, key=None):
-    """Return rows that match host (mandatory) and metadata key (optional).
-
-    :param host matches host, and is required.
-    :param key Matches metadata key, if not None.
-    """
-    query = model_query(context, models.Aggregate)
-    query = query.options(joinedload('_hosts'))
-    query = query.options(joinedload('_metadata'))
-    query = query.join('_hosts')
-    query = query.filter(models.AggregateHost.host == host)
-
-    if key:
-        query = query.join("_metadata").filter(
-            models.AggregateMetadata.key == key)
-    return query.all()
-
-
-@pick_context_manager_reader
-def aggregate_metadata_get_by_host(context, host, key=None):
-    query = model_query(context, models.Aggregate)
-    query = query.join("_hosts")
-    query = query.join("_metadata")
-    query = query.filter(models.AggregateHost.host == host)
-    query = query.options(contains_eager("_metadata"))
-
-    if key:
-        query = query.filter(models.AggregateMetadata.key == key)
-    rows = query.all()
-
-    metadata = collections.defaultdict(set)
-    for agg in rows:
-        for kv in agg._metadata:
-            metadata[kv['key']].add(kv['value'])
-    return dict(metadata)
-
-
-@pick_context_manager_reader
-def aggregate_get_by_metadata_key(context, key):
-    """Return rows that match metadata key.
-
-    :param key Matches metadata key.
-    """
-    query = model_query(context, models.Aggregate)
-    query = query.join("_metadata")
-    query = query.filter(models.AggregateMetadata.key == key)
-    query = query.options(contains_eager("_metadata"))
-    query = query.options(joinedload("_hosts"))
-    return query.all()
-
-
-@pick_context_manager_writer
-def aggregate_update(context, aggregate_id, values):
-    if "name" in values:
-        aggregate_by_name = (_aggregate_get_query(context,
-                                                  models.Aggregate,
-                                                  models.Aggregate.name,
-                                                  values['name'],
-                                                  read_deleted='no').first())
-        if aggregate_by_name and aggregate_by_name.id != aggregate_id:
-            # there is another aggregate with the new name
-            raise exception.AggregateNameExists(aggregate_name=values['name'])
-
-    aggregate = (_aggregate_get_query(context,
-                                     models.Aggregate,
-                                     models.Aggregate.id,
-                                     aggregate_id).first())
-
-    set_delete = True
-    if aggregate:
-        if "availability_zone" in values:
-            az = values.pop('availability_zone')
-            if 'metadata' not in values:
-                values['metadata'] = {'availability_zone': az}
-                set_delete = False
-            else:
-                values['metadata']['availability_zone'] = az
-        metadata = values.get('metadata')
-        if metadata is not None:
-            aggregate_metadata_add(context,
-                                   aggregate_id,
-                                   values.pop('metadata'),
-                                   set_delete=set_delete)
-
-        aggregate.update(values)
-        aggregate.save(context.session)
-        return aggregate_get(context, aggregate.id)
-    else:
-        raise exception.AggregateNotFound(aggregate_id=aggregate_id)
-
-
-@pick_context_manager_writer
-def aggregate_delete(context, aggregate_id):
-    count = _aggregate_get_query(context,
-                                 models.Aggregate,
-                                 models.Aggregate.id,
-                                 aggregate_id).\
-                soft_delete()
-    if count == 0:
-        raise exception.AggregateNotFound(aggregate_id=aggregate_id)
-
-    # Delete Metadata
-    model_query(context, models.AggregateMetadata).\
-                filter_by(aggregate_id=aggregate_id).\
-                soft_delete()
-
-
-@pick_context_manager_reader
-def aggregate_get_all(context):
-    return _aggregate_get_query(context, models.Aggregate).all()
-
-
-def _aggregate_metadata_get_query(context, aggregate_id, read_deleted="yes"):
-    return model_query(context,
-                       models.AggregateMetadata,
-                       read_deleted=read_deleted).\
-                filter_by(aggregate_id=aggregate_id)
-
-
-@require_aggregate_exists
-@pick_context_manager_reader
-def aggregate_metadata_get(context, aggregate_id):
-    rows = model_query(context,
-                       models.AggregateMetadata).\
-                       filter_by(aggregate_id=aggregate_id).all()
-
-    return {r['key']: r['value'] for r in rows}
-
-
-@require_aggregate_exists
-@pick_context_manager_writer
-def aggregate_metadata_delete(context, aggregate_id, key):
-    count = _aggregate_get_query(context,
-                                 models.AggregateMetadata,
-                                 models.AggregateMetadata.aggregate_id,
-                                 aggregate_id).\
-                                 filter_by(key=key).\
-                                 soft_delete()
-    if count == 0:
-        raise exception.AggregateMetadataNotFound(aggregate_id=aggregate_id,
-                                                  metadata_key=key)
-
-
-@require_aggregate_exists
-@pick_context_manager_writer
-def aggregate_metadata_add(context, aggregate_id, metadata, set_delete=False,
-                           max_retries=10):
-    all_keys = metadata.keys()
-    for attempt in range(max_retries):
-        try:
-            query = _aggregate_metadata_get_query(context, aggregate_id,
-                                                  read_deleted='no')
-            if set_delete:
-                query.filter(~models.AggregateMetadata.key.in_(all_keys)).\
-                    soft_delete(synchronize_session=False)
-
-            already_existing_keys = set()
-            if all_keys:
-                query = query.filter(
-                    models.AggregateMetadata.key.in_(all_keys))
-                for meta_ref in query.all():
-                    key = meta_ref.key
-                    meta_ref.update({"value": metadata[key]})
-                    already_existing_keys.add(key)
-
-            new_entries = []
-            for key, value in metadata.items():
-                if key in already_existing_keys:
-                    continue
-                new_entries.append({"key": key,
-                                    "value": value,
-                                    "aggregate_id": aggregate_id})
-            if new_entries:
-                context.session.execute(
-                    models.AggregateMetadata.__table__.insert(),
-                    new_entries)
-
-            return metadata
-        except db_exc.DBDuplicateEntry:
-            # a concurrent transaction has been committed,
-            # try again unless this was the last attempt
-            with excutils.save_and_reraise_exception() as ctxt:
-                if attempt < max_retries - 1:
-                    ctxt.reraise = False
-                else:
-                    LOG.warning("Add metadata failed for aggregate %(id)s "
-                                "after %(retries)s retries",
-                                {"id": aggregate_id, "retries": max_retries})
-
-
-@require_aggregate_exists
-@pick_context_manager_reader
-def aggregate_host_get_all(context, aggregate_id):
-    rows = model_query(context,
-                       models.AggregateHost).\
-                       filter_by(aggregate_id=aggregate_id).all()
-
-    return [r.host for r in rows]
-
-
-@require_aggregate_exists
-@pick_context_manager_writer
-def aggregate_host_delete(context, aggregate_id, host):
-    count = _aggregate_get_query(context,
-                                 models.AggregateHost,
-                                 models.AggregateHost.aggregate_id,
-                                 aggregate_id).\
-            filter_by(host=host).\
-            soft_delete()
-    if count == 0:
-        raise exception.AggregateHostNotFound(aggregate_id=aggregate_id,
-                                              host=host)
-
-
-@require_aggregate_exists
-@pick_context_manager_writer
-def aggregate_host_add(context, aggregate_id, host):
-    host_ref = models.AggregateHost()
-    host_ref.update({"host": host, "aggregate_id": aggregate_id})
-    try:
-        host_ref.save(context.session)
-    except db_exc.DBDuplicateEntry:
-        raise exception.AggregateHostExists(host=host,
-                                            aggregate_id=aggregate_id)
-    return host_ref
-
-
-################
 
 
 @pick_context_manager_writer
@@ -6238,6 +5590,65 @@ def archive_deleted_rows(max_rows=None):
     return table_to_rows_archived, deleted_instance_uuids
 
 
+def _purgeable_tables(metadata):
+    return [t for t in metadata.sorted_tables
+            if (t.name.startswith(_SHADOW_TABLE_PREFIX) and not
+                t.name.endswith('migrate_version'))]
+
+
+def purge_shadow_tables(context, before_date, status_fn=None):
+    engine = get_engine(context=context)
+    conn = engine.connect()
+    metadata = MetaData()
+    metadata.bind = engine
+    metadata.reflect()
+    total_deleted = 0
+
+    if status_fn is None:
+        status_fn = lambda m: None
+
+    # Some things never get formally deleted, and thus deleted_at
+    # is never set. So, prefer specific timestamp columns here
+    # for those special cases.
+    overrides = {
+        'shadow_instance_actions': 'created_at',
+        'shadow_instance_actions_events': 'created_at',
+    }
+
+    for table in _purgeable_tables(metadata):
+        if before_date is None:
+            col = None
+        elif table.name in overrides:
+            col = getattr(table.c, overrides[table.name])
+        elif hasattr(table.c, 'deleted_at'):
+            col = table.c.deleted_at
+        elif hasattr(table.c, 'updated_at'):
+            col = table.c.updated_at
+        elif hasattr(table.c, 'created_at'):
+            col = table.c.created_at
+        else:
+            status_fn(_('Unable to purge table %(table)s because it '
+                        'has no timestamp column') % {
+                            'table': table.name})
+            continue
+
+        if col is not None:
+            delete = table.delete().where(col < before_date)
+        else:
+            delete = table.delete()
+
+        deleted = conn.execute(delete)
+        if deleted.rowcount > 0:
+            status_fn(_('Deleted %(rows)i rows from %(table)s based on '
+                        'timestamp column %(col)s') % {
+                            'rows': deleted.rowcount,
+                            'table': table.name,
+                            'col': col is None and '(n/a)' or col.name})
+        total_deleted += deleted.rowcount
+
+    return total_deleted
+
+
 @pick_context_manager_writer
 def service_uuids_online_data_migration(context, max_count):
     from nova.objects import service
@@ -6254,258 +5665,6 @@ def service_uuids_online_data_migration(context, max_count):
         if 'uuid' in service_obj:
             count_hit += 1
     return count_all, count_hit
-
-
-####################
-
-
-def _instance_group_get_query(context, model_class, id_field=None, id=None,
-                              read_deleted=None):
-    columns_to_join = {models.InstanceGroup: ['_policies', '_members']}
-    query = model_query(context, model_class, read_deleted=read_deleted,
-                        project_only=True)
-    for c in columns_to_join.get(model_class, []):
-        query = query.options(joinedload(c))
-
-    if id and id_field:
-        query = query.filter(id_field == id)
-
-    return query
-
-
-@pick_context_manager_writer
-def instance_group_create(context, values, policies=None, members=None):
-    """Create a new group."""
-    uuid = values.get('uuid', None)
-    if uuid is None:
-        uuid = uuidutils.generate_uuid()
-        values['uuid'] = uuid
-
-    try:
-        group = models.InstanceGroup()
-        group.update(values)
-        group.save(context.session)
-    except db_exc.DBDuplicateEntry:
-        raise exception.InstanceGroupIdExists(group_uuid=uuid)
-
-    # We don't want '_policies' and '_members' attributes to be lazy loaded
-    # later. We know there is nothing here since we just created this
-    # instance group.
-    if policies:
-        _instance_group_policies_add(context, group.id, policies)
-    else:
-        group._policies = []
-    if members:
-        _instance_group_members_add(context, group.id, members)
-    else:
-        group._members = []
-
-    return instance_group_get(context, uuid)
-
-
-@pick_context_manager_reader
-def instance_group_get(context, group_uuid):
-    """Get a specific group by uuid."""
-    group = _instance_group_get_query(context,
-                                      models.InstanceGroup,
-                                      models.InstanceGroup.uuid,
-                                      group_uuid).\
-                            first()
-    if not group:
-        raise exception.InstanceGroupNotFound(group_uuid=group_uuid)
-    return group
-
-
-@pick_context_manager_reader
-def instance_group_get_by_instance(context, instance_uuid):
-    group_member = model_query(context, models.InstanceGroupMember).\
-                               filter_by(instance_id=instance_uuid).\
-                               first()
-    if not group_member:
-        raise exception.InstanceGroupNotFound(group_uuid='')
-    group = _instance_group_get_query(context, models.InstanceGroup,
-                                      models.InstanceGroup.id,
-                                      group_member.group_id).first()
-    if not group:
-        raise exception.InstanceGroupNotFound(
-                group_uuid=group_member.group_id)
-    return group
-
-
-@pick_context_manager_writer
-def instance_group_update(context, group_uuid, values):
-    """Update the attributes of a group.
-
-    If values contains a metadata key, it updates the aggregate metadata
-    too. Similarly for the policies and members.
-    """
-    group = model_query(context, models.InstanceGroup).\
-            filter_by(uuid=group_uuid).\
-            first()
-    if not group:
-        raise exception.InstanceGroupNotFound(group_uuid=group_uuid)
-
-    policies = values.get('policies')
-    if policies is not None:
-        _instance_group_policies_add(context,
-                                     group.id,
-                                     values.pop('policies'),
-                                     set_delete=True)
-    members = values.get('members')
-    if members is not None:
-        _instance_group_members_add(context,
-                                    group.id,
-                                    values.pop('members'),
-                                    set_delete=True)
-
-    group.update(values)
-
-    if policies:
-        values['policies'] = policies
-    if members:
-        values['members'] = members
-
-
-@pick_context_manager_writer
-def instance_group_delete(context, group_uuid):
-    """Delete a group."""
-    group_id = _instance_group_id(context, group_uuid)
-
-    count = _instance_group_get_query(context,
-                                      models.InstanceGroup,
-                                      models.InstanceGroup.uuid,
-                                      group_uuid).soft_delete()
-    if count == 0:
-        raise exception.InstanceGroupNotFound(group_uuid=group_uuid)
-
-    # Delete policies, metadata and members
-    instance_models = [models.InstanceGroupPolicy,
-                       models.InstanceGroupMember]
-    for model in instance_models:
-        model_query(context, model).filter_by(group_id=group_id).soft_delete()
-
-
-@pick_context_manager_reader
-def instance_group_get_all(context):
-    """Get all groups."""
-    return _instance_group_get_query(context, models.InstanceGroup).all()
-
-
-@pick_context_manager_reader
-def instance_group_get_all_by_project_id(context, project_id):
-    """Get all groups."""
-    return _instance_group_get_query(context, models.InstanceGroup).\
-                            filter_by(project_id=project_id).\
-                            all()
-
-
-def _instance_group_count_by_project_and_user(context, project_id, user_id):
-    return model_query(context, models.InstanceGroup, read_deleted="no").\
-                   filter_by(project_id=project_id).\
-                   filter_by(user_id=user_id).\
-                   count()
-
-
-def _instance_group_model_get_query(context, model_class, group_id,
-                                    read_deleted='no'):
-    return model_query(context,
-                       model_class,
-                       read_deleted=read_deleted).\
-                filter_by(group_id=group_id)
-
-
-def _instance_group_id(context, group_uuid):
-    """Returns the group database ID for the group UUID."""
-
-    result = model_query(context,
-                         models.InstanceGroup,
-                         (models.InstanceGroup.id,)).\
-                filter_by(uuid=group_uuid).\
-                first()
-    if not result:
-        raise exception.InstanceGroupNotFound(group_uuid=group_uuid)
-    return result.id
-
-
-def _instance_group_members_add(context, id, members, set_delete=False):
-    all_members = set(members)
-    query = _instance_group_model_get_query(context,
-                                            models.InstanceGroupMember, id)
-    if set_delete:
-        query.filter(~models.InstanceGroupMember.instance_id.in_(
-                     all_members)).\
-              soft_delete(synchronize_session=False)
-
-    query = query.filter(
-            models.InstanceGroupMember.instance_id.in_(all_members))
-    already_existing = set()
-    for member_ref in query.all():
-        already_existing.add(member_ref.instance_id)
-
-    for instance_id in members:
-        if instance_id in already_existing:
-            continue
-        member_ref = models.InstanceGroupMember()
-        member_ref.update({'instance_id': instance_id,
-                           'group_id': id})
-        context.session.add(member_ref)
-
-    return members
-
-
-@pick_context_manager_writer
-def instance_group_members_add(context, group_uuid, members,
-                               set_delete=False):
-    id = _instance_group_id(context, group_uuid)
-    return _instance_group_members_add(context, id, members,
-                                       set_delete=set_delete)
-
-
-@pick_context_manager_writer
-def instance_group_member_delete(context, group_uuid, instance_id):
-    id = _instance_group_id(context, group_uuid)
-    count = _instance_group_model_get_query(context,
-                                            models.InstanceGroupMember,
-                                            id).\
-                            filter_by(instance_id=instance_id).\
-                            soft_delete()
-    if count == 0:
-        raise exception.InstanceGroupMemberNotFound(group_uuid=group_uuid,
-                                                    instance_id=instance_id)
-
-
-@pick_context_manager_reader
-def instance_group_members_get(context, group_uuid):
-    id = _instance_group_id(context, group_uuid)
-    instances = model_query(context,
-                            models.InstanceGroupMember,
-                            (models.InstanceGroupMember.instance_id,)).\
-                    filter_by(group_id=id).all()
-    return [instance[0] for instance in instances]
-
-
-def _instance_group_policies_add(context, id, policies, set_delete=False):
-    allpols = set(policies)
-    query = _instance_group_model_get_query(context,
-                                            models.InstanceGroupPolicy, id)
-    if set_delete:
-        query.filter(~models.InstanceGroupPolicy.policy.in_(allpols)).\
-            soft_delete(synchronize_session=False)
-
-    query = query.filter(models.InstanceGroupPolicy.policy.in_(allpols))
-    already_existing = set()
-    for policy_ref in query.all():
-        already_existing.add(policy_ref.policy)
-
-    for policy in policies:
-        if policy in already_existing:
-            continue
-        policy_ref = models.InstanceGroupPolicy()
-        policy_ref.update({'policy': policy,
-                           'group_id': id})
-        context.session.add(policy_ref)
-
-    return policies
 
 
 ####################

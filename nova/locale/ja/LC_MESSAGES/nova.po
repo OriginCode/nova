@@ -13,7 +13,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova VERSION\n"
 "Report-Msgid-Bugs-To: https://bugs.launchpad.net/openstack-i18n/\n"
-"POT-Creation-Date: 2018-02-28 15:53+0000\n"
+"POT-Creation-Date: 2018-07-13 03:26+0000\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
@@ -61,14 +61,6 @@ msgstr ""
 "終了コード: %(code)r\n"
 "stdout: %(stdout)r\n"
 "stderr: %(stderr)r"
-
-#, python-format
-msgid ""
-"%(event_type)s is not a versioned notification and not whitelisted. See ./"
-"doc/source/notification.rst"
-msgstr ""
-"%(event_type)s はバージョンが設定された通知でもなければ、ホワイトリストの対象"
-"にもなっていません。./doc/source/notification.rst を参照してください。"
 
 #, python-format
 msgid "%(field)s should not be part of the updates."
@@ -497,15 +489,6 @@ msgid "Cannot attach one or more volumes to multiple instances"
 msgstr "1 つのボリュームを複数のインスタンスに接続できません"
 
 #, python-format
-msgid ""
-"Cannot block migrate instance %(uuid)s with mapped volumes. Selective block "
-"device migration feature requires libvirt version %(libvirt_ver)s"
-msgstr ""
-"マッピングされたボリュームを使用してインスタンス %(uuid)s のブロックをマイグ"
-"レーションすることはできません。特定のブロックデバイスをマイグレーションする"
-"には、libvirt のバージョン %(libvirt_ver)s が必要です。"
-
-#, python-format
 msgid "Cannot call %(method)s on orphaned %(objtype)s object"
 msgstr ""
 "親のない %(objtype)s オブジェクトで %(method)s を呼び出すことはできません"
@@ -806,14 +789,6 @@ msgstr "PBM が有効になっている場合、デフォルト PBM ポリシー
 #, python-format
 msgid "Deleted %(records)d records from table '%(table_name)s'."
 msgstr "レコード %(records)d がテーブル '%(table_name)s' から削除されました。"
-
-msgid "Deleting by fixed_range is not supported with the NeutronManager"
-msgstr "fixed_range による削除は、NeutronManager ではサポートされていません"
-
-#, python-format
-msgid "Destination host:%s must be in the same aggregate as the source server"
-msgstr ""
-"宛先ホスト:%s は移動元サーバーと同じアグリゲート内に存在しなければなりません"
 
 #, python-format
 msgid "Detected existing vlan with id %(vlan)d"
@@ -1188,20 +1163,8 @@ msgstr ""
 "せん。"
 
 #, python-format
-msgid "Fixed IP %s has been deleted"
-msgstr "Fixed IP %s が削除されました"
-
-#, python-format
 msgid "Fixed IP %s is already in use."
 msgstr "Fixed IP %s は既に使用中です。"
-
-#, python-format
-msgid "Fixed IP %s not found"
-msgstr "Fixed IP %s が見つかりません"
-
-#, python-format
-msgid "Fixed IP %s not valid"
-msgstr "Fixed IP %s は無効です"
 
 #, python-format
 msgid ""
@@ -1367,10 +1330,6 @@ msgstr ""
 "イメージメタデータで渡されるシリアルポート数のフレーバー値を超えないようにし"
 "てください。"
 
-#, python-format
-msgid "Found no PIF for device %s"
-msgstr "デバイス %s に対応する PIF が見つかりませんでした"
-
 msgid "Found no disk to snapshot."
 msgstr "スナップショットの作成対象のディスクが見つかりません"
 
@@ -1512,22 +1471,6 @@ msgstr ""
 
 msgid "Image that the instance was started with could not be found."
 msgstr "インスタンスの起動時に使用されたイメージが見つかりませんでした。"
-
-#, python-format
-msgid ""
-"Image vCPU limits %(sockets)d:%(cores)d:%(threads)d exceeds permitted "
-"%(maxsockets)d:%(maxcores)d:%(maxthreads)d"
-msgstr ""
-"イメージの vCPU 上限 %(sockets)d:%(cores)d:%(threads)d が、許可されている "
-"%(maxsockets)d:%(maxcores)d:%(maxthreads)d を超えています"
-
-#, python-format
-msgid ""
-"Image vCPU topology %(sockets)d:%(cores)d:%(threads)d exceeds permitted "
-"%(maxsockets)d:%(maxcores)d:%(maxthreads)d"
-msgstr ""
-"イメージの vCPU トポロジー %(sockets)d:%(cores)d:%(threads)d が、許可されてい"
-"る %(maxsockets)d:%(maxcores)d:%(maxthreads)d を超えています"
 
 #, python-format
 msgid "Image's config drive option '%(config_drive)s' is invalid"
@@ -1715,9 +1658,6 @@ msgstr "インスタンスの再作成はサポートされていません。"
 msgid "Instance rollback performed due to: %s"
 msgstr "インスタンスのロールバックが実行されました。原因: %s"
 
-msgid "Instance snapshots are not permitted at this time."
-msgstr "現在、インスタンスのスナップショット作成は許可されていません。"
-
 #, python-format
 msgid ""
 "Insufficient Space on Volume Group %(vg)s. Only %(free_space)db available, "
@@ -1859,10 +1799,6 @@ msgstr "無効な is_public フィルター [%s]"
 
 msgid "Invalid key_name provided."
 msgstr "無効な key_name が指定されました。"
-
-#, python-format
-msgid "Invalid libvirt version %(version)s"
-msgstr "libvirt のバージョン %(version)s が無効です"
 
 #, python-format
 msgid "Invalid memory page size '%(pagesize)s'"
@@ -2029,19 +1965,9 @@ msgstr "上限が適用されるのは、vCenter 6.0 以降の場合のみです
 msgid "Link Local address is not found.:%s"
 msgstr "リンクローカルアドレスが見つかりません: %s"
 
-msgid "Listing virtual interfaces is not supported by this cloud."
-msgstr "このクラウドでは仮想インターフェースの一覧表示を行うことができません。"
-
 #, python-format
 msgid "Live migration %(id)s for server %(uuid)s is not in progress."
 msgstr "サーバー %(uuid)s のマイグレーション %(id)s は進行中ではありません。"
-
-msgid ""
-"Live migration with API v2.25 requires all the Mitaka upgrade to be complete "
-"before it is available."
-msgstr ""
-"API v2.25 でライブマイグレーションを行うには、実行前にすべての Mitaka を更新"
-"する必要があります。"
 
 #, python-format
 msgid "Malformed message body: %(reason)s"
@@ -2550,13 +2476,6 @@ msgid "Number of Rows Archived"
 msgstr "アーカイブ済みの行数"
 
 #, python-format
-msgid ""
-"Number of serial ports '%(num_ports)s' specified in '%(property)s' isn't "
-"valid."
-msgstr ""
-"'%(property)s' に指定されているシリアルポート数 '%(num_ports)s' は無効です。"
-
-#, python-format
 msgid "OVS configuration failed with: %(inner_exception)s."
 msgstr "以下の理由のため OVS の設定が失敗しました: %(inner_exception)s。"
 
@@ -2626,14 +2545,6 @@ msgstr "PCI デバイス %(id)s が見つかりません"
 #, python-format
 msgid "PCI device request %(requests)s failed"
 msgstr "PCI デバイス要求 %(requests)s が失敗しました"
-
-#, python-format
-msgid ""
-"PIF %(pif_uuid)s for network %(bridge)s has VLAN id %(pif_vlan)d. Expected "
-"%(vlan_num)d"
-msgstr ""
-"ネットワーク %(bridge)s の PIF %(pif_uuid)s の VLAN ID は %(pif_vlan)d で"
-"す。%(vlan_num)d が期待されていました"
 
 #, python-format
 msgid "PIF %s does not contain IP address"
@@ -2833,9 +2744,6 @@ msgstr ""
 "vCPU のマスクを設定する必要があります。hw:cpu_realtime_mask または "
 "hw_cpu_realtime_mask を参照してください"
 
-msgid "Realtime policy not supported by hypervisor"
-msgstr "ハイパーバイザーはリアルタイムポリシーをサポートしません"
-
 msgid "Request body and URI mismatch"
 msgstr "リクエスト本文と URI の不一致"
 
@@ -2928,20 +2836,6 @@ msgstr ""
 #, python-format
 msgid "Rule (%s) not found"
 msgstr "ルール (%s) が見つかりません"
-
-#, python-format
-msgid "Running Nova with parallels virt_type requires libvirt version %s"
-msgstr ""
-"parallels virt_type で Nova を実行するには libvirt バージョン %s が必要です。"
-
-#, python-format
-msgid ""
-"Running Nova with qemu/kvm virt_type on %(arch)s requires libvirt version "
-"%(libvirt_ver)s and qemu version %(qemu_ver)s, or greater"
-msgstr ""
-"%(arch)s 上で qemu/kvm virt_type を使用して Nova を稼働させるには、libvirt の"
-"バージョン %(libvirt_ver)s および qemu のバージョン %(qemu_ver)s (またはそれ"
-"以降のバージョン) が必要です。"
 
 #, python-format
 msgid "Running batches of %i until complete"
@@ -3442,9 +3336,6 @@ msgstr "ICMP プロトコルのタイプおよびコードは整数でなけれ�
 
 msgid "UEFI is not supported"
 msgstr "UEFI はサポートされません"
-
-msgid "UUID is required to delete Neutron Networks"
-msgstr "Neutron ネットワークを削除するには、UUID が必要です"
 
 #, python-format
 msgid ""
@@ -4012,9 +3903,6 @@ msgstr "Floating IP が見つかりません"
 #, python-format
 msgid "fmt=%(fmt)s backed by: %(backing_file)s"
 msgstr "fmt=%(fmt)s は %(backing_file)s でサポートされています"
-
-msgid "fping utility is not found."
-msgstr "fping ユーティリティーが見つかりません。"
 
 #, python-format
 msgid "href %s does not contain version"

@@ -14,7 +14,6 @@
 
 from oslo_db import exception as db_exc
 from oslo_db.sqlalchemy import utils as sqlalchemyutils
-from oslo_log import log as logging
 from oslo_utils import versionutils
 from sqlalchemy import or_
 from sqlalchemy.orm import joinedload
@@ -33,7 +32,6 @@ from nova.objects import base
 from nova.objects import fields
 
 
-LOG = logging.getLogger(__name__)
 OPTIONAL_FIELDS = ['extra_specs', 'projects']
 # Remove these fields in version 2.0 of the object.
 DEPRECATED_FIELDS = ['deleted', 'deleted_at']
@@ -292,7 +290,7 @@ class Flavor(base.NovaPersistentObject, base.NovaObject,
                         first()
         if not result:
             raise exception.FlavorNotFound(flavor_id=id)
-        return db_api._dict_with_extra_specs(result)
+        return _dict_with_extra_specs(result)
 
     @staticmethod
     @require_context
@@ -303,7 +301,7 @@ class Flavor(base.NovaPersistentObject, base.NovaObject,
                             first()
         if not result:
             raise exception.FlavorNotFoundByName(flavor_name=name)
-        return db_api._dict_with_extra_specs(result)
+        return _dict_with_extra_specs(result)
 
     @staticmethod
     @require_context
@@ -315,7 +313,7 @@ class Flavor(base.NovaPersistentObject, base.NovaObject,
                         first()
         if not result:
             raise exception.FlavorNotFound(flavor_id=flavor_id)
-        return db_api._dict_with_extra_specs(result)
+        return _dict_with_extra_specs(result)
 
     @staticmethod
     def _get_projects_from_db(context, flavorid):

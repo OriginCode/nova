@@ -42,7 +42,7 @@ from nova import exception
 from nova.image import glance
 from nova.network import model as network_model
 from nova import objects
-from nova.objects import fields
+from nova import rc_fields as fields
 from nova import test
 from nova.tests.unit import fake_diagnostics
 from nova.tests.unit import fake_instance
@@ -284,7 +284,7 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
 
     def test_driver_capabilities(self):
         self.assertTrue(self.conn.capabilities['has_imagecache'])
-        self.assertFalse(self.conn.capabilities['supports_recreate'])
+        self.assertFalse(self.conn.capabilities['supports_evacuate'])
         self.assertTrue(
             self.conn.capabilities['supports_migrate_to_same_host'])
 
@@ -1705,16 +1705,14 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
         self._create_instance()
         with test.nested(
             mock.patch('os.path.exists', return_value=True),
-            mock.patch('{}.open'.format(driver.__name__), create=True),
             mock.patch('nova.privsep.path.last_bytes')
-        ) as (fake_exists, fake_open, fake_last_bytes):
-            fake_open.return_value = mock.MagicMock()
-            fake_fd = fake_open.return_value.__enter__.return_value
+        ) as (fake_exists, fake_last_bytes):
             fake_last_bytes.return_value = b'fira', 0
             output = self.conn.get_console_output(self.context, self.instance)
             fname = self.instance.uuid.replace('-', '')
-            fake_exists.assert_called_once_with('/opt/vspc/{}'.format(fname))
-            fake_last_bytes.assert_called_once_with(fake_fd,
+            fpath = '/opt/vspc/{}'.format(fname)
+            fake_exists.assert_called_once_with(fpath)
+            fake_last_bytes.assert_called_once_with(fpath,
                                                     driver.MAX_CONSOLE_BYTES)
         self.assertEqual(b'fira', output)
 

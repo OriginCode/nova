@@ -51,6 +51,14 @@ class MigrationTaskTestCase(test.NoDBTestCase):
         self.reservations = []
         self.clean_shutdown = True
 
+        _p = mock.patch('nova.compute.utils.heal_reqspec_is_bfv')
+        self.heal_reqspec_is_bfv_mock = _p.start()
+        self.addCleanup(_p.stop)
+
+        _p = mock.patch('nova.objects.RequestSpec.ensure_network_metadata')
+        self.ensure_network_metadata_mock = _p.start()
+        self.addCleanup(_p.stop)
+
     def _generate_task(self):
         return migrate.MigrationTask(self.context, self.instance, self.flavor,
                                      self.request_spec,
@@ -131,6 +139,10 @@ class MigrationTaskTestCase(test.NoDBTestCase):
 
         task.execute()
 
+        self.ensure_network_metadata_mock.assert_called_once_with(
+            self.instance)
+        self.heal_reqspec_is_bfv_mock.assert_called_once_with(
+            self.context, self.request_spec, self.instance)
         sig_mock.assert_called_once_with(self.context, self.request_spec)
         task.scheduler_client.select_destinations.assert_called_once_with(
             self.context, self.request_spec, [self.instance.uuid],

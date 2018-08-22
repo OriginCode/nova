@@ -12,20 +12,21 @@ databases, service credentials, and API endpoints.
 
 #. To create the databases, complete these steps:
 
-   * Use the database access client to connect to the database server as the
-     ``root`` user:
+   * Use the database access client to connect to the database server
+     as the ``root`` user:
 
      .. code-block:: console
 
         $ mysql -u root -p
 
-   * Create the ``nova_api``, ``nova``, and ``nova_cell0`` databases:
+   * Create the ``nova_api``, ``nova``, ``nova_cell0``, and ``placement`` databases:
 
      .. code-block:: console
 
         MariaDB [(none)]> CREATE DATABASE nova_api;
         MariaDB [(none)]> CREATE DATABASE nova;
         MariaDB [(none)]> CREATE DATABASE nova_cell0;
+        MariaDB [(none)]> CREATE DATABASE placement;
 
    * Grant proper access to the databases:
 
@@ -46,7 +47,12 @@ databases, service credentials, and API endpoints.
         MariaDB [(none)]> GRANT ALL PRIVILEGES ON nova_cell0.* TO 'nova'@'%' \
           IDENTIFIED BY 'NOVA_DBPASS';
 
-     Replace ``NOVA_DBPASS`` with a suitable password.
+        MariaDB [(none)]> GRANT ALL PRIVILEGES ON placement.* TO 'placement'@'localhost' \
+          IDENTIFIED BY 'PLACEMENT_DBPASS';
+        MariaDB [(none)]> GRANT ALL PRIVILEGES ON placement.* TO 'placement'@'%' \
+          IDENTIFIED BY 'PLACEMENT_DBPASS';
+
+     Replace ``NOVA_DBPASS`` and ``PLACEMENT_DBPASS`` with a suitable password.
 
    * Exit the database access client.
 
@@ -192,7 +198,9 @@ databases, service credentials, and API endpoints.
 
    .. code-block:: console
 
-      $ openstack service create --name placement --description "Placement API" placement
+      $ openstack service create --name placement \
+        --description "Placement API" placement
+
       +-------------+----------------------------------+
       | Field       | Value                            |
       +-------------+----------------------------------+
@@ -207,7 +215,9 @@ databases, service credentials, and API endpoints.
 
    .. code-block:: console
 
-      $ openstack endpoint create --region RegionOne placement public http://controller:8778
+      $ openstack endpoint create --region RegionOne \
+        placement public http://controller:8778
+
       +--------------+----------------------------------+
       | Field        | Value                            |
       +--------------+----------------------------------+
@@ -222,7 +232,9 @@ databases, service credentials, and API endpoints.
       | url          | http://controller:8778           |
       +--------------+----------------------------------+
 
-      $ openstack endpoint create --region RegionOne placement internal http://controller:8778
+      $ openstack endpoint create --region RegionOne \
+        placement internal http://controller:8778
+
       +--------------+----------------------------------+
       | Field        | Value                            |
       +--------------+----------------------------------+
@@ -237,7 +249,9 @@ databases, service credentials, and API endpoints.
       | url          | http://controller:8778           |
       +--------------+----------------------------------+
 
-      $ openstack endpoint create --region RegionOne placement admin http://controller:8778
+      $ openstack endpoint create --region RegionOne \
+        placement admin http://controller:8778
+
       +--------------+----------------------------------+
       | Field        | Value                            |
       +--------------+----------------------------------+
@@ -276,8 +290,8 @@ Install and configure components
         # ...
         enabled_apis = osapi_compute,metadata
 
-   * In the ``[api_database]`` and ``[database]`` sections, configure database
-     access:
+   * In the ``[api_database]``, ``[database]``, and ``[placement_database]``
+     sections, configure database access:
 
      .. path /etc/nova/nova.conf
      .. code-block:: ini
@@ -290,8 +304,12 @@ Install and configure components
         # ...
         connection = mysql+pymysql://nova:NOVA_DBPASS@controller/nova
 
+        [placement_database]
+        # ...
+        connection = mysql+pymysql://placement:PLACEMENT_DBPASS@controller/placement
+
      Replace ``NOVA_DBPASS`` with the password you chose for the Compute
-     databases.
+     databases and ``PLACEMENT_DBPASS`` for Placement database.
 
    * In the ``[DEFAULT]`` section, configure ``RabbitMQ`` message queue access:
 
@@ -317,8 +335,7 @@ Install and configure components
 
         [keystone_authtoken]
         # ...
-        auth_uri = http://controller:5000
-        auth_url = http://controller:35357
+        auth_url = http://controller:5000/v3
         memcached_servers = controller:11211
         auth_type = password
         project_domain_name = default
@@ -352,7 +369,7 @@ Install and configure components
 
         [DEFAULT]
         # ...
-        use_neutron = True
+        use_neutron = true
         firewall_driver = nova.virt.firewall.NoopFirewallDriver
 
      .. note::
@@ -361,6 +378,10 @@ Install and configure components
         Networking service includes a firewall driver, you must disable the
         Compute firewall driver by using the
         ``nova.virt.firewall.NoopFirewallDriver`` firewall driver.
+
+   * Configure the ``[neutron]`` section of **/etc/nova/nova.conf**. Refer to
+     the :neutron-doc:`Networking service install guide
+     <install/compute-install-rdo.html>` for more details.
 
    * In the ``[vnc]`` section, configure the VNC proxy to use the management
      interface IP address of the controller node:
@@ -400,12 +421,12 @@ Install and configure components
 
          [placement]
          # ...
-         os_region_name = RegionOne
+         region_name = RegionOne
          project_domain_name = Default
          project_name = service
          auth_type = password
          user_domain_name = Default
-         auth_url = http://controller:35357/v3
+         auth_url = http://controller:5000/v3
          username = placement
          password = PLACEMENT_PASS
 
@@ -418,18 +439,18 @@ Install and configure components
      access to the Placement API by adding the following configuration to
      ``/etc/httpd/conf.d/00-nova-placement-api.conf``:
 
-      .. path /etc/httpd/conf.d/00-nova-placement-api.conf
-      .. code-block:: ini
+     .. path /etc/httpd/conf.d/00-nova-placement-api.conf
+     .. code-block:: ini
 
-         <Directory /usr/bin>
-            <IfVersion >= 2.4>
-               Require all granted
-            </IfVersion>
-            <IfVersion < 2.4>
-               Order allow,deny
-               Allow from all
-            </IfVersion>
-         </Directory>
+        <Directory /usr/bin>
+           <IfVersion >= 2.4>
+              Require all granted
+           </IfVersion>
+           <IfVersion < 2.4>
+              Order allow,deny
+              Allow from all
+           </IfVersion>
+        </Directory>
 
    * Restart the httpd service:
 
@@ -437,7 +458,7 @@ Install and configure components
 
         # systemctl restart httpd
 
-#. Populate the ``nova-api`` database:
+#. Populate the ``nova-api`` and ``placement`` databases:
 
    .. code-block:: console
 
@@ -447,30 +468,30 @@ Install and configure components
 
       Ignore any deprecation messages in this output.
 
-4. Register the ``cell0`` database:
+#. Register the ``cell0`` database:
 
    .. code-block:: console
 
       # su -s /bin/sh -c "nova-manage cell_v2 map_cell0" nova
 
-5. Create the ``cell1`` cell:
+#. Create the ``cell1`` cell:
 
    .. code-block:: console
 
       # su -s /bin/sh -c "nova-manage cell_v2 create_cell --name=cell1 --verbose" nova
       109e1d4b-536a-40d0-83c6-5f121b82b650
 
-6. Populate the nova database:
+#. Populate the nova database:
 
    .. code-block:: console
 
       # su -s /bin/sh -c "nova-manage db sync" nova
 
-7. Verify nova cell0 and cell1 are registered correctly:
+#. Verify nova cell0 and cell1 are registered correctly:
 
    .. code-block:: console
 
-      # nova-manage cell_v2 list_cells
+      # su -s /bin/sh -c "nova-manage cell_v2 list_cells" nova
       +-------+--------------------------------------+
       | Name  | UUID                                 |
       +-------+--------------------------------------+
@@ -486,8 +507,8 @@ Finalize installation
   .. code-block:: console
 
      # systemctl enable openstack-nova-api.service \
-       openstack-nova-consoleauth.service openstack-nova-scheduler.service \
-       openstack-nova-conductor.service openstack-nova-novncproxy.service
+       openstack-nova-scheduler.service openstack-nova-conductor.service \
+       openstack-nova-novncproxy.service
      # systemctl start openstack-nova-api.service \
-       openstack-nova-consoleauth.service openstack-nova-scheduler.service \
-       openstack-nova-conductor.service openstack-nova-novncproxy.service
+       openstack-nova-scheduler.service openstack-nova-conductor.service \
+       openstack-nova-novncproxy.service

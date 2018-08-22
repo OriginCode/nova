@@ -90,7 +90,7 @@ are exposed to administrators:
   there is no ongoing compute API calls (running tasks), vm_state should reflect
   what the customer expect the VM to be. When combined with task states,
   a better picture can be formed regarding the server's health and progress.
-  Please see: `VM States <https://docs.openstack.org/nova/latest/reference/vm-states.html>`_.
+  Refer to :nova-doc:`VM States <reference/vm-states.html>`.
 
 - task_state represents what is happening to the instance at the
   current moment. These tasks can be generic, such as 'spawning', or specific,
@@ -613,17 +613,15 @@ TODO: Add description about how to custom scheduling policy for server booting.
 Server Consoles
 ~~~~~~~~~~~~~~~
 
-Server Consoles can also be supplied after server launched.
-There are several server console services available.
-First, users can get the console output from the specified server
-and can limit the lines of console text by setting the length.
-Second, users can access multiple types of remote consoles.
-The user can use novnc, xvpvnc, rdp-html5, spice-html5, serial,
-and webmks(start from microversion 2.8) through either the OpenStack
-dashboard or the command line. Please see `Configure remote console access
-<https://docs.openstack.org/nova/latest/admin/remote-console-access.html>`_.
-Specifically for Xenserver, it provides the ability to create,
-delete, detail, list specified server vnc consoles.
+Server Consoles can also be supplied after server launched. There are several
+server console services available. First, users can get the console output
+from the specified server and can limit the lines of console text by setting
+the length. Second, users can access multiple types of remote consoles. The
+user can use novnc, xvpvnc, rdp-html5, spice-html5, serial, and webmks(start
+from microversion 2.8) through either the OpenStack dashboard or the command
+line. Refer to :nova-doc:`Configure remote console access
+<admin/remote-console-access.html>`.  Specifically for Xenserver, it provides
+the ability to create, delete, detail, list specified server vnc consoles.
 
 Server networks
 ~~~~~~~~~~~~~~~
@@ -884,13 +882,17 @@ Metadata API
 ------------
 Nova provides a metadata api for servers to retrieve server specific metadata.
 Neutron ensures this metadata api can be accessed through a predefined ip
-address (169.254.169.254). For more details, see
-`Metadata Service <https://docs.openstack.org/nova/latest/admin/networking-nova.html#metadata-service>`_.
+address (169.254.169.254). For more details, see :nova-doc:`Metadata Service
+<user/metadata-service.html>`.
 
 Config Drive
 ------------
 
-TODO
+Nova is able to write metadata to a special configuration drive that attaches
+to the server when it boots. The server can mount this drive and read files
+from it to get information that is normally available through the metadata
+service. For more details, see :nova-doc:`Config Drive
+<user/config-drive.html>`.
 
 User data
 ---------

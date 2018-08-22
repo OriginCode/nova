@@ -14,7 +14,7 @@ import copy
 
 from nova.compute import multi_cell_list
 from nova import context
-from nova import db
+from nova.db import api as db
 from nova import exception
 from nova import objects
 from nova.objects import base
@@ -56,7 +56,7 @@ class MigrationLister(multi_cell_list.CrossCellLister):
         results = context.scatter_gather_skip_cell0(
             ctx, db.migration_get_by_uuid, marker)
         db_migration = None
-        for cell_uuid, result in results.items():
+        for result in results.values():
             if result not in (context.did_not_respond_sentinel,
                               context.raised_exception_sentinel):
                 db_migration = result

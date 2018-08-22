@@ -19,9 +19,12 @@ import time
 import six
 
 from nova.api.openstack import api_version_request as avr
+import nova.conf
 from nova.tests.functional.api_sample_tests import api_sample_base
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit.image import fake
+
+CONF = nova.conf.CONF
 
 
 class ServersSampleBase(api_sample_base.ApiSampleTestBaseV21):
@@ -96,8 +99,9 @@ class ServersSampleJsonTest(ServersSampleBase):
             use_common_server_api_samples=self.use_common_server_post)
 
     def test_servers_get(self):
-        self.stub_out('nova.db.block_device_mapping_get_all_by_instance_uuids',
-                      fakes.stub_bdm_get_all_by_instance_uuids)
+        self.stub_out(
+            'nova.db.api.block_device_mapping_get_all_by_instance_uuids',
+            fakes.stub_bdm_get_all_by_instance_uuids)
         uuid = self.test_servers_post()
         response = self._do_get('servers/%s' % uuid)
         subs = {}
@@ -117,15 +121,16 @@ class ServersSampleJsonTest(ServersSampleBase):
 
     def test_servers_list(self):
         uuid = self._post_server()
-        response = self._do_get('servers')
+        response = self._do_get('servers?limit=1')
         subs = {'id': uuid}
         self._verify_response('servers-list-resp', subs, response, 200)
 
     def test_servers_details(self):
-        self.stub_out('nova.db.block_device_mapping_get_all_by_instance_uuids',
-                      fakes.stub_bdm_get_all_by_instance_uuids)
+        self.stub_out(
+            'nova.db.api.block_device_mapping_get_all_by_instance_uuids',
+            fakes.stub_bdm_get_all_by_instance_uuids)
         uuid = self.test_servers_post()
-        response = self._do_get('servers/detail')
+        response = self._do_get('servers/detail?limit=1')
         subs = {}
         subs['hostid'] = '[a-f0-9]+'
         subs['id'] = uuid
@@ -235,6 +240,75 @@ class ServersSampleJson252Test(ServersSampleJsonTest):
     microversion = '2.52'
     scenarios = [('v2_52', {'api_major_version': 'v2.1'})]
     use_common_server_post = False
+
+
+class ServersSampleJson263Test(ServersSampleBase):
+    microversion = '2.63'
+    scenarios = [('v2_63', {'api_major_version': 'v2.1'})]
+
+    def setUp(self):
+        super(ServersSampleJson263Test, self).setUp()
+        self.common_subs = {
+            'hostid': '[a-f0-9]+',
+            'instance_name': 'instance-\d{8}',
+            'hypervisor_hostname': r'[\w\.\-]+',
+            'hostname': r'[\w\.\-]+',
+            'access_ip_v4': '1.2.3.4',
+            'access_ip_v6': '80fe::',
+            'user_data': (self.user_data if six.PY2
+                          else self.user_data.decode('utf-8')),
+            'cdrive': '.*',
+        }
+
+    def test_servers_post(self):
+        self._post_server(use_common_server_api_samples=False)
+
+    def test_server_rebuild(self):
+        uuid = self._post_server(use_common_server_api_samples=False)
+        fakes.stub_out_key_pair_funcs(self)
+        image = fake.get_valid_image_id()
+
+        params = {
+            'uuid': image,
+            'name': 'foobar',
+            'key_name': 'new-key',
+            'description': 'description of foobar',
+            'pass': 'seekr3t',
+            'access_ip_v4': '1.2.3.4',
+            'access_ip_v6': '80fe::',
+        }
+
+        resp = self._do_post('servers/%s/action' % uuid,
+                             'server-action-rebuild', params)
+
+        exp_resp = params.copy()
+        del exp_resp['uuid']
+        exp_resp['hostid'] = '[a-f0-9]+'
+
+        self._verify_response('server-action-rebuild-resp',
+                              exp_resp, resp, 202)
+
+    def test_servers_details(self):
+        uuid = self._post_server(use_common_server_api_samples=False)
+        response = self._do_get('servers/detail?limit=1')
+        subs = self.common_subs.copy()
+        subs['id'] = uuid
+        self._verify_response('servers-details-resp', subs, response, 200)
+
+    def test_server_get(self):
+        uuid = self._post_server(use_common_server_api_samples=False)
+        response = self._do_get('servers/%s' % uuid)
+        subs = self.common_subs.copy()
+        subs['id'] = uuid
+        self._verify_response('server-get-resp', subs, response, 200)
+
+    def test_server_update(self):
+        uuid = self._post_server(use_common_server_api_samples=False)
+        subs = self.common_subs.copy()
+        subs['id'] = uuid
+        response = self._do_put('servers/%s' % uuid,
+                                'server-update-req', subs)
+        self._verify_response('server-update-resp', subs, response, 200)
 
 
 class ServersUpdateSampleJsonTest(ServersSampleBase):
@@ -549,9 +623,9 @@ class ServersSampleMultiStatusJsonTest(ServersSampleBase):
 
     def test_servers_list(self):
         uuid = self._post_server()
-        response = self._do_get('servers?status=active&status=error')
-        subs = {'id': uuid}
-        self._verify_response('servers-list-resp', subs, response, 200)
+        response = self._do_get('servers?limit=1&status=active&status=error')
+        subs = {'id': uuid, 'status': 'error'}
+        self._verify_response('servers-list-status-resp', subs, response, 200)
 
 
 class ServerTriggerCrashDumpJsonTest(ServersSampleBase):

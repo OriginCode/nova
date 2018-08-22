@@ -17,6 +17,7 @@ from cinderclient import api_versions as cinder_api_versions
 from cinderclient import exceptions as cinder_exception
 from cinderclient.v2 import limits as cinder_limits
 from keystoneauth1 import loading as ks_loading
+from keystoneauth1 import session
 from keystoneclient import exceptions as keystone_exception
 import mock
 from oslo_utils import timeutils
@@ -191,9 +192,7 @@ class CinderApiTestCase(test.NoDBTestCase):
                                                     description='',
                                                     imageRef=None,
                                                     metadata=None, name='',
-                                                    project_id=None,
                                                     snapshot_id=None,
-                                                    user_id=None,
                                                     volume_type=None)
 
     @mock.patch('nova.volume.cinder.cinderclient')
@@ -211,9 +210,9 @@ class CinderApiTestCase(test.NoDBTestCase):
         self.assertRaises(exception.OverQuota, self.api.create, self.ctx,
                           1, '', '')
         mock_cinderclient.return_value.volumes.create.assert_called_once_with(
-            1, user_id=None, imageRef=None, availability_zone=None,
+            1, imageRef=None, availability_zone=None,
             volume_type=None, description='', snapshot_id=None, name='',
-            project_id=None, metadata=None)
+            metadata=None)
 
     @mock.patch('nova.volume.cinder.cinderclient')
     def test_get_all(self, mock_cinderclient):
@@ -988,8 +987,7 @@ class CinderClientTestCase(test.NoDBTestCase):
         cinder.reset_globals()
         self.ctxt = context.RequestContext('fake-user', 'fake-project')
         # Mock out the keystoneauth stuff.
-        self.mock_session = mock.Mock(
-            autospec='keystoneauth1.loading.session.Session')
+        self.mock_session = mock.Mock(autospec=session.Session)
         load_session = mock.patch('keystoneauth1.loading.'
                                   'load_session_from_conf_options',
                                   return_value=self.mock_session).start()
@@ -1062,11 +1060,15 @@ class CinderClientTestCase(test.NoDBTestCase):
         get_volume_api.assert_called_once_with(
             self.mock_session.get_endpoint.return_value)
 
+    @mock.patch('nova.volume.cinder.LOG.error')
     @mock.patch.object(ks_loading, 'load_auth_from_conf_options')
-    def test_load_auth_plugin_failed(self, mock_load_from_conf):
+    def test_load_auth_plugin_failed(self, mock_load_from_conf, mock_log_err):
         mock_load_from_conf.return_value = None
         self.assertRaises(cinder_exception.Unauthorized,
                           cinder._load_auth_plugin, CONF)
+        mock_log_err.assert_called()
+        self.assertIn('The [cinder] section of your nova configuration file',
+                      mock_log_err.call_args[0][0])
 
     @mock.patch('nova.volume.cinder._ADMIN_AUTH')
     def test_admin_context_without_token(self,

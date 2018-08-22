@@ -11,9 +11,7 @@
 #    under the License.
 
 import mock
-from wsgi_intercept import interceptor
 
-from nova.api.openstack.placement import deploy
 from nova.compute import power_state
 from nova.compute import resource_tracker
 from nova.compute import task_states
@@ -21,10 +19,11 @@ from nova.compute import vm_states
 from nova import conf
 from nova import context
 from nova import objects
-from nova.objects import fields
-from nova import test
-from nova.tests.functional.api.openstack.placement import test_report_client
+from nova import rc_fields as fields
+from nova.tests import fixtures as nova_fixtures
+from nova.tests.functional import test_report_client as test_base
 from nova.tests import uuidsentinel as uuids
+from nova.virt import driver as virt_driver
 
 CONF = conf.CONF
 VCPU = fields.ResourceClass.VCPU
@@ -33,7 +32,7 @@ DISK_GB = fields.ResourceClass.DISK_GB
 COMPUTE_HOST = 'compute-host'
 
 
-class IronicResourceTrackerTest(test.TestCase):
+class IronicResourceTrackerTest(test_base.SchedulerReportClientTestBase):
     """Tests the behaviour of the resource tracker with regards to the
     transitional period between adding support for custom resource classes in
     the placement API and integrating inventory and allocation records for
@@ -129,9 +128,16 @@ class IronicResourceTrackerTest(test.TestCase):
         ),
     }
 
+    def _set_client(self, client):
+        """Set up embedded report clients to use the direct one from the
+        interceptor.
+        """
+        self.report_client = client
+        self.rt.scheduler_client.reportclient = client
+        self.rt.reportclient = client
+
     def setUp(self):
         super(IronicResourceTrackerTest, self).setUp()
-        self.flags(auth_strategy='noauth2', group='api')
         self.flags(
             reserved_host_memory_mb=0,
             cpu_allocation_ratio=1.0,
@@ -140,20 +146,19 @@ class IronicResourceTrackerTest(test.TestCase):
         )
 
         self.ctx = context.RequestContext('user', 'project')
-        self.app = lambda: deploy.loadapp(CONF)
-        self.report_client = test_report_client.NoAuthReportClient()
 
-        driver = mock.MagicMock(autospec='nova.virt.driver.ComputeDriver')
+        driver = mock.MagicMock(autospec=virt_driver.ComputeDriver)
         driver.node_is_available.return_value = True
+        driver.update_provider_tree.side_effect = NotImplementedError
         self.driver_mock = driver
         self.rt = resource_tracker.ResourceTracker(COMPUTE_HOST, driver)
-        self.rt.scheduler_client.reportclient = self.report_client
-        self.rt.reportclient = self.report_client
-        self.url = 'http://localhost/placement'
-        self.create_fixtures()
+        self.instances = self.create_fixtures()
 
     def create_fixtures(self):
         for flavor in self.FLAVOR_FIXTURES.values():
+            # Clone the object so the class variable isn't
+            # modified by reference.
+            flavor = flavor.obj_clone()
             flavor._context = self.ctx
             flavor.obj_set_defaults()
             flavor.create()
@@ -162,14 +167,23 @@ class IronicResourceTrackerTest(test.TestCase):
         # data before adding integration for Ironic baremetal nodes with the
         # placement API...
         for cn in self.COMPUTE_NODE_FIXTURES.values():
+            # Clone the object so the class variable isn't
+            # modified by reference.
+            cn = cn.obj_clone()
             cn._context = self.ctx
             cn.obj_set_defaults()
             cn.create()
 
+        instances = {}
         for instance in self.INSTANCE_FIXTURES.values():
+            # Clone the object so the class variable isn't
+            # modified by reference.
+            instance = instance.obj_clone()
             instance._context = self.ctx
             instance.obj_set_defaults()
             instance.create()
+            instances[instance.uuid] = instance
+        return instances
 
     def placement_get_inventory(self, rp_uuid):
         url = '/resource_providers/%s/inventories' % rp_uuid
@@ -196,22 +210,16 @@ class IronicResourceTrackerTest(test.TestCase):
                     if rc['name'] not in fields.ResourceClass.STANDARD]
 
     @mock.patch('nova.compute.utils.is_volume_backed_instance',
-                return_value=False)
-    @mock.patch('nova.objects.compute_node.ComputeNode.save')
-    @mock.patch('keystoneauth1.session.Session.get_auth_headers',
-                return_value={'x-auth-token': 'admin'})
-    @mock.patch('keystoneauth1.session.Session.get_endpoint',
-                return_value='http://localhost/placement')
-    def test_ironic_ocata_to_pike(self, mock_vbi, mock_endpoint, mock_auth,
-            mock_cn):
+                new=mock.Mock(return_value=False))
+    @mock.patch('nova.objects.compute_node.ComputeNode.save', new=mock.Mock())
+    def test_ironic_ocata_to_pike(self):
         """Check that when going from an Ocata installation with Ironic having
         node's resource class attributes set, that we properly "auto-heal" the
         inventory and allocation records in the placement API to account for
         both the old-style VCPU/MEMORY_MB/DISK_GB resources as well as the new
         custom resource class from Ironic's node.resource_class attribute.
         """
-        with interceptor.RequestsInterceptor(
-                app=self.app, url=self.url):
+        with self._interceptor():
             # Before the resource tracker is "initialized", we shouldn't have
             # any compute nodes in the RT's cache...
             self.assertEqual(0, len(self.rt.compute_nodes))
@@ -293,7 +301,7 @@ class IronicResourceTrackerTest(test.TestCase):
             # RT's instance_claim().
             cn1_obj = self.COMPUTE_NODE_FIXTURES[uuids.cn1]
             cn1_nodename = cn1_obj.hypervisor_hostname
-            inst = self.INSTANCE_FIXTURES[uuids.instance1]
+            inst = self.instances[uuids.instance1]
             # Since we're pike, the scheduler would have created our
             # allocation for us. So, we can use our old update routine
             # here to mimic that before we go do the compute RT claim,
@@ -391,3 +399,81 @@ class IronicResourceTrackerTest(test.TestCase):
             # request a single amount of that custom resource class, we will
             # modify the allocation/claim to consume only the custom resource
             # class and not the VCPU, MEMORY_MB and DISK_GB.
+
+    @mock.patch('nova.compute.utils.is_volume_backed_instance',
+                new=mock.Mock(return_value=False))
+    @mock.patch('nova.objects.compute_node.ComputeNode.save', new=mock.Mock())
+    def test_node_stats_isolation(self):
+        """Regression test for bug 1784705 introduced in Ocata.
+
+        The ResourceTracker.stats field is meant to track per-node stats
+        so this test registers three compute nodes with a single RT where
+        each node has unique stats, and then makes sure that after updating
+        usage for an instance, the nodes still have their unique stats and
+        nothing is leaked from node to node.
+        """
+        self.useFixture(nova_fixtures.PlacementFixture())
+        # Before the resource tracker is "initialized", we shouldn't have
+        # any compute nodes or stats in the RT's cache...
+        self.assertEqual(0, len(self.rt.compute_nodes))
+        self.assertEqual(0, len(self.rt.stats))
+
+        # Now "initialize" the resource tracker. This is what
+        # nova.compute.manager.ComputeManager does when "initializing" the
+        # nova-compute service. Do this in a predictable order so cn1 is
+        # first and cn3 is last.
+        for cn in sorted(self.COMPUTE_NODE_FIXTURES.values(),
+                         key=lambda _cn: _cn.hypervisor_hostname):
+            nodename = cn.hypervisor_hostname
+            # Fake that each compute node has unique extra specs stats and
+            # the RT makes sure those are unique per node.
+            stats = {'node:%s' % nodename: nodename}
+            self.driver_mock.get_available_resource.return_value = {
+                'hypervisor_hostname': nodename,
+                'hypervisor_type': 'ironic',
+                'hypervisor_version': 0,
+                'vcpus': cn.vcpus,
+                'vcpus_used': cn.vcpus_used,
+                'memory_mb': cn.memory_mb,
+                'memory_mb_used': cn.memory_mb_used,
+                'local_gb': cn.local_gb,
+                'local_gb_used': cn.local_gb_used,
+                'numa_topology': None,
+                'resource_class': None,  # Act like admin hasn't set yet...
+                'stats': stats,
+            }
+            self.driver_mock.get_inventory.return_value = {
+                'CUSTOM_SMALL_IRON': {
+                    'total': 1,
+                    'reserved': 0,
+                    'min_unit': 1,
+                    'max_unit': 1,
+                    'step_size': 1,
+                    'allocation_ratio': 1.0,
+                },
+            }
+            self.rt.update_available_resource(self.ctx, nodename)
+
+        self.assertEqual(3, len(self.rt.compute_nodes))
+        self.assertEqual(3, len(self.rt.stats))
+
+        def _assert_stats():
+            # Make sure each compute node has a unique set of stats and
+            # they don't accumulate across nodes.
+            for _cn in self.rt.compute_nodes.values():
+                node_stats_key = 'node:%s' % _cn.hypervisor_hostname
+                self.assertIn(node_stats_key, _cn.stats)
+                node_stat_count = 0
+                for stat in _cn.stats:
+                    if stat.startswith('node:'):
+                        node_stat_count += 1
+                self.assertEqual(1, node_stat_count, _cn.stats)
+        _assert_stats()
+
+        # Now "spawn" an instance to the first compute node by calling the
+        # RT's instance_claim().
+        cn1_obj = self.COMPUTE_NODE_FIXTURES[uuids.cn1]
+        cn1_nodename = cn1_obj.hypervisor_hostname
+        inst = self.instances[uuids.instance1]
+        with self.rt.instance_claim(self.ctx, inst, cn1_nodename):
+            _assert_stats()

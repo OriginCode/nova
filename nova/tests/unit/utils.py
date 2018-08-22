@@ -23,7 +23,7 @@ from six.moves import range
 from nova.compute import flavors
 import nova.conf
 import nova.context
-import nova.db
+from nova.db import api as db
 from nova import exception
 from nova.image import glance
 from nova.network import minidns
@@ -64,11 +64,12 @@ def get_test_flavor(context=None, options=None):
                    'swap': 1024}
 
     test_flavor.update(options)
-
+    flavor_ref = objects.Flavor(context, **test_flavor)
     try:
-        flavor_ref = nova.db.flavor_create(context, test_flavor)
+        flavor_ref.create()
     except (exception.FlavorExists, exception.FlavorIdExists):
-        flavor_ref = nova.db.flavor_get_by_name(context, 'kinda.big')
+        flavor_ref = objects.Flavor.get_by_flavor_id(
+            context, test_flavor['flavorid'])
     return flavor_ref
 
 
@@ -99,7 +100,7 @@ def get_test_instance(context=None, flavor=None, obj=False):
         instance.create()
     else:
         flavors.save_flavor_info(test_instance['system_metadata'], flavor, '')
-        instance = nova.db.instance_create(context, test_instance)
+        instance = db.instance_create(context, test_instance)
     return instance
 
 FAKE_NETWORK_VLAN = 100
@@ -313,8 +314,7 @@ def assert_instance_delete_notification_by_uuid(
         mock.call(expected_notifier,
                   expected_context,
                   match_by_instance_uuid,
-                  'delete.end',
-                  system_metadata={})])
+                  'delete.end')])
 
     for call in mock_notify.call_args_list:
         if expect_targeted_context:

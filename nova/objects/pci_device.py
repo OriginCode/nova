@@ -21,7 +21,7 @@ from oslo_utils import uuidutils
 from oslo_utils import versionutils
 import six
 
-from nova import db
+from nova.db import api as db
 from nova import exception
 from nova import objects
 from nova.objects import base
@@ -251,7 +251,6 @@ class PciDevice(base.NovaPersistentObject, base.NovaObject):
             if 'uuid' not in self:
                 self.uuid = uuidutils.generate_uuid()
             updates = self.obj_get_changes()
-            updates['extra_info'] = self.extra_info
 
             if 'extra_info' in updates:
                 updates['extra_info'] = jsonutils.dumps(updates['extra_info'])

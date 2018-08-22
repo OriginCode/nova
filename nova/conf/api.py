@@ -254,25 +254,18 @@ Possible values:
 
 * Any string, including an empty string (the default).
 """),
-]
-
-allow_instance_snapshots_opts = [
-    cfg.BoolOpt("allow_instance_snapshots",
-        default=True,
-        deprecated_group="DEFAULT",
-        deprecated_for_removal=True,
-        deprecated_since="16.0.0",
-        deprecated_reason="This option disables the createImage server action "
-                          "API in a non-discoverable way and is thus a "
-                          "barrier to interoperability. Also, it is not used "
-                          "for other APIs that create snapshots like shelve "
-                          "or createBackup. Disabling snapshots should be "
-                          "done via policy if so desired.",
+    cfg.BoolOpt("instance_list_per_project_cells",
+        default=False,
         help="""
-Operators can turn off the ability for a user to take snapshots of their
-instances by setting this option to False. When disabled, any attempt to
-take a snapshot will result in a HTTP 400 response ("Bad Request").
-""")
+When enabled, this will cause the API to only query cell databases
+in which the tenant has mapped instances. This requires an additional
+(fast) query in the API database before each list, but also
+(potentially) limits the number of cell databases that must be queried
+to provide the result. If you have a small number of cells, or tenants
+are likely to have instances in all cells, then this should be
+False. If you have many cells, especially if you confine tenants to a
+small subset of those cells, this should be True.
+"""),
 ]
 
 # NOTE(edleafe): I would like to import the value directly from
@@ -316,13 +309,6 @@ Possible values:
 """)
 ]
 
-fping_path_opts = [
-    cfg.StrOpt("fping_path",
-        default="/usr/sbin/fping",
-        deprecated_group="DEFAULT",
-        help="The full path to the fping binary.")
-]
-
 os_network_opts = [
     cfg.BoolOpt("use_neutron_default_nets",
         default=False,
@@ -364,9 +350,7 @@ API_OPTS = (auth_opts +
             metadata_opts +
             file_opts +
             osapi_opts +
-            allow_instance_snapshots_opts +
             osapi_hide_opts +
-            fping_path_opts +
             os_network_opts +
             enable_inst_pw_opts)
 

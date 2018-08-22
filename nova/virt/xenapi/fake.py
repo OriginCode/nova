@@ -109,11 +109,14 @@ def _create_pool(name_label):
                           {'name_label': name_label})
 
 
-def create_host(name_label, hostname='fake_name', address='fake_addr'):
+def create_host(name_label, hostname='fake_name', address='fake_addr',
+                software_version={'platform_name': 'fake_platform',
+                                  'platform_version': '1.0.0'}):
     host_ref = _create_object('host',
-                               {'name_label': name_label,
-                                'hostname': hostname,
-                                'address': address})
+                              {'name_label': name_label,
+                               'hostname': hostname,
+                               'address': address,
+                               'software_version': software_version})
     host_default_sr_ref = _create_local_srs(host_ref)
     _create_local_pif(host_ref)
 
@@ -352,7 +355,8 @@ def _create_local_pif(host_ref):
                               'IP': '10.1.1.1',
                               'IPv6': '',
                               'uuid': '',
-                              'management': 'true'})
+                              'management': 'true',
+                              'host': 'fake_host_ref'})
     _db_content['PIF'][pif_ref]['uuid'] = pif_ref
     return pif_ref
 
@@ -756,6 +760,9 @@ class SessionBase(object):
     def _plugin_xenhost_host_uptime(self, method, args):
         return jsonutils.dumps({"uptime": "fake uptime"})
 
+    def _plugin_xenhost_network_config(self, method, args):
+        return pickle.dumps({"fake_network": "fake conf"})
+
     def _plugin_xenhost_get_pci_device_details(self, method, args):
         """Simulate the ouput of three pci devices.
 
@@ -1002,6 +1009,18 @@ class SessionBase(object):
             return self._get_by_field(
                 _db_content[cls], func[len('get_by_'):], params[1],
                 return_singleton=return_singleton)
+
+        if func == 'get_VIFs':
+            self._check_arg_count(params, 2)
+            # FIXME(mriedem): figure out how to use _get_by_field for VIFs,
+            # or just stop relying on this fake DB and use mock
+            return _db_content['VIF'].keys()
+
+        if func == 'get_bridge':
+            self._check_arg_count(params, 2)
+            # FIXME(mriedem): figure out how to use _get_by_field for bridge,
+            # or just stop relying on this fake DB and use mock
+            return 'fake_bridge'
 
         if len(params) == 2:
             field = func[len('get_'):]

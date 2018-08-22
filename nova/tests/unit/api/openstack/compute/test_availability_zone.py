@@ -16,15 +16,15 @@ import datetime
 
 import iso8601
 import mock
-from oslo_config import cfg
 
 from nova.api.openstack.compute import availability_zone as az_v21
 from nova.api.openstack.compute import servers as servers_v21
 from nova import availability_zones
 from nova.compute import api as compute_api
 from nova import context
-from nova import db
+from nova.db import api as db
 from nova import exception
+from nova import objects
 from nova import test
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit.image import fake
@@ -33,7 +33,6 @@ from nova.tests.unit.objects import test_service
 from nova.tests import uuidsentinel
 
 
-CONF = cfg.CONF
 FAKE_UUID = fakes.FAKE_UUID
 
 
@@ -84,7 +83,7 @@ class AvailabilityZoneApiTestV21(test.NoDBTestCase):
         super(AvailabilityZoneApiTestV21, self).setUp()
         availability_zones.reset_cache()
         fakes.stub_out_nw_api(self)
-        self.stub_out('nova.db.service_get_all', fake_service_get_all)
+        self.stub_out('nova.db.api.service_get_all', fake_service_get_all)
         self.stub_out('nova.availability_zones.set_availability_zones',
                       lambda c, services: services)
         self.stub_out('nova.servicegroup.API.service_is_up',
@@ -213,10 +212,12 @@ class ServersControllerCreateTestV21(test.TestCase):
                                           'binary': "nova-compute",
                                           'topic': 'compute',
                                           'report_count': 0})
-        agg = db.aggregate_create(admin_context,
-                {'name': 'agg1', 'uuid': uuidsentinel.agg_uuid},
-                {'availability_zone': 'nova'})
-        db.aggregate_host_add(admin_context, agg['id'], 'host1_zones')
+        agg = objects.Aggregate(admin_context,
+                                name='agg1',
+                                uuid=uuidsentinel.agg_uuid,
+                                metadata={'availability_zone': 'nova'})
+        agg.create()
+        agg.add_host('host1_zones')
         return self.req, body
 
     def test_create_instance_with_availability_zone(self):

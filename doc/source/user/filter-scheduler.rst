@@ -325,14 +325,32 @@ would be available, and by default the |ComputeFilter|,
 |ImagePropertiesFilter|, |ServerGroupAntiAffinityFilter|,
 and |ServerGroupAffinityFilter| would be used.
 
+Each filter selects hosts in a different way and has different costs. The order
+of ``filter_scheduler.enabled_filters`` affects scheduling performance. The
+general suggestion is to filter out invalid hosts as soon as possible to avoid
+unnecessary costs.  We can sort ``filter_scheduler.enabled_filters`` items by
+their costs in reverse order. For example, ComputeFilter is better before any
+resource calculating filters like RamFilter, CoreFilter.
+
+In medium/large environments having AvailabilityZoneFilter before any
+capability or resource calculating filters can be useful.
+
 Writing Your Own Filter
 -----------------------
 
 To create **your own filter** you must inherit from
-|BaseHostFilter| and implement one method:
-``host_passes``. This method should return ``True`` if a host passes the filter. It
-takes ``host_state`` (describing the host) and ``filter_properties`` dictionary as the
-parameters.
+|BaseHostFilter| and implement one method: ``host_passes``.
+This method should return ``True`` if a host passes the filter and return
+``False`` elsewhere.
+It takes two parameters (named arbitrarily as ``host_state`` and ``spec_obj``):
+
+* the ``HostState`` object allows to get attributes of the host.
+* the ``RequestSpec`` object describes the user request, including the flavor,
+  the image and the scheduler hints.
+
+For further details about each of those objects and their corresponding
+attributes, please refer to the codebase (at least by looking at the other
+filters code) or ask for help in the #openstack-nova IRC channel.
 
 As an example, nova.conf could contain the following scheduler-related
 settings:
@@ -352,16 +370,6 @@ With these settings, nova will use the ``FilterScheduler`` for the scheduler
 driver. All of the standard nova filters and MyFilter are available to the
 FilterScheduler, but just the RamFilter, ComputeFilter, and MyFilter will be
 used on each request.
-
-Each filter selects hosts in a different way and has different costs. The order
-of ``filter_scheduler.enabled_filters`` affects scheduling performance. The
-general suggestion is to filter out invalid hosts as soon as possible to avoid
-unnecessary costs.  We can sort ``filter_scheduler.enabled_filters`` items by
-their costs in reverse order. For example, ComputeFilter is better before any
-resource calculating filters like RamFilter, CoreFilter.
-
-In medium/large environments having AvailabilityZoneFilter before any
-capability or resource calculating filters can be useful.
 
 Weights
 -------
@@ -389,8 +397,14 @@ The Filter Scheduler weighs hosts based on the config option
 `nova.scheduler.weights.all_weighers`, which selects the following weighers:
 
 * |RAMWeigher| Compute weight based on available RAM on the compute node.
-  Sort with the largest weight winning. If the multiplier is negative, the
+  Sort with the largest weight winning. If the multiplier,
+  :oslo.config:option:`filter_scheduler.ram_weight_multiplier`, is negative, the
   host with least RAM available will win (useful for stacking hosts, instead
+  of spreading).
+* |CPUWeigher| Compute weight based on available vCPUs on the compute node.
+  Sort with the largest weight winning. If the multiplier,
+  :oslo.config:option:`filter_scheduler.cpu_weight_multiplier`, is negative, the
+  host with least CPUs available will win (useful for stacking hosts, instead
   of spreading).
 * |DiskWeigher| Hosts are weighted and sorted by free disk space with the largest
   weight winning.  If the multiplier is negative, the host with less disk space available
@@ -437,6 +451,10 @@ The Filter Scheduler weighs hosts based on the config option
   a negative value would mean that the anti-affinity weigher would prefer
   collocating placement.
 
+* |BuildFailureWeigher| Weigh hosts by the number of recent failed boot attempts.
+  It considers the build failure counter and can negatively weigh hosts with
+  recent failures. This avoids taking computes fully out of rotation.
+
 Filter Scheduler makes a local list of acceptable hosts by repeated filtering and
 weighing. Each time it chooses a host, it virtually consumes resources on it,
 so subsequent selections can adjust accordingly. It is useful if the customer
@@ -481,6 +499,7 @@ in :mod:`nova.tests.scheduler`.
 .. |AggregateMultiTenancyIsolation| replace:: :class:`AggregateMultiTenancyIsolation <nova.scheduler.filters.aggregate_multitenancy_isolation.AggregateMultiTenancyIsolation>`
 .. |NUMATopologyFilter| replace:: :class:`NUMATopologyFilter <nova.scheduler.filters.numa_topology_filter.NUMATopologyFilter>`
 .. |RAMWeigher| replace:: :class:`RAMWeigher <nova.scheduler.weights.ram.RAMWeigher>`
+.. |CPUWeigher| replace:: :class:`CPUWeigher <nova.scheduler.weights.cpu.CPUWeigher>`
 .. |AggregateImagePropertiesIsolation| replace:: :class:`AggregateImagePropertiesIsolation <nova.scheduler.filters.aggregate_image_properties_isolation.AggregateImagePropertiesIsolation>`
 .. |MetricsFilter| replace:: :class:`MetricsFilter <nova.scheduler.filters.metrics_filter.MetricsFilter>`
 .. |MetricsWeigher| replace:: :class:`MetricsWeigher <nova.scheduler.weights.metrics.MetricsWeigher>`
@@ -489,3 +508,4 @@ in :mod:`nova.tests.scheduler`.
 .. |ServerGroupSoftAffinityWeigher| replace:: :class:`ServerGroupSoftAffinityWeigher <nova.scheduler.weights.affinity.ServerGroupSoftAffinityWeigher>`
 .. |ServerGroupSoftAntiAffinityWeigher| replace:: :class:`ServerGroupSoftAntiAffinityWeigher <nova.scheduler.weights.affinity.ServerGroupSoftAntiAffinityWeigher>`
 .. |DiskWeigher| replace:: :class:`DiskWeigher <nova.scheduler.weights.disk.DiskWeigher>`
+.. |BuildFailureWeigher| replace:: :class:`BuildFailureWeigher <nova.scheduler.weights.compute.BuildFailureWeigher>`

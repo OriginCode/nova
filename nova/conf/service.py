@@ -49,6 +49,7 @@ for more than service_down_time, then the compute node is considered down.
 Related Options:
 
 * report_interval (service_down_time should not be less than report_interval)
+* scheduler.periodic_task_interval
 """),
     cfg.BoolOpt('periodic_enable',
                default=True,
@@ -157,18 +158,7 @@ Possible Values:
 * Any positive integer
 * None (default value)
 """),
-    # NOTE(sdague): the network_manager has a bunch of different in
-    # tree classes that are still legit options. In Newton we should
-    # turn this into a selector.
-    cfg.StrOpt('network_manager',
-               choices=[
-                   'nova.network.manager.FlatManager',
-                   'nova.network.manager.FlatDHCPManager',
-                   'nova.network.manager.VlanManager',
-               ],
-               default='nova.network.manager.VlanManager',
-               help='Full class name for the Manager for network'),
-    ]
+]
 
 
 def register_opts(conf):

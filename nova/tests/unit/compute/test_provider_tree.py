@@ -32,18 +32,22 @@ class TestProviderTree(test.NoDBTestCase):
             objects=[self.compute_node1, self.compute_node2],
         )
 
+    def _pt_with_cns(self):
+        pt = provider_tree.ProviderTree()
+        for cn in self.compute_nodes:
+            pt.new_root(cn.hypervisor_hostname, cn.uuid, generation=0)
+        return pt
+
     def test_tree_ops(self):
         cn1 = self.compute_node1
         cn2 = self.compute_node2
-        cns = self.compute_nodes
-        pt = provider_tree.ProviderTree(cns)
+        pt = self._pt_with_cns()
 
         self.assertRaises(
             ValueError,
             pt.new_root,
             cn1.hypervisor_hostname,
             cn1.uuid,
-            1,
         )
 
         self.assertTrue(pt.exists(cn1.uuid))
@@ -87,6 +91,12 @@ class TestProviderTree(test.NoDBTestCase):
             uuids.non_existing_rp,
         )
 
+        # Fail attempting to add a child that already exists in the tree
+        # Existing provider is a child; search by name
+        self.assertRaises(ValueError, pt.new_child, 'numa_cell0', cn1.uuid)
+        # Existing provider is a root; search by UUID
+        self.assertRaises(ValueError, pt.new_child, cn1.uuid, cn2.uuid)
+
         # Test data().
         # Root, by UUID
         cn1_snap = pt.data(cn1.uuid)
@@ -106,7 +116,7 @@ class TestProviderTree(test.NoDBTestCase):
         )
         self.assertFalse(pt.exists(cn3.uuid))
         self.assertFalse(pt.exists(cn3.hypervisor_hostname))
-        pt.new_root(cn3.hypervisor_hostname, cn3.uuid, 1)
+        pt.new_root(cn3.hypervisor_hostname, cn3.uuid)
 
         self.assertTrue(pt.exists(cn3.uuid))
         self.assertTrue(pt.exists(cn3.hypervisor_hostname))
@@ -116,7 +126,6 @@ class TestProviderTree(test.NoDBTestCase):
             pt.new_root,
             cn3.hypervisor_hostname,
             cn3.uuid,
-            1,
         )
 
         self.assertRaises(
@@ -320,12 +329,12 @@ class TestProviderTree(test.NoDBTestCase):
         # always comes after its parent (and by extension, its ancestors too).
         puuids = pt.get_provider_uuids()
         for desc in (uuids.child1, uuids.child2):
-            self.assertTrue(puuids.index(desc) > puuids.index(uuids.root))
+            self.assertGreater(puuids.index(desc), puuids.index(uuids.root))
         for desc in (uuids.grandchild1_1, uuids.grandchild1_2):
-            self.assertTrue(puuids.index(desc) > puuids.index(uuids.child1))
+            self.assertGreater(puuids.index(desc), puuids.index(uuids.child1))
         for desc in (uuids.ggc1_2_1, uuids.ggc1_2_2, uuids.ggc1_2_3):
-            self.assertTrue(
-                puuids.index(desc) > puuids.index(uuids.grandchild1_2))
+            self.assertGreater(
+                puuids.index(desc), puuids.index(uuids.grandchild1_2))
 
     def test_populate_from_iterable_with_root_update(self):
         # Ensure we can update hierarchies, including adding children, in a
@@ -406,8 +415,7 @@ class TestProviderTree(test.NoDBTestCase):
         self.assertFalse(pt.exists(uuids.grandchild))
 
     def test_has_inventory_changed_no_existing_rp(self):
-        cns = self.compute_nodes
-        pt = provider_tree.ProviderTree(cns)
+        pt = self._pt_with_cns()
         self.assertRaises(
             ValueError,
             pt.has_inventory_changed,
@@ -416,26 +424,22 @@ class TestProviderTree(test.NoDBTestCase):
         )
 
     def test_update_inventory_no_existing_rp(self):
-        cns = self.compute_nodes
-        pt = provider_tree.ProviderTree(cns)
+        pt = self._pt_with_cns()
         self.assertRaises(
             ValueError,
             pt.update_inventory,
             uuids.non_existing_rp,
             {},
-            1,
         )
 
     def test_has_inventory_changed(self):
         cn = self.compute_node1
-        cns = self.compute_nodes
-        pt = provider_tree.ProviderTree(cns)
+        pt = self._pt_with_cns()
         rp_gen = 1
 
         cn_inv = {
             'VCPU': {
                 'total': 8,
-                'reserved': 0,
                 'min_unit': 1,
                 'max_unit': 8,
                 'step_size': 1,
@@ -459,11 +463,13 @@ class TestProviderTree(test.NoDBTestCase):
             },
         }
         self.assertTrue(pt.has_inventory_changed(cn.uuid, cn_inv))
-        self.assertTrue(pt.update_inventory(cn.uuid, cn_inv, rp_gen))
+        self.assertTrue(pt.update_inventory(cn.uuid, cn_inv,
+                                            generation=rp_gen))
 
         # Updating with the same inventory info should return False
         self.assertFalse(pt.has_inventory_changed(cn.uuid, cn_inv))
-        self.assertFalse(pt.update_inventory(cn.uuid, cn_inv, rp_gen))
+        self.assertFalse(pt.update_inventory(cn.uuid, cn_inv,
+                                             generation=rp_gen))
 
         # A data-grab's inventory should be "equal" to the original
         cndata = pt.data(cn.uuid)
@@ -471,40 +477,48 @@ class TestProviderTree(test.NoDBTestCase):
 
         cn_inv['VCPU']['total'] = 6
         self.assertTrue(pt.has_inventory_changed(cn.uuid, cn_inv))
-        self.assertTrue(pt.update_inventory(cn.uuid, cn_inv, rp_gen))
+        self.assertTrue(pt.update_inventory(cn.uuid, cn_inv,
+                                            generation=rp_gen))
 
         # The data() result was not affected; now the tree's copy is different
         self.assertTrue(pt.has_inventory_changed(cn.uuid, cndata.inventory))
 
         self.assertFalse(pt.has_inventory_changed(cn.uuid, cn_inv))
-        self.assertFalse(pt.update_inventory(cn.uuid, cn_inv, rp_gen))
+        self.assertFalse(pt.update_inventory(cn.uuid, cn_inv,
+                                             generation=rp_gen))
 
         # Deleting a key in the new record should NOT result in changes being
         # recorded...
         del cn_inv['VCPU']['allocation_ratio']
         self.assertFalse(pt.has_inventory_changed(cn.uuid, cn_inv))
-        self.assertFalse(pt.update_inventory(cn.uuid, cn_inv, rp_gen))
+        self.assertFalse(pt.update_inventory(cn.uuid, cn_inv,
+                                             generation=rp_gen))
 
         del cn_inv['MEMORY_MB']
         self.assertTrue(pt.has_inventory_changed(cn.uuid, cn_inv))
-        self.assertTrue(pt.update_inventory(cn.uuid, cn_inv, rp_gen))
+        self.assertTrue(pt.update_inventory(cn.uuid, cn_inv,
+                                            generation=rp_gen))
+
+        # ...but *adding* a key in the new record *should* result in changes
+        # being recorded
+        cn_inv['VCPU']['reserved'] = 0
+        self.assertTrue(pt.has_inventory_changed(cn.uuid, cn_inv))
+        self.assertTrue(pt.update_inventory(cn.uuid, cn_inv,
+                                            generation=rp_gen))
 
     def test_have_traits_changed_no_existing_rp(self):
-        cns = self.compute_nodes
-        pt = provider_tree.ProviderTree(cns)
+        pt = self._pt_with_cns()
         self.assertRaises(
             ValueError, pt.have_traits_changed, uuids.non_existing_rp, [])
 
     def test_update_traits_no_existing_rp(self):
-        cns = self.compute_nodes
-        pt = provider_tree.ProviderTree(cns)
+        pt = self._pt_with_cns()
         self.assertRaises(
             ValueError, pt.update_traits, uuids.non_existing_rp, [])
 
     def test_have_traits_changed(self):
         cn = self.compute_node1
-        cns = self.compute_nodes
-        pt = provider_tree.ProviderTree(cns)
+        pt = self._pt_with_cns()
         rp_gen = 1
 
         traits = [
@@ -544,22 +558,61 @@ class TestProviderTree(test.NoDBTestCase):
         self.assertEqual(rp_gen, pt.data(cn.uuid).generation)
         self.assertTrue(pt.has_traits(cn.uuid, traits[-1:]))
 
+    def test_add_remove_traits(self):
+        cn = self.compute_node1
+        pt = self._pt_with_cns()
+        self.assertEqual(set([]), pt.data(cn.uuid).traits)
+        # Test adding with no trait provided for a bogus provider
+        pt.add_traits('bogus-uuid')
+        self.assertEqual(
+            set([]),
+            pt.data(cn.uuid).traits
+        )
+        # Add a couple of traits
+        pt.add_traits(cn.uuid, "HW_GPU_API_DIRECT3D_V7_0", "HW_NIC_OFFLOAD_SG")
+        self.assertEqual(
+            set(["HW_GPU_API_DIRECT3D_V7_0", "HW_NIC_OFFLOAD_SG"]),
+            pt.data(cn.uuid).traits)
+        # set() behavior: add a trait that's already there, and one that's not.
+        # The unrelated one is unaffected.
+        pt.add_traits(cn.uuid, "HW_GPU_API_DIRECT3D_V7_0", "HW_CPU_X86_AVX")
+        self.assertEqual(
+            set(["HW_GPU_API_DIRECT3D_V7_0", "HW_NIC_OFFLOAD_SG",
+                 "HW_CPU_X86_AVX"]),
+            pt.data(cn.uuid).traits)
+        # Test removing with no trait provided for a bogus provider
+        pt.remove_traits('bogus-uuid')
+        self.assertEqual(
+            set(["HW_GPU_API_DIRECT3D_V7_0", "HW_NIC_OFFLOAD_SG",
+                 "HW_CPU_X86_AVX"]),
+            pt.data(cn.uuid).traits)
+        # Now remove a trait
+        pt.remove_traits(cn.uuid, "HW_NIC_OFFLOAD_SG")
+        self.assertEqual(
+            set(["HW_GPU_API_DIRECT3D_V7_0", "HW_CPU_X86_AVX"]),
+            pt.data(cn.uuid).traits)
+        # set() behavior: remove a trait that's there, and one that's not.
+        # The unrelated one is unaffected.
+        pt.remove_traits(cn.uuid,
+                         "HW_NIC_OFFLOAD_SG", "HW_GPU_API_DIRECT3D_V7_0")
+        self.assertEqual(set(["HW_CPU_X86_AVX"]), pt.data(cn.uuid).traits)
+        # Remove the last trait, and an unrelated one
+        pt.remove_traits(cn.uuid, "CUSTOM_FOO", "HW_CPU_X86_AVX")
+        self.assertEqual(set([]), pt.data(cn.uuid).traits)
+
     def test_have_aggregates_changed_no_existing_rp(self):
-        cns = self.compute_nodes
-        pt = provider_tree.ProviderTree(cns)
+        pt = self._pt_with_cns()
         self.assertRaises(
             ValueError, pt.have_aggregates_changed, uuids.non_existing_rp, [])
 
     def test_update_aggregates_no_existing_rp(self):
-        cns = self.compute_nodes
-        pt = provider_tree.ProviderTree(cns)
+        pt = self._pt_with_cns()
         self.assertRaises(
             ValueError, pt.update_aggregates, uuids.non_existing_rp, [])
 
     def test_have_aggregates_changed(self):
         cn = self.compute_node1
-        cns = self.compute_nodes
-        pt = provider_tree.ProviderTree(cns)
+        pt = self._pt_with_cns()
         rp_gen = 1
 
         aggregates = [
@@ -601,3 +654,29 @@ class TestProviderTree(test.NoDBTestCase):
         self.assertTrue(pt.in_aggregates(cn.uuid, aggregates[-1:]))
         # Previously-taken data now differs
         self.assertTrue(pt.have_aggregates_changed(cn.uuid, cnsnap.aggregates))
+
+    def test_add_remove_aggregates(self):
+        cn = self.compute_node1
+        pt = self._pt_with_cns()
+        self.assertEqual(set([]), pt.data(cn.uuid).aggregates)
+        # Add a couple of aggregates
+        pt.add_aggregates(cn.uuid, uuids.agg1, uuids.agg2)
+        self.assertEqual(
+            set([uuids.agg1, uuids.agg2]),
+            pt.data(cn.uuid).aggregates)
+        # set() behavior: add an aggregate that's already there, and one that's
+        # not. The unrelated one is unaffected.
+        pt.add_aggregates(cn.uuid, uuids.agg1, uuids.agg3)
+        self.assertEqual(set([uuids.agg1, uuids.agg2, uuids.agg3]),
+                         pt.data(cn.uuid).aggregates)
+        # Now remove an aggregate
+        pt.remove_aggregates(cn.uuid, uuids.agg2)
+        self.assertEqual(set([uuids.agg1, uuids.agg3]),
+                         pt.data(cn.uuid).aggregates)
+        # set() behavior: remove an aggregate that's there, and one that's not.
+        # The unrelated one is unaffected.
+        pt.remove_aggregates(cn.uuid, uuids.agg2, uuids.agg3)
+        self.assertEqual(set([uuids.agg1]), pt.data(cn.uuid).aggregates)
+        # Remove the last aggregate, and an unrelated one
+        pt.remove_aggregates(cn.uuid, uuids.agg4, uuids.agg1)
+        self.assertEqual(set([]), pt.data(cn.uuid).aggregates)

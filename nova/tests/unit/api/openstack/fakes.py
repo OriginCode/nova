@@ -30,7 +30,7 @@ from nova.api.openstack import compute
 from nova.api.openstack.compute import versions
 from nova.api.openstack import urlmap
 from nova.api.openstack import wsgi as os_wsgi
-from nova.compute import api as compute_api
+from nova.api import wsgi
 from nova.compute import flavors
 from nova.compute import vm_states
 import nova.conf
@@ -45,7 +45,6 @@ from nova.tests.unit import fake_block_device
 from nova.tests.unit import fake_network
 from nova.tests.unit.objects import test_keypair
 from nova import utils
-from nova import wsgi
 
 
 CONF = nova.conf.CONF
@@ -100,10 +99,34 @@ def stub_out_key_pair_funcs(testcase, have_key_pair=True, **kwargs):
         return []
 
     if have_key_pair:
-        testcase.stub_out('nova.db.key_pair_get_all_by_user', key_pair)
-        testcase.stub_out('nova.db.key_pair_get', one_key_pair)
+        testcase.stub_out('nova.db.api.key_pair_get_all_by_user', key_pair)
+        testcase.stub_out('nova.db.api.key_pair_get', one_key_pair)
     else:
-        testcase.stub_out('nova.db.key_pair_get_all_by_user', no_key_pair)
+        testcase.stub_out('nova.db.api.key_pair_get_all_by_user', no_key_pair)
+
+
+def stub_out_trusted_certs(test, certs=None):
+    def fake_trusted_certs(cls, context, instance_uuid):
+        return objects.TrustedCerts(ids=trusted_certs)
+
+    def fake_instance_extra(context, instance_uuid, columns):
+        if columns is ['trusted_certs']:
+            return {'trusted_certs': trusted_certs}
+        else:
+            return {'numa_topology': None,
+                    'pci_requests': None,
+                    'flavor': None,
+                    'vcpu_model': None,
+                    'trusted_certs': trusted_certs,
+                    'migration_context': None}
+
+    trusted_certs = []
+    if certs:
+        trusted_certs = certs
+    test.stub_out('nova.objects.TrustedCerts.get_by_instance_uuid',
+                  fake_trusted_certs)
+    test.stub_out('nova.db.instance_extra_get_by_instance_uuid',
+                  fake_instance_extra)
 
 
 def stub_out_instance_quota(test, allowed, quota, resource='instances'):
@@ -128,7 +151,7 @@ def stub_out_networking(test):
     test.stub_out('oslo_utils.netutils.get_my_ipv4', get_my_ip)
 
 
-def stub_out_compute_api_snapshot(stubs):
+def stub_out_compute_api_snapshot(test):
 
     def snapshot(self, context, instance, name, extra_properties=None):
         # emulate glance rejecting image names which are too long
@@ -137,15 +160,14 @@ def stub_out_compute_api_snapshot(stubs):
         return dict(id='123', status='ACTIVE', name=name,
                     properties=extra_properties)
 
-    stubs.Set(compute_api.API, 'snapshot', snapshot)
+    test.stub_out('nova.compute.api.API.snapshot', snapshot)
 
 
 class stub_out_compute_api_backup(object):
 
-    def __init__(self, stubs):
-        self.stubs = stubs
+    def __init__(self, test):
         self.extra_props_last_call = None
-        stubs.Set(compute_api.API, 'backup', self.backup)
+        test.stub_out('nova.compute.api.API.backup', self.backup)
 
     def backup(self, context, instance, name, backup_type, rotation,
                extra_properties=None):
@@ -179,9 +201,8 @@ def stub_out_nw_api(test, cls=None, private=None, publics=None):
         def validate_networks(self, context, networks, max_count):
             return max_count
 
-        def create_pci_requests_for_sriov_ports(self, context,
-                                                system_metadata,
-                                                requested_networks):
+        def create_resource_requests(self, context, requested_networks,
+                                     pci_requests):
             pass
 
     if cls is None:
@@ -375,6 +396,9 @@ def fake_instance_get_all_by_filters(num_servers=5, **kwargs):
         if 'sort_dirs' in kwargs:
             kwargs.pop('sort_dirs')
 
+        if 'cell_mappings' in kwargs:
+            kwargs.pop('cell_mappings')
+
         for i in range(num_servers):
             uuid = get_fake_uuid(i)
             server = stub_instance(id=i + 1, uuid=uuid,
@@ -423,7 +447,7 @@ def stub_instance(id=1, user_id=None, project_id=None, host=None,
                   memory_mb=0, vcpus=0, root_gb=0, ephemeral_gb=0,
                   instance_type=None, launch_index=0, kernel_id="",
                   ramdisk_id="", user_data=None, system_metadata=None,
-                  services=None):
+                  services=None, trusted_certs=None):
     if user_id is None:
         user_id = 'fake_user'
     if project_id is None:
@@ -530,10 +554,12 @@ def stub_instance(id=1, user_id=None, project_id=None, host=None,
         "extra": {"numa_topology": None,
                   "pci_requests": None,
                   "flavor": flavorinfo,
-              },
+                  "trusted_certs": trusted_certs,
+                  },
         "cleaned": cleaned,
         "services": services,
-        "tags": []}
+        "tags": [],
+    }
 
     instance.update(info_cache)
     instance['info_cache']['instance_uuid'] = instance['uuid']
@@ -602,16 +628,8 @@ def stub_volume_update(self, context, *args, **param):
     pass
 
 
-def stub_volume_delete(self, context, *args, **param):
-    pass
-
-
 def stub_volume_get(self, context, volume_id):
     return stub_volume(volume_id)
-
-
-def stub_volume_notfound(self, context, volume_id):
-    raise exc.VolumeNotFound(volume_id=volume_id)
 
 
 def stub_volume_get_all(context, search_opts=None):
@@ -707,7 +725,8 @@ FLAVORS = {
         vcpu_weight=None,
         disabled=False,
         is_public=True,
-        description=None
+        description=None,
+        extra_specs={"key1": "value1", "key2": "value2"}
     ),
     '2': objects.Flavor(
         id=2,
@@ -722,7 +741,8 @@ FLAVORS = {
         vcpu_weight=None,
         disabled=True,
         is_public=True,
-        description='flavor 2 description'
+        description='flavor 2 description',
+        extra_specs={}
     ),
 }
 

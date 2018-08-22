@@ -27,6 +27,7 @@ import oslo_messaging as messaging
 from oslo_service import service
 from oslo_utils import importutils
 
+from nova.api import wsgi as api_wsgi
 from nova import baserpc
 from nova import conductor
 import nova.conf
@@ -96,7 +97,7 @@ def setup_profiler(binary, host):
 
 
 def assert_eventlet_uses_monotonic_clock():
-    import eventlet.hubs as hubs
+    from eventlet import hubs
     import monotonic
 
     hub = hubs.get_hub()
@@ -321,12 +322,16 @@ class WSGIService(service.Service):
 
         """
         self.name = name
-        # NOTE(danms): Name can be metadata, osapi_compute, or ec2, per
+        # NOTE(danms): Name can be metadata, osapi_compute, per
         # nova.service's enabled_apis
         self.binary = 'nova-%s' % name
+
+        LOG.warning('Running %s using eventlet is deprecated. Deploy with '
+                    'a WSGI server such as uwsgi or mod_wsgi.', self.binary)
+
         self.topic = None
         self.manager = self._get_manager()
-        self.loader = loader or wsgi.Loader()
+        self.loader = loader or api_wsgi.Loader()
         self.app = self.loader.load_app(name)
         # inherit all compute_api worker counts from osapi_compute
         if name.startswith('openstack_compute_api'):

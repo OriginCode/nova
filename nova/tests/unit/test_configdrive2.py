@@ -38,7 +38,7 @@ class FakeInstanceMD(object):
 
 class ConfigDriveTestCase(test.NoDBTestCase):
 
-    @mock.patch.object(utils, 'execute', return_value=None)
+    @mock.patch('oslo_concurrency.processutils.execute', return_value=None)
     def test_create_configdrive_iso(self, mock_execute):
         CONF.set_override('config_drive_format', 'iso9660')
         imagefile = None
@@ -64,12 +64,11 @@ class ConfigDriveTestCase(test.NoDBTestCase):
             if imagefile:
                 fileutils.delete_if_exists(imagefile)
 
-    @mock.patch.object(utils, 'mkfs', return_value=None)
+    @mock.patch('nova.privsep.fs.unprivileged_mkfs', return_value=None)
     @mock.patch('nova.privsep.fs.mount', return_value=('', ''))
     @mock.patch('nova.privsep.fs.umount', return_value=None)
-    @mock.patch.object(utils, 'trycmd', return_value=(None, None))
-    def test_create_configdrive_vfat(self, mock_trycmd, mock_umount,
-                                     mock_mount, mock_mkfs):
+    def test_create_configdrive_vfat(
+            self, mock_umount, mock_mount, mock_mkfs):
         CONF.set_override('config_drive_format', 'vfat')
         imagefile = None
         try:

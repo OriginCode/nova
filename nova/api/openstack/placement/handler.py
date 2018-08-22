@@ -28,6 +28,7 @@ import webob
 
 from oslo_log import log as logging
 
+from nova.api.openstack.placement import exception
 from nova.api.openstack.placement.handlers import aggregate
 from nova.api.openstack.placement.handlers import allocation
 from nova.api.openstack.placement.handlers import allocation_candidate
@@ -37,9 +38,7 @@ from nova.api.openstack.placement.handlers import resource_provider
 from nova.api.openstack.placement.handlers import root
 from nova.api.openstack.placement.handlers import trait
 from nova.api.openstack.placement.handlers import usage
-from nova.api.openstack.placement import policy
 from nova.api.openstack.placement import util
-from nova import exception
 from nova.i18n import _
 
 LOG = logging.getLogger(__name__)
@@ -193,16 +192,6 @@ class PlacementHandler(object):
         self._map = make_map(ROUTE_DECLARATIONS)
 
     def __call__(self, environ, start_response):
-        # All requests but '/' require admin.
-        if environ['PATH_INFO'] != '/':
-            context = environ['placement.context']
-            # TODO(cdent): Using is_admin everywhere (except /) is
-            # insufficiently flexible for future use case but is
-            # convenient for initial exploration.
-            if not policy.placement_authorize(context, 'placement'):
-                raise webob.exc.HTTPForbidden(
-                    _('admin required'),
-                    json_formatter=util.json_error_formatter)
         # Check that an incoming request with a content-length header
         # that is an integer > 0 and not empty, also has a content-type
         # header that is not empty. If not raise a 400.
@@ -223,12 +212,16 @@ class PlacementHandler(object):
         except exception.NotFound as exc:
             raise webob.exc.HTTPNotFound(
                 exc, json_formatter=util.json_error_formatter)
-        # Trap the HTTPNotFound that can be raised by dispatch()
-        # when no route is found. The exception is passed through to
-        # the FaultWrap middleware without causing an alarming log
-        # message.
-        except webob.exc.HTTPNotFound:
-            raise
-        except Exception as exc:
-            LOG.exception("Uncaught exception")
-            raise
+        except exception.PolicyNotAuthorized as exc:
+            raise webob.exc.HTTPForbidden(
+                exc.format_message(),
+                json_formatter=util.json_error_formatter)
+        # Remaining uncaught exceptions will rise first to the Microversion
+        # middleware, where any WebOb generated exceptions will be caught and
+        # transformed into legit HTTP error responses (with microversion
+        # headers added), and then to the FaultWrapper middleware which will
+        # catch anything else and transform them into 500 responses.
+        # NOTE(cdent): There should be very few uncaught exceptions which are
+        # not WebOb exceptions at this stage as the handlers are contained by
+        # the wsgify decorator which will transform those exceptions to
+        # responses itself.

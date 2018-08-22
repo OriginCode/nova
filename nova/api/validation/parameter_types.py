@@ -21,7 +21,6 @@ import unicodedata
 
 import six
 
-from nova import db
 from nova.i18n import _
 from nova.objects import tag
 
@@ -427,7 +426,9 @@ volume_size = {
     'type': ['integer', 'string'],
     'pattern': '^[0-9]+$',
     'minimum': 1,
-    'maximum': db.MAX_INT
+    # maximum's value is limited to db constant's MAX_INT
+    # (in nova/db/constants.py)
+    'maximum': 0x7FFFFFFF
 }
 
 disk_config = {
@@ -475,4 +476,17 @@ tag = {
 pagination_parameters = {
     'limit': multi_params(non_negative_integer),
     'marker': multi_params({'type': 'string'})
+}
+
+# The trusted_certs list is restricted to a maximum of 50 IDs.
+# "null" is allowed to unset/reset trusted certs during rebuild.
+trusted_certs = {
+    "type": ["array", "null"],
+    "minItems": 1,
+    "maxItems": 50,
+    "uniqueItems": True,
+    "items": {
+        "type": "string",
+        "minLength": 1,
+    }
 }

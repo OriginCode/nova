@@ -305,6 +305,13 @@ class QueryParamsSchemaTestCase(test.NoDBTestCase):
         req.api_version_request = api_version.APIVersionRequest("2.3")
         self.assertRaises(exception.ValidationError, self.controller.get, req)
 
+    def test_validate_request_unicode_decode_failure(self):
+        req = fakes.HTTPRequest.blank("/tests?foo=%88")
+        req.api_version_request = api_version.APIVersionRequest("2.1")
+        ex = self.assertRaises(
+            exception.ValidationError, self.controller.get, req)
+        self.assertIn("Query string is not UTF-8 encoded", six.text_type(ex))
+
     def test_strip_out_additional_properties(self):
         req = fakes.HTTPRequest.blank(
             "/tests?foos=abc&foo=%s&bar=123&-bar=456" % fakes.FAKE_UUID)
@@ -458,7 +465,7 @@ class PatternPropertiesTestCase(APIValidationTestCase):
         # Note(jrosenboom): This is referencing an internal python error
         # string, which is no stable interface. We need a patch in the
         # jsonschema library in order to fix this properly.
-        if sys.version[:3] == '3.5':
+        if sys.version[:3] in ['3.5', '3.6']:
             detail = "expected string or bytes-like object"
         else:
             detail = "expected string or buffer"

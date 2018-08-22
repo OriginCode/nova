@@ -37,7 +37,7 @@ CONF = cfg.CONF
 def _get_vif_name(vif):
     """Get a VIF device name
 
-    :param vif: the nova.nework.model.VIF instance
+    :param vif: the nova.network.model.VIF instance
 
     Get a string suitable for use as a host OS network
     device name
@@ -53,7 +53,7 @@ def _get_vif_name(vif):
 def _get_hybrid_bridge_name(vif):
     """Get a bridge device name
 
-    :param vif: the nova.nework.model.VIF instance
+    :param vif: the nova.network.model.VIF instance
 
     Get a string suitable for use as a host OS bridge
     device name
@@ -67,7 +67,7 @@ def _get_hybrid_bridge_name(vif):
 def _is_firewall_required(vif):
     """Check if local firewall is required
 
-    :param vif: the nova.nework.model.VIF instance
+    :param vif: the nova.network.model.VIF instance
 
     :returns: True if local firewall is required
     """
@@ -248,7 +248,7 @@ def _nova_to_osvif_network(network):
 def _get_vif_instance(vif, cls, **kwargs):
     """Instantiate an os-vif VIF instance
 
-    :param vif: the nova.nework.model.VIF instance
+    :param vif: the nova.network.model.VIF instance
     :param cls: class for a os_vif.objects.vif.VIFBase subclass
 
     :returns: a os_vif.objects.vif.VIFBase instance
@@ -410,7 +410,20 @@ def _nova_to_osvif_vif_vhostuser(vif):
 
 # VIF_TYPE_IVS = 'ivs'
 def _nova_to_osvif_vif_ivs(vif):
-    raise NotImplementedError()
+    if _is_firewall_required(vif) or vif.is_hybrid_plug_enabled():
+        obj = _get_vif_instance(
+            vif,
+            objects.vif.VIFBridge,
+            plugin="ivs",
+            vif_name=_get_vif_name(vif),
+            bridge_name=_get_hybrid_bridge_name(vif))
+    else:
+        obj = _get_vif_instance(
+            vif,
+            objects.vif.VIFGeneric,
+            plugin="ivs",
+            vif_name=_get_vif_name(vif))
+    return obj
 
 
 # VIF_TYPE_DVS = 'dvs'

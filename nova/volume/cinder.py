@@ -70,6 +70,10 @@ def _load_auth_plugin(conf):
     if auth_plugin:
         return auth_plugin
 
+    if conf.cinder.auth_type is None:
+        LOG.error('The [cinder] section of your nova configuration file '
+                  'must be configured for authentication with the '
+                  'block-storage service endpoint.')
     err_msg = _('Unknown auth type: %s') % conf.cinder.auth_type
     raise cinder_exception.Unauthorized(401, message=err_msg)
 
@@ -612,8 +616,6 @@ class API(object):
 
         kwargs = dict(snapshot_id=snapshot_id,
                       volume_type=volume_type,
-                      user_id=context.user_id,
-                      project_id=context.project_id,
                       availability_zone=availability_zone,
                       metadata=metadata,
                       imageRef=image_id,

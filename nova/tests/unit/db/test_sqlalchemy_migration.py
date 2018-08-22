@@ -240,12 +240,6 @@ class TestNewtonCheck(test.TestCase):
             '330_enforce_mitaka_online_migrations')
         self.engine = db_api.get_engine()
 
-    def test_aggregate_not_migrated(self):
-        agg = db_api.aggregate_create(self.context, {"name": "foobar"})
-        db_api.aggregate_update(self.context, agg.id, {'uuid': None})
-        self.assertRaises(exception.ValidationError,
-                          self.migration.upgrade, self.engine)
-
     def setup_pci_device(self, dev_type):
         # NOTE(jaypipes): We cannot use db_api.pci_device_update() here because
         # newer models of PciDevice contain fields (uuid) that are not present
@@ -305,6 +299,7 @@ class TestOcataCheck(test.TestCase):
             'vcpu_weight': 1,
             'disabled': False,
             'is_public': True,
+            'deleted': 0
         }
         self.keypair_values = {
             'name': 'foo',
@@ -322,20 +317,17 @@ class TestOcataCheck(test.TestCase):
             'project_id': 'bar',
             'uuid': uuidsentinel.ig,
             'name': 'baz',
+            'deleted': 0
         }
 
     def test_upgrade_clean(self):
         self.migration.upgrade(self.engine)
 
     def test_upgrade_dirty_flavors(self):
-        db_api.flavor_create(self.context, self.flavor_values)
+        flavors = db_utils.get_table(self.engine, 'instance_types')
+        flavors.insert().execute(self.flavor_values)
         self.assertRaises(exception.ValidationError,
                           self.migration.upgrade, self.engine)
-
-    def test_upgrade_with_deleted_flavors(self):
-        flavor = db_api.flavor_create(self.context, self.flavor_values)
-        db_api.flavor_destroy(self.context, flavor['flavorid'])
-        self.migration.upgrade(self.engine)
 
     def test_upgrade_dirty_keypairs(self):
         db_api.key_pair_create(self.context, self.keypair_values)
@@ -348,24 +340,17 @@ class TestOcataCheck(test.TestCase):
                                 keypair['user_id'], keypair['name'])
         self.migration.upgrade(self.engine)
 
-    def test_upgrade_dirty_aggregates(self):
-        db_api.aggregate_create(self.context, self.aggregate_values)
-        self.assertRaises(exception.ValidationError,
-                          self.migration.upgrade, self.engine)
-
-    def test_upgrade_with_deleted_aggregates(self):
-        agg = db_api.aggregate_create(self.context, self.aggregate_values)
-        db_api.aggregate_delete(self.context, agg['id'])
-        self.migration.upgrade(self.engine)
-
     def test_upgrade_dirty_instance_groups(self):
-        db_api.instance_group_create(self.context, self.ig_values)
+        igs = db_utils.get_table(self.engine, 'instance_groups')
+        igs.insert().execute(self.ig_values)
         self.assertRaises(exception.ValidationError,
                           self.migration.upgrade, self.engine)
 
     def test_upgrade_with_deleted_instance_groups(self):
-        group = db_api.instance_group_create(self.context, self.ig_values)
-        db_api.instance_group_delete(self.context, group['uuid'])
+        igs = db_utils.get_table(self.engine, 'instance_groups')
+        group_id = igs.insert().execute(self.ig_values).inserted_primary_key[0]
+        igs.update().where(igs.c.id == group_id).values(
+            deleted=group_id).execute()
         self.migration.upgrade(self.engine)
 
 
@@ -391,6 +376,14 @@ class TestNewtonCellsCheck(test.NoDBTestCase):
                       flavorid='m1.foo', swap=0)
         flavors.insert().execute(values)
 
+    def _create_cell_mapping(self, **values):
+        mappings = db_utils.get_table(self.engine, 'cell_mappings')
+        return mappings.insert().execute(**values).inserted_primary_key[0]
+
+    def _create_host_mapping(self, **values):
+        mappings = db_utils.get_table(self.engine, 'host_mappings')
+        return mappings.insert().execute(**values).inserted_primary_key[0]
+
     def test_upgrade_with_no_cell_mappings(self):
         self._flavor_me()
         self.assertRaisesRegex(exception.ValidationError,
@@ -399,48 +392,38 @@ class TestNewtonCellsCheck(test.NoDBTestCase):
 
     def test_upgrade_with_only_cell0(self):
         self._flavor_me()
-        cell0 = objects.CellMapping(context=self.context,
-                                    uuid=objects.CellMapping.CELL0_UUID,
-                                    name='cell0',
-                                    transport_url='fake',
-                                    database_connection='fake')
-        cell0.create()
+        self._create_cell_mapping(uuid=objects.CellMapping.CELL0_UUID,
+                                  name='cell0',
+                                  transport_url='fake',
+                                  database_connection='fake')
         self.assertRaisesRegex(exception.ValidationError,
                                'Cell mappings',
                                self.migration.upgrade, self.engine)
 
     def test_upgrade_without_cell0(self):
         self._flavor_me()
-        cell1 = objects.CellMapping(context=self.context,
-                                    uuid=uuidsentinel.cell1,
-                                    name='cell1',
-                                    transport_url='fake',
-                                    database_connection='fake')
-        cell1.create()
-        cell2 = objects.CellMapping(context=self.context,
-                                    uuid=uuidsentinel.cell2,
-                                    name='cell2',
-                                    transport_url='fake',
-                                    database_connection='fake')
-        cell2.create()
+        self._create_cell_mapping(uuid=uuidsentinel.cell1,
+                                  name='cell1',
+                                  transport_url='fake',
+                                  database_connection='fake')
+        self._create_cell_mapping(uuid=uuidsentinel.cell2,
+                                  name='cell2',
+                                  transport_url='fake',
+                                  database_connection='fake')
         self.assertRaisesRegex(exception.ValidationError,
                                'Cell0',
                                self.migration.upgrade, self.engine)
 
     def test_upgrade_with_no_host_mappings(self):
         self._flavor_me()
-        cell0 = objects.CellMapping(context=self.context,
-                                    uuid=objects.CellMapping.CELL0_UUID,
-                                    name='cell0',
-                                    transport_url='fake',
-                                    database_connection='fake')
-        cell0.create()
-        cell1 = objects.CellMapping(context=self.context,
-                                    uuid=uuidsentinel.cell1,
-                                    name='cell1',
-                                    transport_url='fake',
-                                    database_connection='fake')
-        cell1.create()
+        self._create_cell_mapping(uuid=objects.CellMapping.CELL0_UUID,
+                                  name='cell0',
+                                  transport_url='fake',
+                                  database_connection='fake')
+        self._create_cell_mapping(uuid=uuidsentinel.cell1,
+                                  name='cell1',
+                                  transport_url='fake',
+                                  database_connection='fake')
 
         with mock.patch.object(self.migration, 'LOG') as log:
             self.migration.upgrade(self.engine)
@@ -448,22 +431,15 @@ class TestNewtonCellsCheck(test.NoDBTestCase):
 
     def test_upgrade_with_required_mappings(self):
         self._flavor_me()
-        cell0 = objects.CellMapping(context=self.context,
-                                    uuid=objects.CellMapping.CELL0_UUID,
-                                    name='cell0',
-                                    transport_url='fake',
-                                    database_connection='fake')
-        cell0.create()
-        cell1 = objects.CellMapping(context=self.context,
-                                    uuid=uuidsentinel.cell1,
-                                    name='cell1',
-                                    transport_url='fake',
-                                    database_connection='fake')
-        cell1.create()
-        hostmapping = objects.HostMapping(context=self.context,
-                                          cell_mapping=cell1,
-                                          host='foo')
-        hostmapping.create()
+        self._create_cell_mapping(uuid=objects.CellMapping.CELL0_UUID,
+                                  name='cell0',
+                                  transport_url='fake',
+                                  database_connection='fake')
+        cell1_id = self._create_cell_mapping(uuid=uuidsentinel.cell1,
+                                             name='cell1',
+                                             transport_url='fake',
+                                             database_connection='fake')
+        self._create_host_mapping(cell_id=cell1_id, host='foo')
 
         self.migration.upgrade(self.engine)
 

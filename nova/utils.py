@@ -20,17 +20,13 @@
 import contextlib
 import copy
 import datetime
-import errno
 import functools
 import hashlib
 import inspect
-import mmap
 import os
-import pyclbr
 import random
 import re
 import shutil
-import sys
 import tempfile
 import time
 
@@ -93,6 +89,12 @@ VIM_IMAGE_ATTRIBUTES = (
 _FILE_CACHE = {}
 
 _SERVICE_TYPES = service_types.ServiceTypes()
+
+
+if hasattr(inspect, 'getfullargspec'):
+    getargspec = inspect.getfullargspec
+else:
+    getargspec = inspect.getargspec
 
 
 def get_root_helper():
@@ -237,17 +239,6 @@ def ssh_execute(dest, *cmd, **kwargs):
     ssh_cmd.append(dest)
     ssh_cmd.extend(cmd)
     return execute(*ssh_cmd, **kwargs)
-
-
-def trycmd(*args, **kwargs):
-    """Convenience wrapper around oslo's trycmd() method."""
-    if kwargs.get('run_as_root', False):
-        if CONF.use_rootwrap_daemon:
-            return RootwrapDaemonHelper(CONF.rootwrap_config).trycmd(
-                *args, **kwargs)
-        else:
-            return RootwrapProcessHelper().trycmd(*args, **kwargs)
-    return processutils.trycmd(*args, **kwargs)
 
 
 def generate_uid(topic, size=8):
@@ -476,55 +467,6 @@ def format_remote_path(host, path):
     return "%s:%s" % (safe_ip_format(host), path)
 
 
-# TODO(mriedem): Remove this in Rocky.
-def monkey_patch():
-    """DEPRECATED: If the CONF.monkey_patch set as True,
-    this function patches a decorator
-    for all functions in specified modules.
-    You can set decorators for each modules
-    using CONF.monkey_patch_modules.
-    The format is "Module path:Decorator function".
-    Example:
-    'nova.api.ec2.cloud:nova.notifications.notify_decorator'
-
-    Parameters of the decorator is as follows.
-    (See nova.notifications.notify_decorator)
-
-    name - name of the function
-    function - object of the function
-    """
-    # If CONF.monkey_patch is not True, this function do nothing.
-    if not CONF.monkey_patch:
-        return
-    LOG.warning('Monkey patching nova is deprecated for removal.')
-    if six.PY2:
-        is_method = inspect.ismethod
-    else:
-        def is_method(obj):
-            # Unbound methods became regular functions on Python 3
-            return inspect.ismethod(obj) or inspect.isfunction(obj)
-    # Get list of modules and decorators
-    for module_and_decorator in CONF.monkey_patch_modules:
-        module, decorator_name = module_and_decorator.split(':')
-        # import decorator function
-        decorator = importutils.import_class(decorator_name)
-        __import__(module)
-        # Retrieve module information using pyclbr
-        module_data = pyclbr.readmodule_ex(module)
-        for key, value in module_data.items():
-            # set the decorator for the class methods
-            if isinstance(value, pyclbr.Class):
-                clz = importutils.import_class("%s.%s" % (module, key))
-                for method, func in inspect.getmembers(clz, is_method):
-                    setattr(clz, method,
-                        decorator("%s.%s.%s" % (module, key, method), func))
-            # set the decorator for the function
-            if isinstance(value, pyclbr.Function):
-                func = importutils.import_class("%s.%s" % (module, key))
-                setattr(sys.modules[module], key,
-                    decorator("%s.%s" % (module, key), func))
-
-
 def make_dev_path(dev, partition=None, base='/dev'):
     """Return a path to a particular device.
 
@@ -683,19 +625,6 @@ def tempdir(**kwargs):
             LOG.error(_LE('Could not remove tmpdir: %s'), e)
 
 
-def walk_class_hierarchy(clazz, encountered=None):
-    """Walk class hierarchy, yielding most derived classes first."""
-    if not encountered:
-        encountered = []
-    for subclass in clazz.__subclasses__():
-        if subclass not in encountered:
-            encountered.append(subclass)
-            # drill down to leaves first
-            for subsubclass in walk_class_hierarchy(subclass, encountered):
-                yield subsubclass
-            yield subclass
-
-
 class UndoManager(object):
     """Provides a mechanism to facilitate rolling back a series of actions
     when an exception is raised.
@@ -721,31 +650,6 @@ class UndoManager(object):
                 LOG.exception(msg, **kwargs)
 
             self._rollback()
-
-
-def mkfs(fs, path, label=None, run_as_root=False):
-    """Format a file or block device
-
-    :param fs: Filesystem type (examples include 'swap', 'ext3', 'ext4'
-               'btrfs', etc.)
-    :param path: Path to file or block device to format
-    :param label: Volume label to use
-    """
-    if fs == 'swap':
-        args = ['mkswap']
-    else:
-        args = ['mkfs', '-t', fs]
-    # add -F to force no interactive execute on non-block device.
-    if fs in ('ext3', 'ext4', 'ntfs'):
-        args.extend(['-F'])
-    if label:
-        if fs in ('msdos', 'vfat'):
-            label_opt = '-n'
-        else:
-            label_opt = '-L'
-        args.extend([label_opt, label])
-    args.append(path)
-    execute(*args, run_as_root=run_as_root)
 
 
 def metadata_to_dict(metadata, include_deleted=False):
@@ -786,8 +690,8 @@ def expects_func_args(*args):
         @functools.wraps(dec)
         def _decorator(f):
             base_f = safe_utils.get_wrapped_function(f)
-            arg_names, a, kw, _default = inspect.getargspec(base_f)
-            if a or kw or set(args) <= set(arg_names):
+            argspec = getargspec(base_f)
+            if argspec[1] or argspec[2] or set(args) <= set(argspec[0]):
                 # NOTE (ndipanov): We can't really tell if correct stuff will
                 # be passed if it's a function with *args or **kwargs so
                 # we still carry on and hope for the best
@@ -1271,6 +1175,10 @@ def get_ksa_adapter(service_type, ksa_auth=None, ksa_session=None,
     used, ksa auth and/or session options may also be required, or the relevant
     parameter supplied.
 
+    A raise_exc=False adapter is returned, meaning responses >=400 return the
+    Response object rather than raising an exception.  This behavior can be
+    overridden on a per-request basis by setting raise_exc=True.
+
     :param service_type: String name of the service type for which the Adapter
                          is to be constructed.
     :param ksa_auth: A keystoneauth1 auth plugin. If not specified, we attempt
@@ -1317,7 +1225,7 @@ def get_ksa_adapter(service_type, ksa_auth=None, ksa_session=None,
 
     return ks_loading.load_adapter_from_conf_options(
         CONF, confgrp, session=ksa_session, auth=ksa_auth,
-        min_version=min_version, max_version=max_version)
+        min_version=min_version, max_version=max_version, raise_exc=False)
 
 
 def get_endpoint(ksa_adapter):
@@ -1373,48 +1281,18 @@ def get_endpoint(ksa_adapter):
         "interfaces: %s" % interfaces)
 
 
-def supports_direct_io(dirpath):
+def generate_hostid(host, project_id):
+    """Generate an obfuscated host id representing the host.
 
-    if not hasattr(os, 'O_DIRECT'):
-        LOG.debug("This python runtime does not support direct I/O")
-        return False
+    This is a hashed value so will not actually look like a hostname, and is
+    hashed with data from the project_id.
 
-    testfile = os.path.join(dirpath, ".directio.test")
-
-    hasDirectIO = True
-    fd = None
-    try:
-        fd = os.open(testfile, os.O_CREAT | os.O_WRONLY | os.O_DIRECT)
-        # Check is the write allowed with 512 byte alignment
-        align_size = 512
-        m = mmap.mmap(-1, align_size)
-        m.write(b"x" * align_size)
-        os.write(fd, m)
-        LOG.debug("Path '%(path)s' supports direct I/O",
-                  {'path': dirpath})
-    except OSError as e:
-        if e.errno == errno.EINVAL:
-            LOG.debug("Path '%(path)s' does not support direct I/O: "
-                      "'%(ex)s'", {'path': dirpath, 'ex': e})
-            hasDirectIO = False
-        else:
-            with excutils.save_and_reraise_exception():
-                LOG.error("Error on '%(path)s' while checking "
-                          "direct I/O: '%(ex)s'",
-                          {'path': dirpath, 'ex': e})
-    except Exception as e:
-        with excutils.save_and_reraise_exception():
-            LOG.error("Error on '%(path)s' while checking direct I/O: "
-                      "'%(ex)s'", {'path': dirpath, 'ex': e})
-    finally:
-        # ensure unlink(filepath) will actually remove the file by deleting
-        # the remaining link to it in close(fd)
-        if fd is not None:
-            os.close(fd)
-
-        try:
-            os.unlink(testfile)
-        except Exception:
-            pass
-
-    return hasDirectIO
+    :param host: The name of the compute host.
+    :param project_id: The UUID of the project.
+    :return: An obfuscated hashed host id string, return "" if host is empty
+    """
+    if host:
+        data = (project_id + host).encode('utf-8')
+        sha_hash = hashlib.sha224(data)
+        return sha_hash.hexdigest()
+    return ""

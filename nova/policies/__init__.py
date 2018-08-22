@@ -36,17 +36,13 @@ from nova.policies import extended_server_attributes
 from nova.policies import extended_status
 from nova.policies import extended_volumes
 from nova.policies import extensions
-from nova.policies import fixed_ips
 from nova.policies import flavor_access
 from nova.policies import flavor_extra_specs
 from nova.policies import flavor_manage
 from nova.policies import flavor_rxtx
 from nova.policies import flavors
-from nova.policies import floating_ip_dns
 from nova.policies import floating_ip_pools
 from nova.policies import floating_ips
-from nova.policies import floating_ips_bulk
-from nova.policies import fping
 from nova.policies import hide_server_addresses
 from nova.policies import hosts
 from nova.policies import hypervisors
@@ -84,7 +80,6 @@ from nova.policies import simple_tenant_usage
 from nova.policies import suspend_server
 from nova.policies import tenant_networks
 from nova.policies import used_limits
-from nova.policies import virtual_interfaces
 from nova.policies import volumes
 from nova.policies import volumes_attachments
 
@@ -114,17 +109,13 @@ def list_rules():
         extended_status.list_rules(),
         extended_volumes.list_rules(),
         extensions.list_rules(),
-        fixed_ips.list_rules(),
         flavor_access.list_rules(),
         flavor_extra_specs.list_rules(),
         flavor_manage.list_rules(),
         flavor_rxtx.list_rules(),
         flavors.list_rules(),
-        floating_ip_dns.list_rules(),
         floating_ip_pools.list_rules(),
         floating_ips.list_rules(),
-        floating_ips_bulk.list_rules(),
-        fping.list_rules(),
         hide_server_addresses.list_rules(),
         hosts.list_rules(),
         hypervisors.list_rules(),
@@ -162,7 +153,6 @@ def list_rules():
         suspend_server.list_rules(),
         tenant_networks.list_rules(),
         used_limits.list_rules(),
-        virtual_interfaces.list_rules(),
         volumes.list_rules(),
         volumes_attachments.list_rules()
     )
