@@ -1,13 +1,14 @@
-nova (2:17.0.3-14) UNRELEASED; urgency=medium
+nova (2:18.0.0~rc2-1) experimental; urgency=medium
 
   [ Thomas Goirand ]
+  * New upstream release.
   * Add python3-ceph runtime depends. Note: this is for the moment incompatible
     with Sid that doesn't have it.
 
   [ Ondřej Nový ]
   * d/control: Use team+openstack@tracker.debian.org as maintainer
 
- -- Thomas Goirand <zigo@debian.org>  Mon, 30 Jul 2018 15:24:57 +0000
+ -- Thomas Goirand <zigo@debian.org>  Wed, 22 Aug 2018 22:20:35 +0200
 
 nova (2:17.0.3-13) unstable; urgency=medium
 
