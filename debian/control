@@ -23,7 +23,6 @@ Build-Depends-Indep:
  libvirt-daemon-system,
  openssh-client,
  procps,
- python3 sphinxcontrib.seqdiag (>= 0.8.4),
  python3-babel,
  python3-barbicanclient (>= 4.5.2),
  python3-castellan (>= 0.16.0),
