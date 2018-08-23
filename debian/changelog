@@ -5,6 +5,9 @@ nova (2:18.0.0~rc2-1) experimental; urgency=medium
   * Add python3-ceph runtime depends. Note: this is for the moment incompatible
     with Sid that doesn't have it.
   * Fixed (build-)depends for this release.
+  * Removed patches applied upstream, refresh others:
+    - Fix_PatternPropertiesTestCase_for_py3.6.patch
+    - fix-async-as-keyword.patch
 
   [ Ondřej Nový ]
   * d/control: Use team+openstack@tracker.debian.org as maintainer
