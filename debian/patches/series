@@ -2,4 +2,3 @@ Install-missed-files.patch
 clean-up-build_requests-table-on-upgrades.patch
 #python3-fix-for-sphinx-doc.patch
 remove-crashing-blockdiag-doc-line.patch
-make-nova-reproducible.patch

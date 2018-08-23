@@ -3310,29 +3310,6 @@ class _ComputeAPIUnitTestMixIn(object):
                           self._test_snapshot_volume_backed,
                           limits=limits)
 
-    def test_snapshot_volume_backed_with_quiesce_create_snap_fails(self):
-        self._test_snapshot_volume_backed(quiesce_required=True,
-                                          quiesce_fails=False,
-                                          snapshot_fails=True)
-
-    def test_snapshot_volume_backed_unlimited_quota(self):
-        """Tests that there is unlimited quota on volume snapshots so we
-        don't perform a quota check.
-        """
-        limits = {'maxTotalSnapshots': -1, 'totalSnapshotsUsed': 0}
-        self._test_snapshot_volume_backed(
-            quiesce_required=False, quiesce_fails=False, limits=limits)
-
-    def test_snapshot_volume_backed_over_quota_before_snapshot(self):
-        """Tests that the up-front check on quota fails before actually
-        attempting to snapshot any volumes.
-        """
-        limits = {'maxTotalSnapshots': 1, 'totalSnapshotsUsed': 1}
-        self.assertRaises(exception.OverQuota,
-                          self._test_snapshot_volume_backed,
-                          quiesce_required=False, quiesce_fails=False,
-                          limits=limits)
-
     def test_snapshot_volume_backed_with_quiesce_skipped(self):
         self._test_snapshot_volume_backed(quiesce_required=False,
                                           quiesce_unsupported=True)

@@ -1572,12 +1572,6 @@ class CellV2Commands(object):
             node.mapped = 0
             node.save()
 
-        # Unmap the compute nodes so that they can be discovered
-        # again in future, if needed.
-        for node in nodes:
-            node.mapped = 0
-            node.save()
-
         # Delete hosts mapped to the cell.
         for host_mapping in host_mappings:
             host_mapping.destroy()

@@ -2032,16 +2032,6 @@ class API(base.Base):
             # NOTE(comstud): Race condition. Instance already gone.
             pass
 
-    def _may_have_ports_or_volumes(self, instance):
-        # NOTE(melwitt): When an instance build fails in the compute manager,
-        # the instance host and node are set to None and the vm_state is set
-        # to ERROR. In the case, the instance with host = None has actually
-        # been scheduled and may have ports and/or volumes allocated on the
-        # compute node.
-        if instance.vm_state in (vm_states.SHELVED_OFFLOADED, vm_states.ERROR):
-            return True
-        return False
-
     def _confirm_resize_on_deleting(self, context, instance):
         # If in the middle of a resize, use confirm_resize to
         # ensure the original instance is cleaned up too

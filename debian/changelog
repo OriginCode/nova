@@ -8,6 +8,7 @@ nova (2:18.0.0~rc2-1) experimental; urgency=medium
   * Removed patches applied upstream, refresh others:
     - Fix_PatternPropertiesTestCase_for_py3.6.patch
     - fix-async-as-keyword.patch
+    - make-nova-reproducible.patch
 
   [ Ondřej Nový ]
   * d/control: Use team+openstack@tracker.debian.org as maintainer
