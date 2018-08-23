@@ -113,6 +113,7 @@ Build-Depends-Indep:
  python3-webob (>= 1.8.2),
  python3-websockify,
  python3-wsgi-intercept (>= 1.4.1),
+ python3-zvmcloudconnector,
  sqlite3,
  subunit,
 Build-Conflicts:
@@ -664,6 +665,7 @@ Depends:
  python3-tooz (>= 1.58.0),
  python3-webob (>= 1.8.2),
  python3-websockify,
+ python3-zvmcloudconnector,
  sudo,
  ${misc:Depends},
  ${python3:Depends},
