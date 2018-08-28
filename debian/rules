@@ -90,7 +90,7 @@ endif
 		--namespace nova
 
 	PYTHONPATH=$(CURDIR)/debian/tmp/usr/lib/python3/dist-packages oslopolicy-policy-generator \
-		--output0file=$(CURDIR)/debian/nova-common/usr/share/nova-common/placement-policy.json \
+		--output-file=$(CURDIR)/debian/nova-common/usr/share/nova-common/placement-policy.json \
 		--namespace placement \
 		--format json
 
