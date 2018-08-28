@@ -79,7 +79,8 @@ endif
 		--namespace oslo.db.concurrency \
 		--namespace oslo.middleware \
 		--namespace oslo.concurrency \
-		--namespace keystonemiddleware.auth_token
+		--namespace keystonemiddleware.auth_token \
+		--namespace osprofiler
 
 	pkgos-readd-keystone-authtoken-missing-options $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf keystone_authtoken nova
 
