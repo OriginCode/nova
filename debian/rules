@@ -89,7 +89,7 @@ endif
 		--format json \
 		--namespace nova
 
-	PYTHONPATH=$(CURDIR)/debian/tmp/usr/lib/python3/dist-packages oslopolicy-policy-generator \
+	PYTHONPATH=$(CURDIR)/debian/tmp/usr/lib/python3/dist-packages python3-oslopolicy-sample-generator \
 		--output-file=$(CURDIR)/debian/nova-common/usr/share/nova-common/placement-policy.json \
 		--namespace placement \
 		--format json
