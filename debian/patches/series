@@ -3,3 +3,4 @@ clean-up-build_requests-table-on-upgrades.patch
 #python3-fix-for-sphinx-doc.patch
 remove-crashing-blockdiag-doc-line.patch
 Add_debug_logs_for_when_provider_inventory_changes.patch
+Log_the_operation_when_updating_generation_in_ProviderTree.patch
