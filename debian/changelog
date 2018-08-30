@@ -1,11 +1,12 @@
-nova (2:18.0.0~rc2-2) UNRELEASED; urgency=medium
+nova (2:18.0.0-1) experimental; urgency=medium
 
+  * New upstream release.
   * Add --namespace osprofiler when generating nova.conf.
   * Also generate placement-policy.json and install it in postinst.
   * Add Add_debug_logs_for_when_provider_inventory_changes.patch.
   * Add Log_the_operation_when_updating_generation_in_ProviderTree.patch.
 
- -- Thomas Goirand <zigo@debian.org>  Tue, 28 Aug 2018 22:59:30 +0200
+ -- Thomas Goirand <zigo@debian.org>  Thu, 30 Aug 2018 16:36:22 +0200
 
 nova (2:18.0.0~rc2-1) experimental; urgency=medium
 
