@@ -4,3 +4,4 @@ clean-up-build_requests-table-on-upgrades.patch
 remove-crashing-blockdiag-doc-line.patch
 Add_debug_logs_for_when_provider_inventory_changes.patch
 Log_the_operation_when_updating_generation_in_ProviderTree.patch
+Avoid-spurious-ComputeNode.save-during-update_available_resource.patch
