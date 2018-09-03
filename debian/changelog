@@ -1,6 +1,6 @@
 nova (2:18.0.0-2) UNRELEASED; urgency=medium
 
-  * Add Avoid-spurious-ComputeNode.save-during-update_available_resource.patch.
+  * Add Dont_persist_zero_allocation_ratios_in_ResourceTracker.patch.
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 31 Aug 2018 09:06:34 +0200
 
