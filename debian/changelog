@@ -1,25 +1,12 @@
-nova (2:18.0.0-2) unstable; urgency=medium
-
-  * Add Dont_persist_zero_allocation_ratios_in_ResourceTracker.patch.
-  * Uploading to unstable.
-
- -- Thomas Goirand <zigo@debian.org>  Fri, 31 Aug 2018 09:06:34 +0200
-
 nova (2:18.0.0-1) experimental; urgency=medium
 
+  [ Thomas Goirand ]
   * New upstream release.
   * Add --namespace osprofiler when generating nova.conf.
   * Also generate placement-policy.json and install it in postinst.
   * Add Add_debug_logs_for_when_provider_inventory_changes.patch.
   * Add Log_the_operation_when_updating_generation_in_ProviderTree.patch.
   * Add Avoid-spurious-ComputeNode.save-during-update_available_resource.patch.
-
- -- Thomas Goirand <zigo@debian.org>  Thu, 30 Aug 2018 16:36:22 +0200
-
-nova (2:18.0.0~rc2-1) experimental; urgency=medium
-
-  [ Thomas Goirand ]
-  * New upstream release.
   * Add python3-ceph runtime depends. Note: this is for the moment incompatible
     with Sid that doesn't have it.
   * Fixed (build-)depends for this release.
@@ -27,11 +14,13 @@ nova (2:18.0.0~rc2-1) experimental; urgency=medium
     - Fix_PatternPropertiesTestCase_for_py3.6.patch
     - fix-async-as-keyword.patch
     - make-nova-reproducible.patch
+  * Add Dont_persist_zero_allocation_ratios_in_ResourceTracker.patch.
+  * Uploading to unstable.
 
   [ Ondřej Nový ]
   * d/control: Use team+openstack@tracker.debian.org as maintainer
 
- -- Thomas Goirand <zigo@debian.org>  Wed, 22 Aug 2018 22:20:35 +0200
+ -- Thomas Goirand <zigo@debian.org>  Thu, 30 Aug 2018 16:36:22 +0200
 
 nova (2:17.0.3-13) unstable; urgency=medium
 
