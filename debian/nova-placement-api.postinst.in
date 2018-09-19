@@ -7,6 +7,14 @@ set -e
 if [ "$1" = "configure" ] ; then
 	. /usr/share/debconf/confmodule
 	pkgos_register_endpoint_postinst nova-placement-api placement placement "Placement API" 8778 ""
+
+	db_get novaplacement/configure_db
+	if [ "$RET" = "true" ]; then
+		pkgos_dbc_postinst --suite nova /etc/nova/nova.conf placement_database connection novaplacement $@
+		echo "nova-common: Now running \"nova-manage api_db sync\", this may take a while..."
+		su nova -s /bin/sh -c "nova-manage api_db sync" || true
+	fi
+
 	db_stop
 fi
 
