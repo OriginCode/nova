@@ -51,6 +51,21 @@ read_neutron_config () {
 	pkgos_inifile set ${NOVA_CONF} neutron metadata_proxy_shared_secret ${RET}
 }
 
+run_db_sync (){
+
+	API_DATABASE_CONFIG_AVAILABLE=None
+
+	# We have to check if connection is set in [api_database] config
+	pkgos_inifile get ${NOVA_CONF} api_database connection
+	if echo ${RET} | egrep 'mysql(\+pymysql)?:.*:.*@.*\/.*' > /dev/null; then
+		echo "nova-common: Now running \"nova-manage db sync\", this may take a while..."
+		su nova -s /bin/sh -c "nova-manage db sync" || true
+	else
+		echo "nova-common: \"nova-manage db sync\" needs api_database.connection set. Sorry."
+	fi
+
+}
+
 
 if [ "$1" = "configure" ] || [ "$1" = "reconfigure" ] ; then
 	. /usr/share/debconf/confmodule
@@ -83,8 +98,7 @@ if [ "$1" = "configure" ] || [ "$1" = "reconfigure" ] ; then
 	db_get nova/configure_db
 	if [ "$RET" = "true" ]; then
 		pkgos_dbc_postinst /etc/nova/nova.conf database connection nova $@
-		echo "nova-common: Now running \"nova-manage db sync\", this may take a while..."
-		su nova -s /bin/sh -c "nova-manage db sync" || true
+		run_db_sync
 	fi
 
 	db_stop
@@ -92,6 +106,11 @@ if [ "$1" = "configure" ] || [ "$1" = "reconfigure" ] ; then
 	# Fixup sudoers rights and clean old config file location
 	chmod 0440 /etc/sudoers.d/nova-common
 	[ -f /etc/sudoers.d/nova_sudoers ] && rm -f /etc/sudoers.d/nova_sudoers # That's the old file that we get rid of
+fi
+
+if [ "$1" = "triggered" ]; then
+	run_db_sync
+
 fi
 
 #DEBHELPER#
