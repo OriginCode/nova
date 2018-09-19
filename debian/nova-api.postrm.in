@@ -1,0 +1,14 @@
+#!/bin/sh
+
+set -e
+
+#PKGOS-INCLUDE#
+
+if [ "$1" = "purge" ] ; then
+	pkgos_dbc_postrm novaapi nova-api $@
+
+	rm -f /var/log/nova/nova-api.log*
+fi
+
+
+#DEBHELPER#
