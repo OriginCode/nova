@@ -1,0 +1,19 @@
+Template: novaplacementapi/configure_db
+Type: boolean
+Default: false
+_Description: Set up a database for Nova Placement API?
+ No database has been set up for Nova Placement to use. If you want
+ to set one up now, please make sure you have all needed
+ information:
+ .
+  * the host name of the database server (which must allow TCP
+    connections from this machine);
+  * a username and password to access the database;
+  * the type of database management software you want to use.
+ .
+ If you don't choose this option, no database will be set up and Nova
+ will use regular SQLite support.
+ .
+ You can change this setting later on by running "dpkg-reconfigure
+ -plow nova-placement-api".
+

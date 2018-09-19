@@ -9,6 +9,6 @@ NOVA_CONF=/etc/nova/nova.conf
 #PKGOS-INCLUDE#
 
 pkgos_register_endpoint_config nova-placement-api
-pkgos_dbc_read_conf -pkg nova-placement-api ${NOVA_CONF} placement_database connection novaplacement $@
+pkgos_dbc_read_conf -pkg nova-placement-api ${NOVA_CONF} placement_database connection novaplacementapi $@
 
 exit 0

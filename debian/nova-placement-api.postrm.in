@@ -1,0 +1,12 @@
+#!/bin/sh
+
+set -e
+
+#PKGOS-INCLUDE#
+
+if [ "$1" = "purge" ] ; then
+	pkgos_dbc_postrm novaplacementapi nova-placement-api $@
+fi
+
+
+#DEBHELPER#
