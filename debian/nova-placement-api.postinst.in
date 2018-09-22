@@ -13,10 +13,6 @@ if [ "$1" = "configure" ] ; then
 		pkgos_dbc_postinst --suite nova /etc/nova/nova.conf placement_database connection placement $@
 		echo "nova-common: Now running \"nova-manage api_db sync\", this may take a while..."
 		su nova -s /bin/sh -c "nova-manage api_db sync 2>/dev/null" || true
-		echo "nova-common: Registering nova cell0 database"
-		su nova -s /bin/sh -c "nova-manage cell_v2 map_cell0 2>/dev/null" || true
-		echo "nova-common: Creating nova cell1 database"
-		su nova -s /bin/sh -c "nova-manage cell_v2 create_cell --name=cell1 --verbose 2>/dev/null" || true
 		dpkg-trigger --no-await nova-common-db-sync
 	fi
 
