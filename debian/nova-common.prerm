@@ -2,12 +2,60 @@
 
 set -e
 
+remove_cell0_database (){
+	dump_timestamp=$(date +"%Y-%m-%d-%H-%M-%S")
+	db_get nova-common/database-type
+	nova_database_type=$RET
+	if [ "$nova_database_type" = "mysql" ]; then
+		# We need to know admin connection details
+		db_get nova-common/remote/host
+		mysql_host=$RET
+		db_get nova-common/mysql/admin-user
+		mysql_admin_user=$RET
+		db_get nova-common/mysql/admin-pass
+		mysql_admin_pass=$RET
+		db_get nova-common/db/dbname
+		mysql_nova_db_name=$RET
+		# We need to know mysql user which have grants to nova db
+		db_get nova-common/db/app-user
+		mysql_app_user_complete=$RET
+		if echo $mysql_app_user_complete | egrep @ > /dev/null; then
+			mysql_app_username=$(echo $mysql_app_user_complete | cut -d@ -f1)
+			mysql_app_user_domain=$(echo $mysql_app_user_complete | cut -d@ -f2)
+			mysql_app_user=$(echo "'$mysql_app_username'@'$mysql_app_user_domain'")
+		else
+			mysql_app_user=$(echo $mysql_app_user_complete)
+		fi
+		# Drop nova_cell0 database
+		echo "===> nova-common: Dumping ${mysql_nova_db_name}_cell0 database:"
+		mysqldump -h $mysql_host -u $mysql_admin_user -p$mysql_admin_pass ${mysql_nova_db_name}_cell0 > /var/tmp/${mysql_nova_db_name}_cell0.${dump_timestamp}.mysql
+		echo "===> nova-common: Revoking all privileges from ${mysql_app_user} for ${mysql_nova_db_name}_cell0"
+		echo "REVOKE ALL PRIVILEGES ON ${mysql_nova_db_name}_cell0.* FROM ${mysql_app_user};" | mysql -h $mysql_host -u $mysql_admin_user -p$mysql_admin_pass
+		echo "===> nova-common: Droping database ${mysql_nova_db_name}_cell0"
+		echo "DROP DATABASE ${mysql_nova_db_name}_cell0" | mysql -h $mysql_host -u $mysql_admin_user -p$mysql_admin_pass
+	elif [ "$nova_database_type" = "sqlite3" ]; then
+	         # We need to know path of sqlite3 file
+	        db_get nova-common/db/basepath
+	        sqlite3_base_path=$RET
+	        db_get nova-common/db/dbname
+		sqlite3_db_name=${RET}_cell0
+	        sqlite3_file_path=$(echo "$sqlite3_base_path/$sqlite3_db_name")
+		echo "===> nova-common: Creation of database $sqlite3_db_name in sqlite3 is not currently supported. If you've created manually, delete also manyally."
+	else
+		echo "Database configuration available only for mysql currently."
+	fi
+}
+
 if [ "${1}" = "remove" ] && [ -r /usr/share/debconf/confmodule ] && [ -r /usr/share/dbconfig-common/dpkg/prerm ] ; then
 	. /usr/share/debconf/confmodule
 	db_get nova/configure_db || true
 	if [ "$RET" = "true" ] ; then
 		. /usr/share/dbconfig-common/dpkg/prerm
 		dbc_go nova-common $@
+		db_get nova-common/dbconfig-remove
+		if [ "$RET" = "true" ]; then
+			remove_cell0_database
+		fi
 	fi
 fi
 

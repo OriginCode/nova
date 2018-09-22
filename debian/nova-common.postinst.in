@@ -66,6 +66,49 @@ run_db_sync (){
 
 }
 
+create_cell0_database (){
+	db_get nova-common/dbconfig-install
+	if [ "$RET" = "true" ]; then
+		db_get nova-common/database-type
+		if [ "$RET" = "mysql" ]; then
+			# We need to know admin connection details
+			db_get nova-common/remote/host
+			mysql_host=$RET
+			db_get nova-common/mysql/admin-user
+			mysql_admin_user=$RET
+			db_get nova-common/mysql/admin-pass
+			mysql_admin_pass=$RET
+			db_get nova-common/db/dbname
+			mysql_nova_db_name=$RET
+			# We need to know mysql user which have grants to nova db
+			db_get nova-common/db/app-user
+			mysql_app_user_complete=$RET
+			if echo $mysql_app_user_complete | egrep @ > /dev/null; then
+				mysql_app_username=$(echo $mysql_app_user_complete | cut -d@ -f1)
+				mysql_app_user_domain=$(echo $mysql_app_user_complete | cut -d@ -f2)
+				mysql_app_user=$(echo "'$mysql_app_username'@'$mysql_app_user_domain'")
+			else
+				mysql_app_user=$(echo $mysql_app_user_complete)
+			fi
+			# Create nova_cell0 database
+			echo "===> nova-common: Creating ${mysql_nova_db_name}_cell0 database:"
+			echo "CREATE DATABASE IF NOT EXISTS ${mysql_nova_db_name}_cell0 CHARACTER SET utf8 COLLATE utf8_unicode_ci;" | mysql -h $mysql_host -u $mysql_admin_user -p$mysql_admin_pass
+			echo "===> nova-common: Granting permissions on ${mysql_nova_db_name}_cell0.* to ${mysql_app_user}"
+			echo "GRANT ALL PRIVILEGES ON ${mysql_nova_db_name}_cell0.* TO ${mysql_app_user};" | mysql -h $mysql_host -u $mysql_admin_user -p$mysql_admin_pass
+		elif [ "$RET" = "sqlite3" ]; then
+			 # We need to know path of sqlite3 file
+			db_get nova-common/db/basepath
+			sqlite3_base_path=$RET
+			db_get nova-common/db/dbname
+			sqlite3_db_name=${RET}_cell0
+			sqlite3_file_path=$(echo "$sqlite3_base_path/$sqlite3_db_name")
+			echo "===> nova-common: Creation of database $sqlite3_db_name in sqlite3 is not currently supported. Please create $sqlite3_db_name manually."
+		else
+			echo "Database configuration available only mysql currently."
+		fi
+	fi
+}
+
 
 if [ "$1" = "configure" ] || [ "$1" = "reconfigure" ] ; then
 	. /usr/share/debconf/confmodule
@@ -98,6 +141,7 @@ if [ "$1" = "configure" ] || [ "$1" = "reconfigure" ] ; then
 	db_get nova/configure_db
 	if [ "$RET" = "true" ]; then
 		pkgos_dbc_postinst /etc/nova/nova.conf database connection nova $@
+		create_cell0_database
 		run_db_sync
 	fi
 
@@ -110,7 +154,6 @@ fi
 
 if [ "$1" = "triggered" ]; then
 	run_db_sync
-
 fi
 
 #DEBHELPER#
