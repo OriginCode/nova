@@ -1,4 +1,4 @@
-Template: novaplacementapi/configure_db
+Template: placement/configure_db
 Type: boolean
 Default: false
 _Description: Set up a database for Nova Placement API?
