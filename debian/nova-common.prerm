@@ -27,7 +27,7 @@ remove_cell0_database (){
 			mysql_app_user=$(echo $mysql_app_user_complete)
 		fi
 		# Drop nova_cell0 database
-		echo "===> nova-common: Dumping ${mysql_nova_db_name}_cell0 database:"
+		echo "===> nova-common: Dumping ${mysql_nova_db_name}_cell0 database to /var/tmp/${mysql_nova_db_name}_cell0.${dump_timestamp}.mysql"
 		mysqldump -h $mysql_host -u $mysql_admin_user -p$mysql_admin_pass ${mysql_nova_db_name}_cell0 > /var/tmp/${mysql_nova_db_name}_cell0.${dump_timestamp}.mysql
 		echo "===> nova-common: Revoking all privileges from ${mysql_app_user} for ${mysql_nova_db_name}_cell0"
 		echo "REVOKE ALL PRIVILEGES ON ${mysql_nova_db_name}_cell0.* FROM ${mysql_app_user};" | mysql -h $mysql_host -u $mysql_admin_user -p$mysql_admin_pass
