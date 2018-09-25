@@ -58,10 +58,10 @@ run_db_sync (){
 	# We have to check if connection is set in [api_database] config
 	pkgos_inifile get ${NOVA_CONF} api_database connection
 	if echo ${RET} | egrep 'mysql(\+pymysql)?:.*:.*@.*\/.*' > /dev/null; then
-		echo "nova-common: Now running \"nova-manage db sync\", this may take a while..."
+		echo "===> nova-common: Now running \"nova-manage db sync\", this may take a while..."
 		su nova -s /bin/sh -c "nova-manage db sync" || true
 	else
-		echo "nova-common: \"nova-manage db sync\" needs api_database.connection set. Sorry."
+		echo "===> nova-common: \"nova-manage db sync\" needs api_database.connection set. Sorry."
 	fi
 
 }
@@ -104,7 +104,7 @@ create_cell0_database (){
 			sqlite3_file_path=$(echo "$sqlite3_base_path/$sqlite3_db_name")
 			echo "===> nova-common: Creation of database $sqlite3_db_name in sqlite3 is not currently supported. Please create $sqlite3_db_name manually."
 		else
-			echo "Database configuration available only mysql currently."
+			echo "===> nova-common: Database configuration available only mysql currently."
 		fi
 	fi
 }

@@ -42,7 +42,7 @@ remove_cell0_database (){
 	        sqlite3_file_path=$(echo "$sqlite3_base_path/$sqlite3_db_name")
 		echo "===> nova-common: Creation of database $sqlite3_db_name in sqlite3 is not currently supported. If you've created manually, delete also manyally."
 	else
-		echo "Database configuration available only for mysql currently."
+		echo "===> nova-common: Database configuration available only for mysql currently."
 	fi
 }
 
