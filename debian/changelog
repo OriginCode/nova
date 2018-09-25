@@ -1,6 +1,8 @@
 nova (2:18.0.1-1) unstable; urgency=medium
 
   * New upstream release.
+  * Remove Dont_persist_zero_allocation_ratios_in_ResourceTracker.patch applied
+    upstream.
 
  -- Thomas Goirand <zigo@debian.org>  Tue, 25 Sep 2018 08:58:22 +0200
 
