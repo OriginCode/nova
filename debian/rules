@@ -20,6 +20,7 @@ override_dh_auto_clean:
 	rm -rf .testrepository subunit.log instances keys
 	rm -rf debian/bla
 	rm -f debian/nova-api.templates debian/nova-common.templates
+	find .  -type d -name __pycache__ -exec rm -r {} \+
 
 override_dh_auto_build:
 	/usr/share/openstack-pkg-tools/pkgos_insert_include pkgos_func nova-common.config
