@@ -1051,6 +1051,13 @@ class _ComputeAPIUnitTestMixIn(object):
         mock_confirm = self.useFixture(
             fixtures.MockPatchObject(rpcapi, 'confirm_resize')).mock
 
+        def _reset_task_state(context, instance, migration, src_host,
+                              cast=False):
+            inst.update({'task_state': None})
+
+        # After confirm resize action, instance task_state is reset to None
+        mock_confirm.side_effect = _reset_task_state
+
         is_shelved = inst.vm_state in (vm_states.SHELVED,
                                        vm_states.SHELVED_OFFLOADED)
         if is_shelved:
@@ -1093,6 +1100,17 @@ class _ComputeAPIUnitTestMixIn(object):
                 expected_record_calls.append(
                     mock.call(self.context, inst,
                               instance_actions.CONFIRM_RESIZE))
+
+                # After confirm resize action, instance task_state
+                # is reset to None, so is the expected value. But
+                # for soft delete, task_state will be again reset
+                # back to soft-deleting in the code to avoid status
+                # checking failure.
+                updates['task_state'] = None
+                if delete_type == 'soft_delete':
+                    expected_save_calls.append(mock.call())
+                    updates['task_state'] = 'soft-deleting'
+
             if inst.host is not None:
                 mock_elevated.return_value = self.context
                 expected_elevated_calls.append(mock.call())
@@ -1237,6 +1255,9 @@ class _ComputeAPIUnitTestMixIn(object):
 
     def test_delete_soft_with_down_host(self):
         self._test_delete('soft_delete', host='down-host')
+
+    def test_delete_soft_in_resized(self):
+        self._test_delete('soft_delete', vm_state=vm_states.RESIZED)
 
     def test_delete_soft(self):
         self._test_delete('soft_delete')
@@ -1802,8 +1823,9 @@ class _ComputeAPIUnitTestMixIn(object):
     @mock.patch('nova.objects.Quotas.check_deltas')
     @mock.patch('nova.objects.Migration.get_by_instance_and_status')
     @mock.patch('nova.context.RequestContext.elevated')
-    def _test_revert_resize(self, mock_elevated, mock_get_migration,
-                            mock_check):
+    @mock.patch('nova.objects.RequestSpec.get_by_instance_uuid')
+    def _test_revert_resize(self, mock_get_reqspec, mock_elevated,
+                            mock_get_migration, mock_check):
         params = dict(vm_state=vm_states.RESIZED)
         fake_inst = self._create_instance_obj(params=params)
         fake_inst.old_flavor = fake_inst.flavor
@@ -1835,6 +1857,9 @@ class _ComputeAPIUnitTestMixIn(object):
                 self.context, fake_inst['uuid'], 'finished')
             mock_inst_save.assert_called_once_with(expected_task_state=[None])
             mock_mig_save.assert_called_once_with()
+            mock_get_reqspec.assert_called_once_with(
+                self.context, fake_inst.uuid)
+            mock_get_reqspec.return_value.save.assert_called_once_with()
             mock_record_action.assert_called_once_with(self.context, fake_inst,
                                                        'revertResize')
             mock_revert_resize.assert_called_once_with(

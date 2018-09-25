@@ -202,7 +202,7 @@ def select_db_reader_mode(f):
         use_slave = keyed_args.get('use_slave', False)
 
         if use_slave:
-            reader_mode = get_context_manager(context).async_
+            reader_mode = get_context_manager(context).async
         else:
             reader_mode = get_context_manager(context).reader
 
@@ -5429,7 +5429,7 @@ def _archive_if_instance_deleted(table, shadow_table, instances, conn,
             return result_delete.rowcount
     except db_exc.DBReferenceError as ex:
         LOG.warning('Failed to archive %(table)s: %(error)s',
-                    {'table': table.__tablename__,
+                    {'table': table.name,
                      'error': six.text_type(ex)})
         return 0
 

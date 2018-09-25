@@ -959,8 +959,15 @@ class ComputeManager(manager.Manager):
         except NotImplementedError as e:
             LOG.debug(e, instance=instance)
         except exception.VirtualInterfacePlugException:
-            # we don't want an exception to block the init_host
-            LOG.exception("Vifs plug failed", instance=instance)
+            # NOTE(mriedem): If we get here, it could be because the vif_type
+            # in the cache is "binding_failed". The only way to fix that is to
+            # try and bind the ports again, which would be expensive here on
+            # host startup. We could add a check to _heal_instance_info_cache
+            # to handle this, but probably only if the instance task_state is
+            # None.
+            LOG.exception('Virtual interface plugging failed for instance. '
+                          'The port binding:host_id may need to be manually '
+                          'updated.', instance=instance)
             self._set_instance_obj_error_state(context, instance)
             return
 
@@ -2984,6 +2991,12 @@ class ComputeManager(manager.Manager):
         image_meta = {}
         if image_ref:
             image_meta = self.image_api.get(context, image_ref)
+        elif evacuate:
+            # For evacuate the API does not send down the image_ref since the
+            # image does not change so just get it from what was stashed in
+            # the instance system_metadata when the instance was created (or
+            # last rebuilt). This also works for volume-backed instances.
+            image_meta = instance.image_meta
 
         # NOTE(mriedem): On an evacuate, we need to update
         # the instance's host and node properties to reflect it's
@@ -3908,7 +3921,8 @@ class ComputeManager(manager.Manager):
 
             instance.vm_state = vm_state
             instance.task_state = None
-            instance.save(expected_task_state=[None, task_states.DELETING])
+            instance.save(expected_task_state=[None, task_states.DELETING,
+                                               task_states.SOFT_DELETING])
 
             self._notify_about_instance_usage(
                 context, instance, "resize.confirm.end",

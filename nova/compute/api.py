@@ -1982,6 +1982,18 @@ class API(base.Base):
 
             if instance.vm_state == vm_states.RESIZED:
                 self._confirm_resize_on_deleting(context, instance)
+                # NOTE(neha_alhat): After confirm resize vm_state will become
+                # 'active' and task_state will be set to 'None'. But for soft
+                # deleting a vm, the _do_soft_delete callback requires
+                # task_state in 'SOFT_DELETING' status. So, we need to set
+                # task_state as 'SOFT_DELETING' again for soft_delete case.
+                # After confirm resize and before saving the task_state to
+                # "SOFT_DELETING", during the short window, user can submit
+                # soft delete vm request again and system will accept and
+                # process it without any errors.
+                if delete_type == 'soft_delete':
+                    instance.task_state = instance_attrs['task_state']
+                    instance.save()
 
             is_local_delete = True
             try:
@@ -3333,6 +3345,21 @@ class API(base.Base):
 
         self._record_action_start(context, instance,
                                   instance_actions.REVERT_RESIZE)
+
+        # Conductor updated the RequestSpec.flavor during the initial resize
+        # operation to point at the new flavor, so we need to update the
+        # RequestSpec to point back at the original flavor, otherwise
+        # subsequent move operations through the scheduler will be using the
+        # wrong flavor.
+        try:
+            reqspec = objects.RequestSpec.get_by_instance_uuid(
+                context, instance.uuid)
+            reqspec.flavor = instance.old_flavor
+            reqspec.save()
+        except exception.RequestSpecNotFound:
+            # TODO(mriedem): Make this a failure in Stein when we drop
+            # compatibility for missing request specs.
+            pass
 
         # TODO(melwitt): We're not rechecking for strict quota here to guard
         # against going over quota during a race at this time because the

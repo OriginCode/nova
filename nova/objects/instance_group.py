@@ -15,6 +15,7 @@
 import copy
 
 from oslo_db import exception as db_exc
+from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import uuidutils
 from oslo_utils import versionutils
@@ -31,6 +32,7 @@ from nova.objects import fields
 
 
 LAZY_LOAD_FIELDS = ['hosts']
+LOG = logging.getLogger(__name__)
 
 
 def _instance_group_get_query(context, id_field=None, id=None):
@@ -335,11 +337,28 @@ class InstanceGroup(base.NovaPersistentObject, base.NovaObject,
                    in_(set(instance_uuids))).\
             delete(synchronize_session=False)
 
+    @staticmethod
+    @db_api.api_context_manager.writer
+    def _destroy_members_bulk_in_db(context, instance_uuids):
+        return context.session.query(api_models.InstanceGroupMember).filter(
+            api_models.InstanceGroupMember.instance_uuid.in_(instance_uuids)).\
+            delete(synchronize_session=False)
+
+    @classmethod
+    def destroy_members_bulk(cls, context, instance_uuids):
+        return cls._destroy_members_bulk_in_db(context, instance_uuids)
+
     def obj_load_attr(self, attrname):
         # NOTE(sbauza): Only hosts could be lazy-loaded right now
         if attrname != 'hosts':
             raise exception.ObjectActionError(
                 action='obj_load_attr', reason='unable to load %s' % attrname)
+
+        LOG.debug("Lazy-loading '%(attr)s' on %(name)s uuid %(uuid)s",
+                  {'attr': attrname,
+                   'name': self.obj_name(),
+                   'uuid': self.uuid,
+                   })
 
         self.hosts = self.get_hosts()
         self.obj_reset_changes(['hosts'])
