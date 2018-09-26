@@ -75,9 +75,9 @@ create_cell0_database (){
 			echo "===> nova-common: Granting permissions on ${dbc_dbname}_cell0.* to '${dbc_dbuser}'@'${dbc_dballow}'"
 			echo "GRANT ALL PRIVILEGES ON ${dbc_dbname}_cell0.* TO '${dbc_dbuser}'@'${dbc_dballow}';" | mysql -h ${dbc_dbserver} -u ${dbc_dbadmin} -p${dbc_dbadmpass}
 		elif [ "$RET" = "sqlite3" ]; then
-			echo "===> nova-common: Creation of database $sqlite3_db_name in sqlite3 is not currently supported. Please create $sqlite3_db_name manually."
+			echo "===> nova-common: Creation of database $sqlite3_db_name in sqlite3 is not currently supported. Please create database manually."
 		else
-			echo "===> nova-common: Database configuration available only mysql currently."
+			echo "===> nova-common: Database configuration available only mysql currently. Please, create database manually."
 		fi
 	fi
 }
