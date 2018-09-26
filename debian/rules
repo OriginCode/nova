@@ -20,6 +20,7 @@ override_dh_auto_clean:
 	rm -rf .testrepository subunit.log instances keys
 	rm -rf debian/bla
 	rm -f debian/nova-api.templates debian/nova-common.templates
+	find .  -type d -name __pycache__ -exec rm -r {} \+
 
 override_dh_auto_build:
 	/usr/share/openstack-pkg-tools/pkgos_insert_include pkgos_func nova-common.config
@@ -31,7 +32,7 @@ override_dh_auto_build:
 	/usr/share/openstack-pkg-tools/pkgos_insert_include pkgos_postrm nova-common.postrm
 	pkgos-merge-templates nova-api nova endpoint
 	pkgos-merge-templates nova-common nova db rabbit ksat
-	pkgos-merge-templates nova-placement-api nova-placement-api endpoint
+	pkgos-merge-templates nova-placement-api nova-placement-api endpoint db
 
 override_dh_sphinxdoc:
 ifeq (,$(findstring nodoc, $(DEB_BUILD_OPTIONS)))

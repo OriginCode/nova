@@ -14,6 +14,7 @@ if [ "$1" = "purge" ] ; then
 	rm -f /etc/default/nova-common
 	rm -f /etc/nova/api-paste.ini
 	rm -f /etc/nova/logging.conf
+	rm -f /etc/nova/placement-policy.json
 	rmdir --ignore-fail-on-non-empty /etc/nova
 fi
 

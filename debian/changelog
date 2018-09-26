@@ -1,3 +1,39 @@
+nova (2:18.0.1-2) unstable; urgency=medium
+
+  [ Michal Arbet ]
+  * d/nova-api-postinst.in:
+    - Add calling nova-common's trigger nova-common-db-sync
+  * - Add calling "nova-manage cell_v2 map_cell0"
+  * - Add calling "nova-manage cell_v2 create_cell --name=cell1"
+  * d/nova-api.postrm:
+    - Redesigned to nova-api.postrm.in
+  * d/nova-api.prerm:
+    - Add deletion of nova_api database
+  * d/nova-common.postinst.in
+    - Add function run_db_sync
+    - Add function create_cell0_database if configured
+      via dbconfig-common
+    - Changed postinst to call create_cell0_database
+      and after that run_db_sync
+    - Add if clause triggered which calls nova-common-db-sync
+  * d/nova-common.postrm.in:
+    - Add deletion of /etc/nova/placement-policy.json (Closes: #909115)
+    - Add deletion of nova_cell0 database if configured
+  * d/nova-common.triggers:
+    - Add nova-common-db-sync trigger
+  * d/nova-placement-api.config.in
+    - Add creation of placement db which is currently not required
+      in rocky, but now it is possible to do it with dbconfig-common
+  * d/nova-placement-api.postrm.in
+    - Add purging dbc config
+  * d/nova-placement-api.prerm
+    - Add deletion of placement database
+  * d/rules:
+    - Add deletion of __pychache__ in dh_clean
+    - Add pkgos-merge-templates of nova-placement-api
+
+ -- Michal Arbet <michal.arbet@ultimum.io>  Wed, 26 Sep 2018 15:59:53 +0200
+
 nova (2:18.0.1-1) unstable; urgency=medium
 
   * New upstream release.

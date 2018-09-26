@@ -7,6 +7,16 @@ set -e
 if [ "$1" = "configure" ] ; then
 	. /usr/share/debconf/confmodule
 	pkgos_register_endpoint_postinst nova-placement-api placement placement "Placement API" 8778 ""
+
+	db_get placement/configure_db
+	if [ "$RET" = "true" ]; then
+		pkgos_dbc_postinst --suite nova /etc/nova/nova.conf placement_database connection placement $@
+		echo "===> nova-common: Now running \"nova-manage api_db sync\", this may take a while..."
+		# This command is failing when api_database not filled, but it is false positive
+		# If we have nova api db populated , it is OK , placement db is not required still in rocky
+		su nova -s /bin/sh -c "nova-manage api_db sync 2>/dev/null" || true
+	fi
+
 	db_stop
 fi
 
