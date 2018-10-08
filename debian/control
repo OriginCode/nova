@@ -5,6 +5,7 @@ Maintainer: Debian OpenStack <team+openstack@tracker.debian.org>
 Uploaders:
  Thomas Goirand <zigo@debian.org>,
  gustavo panizzo <gfa@zumbi.com.ar>,
+ Michal Arbet <michal.arbet@ultimum.io>,
 Build-Depends:
  debhelper (>= 10),
  dh-python,
