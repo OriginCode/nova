@@ -1,3 +1,13 @@
+nova (2:18.0.3-1) unstable; urgency=medium
+
+  * Add debconf config for cinder os_region_name
+  * d/rules: make regionOne default value for os_region_name
+  * d/copyright: Add me to copyright file
+  * Update pofiles
+  * New upstream version
+
+ -- Michal Arbet <michal.arbet@ultimum.io>  Tue, 06 Nov 2018 11:35:16 +0100
+
 nova (2:18.0.1-3) unstable; urgency=medium
 
   [ Michal Arbet ]
