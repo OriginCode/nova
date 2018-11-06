@@ -578,6 +578,9 @@ class ComputeManager(manager.Manager):
         # to the database layer.
         instance.host = None
         instance.node = None
+        # If the instance is not on a host, it's not in an aggregate and
+        # therefore is not in an availability zone.
+        instance.availability_zone = None
 
     def _set_instance_obj_error_state(self, context, instance,
                                       clean_task_state=False):
@@ -3663,7 +3666,6 @@ class ComputeManager(manager.Manager):
         except Exception:
             # Catch all here because this could be anything.
             LOG.exception('set_admin_password failed', instance=instance)
-            self._set_instance_obj_error_state(context, instance)
             # We create a new exception here so that we won't
             # potentially reveal password information to the
             # API caller.  The real exception is logged above
@@ -6123,8 +6125,17 @@ class ComputeManager(manager.Manager):
         migrate_data.old_vol_attachment_ids = {}
         bdms = objects.BlockDeviceMappingList.get_by_instance_uuid(
             context, instance.uuid)
+        network_info = self.network_api.get_instance_nw_info(context, instance)
+        self._notify_about_instance_usage(
+            context, instance, "live_migration.pre.start",
+            network_info=network_info)
+        compute_utils.notify_about_instance_action(
+            context, instance, self.host,
+            action=fields.NotificationAction.LIVE_MIGRATION_PRE,
+            phase=fields.NotificationPhase.START, bdms=bdms)
+
+        connector = self.driver.get_volume_connector(instance)
         try:
-            connector = self.driver.get_volume_connector(instance)
             for bdm in bdms:
                 if bdm.is_volume and bdm.attachment_id is not None:
                     # This bdm uses the new cinder v3.44 API.
@@ -6149,6 +6160,42 @@ class ComputeManager(manager.Manager):
                     # update the bdm with the new attachment_id.
                     bdm.attachment_id = attach_ref['id']
                     bdm.save()
+
+            block_device_info = self._get_instance_block_device_info(
+                                context, instance, refresh_conn_info=True,
+                                bdms=bdms)
+
+            # The driver pre_live_migration will plug vifs on the host. We call
+            # plug_vifs before calling ensure_filtering_rules_for_instance, to
+            # ensure bridge is set up.
+            migrate_data = self.driver.pre_live_migration(context,
+                                           instance,
+                                           block_device_info,
+                                           network_info,
+                                           disk,
+                                           migrate_data)
+            LOG.debug('driver pre_live_migration data is %s', migrate_data)
+            # driver.pre_live_migration is what plugs vifs on the destination
+            # host so now we can set the wait_for_vif_plugged flag in the
+            # migrate_data object which the source compute will use to
+            # determine if it should wait for a 'network-vif-plugged' event
+            # from neutron before starting the actual guest transfer in the
+            # hypervisor
+            migrate_data.wait_for_vif_plugged = (
+                CONF.compute.live_migration_wait_for_vif_plug)
+
+            # NOTE(tr3buchet): setup networks on destination host
+            self.network_api.setup_networks_on_host(context, instance,
+                                                             self.host)
+
+            # Creating filters to hypervisors and firewalls.
+            # An example is that nova-instance-instance-xxx,
+            # which is written to libvirt.xml(Check "virsh nwfilter-list")
+            # This nwfilter is necessary on the destination host.
+            # In addition, this method is creating filtering rule
+            # onto destination host.
+            self.driver.ensure_filtering_rules_for_instance(instance,
+                                                network_info)
         except Exception:
             # If we raise, migrate_data with the updated attachment ids
             # will not be returned to the source host for rollback.
@@ -6163,37 +6210,6 @@ class ComputeManager(manager.Manager):
                         bdm.attachment_id = old_attachments[bdm.volume_id]
                         bdm.save()
 
-        block_device_info = self._get_instance_block_device_info(
-                            context, instance, refresh_conn_info=True,
-                            bdms=bdms)
-
-        network_info = self.network_api.get_instance_nw_info(context, instance)
-        self._notify_about_instance_usage(
-                     context, instance, "live_migration.pre.start",
-                     network_info=network_info)
-        compute_utils.notify_about_instance_action(
-            context, instance, self.host,
-            action=fields.NotificationAction.LIVE_MIGRATION_PRE,
-            phase=fields.NotificationPhase.START)
-
-        # The driver pre_live_migration will plug vifs on the host.
-        # We call plug_vifs before calling ensure_filtering_rules_for_instance,
-        # to ensure bridge is set up.
-        migrate_data = self.driver.pre_live_migration(context,
-                                       instance,
-                                       block_device_info,
-                                       network_info,
-                                       disk,
-                                       migrate_data)
-        LOG.debug('driver pre_live_migration data is %s', migrate_data)
-        # driver.pre_live_migration is what plugs vifs on the destination host
-        # so now we can set the wait_for_vif_plugged flag in the migrate_data
-        # object which the source compute will use to determine if it should
-        # wait for a 'network-vif-plugged' event from neutron before starting
-        # the actual guest transfer in the hypervisor
-        migrate_data.wait_for_vif_plugged = (
-            CONF.compute.live_migration_wait_for_vif_plug)
-
         # Volume connections are complete, tell cinder that all the
         # attachments have completed.
         for bdm in bdms:
@@ -6201,26 +6217,13 @@ class ComputeManager(manager.Manager):
                 self.volume_api.attachment_complete(context,
                                                     bdm.attachment_id)
 
-        # NOTE(tr3buchet): setup networks on destination host
-        self.network_api.setup_networks_on_host(context, instance,
-                                                         self.host)
-
-        # Creating filters to hypervisors and firewalls.
-        # An example is that nova-instance-instance-xxx,
-        # which is written to libvirt.xml(Check "virsh nwfilter-list")
-        # This nwfilter is necessary on the destination host.
-        # In addition, this method is creating filtering rule
-        # onto destination host.
-        self.driver.ensure_filtering_rules_for_instance(instance,
-                                            network_info)
-
         self._notify_about_instance_usage(
                      context, instance, "live_migration.pre.end",
                      network_info=network_info)
         compute_utils.notify_about_instance_action(
             context, instance, self.host,
             action=fields.NotificationAction.LIVE_MIGRATION_PRE,
-            phase=fields.NotificationPhase.END)
+            phase=fields.NotificationPhase.END, bdms=bdms)
 
         LOG.debug('pre_live_migration result data is %s', migrate_data)
         return migrate_data
@@ -6527,23 +6530,22 @@ class ComputeManager(manager.Manager):
         # migrate_data objects for drivers that expose block live migration
         # information (i.e. Libvirt, Xenapi and HyperV). For other drivers
         # cleanup is not needed.
-        is_shared_block_storage = True
-        is_shared_instance_path = True
+        do_cleanup = False
+        destroy_disks = False
         if isinstance(migrate_data, migrate_data_obj.LibvirtLiveMigrateData):
-            is_shared_block_storage = migrate_data.is_shared_block_storage
-            is_shared_instance_path = migrate_data.is_shared_instance_path
+            # No instance booting at source host, but instance dir
+            # must be deleted for preparing next block migration
+            # must be deleted for preparing next live migration w/o shared
+            # storage
+            do_cleanup = not migrate_data.is_shared_instance_path
+            destroy_disks = not migrate_data.is_shared_block_storage
         elif isinstance(migrate_data, migrate_data_obj.XenapiLiveMigrateData):
-            is_shared_block_storage = not migrate_data.block_migration
-            is_shared_instance_path = not migrate_data.block_migration
+            do_cleanup = migrate_data.block_migration
+            destroy_disks = migrate_data.block_migration
         elif isinstance(migrate_data, migrate_data_obj.HyperVLiveMigrateData):
-            is_shared_instance_path = migrate_data.is_shared_instance_path
-            is_shared_block_storage = migrate_data.is_shared_instance_path
-
-        # No instance booting at source host, but instance dir
-        # must be deleted for preparing next block migration
-        # must be deleted for preparing next live migration w/o shared storage
-        do_cleanup = not is_shared_instance_path
-        destroy_disks = not is_shared_block_storage
+            # NOTE(claudiub): We need to cleanup any zombie Planned VM.
+            do_cleanup = True
+            destroy_disks = not migrate_data.is_shared_instance_path
 
         return (do_cleanup, destroy_disks)
 
@@ -6580,23 +6582,44 @@ class ComputeManager(manager.Manager):
         connector = self.driver.get_volume_connector(instance)
         for bdm in bdms:
             if bdm.is_volume:
-                if bdm.attachment_id is None:
-                    # Prior to cinder v3.44:
-                    # We don't want to actually mark the volume detached, or
-                    # delete the bdm, just remove the connection from this
-                    # host.
-                    #
-                    # remove the volume connection without detaching from
-                    # hypervisor because the instance is not running anymore
-                    # on the current host
-                    self.volume_api.terminate_connection(ctxt, bdm.volume_id,
-                                                         connector)
-                else:
-                    # cinder v3.44 api flow - delete the old attachment
-                    # for the source host
-                    old_attachment_id = \
-                        migrate_data.old_vol_attachment_ids[bdm.volume_id]
-                    self.volume_api.attachment_delete(ctxt, old_attachment_id)
+                # Detaching volumes is a call to an external API that can fail.
+                # If it does, we need to handle it gracefully so that the call
+                # to post_live_migration_at_destination - where we set instance
+                # host and task state - still happens. We need to rethink the
+                # current approach of setting instance host and task state
+                # AFTER a whole bunch of things that could fail in unhandled
+                # ways, but that is left as a TODO(artom).
+                try:
+                    if bdm.attachment_id is None:
+                        # Prior to cinder v3.44:
+                        # We don't want to actually mark the volume detached,
+                        # or delete the bdm, just remove the connection from
+                        # this host.
+                        #
+                        # remove the volume connection without detaching from
+                        # hypervisor because the instance is not running
+                        # anymore on the current host
+                        self.volume_api.terminate_connection(ctxt,
+                                                             bdm.volume_id,
+                                                             connector)
+                    else:
+                        # cinder v3.44 api flow - delete the old attachment
+                        # for the source host
+                        old_attachment_id = \
+                            migrate_data.old_vol_attachment_ids[bdm.volume_id]
+                        self.volume_api.attachment_delete(ctxt,
+                                                          old_attachment_id)
+                except Exception as e:
+                    if bdm.attachment_id is None:
+                        LOG.error('Connection for volume %s not terminated on '
+                                  'source host %s during post_live_migration: '
+                                   '%s', bdm.volume_id, self.host,
+                                   six.text_type(e), instance=instance)
+                    else:
+                        LOG.error('Volume attachment %s not deleted on source '
+                                  'host %s during post_live_migration: %s',
+                                  old_attachment_id, self.host,
+                                  six.text_type(e), instance=instance)
 
         # Releasing vlan.
         # (not necessary in current implementation?)
@@ -7470,7 +7493,14 @@ class ComputeManager(manager.Manager):
                                                         expected_attrs=[],
                                                         use_slave=True)
 
-        num_vm_instances = self.driver.get_num_instances()
+        try:
+            num_vm_instances = self.driver.get_num_instances()
+        except exception.VirtDriverNotReady as e:
+            # If the virt driver is not ready, like ironic-api not being up
+            # yet in the case of ironic, just log it and exit.
+            LOG.info('Skipping _sync_power_states periodic task due to: %s', e)
+            return
+
         num_db_instances = len(db_instances)
 
         if num_vm_instances != num_db_instances:

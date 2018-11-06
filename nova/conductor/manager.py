@@ -53,6 +53,7 @@ from nova.scheduler import client as scheduler_client
 from nova.scheduler import utils as scheduler_utils
 from nova import servicegroup
 from nova import utils
+from nova.volume import cinder
 
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
@@ -226,6 +227,7 @@ class ComputeTaskManager(base.Base):
     def __init__(self):
         super(ComputeTaskManager, self).__init__()
         self.compute_rpcapi = compute_rpcapi.ComputeAPI()
+        self.volume_api = cinder.API()
         self.image_api = image.API()
         self.network_api = network.API()
         self.servicegroup_api = servicegroup.API()
@@ -513,6 +515,24 @@ class ComputeTaskManager(base.Base):
                 inst_mapping.save()
         return inst_mapping
 
+    def _validate_existing_attachment_ids(self, context, instance, bdms):
+        """Ensure any attachment ids referenced by the bdms exist.
+
+        New attachments will only be created if the attachment ids referenced
+        by the bdms no longer exist. This can happen when an instance is
+        rescheduled after a failure to spawn as cleanup code on the previous
+        host will delete attachments before rescheduling.
+        """
+        for bdm in bdms:
+            if bdm.is_volume and bdm.attachment_id:
+                try:
+                    self.volume_api.attachment_get(context, bdm.attachment_id)
+                except exception.VolumeAttachmentNotFound:
+                    attachment = self.volume_api.attachment_create(
+                        context, bdm.volume_id, instance.uuid)
+                    bdm.attachment_id = attachment['id']
+                    bdm.save()
+
     # NOTE(danms): This is never cell-targeted because it is only used for
     # cellsv1 (which does not target cells directly) and n-cpu reschedules
     # (which go to the cell conductor and thus are always cell-specific).
@@ -699,6 +719,11 @@ class ComputeTaskManager(base.Base):
                     if inst_mapping:
                         inst_mapping.destroy()
                     return
+            else:
+                # NOTE(lyarwood): If this is a reschedule then recreate any
+                # attachments that were previously removed when cleaning up
+                # after failures to spawn etc.
+                self._validate_existing_attachment_ids(context, instance, bdms)
 
             alts = [(alt.service_host, alt.nodename) for alt in host_list]
             LOG.debug("Selected host: %s; Selected node: %s; Alternates: %s",
@@ -1214,6 +1239,7 @@ class ComputeTaskManager(base.Base):
         host_mapping_cache = {}
         cell_mapping_cache = {}
         instances = []
+        host_az = {}  # host=az cache to optimize multi-create
 
         for (build_request, request_spec, host_list) in six.moves.zip(
                 build_requests, request_specs, host_lists):
@@ -1259,9 +1285,11 @@ class ComputeTaskManager(base.Base):
                 rc.delete_allocation_for_instance(context, instance.uuid)
                 continue
             else:
-                instance.availability_zone = (
-                    availability_zones.get_host_availability_zone(
-                        context, host.service_host))
+                if host.service_host not in host_az:
+                    host_az[host.service_host] = (
+                        availability_zones.get_host_availability_zone(
+                            context, host.service_host))
+                instance.availability_zone = host_az[host.service_host]
                 with obj_target_cell(instance, cell):
                     instance.create()
                     instances.append(instance)

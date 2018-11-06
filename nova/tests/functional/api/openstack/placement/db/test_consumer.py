@@ -104,7 +104,7 @@ class CreateIncompleteConsumersTestCase(base.TestCase):
         self.ctx = self.context
 
     @db_api.placement_context_manager.writer
-    def _create_incomplete_allocations(self, ctx):
+    def _create_incomplete_allocations(self, ctx, num_of_consumer_allocs=1):
         # Create some allocations with consumers that don't exist in the
         # consumers table to represent old allocations that we expect to be
         # "cleaned up" with consumers table records that point to the sentinel
@@ -113,10 +113,14 @@ class CreateIncompleteConsumersTestCase(base.TestCase):
         c2_missing_uuid = uuids.c2_missing
         c3_missing_uuid = uuids.c3_missing
         for c_uuid in (c1_missing_uuid, c2_missing_uuid, c3_missing_uuid):
-            ins_stmt = ALLOC_TBL.insert().values(
-                resource_provider_id=1, resource_class_id=0,
-                consumer_id=c_uuid, used=1)
-            ctx.session.execute(ins_stmt)
+            # Create $num_of_consumer_allocs allocations per consumer with
+            # different resource classes.
+            for resource_class_id in range(num_of_consumer_allocs):
+                ins_stmt = ALLOC_TBL.insert().values(
+                    resource_provider_id=1,
+                    resource_class_id=resource_class_id,
+                    consumer_id=c_uuid, used=1)
+                ctx.session.execute(ins_stmt)
         # Verify there are no records in the projects/users table
         project_count = ctx.session.scalar(
             sa.select([sa.func.count('*')]).select_from(PROJECT_TBL))
@@ -212,6 +216,25 @@ class CreateIncompleteConsumersTestCase(base.TestCase):
         # get_all_by_resource_provider() should have auto-completed the still
         # missing consumer record and _check_incomplete_consumers() should
         # assert correctly that there are no more incomplete consumer records.
+        self._check_incomplete_consumers(self.ctx)
+        res = consumer_obj.create_incomplete_consumers(self.ctx, 10)
+        self.assertEqual((0, 0), res)
+
+    def test_create_incomplete_consumers_multiple_allocs_per_consumer(self):
+        """Tests that missing consumer records are created when listing
+        allocations against a resource provider or running the online data
+        migration routine when the consumers have multiple allocations on the
+        same provider.
+        """
+        self._create_incomplete_allocations(self.ctx, num_of_consumer_allocs=2)
+        # Run the online data migration to migrate one consumer. The batch size
+        # needs to be large enough to hit more than one consumer for this test
+        # where each consumer has two allocations.
+        res = consumer_obj.create_incomplete_consumers(self.ctx, 2)
+        self.assertEqual((2, 2), res)
+        # Migrate the rest by listing allocations on the resource provider.
+        rp1 = rp_obj.ResourceProvider(self.ctx, id=1)
+        rp_obj.AllocationList.get_all_by_resource_provider(self.ctx, rp1)
         self._check_incomplete_consumers(self.ctx)
         res = consumer_obj.create_incomplete_consumers(self.ctx, 10)
         self.assertEqual((0, 0), res)

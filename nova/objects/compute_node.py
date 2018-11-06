@@ -19,6 +19,7 @@ from oslo_utils import versionutils
 
 import nova.conf
 from nova.db import api as db
+from nova.db.sqlalchemy import api as sa_api
 from nova.db.sqlalchemy import models
 from nova import exception
 from nova import objects
@@ -350,6 +351,11 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject):
                 "disk_available_least", "host_ip", "uuid"]
         for key in keys:
             if key in resources:
+                # The uuid field is read-only so it should only be set when
+                # creating the compute node record for the first time. Ignore
+                # it otherwise.
+                if key == 'uuid' and 'uuid' in self:
+                    continue
                 setattr(self, key, resources[key])
 
         # supported_instances has a different name in compute_node
@@ -441,7 +447,7 @@ class ComputeNodeList(base.ObjectListBase, base.NovaObject):
     @staticmethod
     @db.select_db_reader_mode
     def _db_compute_node_get_all_by_uuids(context, compute_uuids):
-        db_computes = context.session.query(models.ComputeNode).filter(
+        db_computes = sa_api.model_query(context, models.ComputeNode).filter(
             models.ComputeNode.uuid.in_(compute_uuids)).all()
         return db_computes
 
