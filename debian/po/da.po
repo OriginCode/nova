@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova\n"
 "Report-Msgid-Bugs-To: nova@packages.debian.org\n"
-"POT-Creation-Date: 2018-03-06 20:20+0000\n"
+"POT-Creation-Date: 2018-11-06 11:22+0100\n"
 "PO-Revision-Date: 2016-07-09 23:51+0200\n"
 "Last-Translator: Joe Hansen <joedalton2@yahoo.dk>\n"
 "Language-Team: Danish <debian-l10n-danish@lists.debian.org>\n"
@@ -147,6 +147,20 @@ msgstr ""
 "mellem Neutrons proxy-agent for metadata og Novas metadataserver. Den samme "
 "delte adgangskode skal bruges når pakken neutron-metadata-agent sættes op."
 
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:9001
+msgid "Cinder os region name:"
+msgstr ""
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:9001
+#, fuzzy
+#| msgid "Please enter the URL of the Neutron server."
+msgid "Please enter the region name for cinder service."
+msgstr "Indtast venligst adressen for Neutronserveren."
+
 #. Type: boolean
 #. Description
 #: ../nova-api.templates.in:1001
@@ -224,4 +238,3 @@ msgstr ""
 #: ../nova-consoleproxy.templates:1001
 msgid "This can later be edited in /etc/default/nova-consoleproxy."
 msgstr "Dette kan senere redigeres i /etc/default/nova-consoleproxy."
-

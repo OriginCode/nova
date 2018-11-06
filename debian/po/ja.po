@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova\n"
 "Report-Msgid-Bugs-To: nova@packages.debian.org\n"
-"POT-Creation-Date: 2018-03-06 20:20+0000\n"
+"POT-Creation-Date: 2018-11-06 11:22+0100\n"
 "PO-Revision-Date: 2016-04-07 12:59+0900\n"
 "Last-Translator: Takuma Yamada <tyamada@takumayamada.com>\n"
 "Language-Team: Japanese <debian-japanese@lists.debian.org>\n"
@@ -151,6 +151,20 @@ msgstr ""
 "Neutron メタデータプロキシエージェントおよび Nova メタデータサーバ間の通信を"
 "保護するために使うパスワードを入力してください。同じ共有パスワードは、"
 "neutron-metadata-agent パッケージを設定するときにも使用する必要があります。"
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:9001
+msgid "Cinder os region name:"
+msgstr ""
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:9001
+#, fuzzy
+#| msgid "Please enter the URL of the Neutron server."
+msgid "Please enter the region name for cinder service."
+msgstr "Neutron サーバの URL を入力してください。"
 
 #. Type: boolean
 #. Description

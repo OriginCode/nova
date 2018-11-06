@@ -6,7 +6,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova 2013.2.2-4\n"
 "Report-Msgid-Bugs-To: nova@packages.debian.org\n"
-"POT-Creation-Date: 2018-03-06 20:20+0000\n"
+"POT-Creation-Date: 2018-11-06 11:22+0100\n"
 "PO-Revision-Date: 2014-04-02 19:16+0400\n"
 "Last-Translator: Yuri Kozlov <yuray@komyakino.ru>\n"
 "Language-Team: Russian <debian-l10n-russian@lists.debian.org>\n"
@@ -143,6 +143,20 @@ msgid ""
 "agent package."
 msgstr ""
 
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:9001
+msgid "Cinder os region name:"
+msgstr ""
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:9001
+#, fuzzy
+#| msgid "Please enter the URL of the Neutron server."
+msgid "Please enter the region name for cinder service."
+msgstr "Укажите URL сервера Neutron."
+
 #. Type: boolean
 #. Description
 #: ../nova-api.templates.in:1001
@@ -227,4 +241,3 @@ msgid "This can later be edited in /etc/default/nova-consoleproxy."
 msgstr ""
 "Позже можно изменить настройку, отредактировав файл /etc/default/nova-"
 "consoleproxy."
-

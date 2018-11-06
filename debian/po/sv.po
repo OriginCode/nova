@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova\n"
 "Report-Msgid-Bugs-To: nova@packages.debian.org\n"
-"POT-Creation-Date: 2018-03-06 20:20+0000\n"
+"POT-Creation-Date: 2018-11-06 11:22+0100\n"
 "PO-Revision-Date: 2014-01-08 17:05+0100\n"
 "Last-Translator: Martin Bagge / brother <brother@bsnet.se>\n"
 "Language-Team: Swedish <debian-l10n-swedish@lists.debian.org>\n"
@@ -161,6 +161,20 @@ msgid ""
 "agent package."
 msgstr ""
 
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:9001
+msgid "Cinder os region name:"
+msgstr ""
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:9001
+#, fuzzy
+#| msgid "Please specify the IP address of that server."
+msgid "Please enter the region name for cinder service."
+msgstr "Ange IP-adressen för den servern."
+
 #. Type: boolean
 #. Description
 #: ../nova-api.templates.in:1001
@@ -244,4 +258,3 @@ msgstr ""
 #: ../nova-consoleproxy.templates:1001
 msgid "This can later be edited in /etc/default/nova-consoleproxy."
 msgstr "Detta kan senare justeras i /etc/default/nova-consoleproxy."
-
