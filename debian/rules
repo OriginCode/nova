@@ -139,6 +139,9 @@ endif
 	# Works by default
 	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf keystone_authtoken auth_protocol http
 
+	# Cinder os_region_name set to regionOne as default value
+	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf cinder os_region_name regionOne
+
 	rm debian/tmp/usr/bin/nova-api-os-compute
 	rm debian/tmp/usr/bin/nova-api-metadata
 

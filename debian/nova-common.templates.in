@@ -62,3 +62,9 @@ _Description: Metadata proxy shared secret:
  same shared password should be used when setting up the neutron-metadata-agent
  package.
 
+Template: nova/cinder_os_region_name
+Type: string
+Default: regionOne
+_Description: Cinder os region name:
+ Please enter the region name for cinder service.
+

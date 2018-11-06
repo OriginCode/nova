@@ -23,6 +23,13 @@ manage_nova_my_ip_field () {
 	fi
 }
 
+manage_cinder_os_region () {
+	db_get nova/cinder_os_region_name
+	if [ -n "${RET}" ] ; then
+		pkgos_inifile set ${NOVA_CONF} cinder os_region_name ${RET}
+	fi
+}
+
 maintain_var_lib_nova_perms () {
 	if [ -z "$2" ]; then
 		# New install - blanket permissions
@@ -103,6 +110,7 @@ if [ "$1" = "configure" ] || [ "$1" = "reconfigure" ] ; then
 	manage_nova_my_ip_field
 
 	read_neutron_config
+	manage_cinder_os_region
 
 	# Needed, because in some cases, it's owned by root:root,
 	# which makes the nova-manage db sync fail.
