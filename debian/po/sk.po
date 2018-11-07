@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova\n"
 "Report-Msgid-Bugs-To: nova@packages.debian.org\n"
-"POT-Creation-Date: 2018-11-06 11:22+0100\n"
+"POT-Creation-Date: 2018-11-07 12:48+0100\n"
 "PO-Revision-Date: 2012-06-28 20:40+0100\n"
 "Last-Translator: Ivan Masár <helix84@centrum.sk>\n"
 "Language-Team: Slovak <sk-i18n@lists.linux.sk>\n"
@@ -157,6 +157,23 @@ msgstr ""
 #| msgid ""
 #| "Please enter the username used to connect to your XenAPI (XCP server)."
 msgid "Please enter the region name for cinder service."
+msgstr ""
+"Prosím, zadajte používateľské meno, ktoré sa má použiť na pripojenie k vášmu "
+"XenAPI (XCP server)."
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:10001
+msgid "Glance api server URL:"
+msgstr ""
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:10001
+#, fuzzy
+#| msgid ""
+#| "Please enter the username used to connect to your XenAPI (XCP server)."
+msgid "Please enter the URL of the Glance api server."
 msgstr ""
 "Prosím, zadajte používateľské meno, ktoré sa má použiť na pripojenie k vášmu "
 "XenAPI (XCP server)."

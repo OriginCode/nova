@@ -6,7 +6,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova\n"
 "Report-Msgid-Bugs-To: nova@packages.debian.org\n"
-"POT-Creation-Date: 2018-11-06 11:22+0100\n"
+"POT-Creation-Date: 2018-11-07 12:48+0100\n"
 "PO-Revision-Date: 2014-08-02 13:11+0200\n"
 "Last-Translator: Beatrice Torracca <beatricet@libero.it>\n"
 "Language-Team: Italian <debian-l10n-italian@lists.debian.org>\n"
@@ -156,6 +156,22 @@ msgstr ""
 #, fuzzy
 #| msgid "Please enter the URL of the Neutron server."
 msgid "Please enter the region name for cinder service."
+msgstr "Inserire l'URL del server Neutron."
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:10001
+#, fuzzy
+#| msgid "Neutron server URL:"
+msgid "Glance api server URL:"
+msgstr "URL del server Neutron:"
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:10001
+#, fuzzy
+#| msgid "Please enter the URL of the Neutron server."
+msgid "Please enter the URL of the Glance api server."
 msgstr "Inserire l'URL del server Neutron."
 
 #. Type: boolean

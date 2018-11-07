@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova\n"
 "Report-Msgid-Bugs-To: nova@packages.debian.org\n"
-"POT-Creation-Date: 2018-11-06 11:22+0100\n"
+"POT-Creation-Date: 2018-11-07 12:48+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -144,6 +144,18 @@ msgstr ""
 #. Description
 #: ../nova-common.templates.in:9001
 msgid "Please enter the region name for cinder service."
+msgstr ""
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:10001
+msgid "Glance api server URL:"
+msgstr ""
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:10001
+msgid "Please enter the URL of the Glance api server."
 msgstr ""
 
 #. Type: boolean
