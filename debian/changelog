@@ -1,3 +1,14 @@
+nova (2:18.0.3-2) unstable; urgency=medium
+
+  * d/rules: Change neutron auth_url port default to 5000
+  * d/nova-common.config.in
+    d/nova-common.postinst.in
+    d/nova-common.templates.in
+      - Fix glance api_servers config by debconf (Closes: #913126)
+      - Fix neutron auth_url point to ksat-public-ip (Closes: #913127)
+
+ -- Michal Arbet <michal.arbet@ultimum.io>  Wed, 07 Nov 2018 12:43:56 +0100
+
 nova (2:18.0.3-1) unstable; urgency=medium
 
   * Add debconf config for cinder os_region_name
