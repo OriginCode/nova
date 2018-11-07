@@ -68,3 +68,9 @@ Default: regionOne
 _Description: Cinder os region name:
  Please enter the region name for cinder service.
 
+Template: nova/glance_api_servers
+Type: string
+Default: http://localhost:9292
+_Description: Glance api server URL:
+ Please enter the URL of the Glance api server.
+

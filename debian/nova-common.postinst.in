@@ -30,6 +30,13 @@ manage_cinder_os_region () {
 	fi
 }
 
+manage_glance_api_servers () {
+	db_get nova/glance_api_servers
+	if [ -n "${RET}" ] ; then
+		pkgos_inifile set ${NOVA_CONF} glance api_servers ${RET}
+	fi
+}
+
 maintain_var_lib_nova_perms () {
 	if [ -z "$2" ]; then
 		# New install - blanket permissions
@@ -56,6 +63,10 @@ read_neutron_config () {
 	# The metadata_proxy_shared_secret
 	db_get nova/metadata_secret
 	pkgos_inifile set ${NOVA_CONF} neutron metadata_proxy_shared_secret ${RET}
+
+	# Neutron auth url point to keystone public url
+	db_get nova/ksat-public-url
+	pkgos_inifile set ${NOVA_CONF} neutron auth_url ${RET}
 }
 
 run_db_sync (){
@@ -111,6 +122,7 @@ if [ "$1" = "configure" ] || [ "$1" = "reconfigure" ] ; then
 
 	read_neutron_config
 	manage_cinder_os_region
+	manage_glance_api_servers
 
 	# Needed, because in some cases, it's owned by root:root,
 	# which makes the nova-manage db sync fail.

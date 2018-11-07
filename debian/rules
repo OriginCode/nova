@@ -118,7 +118,7 @@ endif
 	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf neutron project_name admin
 	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf neutron project_domain_name default
 	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf neutron service_name neutron
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf neutron auth_url http://127.0.0.1:35357
+	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf neutron auth_url http://127.0.0.1:5000
 
 	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf neutron service_metadata_proxy true
 
