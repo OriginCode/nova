@@ -6,6 +6,50 @@ NOVA_CONF=/etc/nova/nova.conf
 
 #PKGOS-INCLUDE#
 
+create_placement_user () {
+        local ADMIN_USER ADMIN_PASS NO_PROTO AFTER_PORT WRITE_CRED_URL WRITE_CRED_PROTO
+	ADMIN_USER=${1}
+	ADMIN_PASS=${2}
+
+        db_get nova/ksat-public-url
+        KEYSTONE_PUBLIC_ENDPOINT=${RET}
+
+        # Should we create a new keystone user?
+        db_get nova/ksat-create-service-user
+        if [ "${RET}" = "true" ] ; then
+                # Set command line credentials
+                export OS_USERNAME=${ADMIN_USER}
+                db_get nova/ksat-admin-project-name
+                export OS_TENANT_NAME=${RET}
+                export OS_PROJECT_NAME=${RET}
+                export OS_PASSWORD=${ADMIN_PASS}
+                export OS_AUTH_URL=${KEYSTONE_PUBLIC_ENDPOINT}
+                export OS_IDENTITY_API_VERSION=3
+                export OS_PROJECT_DOMAIN_ID=default
+                export OS_USER_DOMAIN_ID=default
+                export OS_AUTH_TYPE=password
+
+                db_get nova/placement_admin_username
+                if [ -n "${RET}" ] ; then
+                    PLACEMENT_USER=${RET}
+                fi
+                db_get nova/placement_admin_password
+                if [ -n "${RET}" ] ; then
+                    PLACEMENT_PASS=${RET}
+                fi
+                db_get nova/placement_admin_tenant_name
+                if [ -n "${RET}" ] ; then
+                    PLACEMENT_PROJECT=${RET}
+                fi
+
+                echo "Creating user ${PLACEMENT_USER} ..."
+                openstack user create --or-show --password ${PLACEMENT_PASS} --project ${PLACEMENT_PROJECT} --email root@localhost --enable ${PLACEMENT_USER}
+
+                echo "Adding role admin to the user ${PLACEMENT_USER}"
+                openstack role add --project ${PLACEMENT_PROJECT} --user ${PLACEMENT_USER} admin
+        fi
+}
+
 manage_nova_api_field () {
 	db_get nova/active-api
 	if [ -n "${RET}" ] ; then
@@ -148,7 +192,15 @@ if [ "$1" = "configure" ] || [ "$1" = "reconfigure" ] ; then
 	touch /var/log/nova/nova-manage.log
 	chown nova:nova /var/log/nova/nova-manage.log
 
-	pkgos_write_admin_creds ${NOVA_CONF} keystone_authtoken nova
+	db_get nova/configure_ksat
+	if [ "${RET}" = "true" ] ; then
+		db_get nova/ksat-admin-password
+		ADMIN_PASS=${RET}
+		db_get nova/ksat-admin-username
+		ADMIN_USER=${RET}
+		pkgos_write_admin_creds ${NOVA_CONF} keystone_authtoken nova
+		create_placement_user ${ADMIN_USER} ${ADMIN_PASS}
+	fi
 
 	db_get nova/configure_db
 	if [ "$RET" = "true" ]; then
