@@ -1,3 +1,17 @@
+nova (2:18.0.3-3) unstable; urgency=medium
+
+  * d/rules:
+      - Create NOVA_CONF variable to reduce a code
+      - Add some placement defaults
+  * d/nova-common.config.in:
+    d/nova-common.postinst.in:
+      - Add placement configuration
+      - Add placement user creation (Closes: #913478)
+  * d/nova-common.templates.in: Add placement questions
+  * Update po files
+
+ -- Michal Arbet <michal.arbet@ultimum.io>  Sun, 11 Nov 2018 11:16:38 +0100
+
 nova (2:18.0.3-2) unstable; urgency=medium
 
   * d/rules: Change neutron auth_url port default to 5000
