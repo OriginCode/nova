@@ -74,3 +74,29 @@ Default: http://localhost:9292
 _Description: Glance api server URL:
  Please enter the URL of the Glance api server.
 
+Template: nova/placement_admin_tenant_name
+Type: string
+Default: service
+_Description: Placement admin tenant name:
+ Nova needs to be able to communicate with Placement through Keystone. Therefore
+ Nova needs to know the Placement admin tenant, username and password.
+ .
+ Please enter the name of the admin tenant for Placement.
+
+Template: nova/placement_admin_username
+Type: string
+Default: placement
+_Description: Placement administrator username:
+ Please enter the username of the Placement administrator.
+
+Template: nova/placement_admin_password
+Type: password
+_Description: Placement administrator password:
+ Please enter the password of the Placement administrator.
+
+Template: nova/placement_os_region_name
+Type: string
+Default: regionOne
+_Description: Placement os region name:
+ Please enter the region name for Placement service.
+

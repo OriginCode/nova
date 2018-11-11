@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova 2013.1.2-3\n"
 "Report-Msgid-Bugs-To: nova@packages.debian.org\n"
-"POT-Creation-Date: 2018-11-07 12:48+0100\n"
+"POT-Creation-Date: 2018-11-11 11:15+0100\n"
 "PO-Revision-Date: 2013-08-27 12:31+0200\n"
 "Last-Translator: Michal Simunek <michal.simunek@gmail.com>\n"
 "Language-Team: Czech <debian-l10n-czech@lists.debian.org>\n"
@@ -185,6 +185,84 @@ msgstr ""
 #| msgid ""
 #| "Please enter the username used to connect to your XenAPI (XCP server)."
 msgid "Please enter the URL of the Glance api server."
+msgstr ""
+"Zadejte prosím uživatelské jméno pro připojení ke XenAPI (XCP serveru)."
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:11001
+#, fuzzy
+#| msgid "Auth server tenant name:"
+msgid "Placement admin tenant name:"
+msgstr "Název nájemce pro autentizační server:"
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:11001
+msgid ""
+"Nova needs to be able to communicate with Placement through Keystone. "
+"Therefore Nova needs to know the Placement admin tenant, username and "
+"password."
+msgstr ""
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:11001
+#, fuzzy
+#| msgid ""
+#| "Please enter the username used to connect to your XenAPI (XCP server)."
+msgid "Please enter the name of the admin tenant for Placement."
+msgstr ""
+"Zadejte prosím uživatelské jméno pro připojení ke XenAPI (XCP serveru)."
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:12001
+#, fuzzy
+#| msgid "Auth server tenant name:"
+msgid "Placement administrator username:"
+msgstr "Název nájemce pro autentizační server:"
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:12001
+#, fuzzy
+#| msgid ""
+#| "Please enter the username used to connect to your XenAPI (XCP server)."
+msgid "Please enter the username of the Placement administrator."
+msgstr ""
+"Zadejte prosím uživatelské jméno pro připojení ke XenAPI (XCP serveru)."
+
+#. Type: password
+#. Description
+#: ../nova-common.templates.in:13001
+#, fuzzy
+#| msgid "Auth server tenant name:"
+msgid "Placement administrator password:"
+msgstr "Název nájemce pro autentizační server:"
+
+#. Type: password
+#. Description
+#: ../nova-common.templates.in:13001
+#, fuzzy
+#| msgid ""
+#| "Please enter the password used to connect to your XenAPI (XCP server)."
+msgid "Please enter the password of the Placement administrator."
+msgstr "Zadejte prosím heslo pro připojení ke XenAPI (XCP serveru)."
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:14001
+msgid "Placement os region name:"
+msgstr ""
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:14001
+#, fuzzy
+#| msgid ""
+#| "Please enter the username used to connect to your XenAPI (XCP server)."
+msgid "Please enter the region name for Placement service."
 msgstr ""
 "Zadejte prosím uživatelské jméno pro připojení ke XenAPI (XCP serveru)."
 

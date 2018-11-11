@@ -31,7 +31,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova\n"
 "Report-Msgid-Bugs-To: nova@packages.debian.org\n"
-"POT-Creation-Date: 2018-11-07 12:48+0100\n"
+"POT-Creation-Date: 2018-11-11 11:15+0100\n"
 "PO-Revision-Date: 2014-12-11 18:12+0000\n"
 "Last-Translator: Jonathan Bustillos <jathanblackred@openmailbox.com>\n"
 "Language-Team: Debian Spanish <debian-l10n-spanish@lists.debian.org>\n"
@@ -198,6 +198,86 @@ msgstr "URL del servidor Neutron"
 #, fuzzy
 #| msgid "Please enter the URL of the Neutron server."
 msgid "Please enter the URL of the Glance api server."
+msgstr "Introduzca la URL para el servidor Neutron."
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:11001
+#, fuzzy
+#| msgid "Neutron admin tenant name:"
+msgid "Placement admin tenant name:"
+msgstr "Nombre del inquilino («tenant») administrador del servidor Neutron:"
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:11001
+#, fuzzy
+#| msgid ""
+#| "Nova needs to be able to communicate with Neutron through Keystone. "
+#| "Therefore Nova needs to know the Neutron admin tenant, username and "
+#| "password."
+msgid ""
+"Nova needs to be able to communicate with Placement through Keystone. "
+"Therefore Nova needs to know the Placement admin tenant, username and "
+"password."
+msgstr ""
+"Nova necesita ser capaz de comunicarse con Neutron a través de Keystone. Por "
+"lo tanto Nova requiere conocer el inquilino («tenant») administrador de "
+"Neutron, el usuario y la contraseña."
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:11001
+#, fuzzy
+#| msgid "Please enter the name of the admin tenant for Neutron."
+msgid "Please enter the name of the admin tenant for Placement."
+msgstr ""
+"Introduzca el nombre del inquilino («tenant») administrador para Neutron:"
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:12001
+#, fuzzy
+#| msgid "Neutron administrator username:"
+msgid "Placement administrator username:"
+msgstr "Nombre para el administrador de Neutron:"
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:12001
+#, fuzzy
+#| msgid "Please enter the username of the Neutron administrator."
+msgid "Please enter the username of the Placement administrator."
+msgstr "Introduzca el nombre de administrador de Neutron:"
+
+#. Type: password
+#. Description
+#: ../nova-common.templates.in:13001
+#, fuzzy
+#| msgid "Neutron administrator password:"
+msgid "Placement administrator password:"
+msgstr "Contraseña del administrador de Neutron:"
+
+#. Type: password
+#. Description
+#: ../nova-common.templates.in:13001
+#, fuzzy
+#| msgid "Please enter the password of the Neutron administrator."
+msgid "Please enter the password of the Placement administrator."
+msgstr "Introduzca la contraseña del administrador de Neutron."
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:14001
+msgid "Placement os region name:"
+msgstr ""
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:14001
+#, fuzzy
+#| msgid "Please enter the URL of the Neutron server."
+msgid "Please enter the region name for Placement service."
 msgstr "Introduzca la URL para el servidor Neutron."
 
 #. Type: boolean
