@@ -1,8 +1,9 @@
 nova (2:18.0.3-4) unstable; urgency=medium
 
   * d/control: Bump openstack-pkg-tools 89
+  * d/control: Add python3-openstackclient dependency
 
- -- Michal Arbet <michal.arbet@ultimum.io>  Mon, 12 Nov 2018 22:54:58 +0100
+ -- Michal Arbet <michal.arbet@ultimum.io>  Wed, 14 Nov 2018 13:52:11 +0100
 
 nova (2:18.0.3-3) unstable; urgency=medium
 
