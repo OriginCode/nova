@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova 2-14.0.0-4\n"
 "Report-Msgid-Bugs-To: nova@packages.debian.org\n"
-"POT-Creation-Date: 2018-03-06 20:20+0000\n"
+"POT-Creation-Date: 2018-11-11 11:15+0100\n"
 "PO-Revision-Date: 2017-08-07 21:49+0100\n"
 "Last-Translator: Rui Branco <ruipb@debianpt.org>\n"
 "Language-Team: Portuguese <traduz@debianpt.org>\n"
@@ -152,6 +152,115 @@ msgstr ""
 "metadados do Nova. A mesma palavra passe partilhada deve ser usada quando "
 "configurar o pacote neutron-metadata-agent."
 
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:9001
+msgid "Cinder os region name:"
+msgstr ""
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:9001
+#, fuzzy
+#| msgid "Please enter the URL of the Neutron server."
+msgid "Please enter the region name for cinder service."
+msgstr "Por favor introduza o URL do servidor Neutron."
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:10001
+#, fuzzy
+#| msgid "Neutron server URL:"
+msgid "Glance api server URL:"
+msgstr "URL do servidor Neutron:"
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:10001
+#, fuzzy
+#| msgid "Please enter the URL of the Neutron server."
+msgid "Please enter the URL of the Glance api server."
+msgstr "Por favor introduza o URL do servidor Neutron."
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:11001
+#, fuzzy
+#| msgid "Neutron admin tenant name:"
+msgid "Placement admin tenant name:"
+msgstr "Nome do admin tenant Neutron:"
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:11001
+#, fuzzy
+#| msgid ""
+#| "Nova needs to be able to communicate with Neutron through Keystone. "
+#| "Therefore Nova needs to know the Neutron admin tenant, username and "
+#| "password."
+msgid ""
+"Nova needs to be able to communicate with Placement through Keystone. "
+"Therefore Nova needs to know the Placement admin tenant, username and "
+"password."
+msgstr ""
+"O Nova precisa de comunicar com o Neutron através do Keystone. Assim o Nova "
+"precisa de saber o nome de utilizador e palavra-chave do admin tenant do "
+"Neutron."
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:11001
+#, fuzzy
+#| msgid "Please enter the name of the admin tenant for Neutron."
+msgid "Please enter the name of the admin tenant for Placement."
+msgstr "Por favor introduza o nome do admin tenant Neutron."
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:12001
+#, fuzzy
+#| msgid "Neutron administrator username:"
+msgid "Placement administrator username:"
+msgstr "Nome de utilizador do administrador do Neutron:"
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:12001
+#, fuzzy
+#| msgid "Please enter the username of the Neutron administrator."
+msgid "Please enter the username of the Placement administrator."
+msgstr "Por favor introduza o nome de utilizador do administrador do Neutron:"
+
+#. Type: password
+#. Description
+#: ../nova-common.templates.in:13001
+#, fuzzy
+#| msgid "Neutron administrator password:"
+msgid "Placement administrator password:"
+msgstr "Palavra-chave do administrador do Neutron:"
+
+#. Type: password
+#. Description
+#: ../nova-common.templates.in:13001
+#, fuzzy
+#| msgid "Please enter the password of the Neutron administrator."
+msgid "Please enter the password of the Placement administrator."
+msgstr "Por favor introduza a palavra-chave do administrador do Neutron:"
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:14001
+msgid "Placement os region name:"
+msgstr ""
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:14001
+#, fuzzy
+#| msgid "Please enter the URL of the Neutron server."
+msgid "Please enter the region name for Placement service."
+msgstr "Por favor introduza o URL do servidor Neutron."
+
 #. Type: boolean
 #. Description
 #: ../nova-api.templates.in:1001
@@ -231,4 +340,3 @@ msgstr ""
 msgid "This can later be edited in /etc/default/nova-consoleproxy."
 msgstr ""
 "Isto pode posteriormente ser editado em /etc/default/nova-consoleproxy."
-

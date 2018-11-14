@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova\n"
 "Report-Msgid-Bugs-To: nova@packages.debian.org\n"
-"POT-Creation-Date: 2018-03-06 20:20+0000\n"
+"POT-Creation-Date: 2018-11-11 11:15+0100\n"
 "PO-Revision-Date: 2012-06-28 20:40+0100\n"
 "Last-Translator: Ivan Masár <helix84@centrum.sk>\n"
 "Language-Team: Slovak <sk-i18n@lists.linux.sk>\n"
@@ -144,6 +144,117 @@ msgid ""
 "agent package."
 msgstr ""
 
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:9001
+msgid "Cinder os region name:"
+msgstr ""
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:9001
+#, fuzzy
+#| msgid ""
+#| "Please enter the username used to connect to your XenAPI (XCP server)."
+msgid "Please enter the region name for cinder service."
+msgstr ""
+"Prosím, zadajte používateľské meno, ktoré sa má použiť na pripojenie k vášmu "
+"XenAPI (XCP server)."
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:10001
+msgid "Glance api server URL:"
+msgstr ""
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:10001
+#, fuzzy
+#| msgid ""
+#| "Please enter the username used to connect to your XenAPI (XCP server)."
+msgid "Please enter the URL of the Glance api server."
+msgstr ""
+"Prosím, zadajte používateľské meno, ktoré sa má použiť na pripojenie k vášmu "
+"XenAPI (XCP server)."
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:11001
+msgid "Placement admin tenant name:"
+msgstr ""
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:11001
+msgid ""
+"Nova needs to be able to communicate with Placement through Keystone. "
+"Therefore Nova needs to know the Placement admin tenant, username and "
+"password."
+msgstr ""
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:11001
+#, fuzzy
+#| msgid ""
+#| "Please enter the username used to connect to your XenAPI (XCP server)."
+msgid "Please enter the name of the admin tenant for Placement."
+msgstr ""
+"Prosím, zadajte používateľské meno, ktoré sa má použiť na pripojenie k vášmu "
+"XenAPI (XCP server)."
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:12001
+msgid "Placement administrator username:"
+msgstr ""
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:12001
+#, fuzzy
+#| msgid ""
+#| "Please enter the username used to connect to your XenAPI (XCP server)."
+msgid "Please enter the username of the Placement administrator."
+msgstr ""
+"Prosím, zadajte používateľské meno, ktoré sa má použiť na pripojenie k vášmu "
+"XenAPI (XCP server)."
+
+#. Type: password
+#. Description
+#: ../nova-common.templates.in:13001
+msgid "Placement administrator password:"
+msgstr ""
+
+#. Type: password
+#. Description
+#: ../nova-common.templates.in:13001
+#, fuzzy
+#| msgid ""
+#| "Please enter the password used to connect to your XenAPI (XCP server)."
+msgid "Please enter the password of the Placement administrator."
+msgstr ""
+"Prosím, zadajte heslo, ktoré sa má použiť na pripojenie k vášmu XenAPI (XCP "
+"server)."
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:14001
+msgid "Placement os region name:"
+msgstr ""
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:14001
+#, fuzzy
+#| msgid ""
+#| "Please enter the username used to connect to your XenAPI (XCP server)."
+msgid "Please enter the region name for Placement service."
+msgstr ""
+"Prosím, zadajte používateľské meno, ktoré sa má použiť na pripojenie k vášmu "
+"XenAPI (XCP server)."
+
 #. Type: boolean
 #. Description
 #: ../nova-api.templates.in:1001
@@ -224,4 +335,3 @@ msgstr ""
 #| msgid "This can later be edited in /etc/nova/nova-compute.conf."
 msgid "This can later be edited in /etc/default/nova-consoleproxy."
 msgstr "Toto je možné neskôr upraviť v /etc/nova/nova-compute.conf."
-

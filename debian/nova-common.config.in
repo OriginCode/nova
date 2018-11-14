@@ -43,6 +43,13 @@ manage_nova_my_ip () {
 	db_go
 }
 
+read_placement_config () {
+	pkgos_read_config -p high ${NOVA_CONF} placement project_name nova/placement_admin_tenant_name
+	pkgos_read_config -p high ${NOVA_CONF} placement region_name nova/placement_os_region_name
+	pkgos_read_config -p high ${NOVA_CONF} placement username nova/placement_admin_username
+	pkgos_read_config -p high ${NOVA_CONF} placement password nova/placement_admin_password
+}
+
 read_neutron_config () {
 	# Keystone auth credential to talk to Neutron
 	pkgos_read_config -p high ${NOVA_CONF} neutron endpoint_override nova/neutron_url
@@ -59,8 +66,14 @@ pkgos_dbc_read_conf -pkg nova-common ${NOVA_CONF} database connection nova $@
 pkgos_rabbit_read_conf ${NOVA_CONF} oslo_messaging_rabbit nova
 pkgos_read_admin_creds ${NOVA_CONF} keystone_authtoken nova
 read_neutron_config
+read_placement_config
 
 set_enabled_apis_multiselect
 manage_nova_my_ip
+
+# Cinder os_region_name config
+pkgos_read_config -p high ${NOVA_CONF} cinder os_region_name nova/cinder_os_region_name
+# Glance api_servers config
+pkgos_read_config -p high ${NOVA_CONF} glance api_servers nova/glance_api_servers
 
 exit 0

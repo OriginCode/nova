@@ -2,6 +2,8 @@
 
 include /usr/share/openstack-pkg-tools/pkgos.make
 
+NOVA_CONF=$(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf
+
 %:
 	dh $@ --buildsystem=python_distutils --with python3,sphinxdoc,systemd
 
@@ -83,7 +85,7 @@ endif
 		--namespace keystonemiddleware.auth_token \
 		--namespace osprofiler
 
-	pkgos-readd-keystone-authtoken-missing-options $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf keystone_authtoken nova
+	pkgos-readd-keystone-authtoken-missing-options $(NOVA_CONF) keystone_authtoken nova
 
 	PYTHONPATH=$(CURDIR)/debian/tmp/usr/lib/python3/dist-packages python3-oslopolicy-sample-generator \
 		--output-file=$(CURDIR)/debian/nova-common/usr/share/nova-common/policy.json \
@@ -96,48 +98,60 @@ endif
 		--format json
 
 	# Otherwise, this is set to the build dir
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf DEFAULT pybasedir /usr/lib/python3/dist-packages
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf DEFAULT bindir /usr/bin
+	pkgos-fix-config-default $(NOVA_CONF) DEFAULT pybasedir /usr/lib/python3/dist-packages
+	pkgos-fix-config-default $(NOVA_CONF) DEFAULT bindir /usr/bin
 
 	# General needed fixes
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf oslo_concurrency lock_path /var/lock/nova
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf DEFAULT state_path /var/lib/nova
+	pkgos-fix-config-default $(NOVA_CONF) oslo_concurrency lock_path /var/lock/nova
+	pkgos-fix-config-default $(NOVA_CONF) DEFAULT state_path /var/lib/nova
 
 	# Let's use Neutron by default, and not stupid nova-network
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf DEFAULT security_group_api neutron
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf DEFAULT network_api_class nova.network.neutronv2.api.API
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf DEFAULT use_neutron True
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf DEFAULT linuxnet_interface_driver nova.network.linux_net.LinuxOVSInterfaceDriver
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf DEFAULT firewall_driver nova.virt.firewall.NoopFirewallDriver
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf neutron default_floating_pool ext-net
+	pkgos-fix-config-default $(NOVA_CONF) DEFAULT security_group_api neutron
+	pkgos-fix-config-default $(NOVA_CONF) DEFAULT network_api_class nova.network.neutronv2.api.API
+	pkgos-fix-config-default $(NOVA_CONF) DEFAULT use_neutron True
+	pkgos-fix-config-default $(NOVA_CONF) DEFAULT linuxnet_interface_driver nova.network.linux_net.LinuxOVSInterfaceDriver
+	pkgos-fix-config-default $(NOVA_CONF) DEFAULT firewall_driver nova.virt.firewall.NoopFirewallDriver
+	pkgos-fix-config-default $(NOVA_CONF) neutron default_floating_pool ext-net
 
 	# Fixup a few defaults for the [neutron] auth
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf neutron auth_type password
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf neutron username admin
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf neutron user_domain_name default
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf neutron project_name admin
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf neutron project_domain_name default
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf neutron service_name neutron
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf neutron auth_url http://127.0.0.1:35357
+	pkgos-fix-config-default $(NOVA_CONF) neutron auth_type password
+	pkgos-fix-config-default $(NOVA_CONF) neutron username admin
+	pkgos-fix-config-default $(NOVA_CONF) neutron user_domain_name default
+	pkgos-fix-config-default $(NOVA_CONF) neutron project_name admin
+	pkgos-fix-config-default $(NOVA_CONF) neutron project_domain_name default
+	pkgos-fix-config-default $(NOVA_CONF) neutron service_name neutron
+	pkgos-fix-config-default $(NOVA_CONF) neutron auth_url http://127.0.0.1:5000
 
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf neutron service_metadata_proxy true
+	pkgos-fix-config-default $(NOVA_CONF) neutron service_metadata_proxy true
 
 	# Convenient default for the SQLite default db
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf database connection sqlite:////var/lib/nova/novadb
+	pkgos-fix-config-default $(NOVA_CONF) database connection sqlite:////var/lib/nova/novadb
 
 	# Let's use SPICE byd default
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf VNC enabled false
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf VNC vncserver_listen 0.0.0.0
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf spice vncserver_listen 0.0.0.0
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf spice server_listen 0.0.0.0
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf spice server_proxyclient_address \$$my_ip
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf spice enabled true
+	pkgos-fix-config-default $(NOVA_CONF) VNC enabled false
+	pkgos-fix-config-default $(NOVA_CONF) VNC vncserver_listen 0.0.0.0
+	pkgos-fix-config-default $(NOVA_CONF) spice vncserver_listen 0.0.0.0
+	pkgos-fix-config-default $(NOVA_CONF) spice server_listen 0.0.0.0
+	pkgos-fix-config-default $(NOVA_CONF) spice server_proxyclient_address \$$my_ip
+	pkgos-fix-config-default $(NOVA_CONF) spice enabled true
 
 	# Set glance on localhost by default, to allow PoC to work
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf glance api_servers http://localhost:9292
+	pkgos-fix-config-default $(NOVA_CONF) glance api_servers http://localhost:9292
 
 	# Works by default
-	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf keystone_authtoken auth_protocol http
+	pkgos-fix-config-default $(NOVA_CONF) keystone_authtoken auth_protocol http
+
+	# Cinder os_region_name set to regionOne as default value
+	pkgos-fix-config-default $(NOVA_CONF) cinder os_region_name regionOne
+
+	# Fixup a few default for the [placement] auth
+	pkgos-fix-config-default $(NOVA_CONF) placement region_name regionOne
+	pkgos-fix-config-default $(NOVA_CONF) placement project_domain_name default
+	pkgos-fix-config-default $(NOVA_CONF) placement project_name service
+	pkgos-fix-config-default $(NOVA_CONF) placement auth_type password
+	pkgos-fix-config-default $(NOVA_CONF) placement user_domain_name default
+	pkgos-fix-config-default $(NOVA_CONF) placement auth_url http://localhost:5000/v3
+	pkgos-fix-config-default $(NOVA_CONF) placement username = placement
 
 	rm debian/tmp/usr/bin/nova-api-os-compute
 	rm debian/tmp/usr/bin/nova-api-metadata

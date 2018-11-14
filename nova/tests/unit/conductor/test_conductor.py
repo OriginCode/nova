@@ -43,6 +43,7 @@ from nova import exception as exc
 from nova.image import api as image_api
 from nova import objects
 from nova.objects import base as obj_base
+from nova.objects import block_device as block_device_obj
 from nova.objects import fields
 from nova.scheduler import client as scheduler_client
 from nova.scheduler import utils as scheduler_utils
@@ -59,6 +60,7 @@ from nova.tests.unit import fake_server_actions
 from nova.tests.unit import utils as test_utils
 from nova.tests import uuidsentinel as uuids
 from nova import utils
+from nova.volume import cinder
 
 CONF = conf.CONF
 
@@ -963,6 +965,88 @@ class _BaseTaskTestCase(object):
 
         do_test()
 
+    @mock.patch.object(cinder.API, 'attachment_get')
+    @mock.patch.object(cinder.API, 'attachment_create')
+    @mock.patch.object(block_device_obj.BlockDeviceMapping, 'save')
+    def test_validate_existing_attachment_ids_with_missing_attachments(self,
+            mock_bdm_save, mock_attachment_create, mock_attachment_get):
+        instance = self._create_fake_instance_obj()
+        bdms = [
+            block_device.BlockDeviceDict({
+                'boot_index': 0,
+                'guest_format': None,
+                'connection_info': None,
+                'device_type': u'disk',
+                'source_type': 'image',
+                'destination_type': 'volume',
+                'volume_size': 1,
+                'image_id': 1,
+                'device_name': '/dev/vdb',
+                'attachment_id': uuids.attachment,
+                'volume_id': uuids.volume
+            })]
+        bdms = block_device_obj.block_device_make_list_from_dicts(
+            self.context, bdms)
+        mock_attachment_get.side_effect = exc.VolumeAttachmentNotFound(
+            attachment_id=uuids.attachment)
+        mock_attachment_create.return_value = {'id': uuids.new_attachment}
+
+        self.assertEqual(uuids.attachment, bdms[0].attachment_id)
+        self.conductor_manager._validate_existing_attachment_ids(self.context,
+                                                                 instance,
+                                                                 bdms)
+        mock_attachment_get.assert_called_once_with(self.context,
+                                                    uuids.attachment)
+        mock_attachment_create.assert_called_once_with(self.context,
+                                                       uuids.volume,
+                                                       instance.uuid)
+        mock_bdm_save.assert_called_once()
+        self.assertEqual(uuids.new_attachment, bdms[0].attachment_id)
+
+    @mock.patch.object(cinder.API, 'attachment_get')
+    @mock.patch.object(cinder.API, 'attachment_create')
+    @mock.patch.object(block_device_obj.BlockDeviceMapping, 'save')
+    def test_validate_existing_attachment_ids_with_attachments_present(self,
+            mock_bdm_save, mock_attachment_create, mock_attachment_get):
+        instance = self._create_fake_instance_obj()
+        bdms = [
+            block_device.BlockDeviceDict({
+                'boot_index': 0,
+                'guest_format': None,
+                'connection_info': None,
+                'device_type': u'disk',
+                'source_type': 'image',
+                'destination_type': 'volume',
+                'volume_size': 1,
+                'image_id': 1,
+                'device_name': '/dev/vdb',
+                'attachment_id': uuids.attachment,
+                'volume_id': uuids.volume
+            })]
+        bdms = block_device_obj.block_device_make_list_from_dicts(
+            self.context, bdms)
+        mock_attachment_get.return_value = {
+        "attachment": {
+            "status": "attaching",
+            "detached_at": "2015-09-16T09:28:52.000000",
+            "connection_info": {},
+            "attached_at": "2015-09-16T09:28:52.000000",
+            "attach_mode": "ro",
+            "instance": instance.uuid,
+            "volume_id": uuids.volume,
+            "id": uuids.attachment
+        }}
+
+        self.assertEqual(uuids.attachment, bdms[0].attachment_id)
+        self.conductor_manager._validate_existing_attachment_ids(self.context,
+                                                                 instance,
+                                                                 bdms)
+        mock_attachment_get.assert_called_once_with(self.context,
+                                                    uuids.attachment)
+        mock_attachment_create.assert_not_called()
+        mock_bdm_save.assert_not_called()
+        self.assertEqual(uuids.attachment, bdms[0].attachment_id)
+
     @mock.patch.object(compute_rpcapi.ComputeAPI, 'unshelve_instance')
     @mock.patch.object(compute_rpcapi.ComputeAPI, 'start_instance')
     def test_unshelve_instance_on_host(self, mock_start, mock_unshelve):
@@ -1625,7 +1709,9 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
     @mock.patch('nova.compute.rpcapi.ComputeAPI.build_and_run_instance')
     @mock.patch('nova.scheduler.rpcapi.SchedulerAPI.select_destinations')
     @mock.patch('nova.objects.HostMapping.get_by_host')
-    def test_schedule_and_build_multiple_instances(self,
+    @mock.patch('nova.availability_zones.get_host_availability_zone',
+                return_value='nova')
+    def test_schedule_and_build_multiple_instances(self, mock_get_az,
                                                    get_hostmapping,
                                                    select_destinations,
                                                    build_and_run_instance):
@@ -1678,6 +1764,11 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
         build_and_run_instance.side_effect = _build_and_run_instance
         self.conductor.schedule_and_build_instances(**params)
         self.assertEqual(3, build_and_run_instance.call_count)
+        # We're processing 4 instances over 2 hosts, so we should only lookup
+        # the AZ per host once.
+        mock_get_az.assert_has_calls([
+            mock.call(self.ctxt, 'host1'), mock.call(self.ctxt, 'host2')],
+            any_order=True)
 
     @mock.patch('nova.compute.rpcapi.ComputeAPI.build_and_run_instance')
     @mock.patch('nova.scheduler.rpcapi.SchedulerAPI.select_destinations')
