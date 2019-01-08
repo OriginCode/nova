@@ -1,13 +1,14 @@
 # GERMAN TRANSLATION OF THE NOVA DEBCONF TEMPLATE.
 # Copyright (c) 2010 OpenStack LLC.
 # This file is distributed under the same license as the NOVA package.
-# Copyright of this file Erik Pfannenstein 2012, Chris Leick 2013-2017.
+# Copyright of this file Erik Pfannenstein 2012,
+# Chris Leick 2013-2018.
 msgid ""
 msgstr ""
-"Project-Id-Version: nova 2:16.0.3-9\n"
+"Project-Id-Version: nova 2:18.0.3-3\n"
 "Report-Msgid-Bugs-To: nova@packages.debian.org\n"
 "POT-Creation-Date: 2018-11-11 11:15+0100\n"
-"PO-Revision-Date: 2017-12-20 18:04+0200\n"
+"PO-Revision-Date: 2018-11-18 10:19+0200\n"
 "Last-Translator: Chris Leick <c.leick@vollbio.de>\n"
 "Language-Team: German <debian-l10n-german@lists.debian.org>\n"
 "Language: de\n"
@@ -31,7 +32,7 @@ msgid ""
 msgstr ""
 "Openstack Nova unterstützt verschiedene API-Dienste, von denen jeder "
 "einzelne an einen anderen Port gebunden ist. Wählen Sie aus, welche von "
-"»nova-api« unterstützt werden soll."
+"»nova-api« unterstützt werden sollen."
 
 #. Type: multiselect
 #. Description
@@ -43,7 +44,7 @@ msgid ""
 "the same port)."
 msgstr ""
 "Falls Sie einen Rechenknoten einrichten, müssen Sie nur den Metadaten-API-"
-"Server starten. Falls Sie Cinder ausführen, benötigen Sie »osapi_volume« "
+"Server ausführen. Falls Sie Cinder ausführen, benötigen Sie »osapi_volume« "
 "nicht (Sie können »osapi_volume« und »cinder-api« nicht auf demselben Server "
 "ausführen, sie binden sich an den selben Port)."
 
@@ -58,7 +59,7 @@ msgstr "Wert für »my_ip«:"
 #: ../nova-common.templates.in:3001
 msgid "This value will be stored in the my_ip directive of nova.conf."
 msgstr ""
-"Dieser Wert wird in der Richtlinie »my_ip« der »nova.conf« gespeichert."
+"Dieser Wert wird im Eintrag »my_ip« der »nova.conf« gespeichert."
 
 #. Type: string
 #. Description
@@ -70,13 +71,13 @@ msgstr "URL des Neutron-Servers:"
 #. Description
 #: ../nova-common.templates.in:4001
 msgid "Please enter the URL of the Neutron server."
-msgstr "Bitte geben Sie die URL Ihres Neutron-Servers ein."
+msgstr "Bitte geben Sie die URL des Neutron-Servers ein."
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:5001
 msgid "Neutron admin tenant name:"
-msgstr "Tenant-Name des Neutron-Admins:"
+msgstr "Tenant-Name des Neutron-Administrators:"
 
 #. Type: string
 #. Description
@@ -116,7 +117,7 @@ msgstr "Passwort des Neutron-Administrators:"
 #. Description
 #: ../nova-common.templates.in:7001
 msgid "Please enter the password of the Neutron administrator."
-msgstr "Bitte geben Sie das Passwort für des Neutron-Administrators ein."
+msgstr "Bitte geben Sie das Passwort des Neutron-Administrators ein."
 
 #. Type: password
 #. Description
@@ -145,118 +146,98 @@ msgid ""
 "same shared password should be used when setting up the neutron-metadata-"
 "agent package."
 msgstr ""
-"Bitte geben Sie das Passwort ein, das benutzt werden soll, um "
-"Kommunikationen zwischen dem Neutron-Metadaten-Proxy-Agent und dem Nova-"
+"Bitte geben Sie das Passwort ein, das benutzt werden soll, um die "
+"Kommunikation zwischen dem Neutron-Metadaten-Proxy-Agenten und dem Nova-"
 "Metadaten-Server zu schützen. Dasselbe gemeinsam benutzte Passwort sollte "
 "beim Einrichten des Pakets »neutron-metadata-agent« verwendet werden."
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:9001
+# FIXME s/os/of/
 msgid "Cinder os region name:"
-msgstr ""
+msgstr "Regionsname von Cinde:"
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:9001
-#, fuzzy
-#| msgid "Please enter the URL of the Neutron server."
 msgid "Please enter the region name for cinder service."
-msgstr "Bitte geben Sie die URL Ihres Neutron-Servers ein."
+msgstr "Bitte geben Sie den Regionsnamen des Cinder-Dienstes ein."
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:10001
-#, fuzzy
-#| msgid "Neutron server URL:"
 msgid "Glance api server URL:"
-msgstr "URL des Neutron-Servers:"
+msgstr "URL des Glance-API-Servers:"
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:10001
-#, fuzzy
-#| msgid "Please enter the URL of the Neutron server."
 msgid "Please enter the URL of the Glance api server."
-msgstr "Bitte geben Sie die URL Ihres Neutron-Servers ein."
+msgstr "Bitte geben Sie die URL des Glance-API-Servers ein."
 
+# Placement: 
+# https://docs.openstack.org/ocata/de/install-guide-ubuntu/
+#                                                  nova-controller-install.html
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:11001
-#, fuzzy
-#| msgid "Neutron admin tenant name:"
 msgid "Placement admin tenant name:"
-msgstr "Tenant-Name des Neutron-Admins:"
+msgstr "Tenant-Name des Placement-Administrators:"
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:11001
-#, fuzzy
-#| msgid ""
-#| "Nova needs to be able to communicate with Neutron through Keystone. "
-#| "Therefore Nova needs to know the Neutron admin tenant, username and "
-#| "password."
 msgid ""
 "Nova needs to be able to communicate with Placement through Keystone. "
 "Therefore Nova needs to know the Placement admin tenant, username and "
 "password."
 msgstr ""
-"Nova muss mit Neutron über Keystone kommunizieren. Daher muss Nova den "
-"Tenant, Benutzernamen und das Passwort des Neutron-Administrators kennen."
+"Nova muss mit Placement über Keystone kommunizieren. Daher muss Nova den "
+"Tenant, Benutzernamen und das Passwort des Placement-Administrators kennen."
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:11001
-#, fuzzy
-#| msgid "Please enter the name of the admin tenant for Neutron."
 msgid "Please enter the name of the admin tenant for Placement."
-msgstr "Bitte geben Sie den Namen des Administrator-Tenants für Neutron ein."
+msgstr "Bitte geben Sie den Namen des Administrator-Tenants für Placement ein."
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:12001
-#, fuzzy
-#| msgid "Neutron administrator username:"
 msgid "Placement administrator username:"
-msgstr "Benutzername des Neutron-Administrators:"
+msgstr "Benutzername des Placement-Administrators:"
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:12001
-#, fuzzy
-#| msgid "Please enter the username of the Neutron administrator."
 msgid "Please enter the username of the Placement administrator."
-msgstr "Bitte geben Sie den Benutzernamen des Neutron-Administrators ein."
+msgstr "Bitte geben Sie den Benutzernamen des Placement-Administrators ein."
 
 #. Type: password
 #. Description
 #: ../nova-common.templates.in:13001
-#, fuzzy
-#| msgid "Neutron administrator password:"
 msgid "Placement administrator password:"
-msgstr "Passwort des Neutron-Administrators:"
+msgstr "Passwort des Placement-Administrators:"
 
 #. Type: password
 #. Description
 #: ../nova-common.templates.in:13001
-#, fuzzy
-#| msgid "Please enter the password of the Neutron administrator."
 msgid "Please enter the password of the Placement administrator."
-msgstr "Bitte geben Sie das Passwort für des Neutron-Administrators ein."
+msgstr "Bitte geben Sie das Passwort des Placement-Administrators ein."
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:14001
+# FIXME s/os/of/
 msgid "Placement os region name:"
-msgstr ""
+msgstr "Regionsname des Placements:"
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:14001
-#, fuzzy
-#| msgid "Please enter the URL of the Neutron server."
 msgid "Please enter the region name for Placement service."
-msgstr "Bitte geben Sie die URL Ihres Neutron-Servers ein."
+msgstr "Bitte geben Sie den Regionsnamen des Placement-Dienstes ein."
 
 #. Type: boolean
 #. Description
@@ -325,8 +306,8 @@ msgid ""
 "sockets in your browser, and that is a feature only very modern browsers "
 "have support for."
 msgstr ""
-"Nova Console unterstützt drei Konsolentypen. Eine ist speziell für Xen, sie "
-"heißt XVP (Xen-VNC-Proxy) und die anderen unterstützen KVM. Während das "
+"Nova Console unterstützt drei Konsolentypen. Einer ist speziell für Xen, er "
+"heißt XVP (Xen-VNC-Proxy) und der andere Daemon unterstützt KVM. Während das "
 "Protokoll SPICE normalerweise schneller als VNC ist, verlangt es außerdem, "
 "dass Ihr Browser Web-Sockets unterstützt und dies ist eine Funktionalität, "
 "die nur von sehr neuen Browsern geboten wird."
