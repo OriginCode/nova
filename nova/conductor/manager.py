@@ -24,6 +24,7 @@ from oslo_log import log as logging
 import oslo_messaging as messaging
 from oslo_serialization import jsonutils
 from oslo_utils import excutils
+from oslo_utils import timeutils
 from oslo_utils import versionutils
 import six
 
@@ -743,9 +744,12 @@ class ComputeTaskManager(base.Base):
     def _schedule_instances(self, context, request_spec,
                             instance_uuids=None, return_alternates=False):
         scheduler_utils.setup_instance_group(context, request_spec)
-        host_lists = self.scheduler_client.select_destinations(context,
-                request_spec, instance_uuids, return_objects=True,
-                return_alternates=return_alternates)
+        with timeutils.StopWatch() as timer:
+            host_lists = self.scheduler_client.select_destinations(context,
+                    request_spec, instance_uuids, return_objects=True,
+                    return_alternates=return_alternates)
+        LOG.debug('Took %0.2f seconds to select destinations for %s '
+                  'instance(s).', timer.elapsed(), len(instance_uuids))
         return host_lists
 
     @targets_cell
@@ -1150,7 +1154,8 @@ class ComputeTaskManager(base.Base):
 
     def _bury_in_cell0(self, context, request_spec, exc,
                        build_requests=None, instances=None,
-                       block_device_mapping=None):
+                       block_device_mapping=None,
+                       tags=None):
         """Ensure all provided build_requests and instances end up in cell0.
 
         Cell0 is the fake cell we schedule dead instances to when we can't
@@ -1194,6 +1199,8 @@ class ComputeTaskManager(base.Base):
                        cell0, instance.flavor, instance.uuid,
                        block_device_mapping)
 
+                self._create_tags(cctxt, instance.uuid, tags)
+
                 # Use the context targeted to cell0 here since the instance is
                 # now in cell0.
                 self._set_vm_state_and_notify(
@@ -1233,7 +1240,8 @@ class ComputeTaskManager(base.Base):
             LOG.exception('Failed to schedule instances')
             self._bury_in_cell0(context, request_specs[0], exc,
                                 build_requests=build_requests,
-                                block_device_mapping=block_device_mapping)
+                                block_device_mapping=block_device_mapping,
+                                tags=tags)
             return
 
         host_mapping_cache = {}
@@ -1260,7 +1268,8 @@ class ComputeTaskManager(base.Base):
                     self._bury_in_cell0(
                         context, request_spec, exc,
                         build_requests=[build_request], instances=[instance],
-                        block_device_mapping=block_device_mapping)
+                        block_device_mapping=block_device_mapping,
+                        tags=tags)
                     # This is a placeholder in case the quota recheck fails.
                     instances.append(None)
                     continue
@@ -1310,6 +1319,7 @@ class ComputeTaskManager(base.Base):
                     self._cleanup_build_artifacts(context, exc, instances,
                                                   build_requests,
                                                   request_specs,
+                                                  block_device_mapping, tags,
                                                   cell_mapping_cache)
 
         zipped = six.moves.zip(build_requests, request_specs, host_lists,
@@ -1386,7 +1396,8 @@ class ComputeTaskManager(base.Base):
                     limits=host.limits, host_list=host_list)
 
     def _cleanup_build_artifacts(self, context, exc, instances, build_requests,
-                                 request_specs, cell_mapping_cache):
+                                 request_specs, block_device_mappings, tags,
+                                 cell_mapping_cache):
         for (instance, build_request, request_spec) in six.moves.zip(
                 instances, build_requests, request_specs):
             # Skip placeholders that were buried in cell0 or had their
@@ -1406,6 +1417,21 @@ class ComputeTaskManager(base.Base):
                 context, instance.uuid)
             inst_mapping.cell_mapping = cell
             inst_mapping.save()
+
+            # In order to properly clean-up volumes when deleting a server in
+            # ERROR status with no host, we need to store BDMs in the same
+            # cell.
+            if block_device_mappings:
+                self._create_block_device_mapping(
+                    cell, instance.flavor, instance.uuid,
+                    block_device_mappings)
+
+            # Like BDMs, the server tags provided by the user when creating the
+            # server should be persisted in the same cell so they can be shown
+            # from the API.
+            if tags:
+                with nova_context.target_cell(context, cell) as cctxt:
+                    self._create_tags(cctxt, instance.uuid, tags)
 
             # Be paranoid about artifacts being deleted underneath us.
             try:

@@ -8764,7 +8764,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         instance_ref.vcpu_model = test_vcpu_model.fake_vcpumodel
         drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
         compute_info = {'disk_available_least': -1000,
-                        'local_gb': 100,
+                        'free_disk_gb': 50,
                         'cpu_info': 'asdf',
                         }
         filename = "file"
@@ -8781,7 +8781,7 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         return_value.is_volume_backed = False
         self.assertThat({"filename": "file",
                          'image_type': 'default',
-                         'disk_available_mb': 102400,
+                         'disk_available_mb': 51200,
                          "disk_over_commit": True,
                          "block_migration": True,
                          "is_volume_backed": False,
@@ -17982,18 +17982,24 @@ class TestUpdateProviderTree(test.NoDBTestCase):
                 'min_unit': 1,
                 'max_unit': self.vcpus,
                 'step_size': 1,
+                'allocation_ratio': 16.0,
+                'reserved': 0,
             },
             rc_fields.ResourceClass.MEMORY_MB: {
                 'total': self.memory_mb,
                 'min_unit': 1,
                 'max_unit': self.memory_mb,
                 'step_size': 1,
+                'allocation_ratio': 1.5,
+                'reserved': 512,
             },
             rc_fields.ResourceClass.DISK_GB: {
                 'total': self.disk_gb,
                 'min_unit': 1,
                 'max_unit': self.disk_gb,
                 'step_size': 1,
+                'allocation_ratio': 1.0,
+                'reserved': 0,
             },
         }
 
@@ -18757,7 +18763,7 @@ class LibvirtDriverTestCase(test.NoDBTestCase, TraitsComparisonMixin):
                                vifs_already_plugged=None):
             self.fake_create_domain_called = True
             self.assertEqual(powered_on, power_on)
-            self.assertTrue(vifs_already_plugged)
+            self.assertFalse(vifs_already_plugged)
             return mock.MagicMock()
 
         def fake_enable_hairpin():

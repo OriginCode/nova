@@ -86,15 +86,24 @@ Nova Database
     Lists and optionally deletes database records where instance_uuid is NULL.
 
 ``nova-manage db online_data_migrations [--max-count]``
-   Perform data migration to update all live data. Return exit code 0 if
-   migrations were successful or exit code 1 for partial updates. This command
-   should be called after upgrading database schema and nova services on all
-   controller nodes. If the command exits with partial updates (exit code 1)
-   the command will need to be called again.
+   Perform data migration to update all live data.
 
    ``--max-count`` controls the maximum number of objects to migrate in a given
    call. If not specified, migration will occur in batches of 50 until fully
    complete.
+
+   Returns exit code 0 if no (further) updates are possible, 1 if the ``--max-count``
+   option was used and some updates were completed successfully (even if others generated
+   errors), 2 if some updates generated errors and no other migrations were able to take
+   effect in the last batch attempted, or 127 if invalid input is provided (e.g.
+   non-numeric max-count).
+
+   This command should be called after upgrading database schema and nova services on
+   all controller nodes. If it exits with partial updates (exit status 1) it should
+   be called again, even if some updates initially generated errors, because some updates
+   may depend on others having completed. If it exits with status 2, intervention is
+   required to resolve the issue causing remaining updates to fail. It should be
+   considered successfully completed only when the exit status is 0.
 
 ``nova-manage db ironic_flavor_migration [--all] [--host] [--node] [--resource_class]``
    Perform the ironic flavor migration process against the database
@@ -149,8 +158,8 @@ Nova Cells v2
     specified, it will use the one defined by ``[DEFAULT]/transport_url``
     in the configuration file. Returns 0 if setup is completed
     (or has already been done), 1 if no hosts are reporting (and cannot be
-    mapped), 1 if the transport url is missing, and 2 if run in a cells v1
-    environment.
+    mapped), 1 if the transport url is missing or invalid, and 2 if run in a
+    cells v1 environment.
 
 ``nova-manage cell_v2 map_cell0 [--database_connection <database_connection>]``
     Create a cell mapping to the database connection for the cell0 database.
@@ -184,7 +193,7 @@ Nova Cells v2
     use the one defined by ``[DEFAULT]/transport_url`` in the configuration
     file. This command is idempotent (can be run multiple times), and the
     verbose option will print out the resulting cell mapping uuid. Returns 0
-    on successful completion, and 1 if the transport url is missing.
+    on successful completion, and 1 if the transport url is missing or invalid.
 
 ``nova-manage cell_v2 verify_instance --uuid <instance_uuid> [--quiet]``
     Verify instance mapping to a cell. This command is useful to determine if
@@ -211,7 +220,8 @@ Nova Cells v2
     explained below:
 
     * Returns 0 if the cell mapping was successfully created.
-    * Returns 1 if the transport url or database connection was missing.
+    * Returns 1 if the transport url or database connection was missing
+      or invalid.
     * Returns 2 if another cell is already using that transport url and/or
       database connection combination.
 
