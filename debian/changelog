@@ -1,9 +1,14 @@
-nova (2:18.1.0-1) unstable; urgency=medium
+nova (2:18.1.0-2) unstable; urgency=medium
 
-  * New upstream version
   * Add fix-python3-compatibility-ceph.patch
 
  -- Michal Arbet <michal.arbet@ultimum.io>  Wed, 06 Feb 2019 18:04:27 +0100
+
+nova (2:18.1.0-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Thomas Goirand <zigo@debian.org>  Thu, 17 Jan 2019 09:07:03 +0100
 
 nova (2:18.0.3-5) unstable; urgency=medium
 
