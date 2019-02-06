@@ -8,7 +8,7 @@ msgstr ""
 "Project-Id-Version: nova 2:18.0.3-3\n"
 "Report-Msgid-Bugs-To: nova@packages.debian.org\n"
 "POT-Creation-Date: 2018-11-11 11:15+0100\n"
-"PO-Revision-Date: 2018-11-18 10:19+0200\n"
+"PO-Revision-Date: 2019-01-15 21:17+0100\n"
 "Last-Translator: Chris Leick <c.leick@vollbio.de>\n"
 "Language-Team: German <debian-l10n-german@lists.debian.org>\n"
 "Language: de\n"
@@ -133,8 +133,8 @@ msgid ""
 "through the Neutron metadata agent, which serves as a proxy to the Nova "
 "metadata REST API server."
 msgstr ""
-"VM-Instanzen verwenden Neutron, um dafür zu sorgen, dass ihre Metadaten im "
-"Netzwerkbetrieb durch den Neutron-Metadatenagent abgefragt werden. Er dient "
+"VM-Instanzen, die Neutron verwenden, um sich um die Vernetzung zu kümmern, "
+"fragen ihre Metadaten über den Neutron-Metadatenagenten ab. Er dient "
 "als Proxy zum Nova-Metadaten-REST-API-Server."
 
 #. Type: password
@@ -154,9 +154,8 @@ msgstr ""
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:9001
-# FIXME s/os/of/
 msgid "Cinder os region name:"
-msgstr "Regionsname von Cinde:"
+msgstr "OpenStack-Regionsname von Cinder:"
 
 #. Type: string
 #. Description
@@ -229,9 +228,8 @@ msgstr "Bitte geben Sie das Passwort des Placement-Administrators ein."
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:14001
-# FIXME s/os/of/
 msgid "Placement os region name:"
-msgstr "Regionsname des Placements:"
+msgstr "OpenStack-Regionsname des Placements:"
 
 #. Type: string
 #. Description
