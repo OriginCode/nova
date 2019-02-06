@@ -1,6 +1,9 @@
 nova (2:18.1.0-2) unstable; urgency=medium
 
   * Add fix-python3-compatibility-ceph.patch
+  * Update debconf template translations, with thanks to:
+    - German: Helge Kreutzmann (Closes: #919423)
+    - Dutch: Frans Spiesschaert (Closes: #920430)
 
  -- Michal Arbet <michal.arbet@ultimum.io>  Wed, 06 Feb 2019 18:04:27 +0100
 
