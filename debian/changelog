@@ -1,3 +1,9 @@
+nova (2:18.1.0-3) unstable; urgency=medium
+
+  * Also package the nova-serialproxy startup script/unit.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 19 Feb 2019 09:57:59 +0100
+
 nova (2:18.1.0-2) unstable; urgency=medium
 
   * Add fix-python3-compatibility-ceph.patch
