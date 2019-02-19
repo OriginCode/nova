@@ -25,7 +25,7 @@ else
 		exit 0
 	fi
 fi
-if ! [ "${NOVA_SERIAL_PROXY_START}" = "TRUE" ] ; then
+if ! [ ""$(echo "${NOVA_SERIAL_PROXY_START}" | tr '[:upper:]' '[:lower:]') = "true" ] || [ "${NOVA_SERIAL_PROXY_START}" = "1" ] ; then
 	# This is to prevent pkgos-gen-systemd-unit to exit
 	if [ -z "${INIT_TEMPLATE}" ] ; then
 		exit 0
