@@ -11,12 +11,11 @@
 # Description:       Frontend Nova API server
 ### END INIT INFO
 
-# Author: Julien Danjou <acid@debian.org>
-
-# PATH should only include /usr/* if it runs after the mountnfs.sh script
+# Author: Thomas Goirand <zigo@debian.org>
 DESC="OpenStack Nova API (nova-api)"
 PROJECT_NAME=nova
 NAME=${PROJECT_NAME}-api
 SYSTEMD_DOC="man:${NAME}(1)"
-SYSTEMD_TYPE=notify
-SYSTEMD_NOTIFY_ACCESS=all
+UWSGI_PORT=8774
+UWSGI_INI_PATH=/etc/nova/nova-api-uwsgi.ini
+UWSGI_INI_APP=/usr/bin/nova-api-wsgi
