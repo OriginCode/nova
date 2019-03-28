@@ -63,13 +63,13 @@ endif
 	rm -rf $(CURDIR)/debian/tmp/usr/etc
 
 	mkdir -p $(CURDIR)/debian/nova-common/etc/nova
-	PYTHONPATH=$(CURDIR)/debian/tmp/usr/lib/python3/dist-packages python3-oslopolicy-sample-generator \
+	PYTHONPATH=$(CURDIR)/debian/tmp/usr/lib/python3/dist-packages oslopolicy-sample-generator \
 		--output-file=$(CURDIR)/debian/nova-common/etc/nova/policy.json \
 		--format json \
 		--namespace nova
 
 	mkdir -p $(CURDIR)/debian/nova-common/usr/share/nova-common
-	PYTHONPATH=$(CURDIR)/debian/tmp/usr/lib/python3/dist-packages python3-oslo-config-generator \
+	PYTHONPATH=$(CURDIR)/debian/tmp/usr/lib/python3/dist-packages oslo-config-generator \
 		--output-file=$(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf \
 		--wrap-width 140 \
 		--namespace nova.conf \
@@ -87,12 +87,12 @@ endif
 
 	pkgos-readd-keystone-authtoken-missing-options $(NOVA_CONF) keystone_authtoken nova
 
-	PYTHONPATH=$(CURDIR)/debian/tmp/usr/lib/python3/dist-packages python3-oslopolicy-sample-generator \
+	PYTHONPATH=$(CURDIR)/debian/tmp/usr/lib/python3/dist-packages oslopolicy-sample-generator \
 		--output-file=$(CURDIR)/debian/nova-common/usr/share/nova-common/policy.json \
 		--format json \
 		--namespace nova
 
-	PYTHONPATH=$(CURDIR)/debian/tmp/usr/lib/python3/dist-packages python3-oslopolicy-sample-generator \
+	PYTHONPATH=$(CURDIR)/debian/tmp/usr/lib/python3/dist-packages oslopolicy-sample-generator \
 		--output-file=$(CURDIR)/debian/nova-common/usr/share/nova-common/placement-policy.json \
 		--namespace placement \
 		--format json
