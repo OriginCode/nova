@@ -3,6 +3,7 @@ nova (2:19.0.0~rc1-1) experimental; urgency=medium
   * New upstream release.
   * Fixed (build-)depends for this release.
   * Removed revert-restore-async-keyword.patch, not needed anymore.
+  * Refreshed other patches.
 
  -- Thomas Goirand <zigo@debian.org>  Thu, 28 Mar 2019 17:19:52 +0100
 

@@ -9,7 +9,7 @@ Index: nova/doc/source/reference/notifications.rst
 ===================================================================
 --- nova.orig/doc/source/reference/notifications.rst
 +++ nova/doc/source/reference/notifications.rst
-@@ -343,7 +343,6 @@ Existing versioned notifications
+@@ -349,7 +349,6 @@ Existing versioned notifications
  .. This is a reference anchor used in the main index page.
  .. _versioned_notification_samples:
  
