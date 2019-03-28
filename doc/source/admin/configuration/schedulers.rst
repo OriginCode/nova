@@ -240,13 +240,6 @@ tenant-isolated aggregate.
     `Tenant Isolation with Placement`_ filtering capability added in the
     18.0.0 Rocky release.
 
-.. note:: There is a
-    `known limitation <https://bugs.launchpad.net/nova/+bug/1802111>`_ with
-    the number of tenants that can be isolated per aggregate using this
-    filter. This limitation does not exist, however, for the
-    `Tenant Isolation with Placement`_ filtering capability added in the
-    18.0.0 Rocky release.
-
 AggregateNumInstancesFilter
 ---------------------------
 
@@ -1068,23 +1061,6 @@ as well as the other filters that are typically enabled:
 
    [filter_scheduler]
    enabled_filters=AggregateInstanceExtraSpecsFilter,RetryFilter,AvailabilityZoneFilter,ComputeCapabilitiesFilter,ImagePropertiesFilter,ServerGroupAntiAffinityFilter,ServerGroupAffinityFilter
-
-.. _bug-1804125:
-
-.. note:: Regarding the `AggregateCoreFilter`_, `AggregateDiskFilter`_ and
-   `AggregateRamFilter`_, starting in 15.0.0 (Ocata) there is a behavior
-   change where aggregate-based overcommit ratios will no longer be honored
-   during scheduling for the FilterScheduler. Instead, overcommit values must
-   be set on a per-compute-node basis in the Nova configuration files.
-
-   If you have been relying on per-aggregate overcommit, during your upgrade,
-   you must change to using per-compute-node overcommit ratios in order for
-   your scheduling behavior to stay consistent. Otherwise, you may notice
-   increased NoValidHost scheduling failures as the aggregate-based overcommit
-   is no longer being considered.
-
-   See `bug 1804125 <https://bugs.launchpad.net/nova/+bug/1804125>`_ for more
-   details.
 
 Example: Specify compute hosts with SSDs
 ----------------------------------------

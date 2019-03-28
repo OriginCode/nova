@@ -28,8 +28,6 @@ from nova import test
 
 CONF = conf.CONF
 
-CONF = conf.CONF
-
 
 class SchedulerRpcAPITestCase(test.NoDBTestCase):
     def _test_scheduler_api(self, method, rpc_method, expected_args=None,

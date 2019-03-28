@@ -2340,26 +2340,6 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
             test.MatchType(context.RequestContext), inst.uuid,
             self.params['tags'])
 
-    @mock.patch.object(objects.CellMapping, 'get_by_uuid')
-    @mock.patch.object(conductor_manager.ComputeTaskManager,
-                       '_create_tags')
-    def test_bury_in_cell0_with_tags(self, mock_create_tags, mock_get_cell):
-        mock_get_cell.return_value = self.cell_mappings['cell0']
-
-        inst_br = fake_build_request.fake_req_obj(self.ctxt)
-        del inst_br.instance.id
-        inst_br.create()
-        inst = inst_br.get_new_instance(self.ctxt)
-
-        self.conductor._bury_in_cell0(
-            self.ctxt, self.params['request_specs'][0], Exception('Foo'),
-            build_requests=[inst_br], instances=[inst],
-            tags=self.params['tags'])
-
-        mock_create_tags.assert_called_once_with(
-            test.MatchType(context.RequestContext), inst.uuid,
-            self.params['tags'])
-
     def test_reset(self):
         with mock.patch('nova.compute.rpcapi.ComputeAPI') as mock_rpc:
             old_rpcapi = self.conductor_manager.compute_rpcapi

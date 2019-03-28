@@ -7705,8 +7705,6 @@ class ComputeTestCase(BaseTestCase,
             mock_get_filter, mock_destroy, mock_is_inst, mock_get_blk,
             mock_get_inst, mock_remove_allocs):
         fake_context = context.get_admin_context()
-        read_deleted_context = fake_context.elevated(read_only='yes')
-        mock_elevated.return_value = read_deleted_context
 
         # instances in central db
         instances = [
@@ -7743,7 +7741,7 @@ class ComputeTestCase(BaseTestCase,
                                               'pre-migrating',
                                               'done'],
                                           'migration_type': 'evacuation'})
-        mock_get_inst.assert_called_once_with(read_deleted_context)
+        mock_get_inst.assert_called_once_with(fake_context)
         mock_get_nw.assert_called_once_with(fake_context, evacuated_instance)
         mock_get_blk.assert_called_once_with(fake_context, evacuated_instance)
         mock_is_inst.assert_called_once_with(fake_context, evacuated_instance)
@@ -7773,8 +7771,6 @@ class ComputeTestCase(BaseTestCase,
             mock_get_filter, mock_destroy, mock_check_clean, mock_check,
             mock_check_local, mock_get_blk, mock_get_drv, mock_remove_allocs):
         fake_context = context.get_admin_context()
-        read_deleted_context = fake_context.elevated(read_deleted='yes')
-        mock_elevated.return_value = read_deleted_context
 
         # instances in central db
         instances = [
@@ -7805,7 +7801,7 @@ class ComputeTestCase(BaseTestCase,
                 return_value='fake_network_info') as mock_get_nw:
             self.compute._destroy_evacuated_instances(fake_context)
 
-        mock_get_drv.assert_called_once_with(read_deleted_context)
+        mock_get_drv.assert_called_once_with(fake_context)
         mock_get_nw.assert_called_once_with(fake_context, evacuated_instance)
         mock_get_blk.assert_called_once_with(fake_context, evacuated_instance)
         mock_check_local.assert_called_once_with(fake_context,
@@ -7840,8 +7836,6 @@ class ComputeTestCase(BaseTestCase,
             mock_get_filter, mock_destroy, mock_check_clean, mock_check,
             mock_check_local, mock_get_blk, mock_get_inst, mock_remove_allocs):
         fake_context = context.get_admin_context()
-        read_deleted_context = fake_context.elevated(read_deleted='yes')
-        mock_elevated.return_value = read_deleted_context
 
         # instances in central db
         instances = [
@@ -7871,7 +7865,7 @@ class ComputeTestCase(BaseTestCase,
                 return_value='fake_network_info') as mock_get_nw:
             self.compute._destroy_evacuated_instances(fake_context)
 
-        mock_get_inst.assert_called_once_with(read_deleted_context)
+        mock_get_inst.assert_called_once_with(fake_context)
         mock_get_nw.assert_called_once_with(fake_context, evacuated_instance)
         mock_get_blk.assert_called_once_with(fake_context, evacuated_instance)
         mock_check_local.assert_called_once_with(fake_context,
