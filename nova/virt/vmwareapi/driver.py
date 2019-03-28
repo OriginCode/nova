@@ -22,6 +22,7 @@ A connection to the VMware vCenter platform.
 import os
 import re
 
+import os_resource_classes as orc
 from oslo_log import log as logging
 from oslo_utils import excutils
 from oslo_utils import units
@@ -38,8 +39,8 @@ from nova.compute import utils as compute_utils
 import nova.conf
 from nova import exception
 from nova.i18n import _
+from nova import objects
 import nova.privsep.path
-from nova import rc_fields as fields
 from nova.virt import driver
 from nova.virt.vmwareapi import constants
 from nova.virt.vmwareapi import ds_util
@@ -269,6 +270,71 @@ class VMwareVCDriver(driver.ComputeDriver):
                                      network_info, image_meta, resize_instance,
                                      block_device_info, power_on)
 
+    def ensure_filtering_rules_for_instance(self, instance, network_info):
+        pass
+
+    def pre_live_migration(self, context, instance, block_device_info,
+                           network_info, disk_info, migrate_data):
+        return migrate_data
+
+    def post_live_migration_at_source(self, context, instance, network_info):
+        pass
+
+    def post_live_migration_at_destination(self, context, instance,
+                                           network_info,
+                                           block_migration=False,
+                                           block_device_info=None):
+        pass
+
+    def cleanup_live_migration_destination_check(self, context,
+                                                 dest_check_data):
+        pass
+
+    def live_migration(self, context, instance, dest,
+                       post_method, recover_method, block_migration=False,
+                       migrate_data=None):
+        """Live migration of an instance to another host."""
+        self._vmops.live_migration(context, instance, dest, post_method,
+                                   recover_method, block_migration,
+                                   migrate_data)
+
+    def check_can_live_migrate_source(self, context, instance,
+                                      dest_check_data, block_device_info=None):
+        cluster_name = dest_check_data.cluster_name
+        cluster_ref = vm_util.get_cluster_ref_by_name(self._session,
+                                                      cluster_name)
+        if cluster_ref is None:
+            msg = (_("Cannot find destination cluster %s for live migration") %
+                   cluster_name)
+            raise exception.MigrationPreCheckError(reason=msg)
+        res_pool_ref = vm_util.get_res_pool_ref(self._session, cluster_ref)
+        if res_pool_ref is None:
+            msg = _("Cannot find destination resource pool for live migration")
+            raise exception.MigrationPreCheckError(reason=msg)
+        return dest_check_data
+
+    def check_can_live_migrate_destination(self, context, instance,
+                                           src_compute_info, dst_compute_info,
+                                           block_migration=False,
+                                           disk_over_commit=False):
+        # the information that we need for the destination compute node
+        # is the name of its cluster and datastore regex
+        data = objects.VMwareLiveMigrateData()
+        data.cluster_name = CONF.vmware.cluster_name
+        data.datastore_regex = CONF.vmware.datastore_regex
+        return data
+
+    def unfilter_instance(self, instance, network_info):
+        pass
+
+    def rollback_live_migration_at_destination(self, context, instance,
+                                               network_info,
+                                               block_device_info,
+                                               destroy_disks=True,
+                                               migrate_data=None):
+        """Clean up destination node after a failed live migration."""
+        self.destroy(context, instance, network_info, block_device_info)
+
     def get_instance_disk_info(self, instance, block_device_info=None):
         pass
 
@@ -366,21 +432,21 @@ class VMwareVCDriver(driver.ComputeDriver):
         reserved_disk_gb = compute_utils.convert_mb_to_ceil_gb(
             CONF.reserved_host_disk_mb)
         result = {
-            fields.ResourceClass.VCPU: {
+            orc.VCPU: {
                 'total': stats['cpu']['vcpus'],
                 'reserved': CONF.reserved_host_cpus,
                 'min_unit': 1,
                 'max_unit': stats['cpu']['max_vcpus_per_host'],
                 'step_size': 1,
             },
-            fields.ResourceClass.MEMORY_MB: {
+            orc.MEMORY_MB: {
                 'total': stats['mem']['total'],
                 'reserved': CONF.reserved_host_memory_mb,
                 'min_unit': 1,
                 'max_unit': stats['mem']['max_mem_mb_per_host'],
                 'step_size': 1,
             },
-            fields.ResourceClass.DISK_GB: {
+            orc.DISK_GB: {
                 'total': total_disk_capacity // units.Gi,
                 'reserved': reserved_disk_gb,
                 'min_unit': 1,
@@ -517,7 +583,7 @@ class VMwareVCDriver(driver.ComputeDriver):
         """Poll for rebooting instances."""
         self._vmops.poll_rebooting_instances(timeout, instances)
 
-    def get_info(self, instance):
+    def get_info(self, instance, use_cache=True):
         """Return info about the VM instance."""
         return self._vmops.get_info(instance)
 

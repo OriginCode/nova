@@ -67,6 +67,13 @@ Interdependencies to other options:
     cfg.BoolOpt(
         'disable_libvirt_livesnapshot',
         default=False,
+        deprecated_for_removal=True,
+        deprecated_since='19.0.0',
+        deprecated_reason="""
+This option was added to work around issues with libvirt 1.2.2. We no longer
+support this version of libvirt, which means this workaround is no longer
+necessary. It will be removed in a future release.
+""",
         help="""
 Disable live snapshots when using the libvirt driver.
 
@@ -115,8 +122,7 @@ instances that get out of sync between the hypervisor and the Nova database
 will have to be synchronized manually.
 
 For more information, refer to the bug report:
-
-  https://bugs.launchpad.net/bugs/1444630
+https://bugs.launchpad.net/bugs/1444630
 
 Interdependencies to other options:
 
@@ -187,36 +193,61 @@ Related options:
 """),
 
     cfg.BoolOpt(
-        'report_ironic_standard_resource_class_inventory',
-        default=True,
+        'enable_numa_live_migration',
+        default=False,
         help="""
-Starting in the 16.0.0 Pike release, ironic nodes can be scheduled using
-custom resource classes rather than the standard resource classes VCPU,
-MEMORY_MB and DISK_GB:
+Enable live migration of instances with NUMA topologies.
 
-https://docs.openstack.org/ironic/rocky/install/configure-nova-flavors.html
+Live migration of instances with NUMA topologies is disabled by default
+when using the libvirt driver. This includes live migration of instances with
+CPU pinning or hugepages. CPU pinning and huge page information for such
+instances is not currently re-calculated, as noted in `bug #1289064`_.  This
+means that if instances were already present on the destination host, the
+migrated instance could be placed on the same dedicated cores as these
+instances or use hugepages allocated for another instance. Alternately, if the
+host platforms were not homogeneous, the instance could be assigned to
+non-existent cores or be inadvertently split across host NUMA nodes.
 
-However, existing ironic instances require a data migration which can be
-achieved either by restarting ``nova-compute`` services managing ironic nodes
-or running ``nova-manage db ironic_flavor_migration``. The completion of the
-data migration can be checked by running the ``nova-status upgrade check``
-command and checking the "Ironic Flavor Migration" result.
+Despite these known issues, there may be cases where live migration is
+necessary. By enabling this option, operators that are aware of the issues and
+are willing to manually work around them can enable live migration support for
+these instances.
 
-Once all data migrations are complete, you can set this option to False to
-stop reporting VCPU, MEMORY_MB and DISK_GB resource class inventory to the
-Placement service so that scheduling will only rely on the custom resource
-class for each ironic node, as described in the document above.
+Related options:
 
-Note that this option does not apply starting in the 19.0.0 Stein release
-since the ironic compute driver no longer reports standard resource class
-inventory regardless of configuration.
+* ``compute_driver``: Only the libvirt driver is affected.
 
-Alternatives to this workaround would be unsetting ``memory_mb`` and/or
-``vcpus`` properties from ironic nodes, or using host aggregates to segregate
-VM from BM compute hosts and restrict flavors to those aggregates, but those
-alternatives might not be feasible at large scale.
+.. _bug #1289064: https://bugs.launchpad.net/nova/+bug/1289064
+"""),
 
-See related bug https://bugs.launchpad.net/nova/+bug/1796920 for more details.
+    cfg.BoolOpt(
+        'ensure_libvirt_rbd_instance_dir_cleanup',
+        default=False,
+        help="""
+Ensure the instance directory is removed during clean up when using rbd.
+
+When enabled this workaround will ensure that the instance directory is always
+removed during cleanup on hosts using ``[libvirt]/images_type=rbd``. This
+avoids the following bugs with evacuation and revert resize clean up that lead
+to the instance directory remaining on the host:
+
+https://bugs.launchpad.net/nova/+bug/1414895
+
+https://bugs.launchpad.net/nova/+bug/1761062
+
+Both of these bugs can then result in ``DestinationDiskExists`` errors being
+raised if the instances ever attempt to return to the host.
+
+.. warning:: Operators will need to ensure that the instance directory itself,
+  specified by ``[DEFAULT]/instances_path``, is not shared between computes
+  before enabling this workaround otherwise the console.log, kernels, ramdisks
+  and any additional files being used by the running instance will be lost.
+
+Related options:
+
+* ``compute_driver`` (libvirt)
+* ``[libvirt]/images_type`` (rbd)
+* ``instances_path``
 """),
 ]
 

@@ -5,7 +5,7 @@ You can configure OpenStack to write metadata to a special configuration drive
 that attaches to the instance when it boots. The instance can mount this drive
 and read files from it to get information that is normally available through
 the :doc:`metadata service </user/metadata-service>`.
-This metadata is different from the user data.
+This metadata is different from the :doc:`user data </user/user-data>`.
 
 One use case for using the configuration drive is to pass a networking
 configuration when you do not use DHCP to assign IP addresses to
@@ -171,6 +171,9 @@ In this example, the contents of the configuration drive are as follows::
 The files that appear on the configuration drive depend on the arguments
 that you pass to the :command:`openstack server create` command.
 
+Vendor-specific data can also be exposed to a guest in the configuration
+drive. See :doc:`Vendordata </user/vendordata>` for details.
+
 OpenStack metadata format
 -------------------------
 
@@ -282,3 +285,12 @@ systems. However, to use the VFAT format, add the following line to the
    config_drive_format=vfat
 
 If you choose VFAT, the configuration drive is 64 MB.
+
+.. deprecated:: 19.0.0
+
+   The :oslo.config:option:`config_drive_format` option was deprecated in 19.0.0
+   (Stein). The option was originally added as a workaround for a bug in
+   libvirt, `#1246201`__, that was resolved in libvirt v1.2.17. As a result,
+   this option is no longer necessary or useful.
+
+   __ https://bugs.launchpad.net/nova/+bug/1246201

@@ -416,12 +416,16 @@ def _get_provider_by_uuid(context, uuid):
 
 @db_api.placement_context_manager.reader
 def _get_aggregates_by_provider_id(context, rp_id):
+    """Returns a dict, keyed by internal aggregate ID, of aggregate UUIDs
+    associated with the supplied internal resource provider ID.
+    """
     join_statement = sa.join(
         _AGG_TBL, _RP_AGG_TBL, sa.and_(
             _AGG_TBL.c.id == _RP_AGG_TBL.c.aggregate_id,
             _RP_AGG_TBL.c.resource_provider_id == rp_id))
-    sel = sa.select([_AGG_TBL.c.uuid]).select_from(join_statement)
-    return [r[0] for r in context.session.execute(sel).fetchall()]
+    sel = sa.select([_AGG_TBL.c.id, _AGG_TBL.c.uuid]).select_from(
+        join_statement)
+    return {r[0]: r[1] for r in context.session.execute(sel).fetchall()}
 
 
 @db_api.placement_context_manager.reader
@@ -485,6 +489,36 @@ def _anchors_for_sharing_providers(context, rp_ids, get_id=False):
 
 
 @db_api.placement_context_manager.writer
+def _ensure_aggregate(ctx, agg_uuid):
+    """Finds an aggregate and returns its internal ID. If not found, creates
+    the aggregate and returns the new aggregate's internal ID.
+    """
+    sel = sa.select([_AGG_TBL.c.id]).where(_AGG_TBL.c.uuid == agg_uuid)
+    res = ctx.session.execute(sel).fetchone()
+    if res:
+        return res[0]
+
+    LOG.debug("_ensure_aggregate() did not find aggregate %s. "
+              "Creating it.", agg_uuid)
+    try:
+        ins_stmt = _AGG_TBL.insert().values(uuid=agg_uuid)
+        res = ctx.session.execute(ins_stmt)
+        agg_id = res.inserted_primary_key[0]
+        LOG.debug("_ensure_aggregate() created new aggregate %s (id=%d).",
+                  agg_uuid, agg_id)
+        return agg_id
+    except db_exc.DBDuplicateEntry:
+        # Something else added this agg_uuid in between our initial
+        # fetch above and when we tried flushing this session, so let's
+        # grab whatever that other thing added.
+        LOG.debug("_ensure_provider() failed to create new aggregate %s. "
+                  "Another thread already created an aggregate record. "
+                  "Looking up that aggregate record.",
+                  agg_uuid)
+        return _ensure_aggregate(ctx, agg_uuid)
+
+
+@db_api.placement_context_manager.writer
 def _set_aggregates(context, resource_provider, provided_aggregates,
                     increment_generation=False):
     rp_id = resource_provider.id
@@ -498,9 +532,17 @@ def _set_aggregates(context, resource_provider, provided_aggregates,
     # to avoid bloat if it turns out we're creating a lot of noise.
     # Not doing now to move things along.
     provided_aggregates = set(provided_aggregates)
-    existing_aggregates = set(_get_aggregates_by_provider_id(context, rp_id))
-    to_add = provided_aggregates - existing_aggregates
-    target_aggregates = list(provided_aggregates)
+    existing_aggregates = _get_aggregates_by_provider_id(context, rp_id)
+    agg_uuids_to_add = provided_aggregates - set(existing_aggregates.values())
+    # A dict, keyed by internal aggregate ID, of aggregate UUIDs that will be
+    # associated with the provider
+    aggs_to_associate = {}
+    # Same dict for those aggregates to remove the association with this
+    # provider
+    aggs_to_disassociate = {
+        agg_id: agg_uuid for agg_id, agg_uuid in existing_aggregates.items()
+        if agg_uuid not in provided_aggregates
+    }
 
     # Create any aggregates that do not yet exist in
     # PlacementAggregates. This is different from
@@ -511,38 +553,32 @@ def _set_aggregates(context, resource_provider, provided_aggregates,
     # create a new row in the PlacementAggregate table if the
     # aggregate uuid has never been seen before. Code further
     # below will update the associations.
-    for agg_uuid in to_add:
-        found_agg = context.session.query(models.PlacementAggregate.uuid).\
-            filter_by(uuid=agg_uuid).first()
-        if not found_agg:
-            new_aggregate = models.PlacementAggregate(uuid=agg_uuid)
-            try:
-                context.session.add(new_aggregate)
-                # Flush each aggregate to explicitly call the INSERT
-                # statement that could result in an integrity error
-                # if some other thread has added this agg_uuid. This
-                # also makes sure that the new aggregates have
-                # ids when the SELECT below happens.
-                context.session.flush()
-            except db_exc.DBDuplicateEntry:
-                # Something else has already added this agg_uuid
-                pass
+    for agg_uuid in agg_uuids_to_add:
+        agg_id = _ensure_aggregate(context, agg_uuid)
+        aggs_to_associate[agg_id] = agg_uuid
 
-    # Remove all aggregate associations so we can refresh them
-    # below. This means that all associations are added, but the
-    # aggregates themselves stay around.
-    context.session.query(models.ResourceProviderAggregate).filter_by(
-        resource_provider_id=rp_id).delete()
+    for agg_id, agg_uuid in aggs_to_associate.items():
+        try:
+            ins_stmt = _RP_AGG_TBL.insert().values(
+                resource_provider_id=rp_id, aggregate_id=agg_id)
+            context.session.execute(ins_stmt)
+            LOG.debug("Setting aggregates for provider %s. Successfully "
+                      "associated aggregate %s.",
+                      resource_provider.uuid, agg_uuid)
+        except db_exc.DBDuplicateEntry:
+            LOG.debug("Setting aggregates for provider %s. Another thread "
+                      "already associated aggregate %s. Skipping.",
+                      resource_provider.uuid, agg_uuid)
+            pass
 
-    # Set resource_provider_id, aggregate_id pairs to
-    # ResourceProviderAggregate table.
-    if target_aggregates:
-        select_agg_id = sa.select([rp_id, models.PlacementAggregate.id]).\
-            where(models.PlacementAggregate.uuid.in_(target_aggregates))
-        insert_aggregates = models.ResourceProviderAggregate.__table__.\
-            insert().from_select(['resource_provider_id', 'aggregate_id'],
-                                 select_agg_id)
-        context.session.execute(insert_aggregates)
+    for agg_id, agg_uuid in aggs_to_disassociate.items():
+        del_stmt = _RP_AGG_TBL.delete().where(sa.and_(
+                _RP_AGG_TBL.c.resource_provider_id == rp_id,
+                _RP_AGG_TBL.c.aggregate_id == agg_id))
+        context.session.execute(del_stmt)
+        LOG.debug("Setting aggregates for provider %s. Successfully "
+                  "disassociated aggregate %s.",
+                  resource_provider.uuid, agg_uuid)
 
     if increment_generation:
         resource_provider.generation = _increment_provider_generation(
@@ -948,7 +984,8 @@ class ResourceProvider(base.VersionedObject, base.TimestampedObject):
 
     def get_aggregates(self):
         """Get the aggregate uuids associated with this resource provider."""
-        return _get_aggregates_by_provider_id(self._context, self.id)
+        return list(
+            _get_aggregates_by_provider_id(self._context, self.id).values())
 
     def set_aggregates(self, aggregate_uuids, increment_generation=False):
         """Set the aggregate uuids associated with this resource provider.
@@ -3661,7 +3698,7 @@ def _get_traits_by_provider_tree(ctx, root_ids):
     :param root_ids: list of root resource provider IDs
     """
     if not root_ids:
-        raise ValueError(_("Expected root_ids to be a list of root resource"
+        raise ValueError(_("Expected root_ids to be a list of root resource "
                            "provider internal IDs, but got an empty list."))
 
     rpt = sa.alias(_RP_TBL, name='rpt')
@@ -4065,16 +4102,13 @@ class AllocationCandidates(base.VersionedObject):
 
         # Either we are processing a single-RP request group, or there are no
         # sharing providers that (help) satisfy the request.  Get a list of
-        # resource provider IDs that have ALL the requested resources and more
-        # efficiently construct the allocation requests.
-        # NOTE(jaypipes): When we start handling nested providers, we may
-        # add new code paths or modify this code path to return root
-        # provider IDs of provider trees instead of the resource provider
-        # IDs.
-        rp_ids = _get_provider_ids_matching(context, resources,
+        # tuples of (internal provider ID, root provider ID) that have ALL
+        # the requested resources and more efficiently construct the
+        # allocation requests.
+        rp_tuples = _get_provider_ids_matching(context, resources,
                                             required_trait_map,
                                             forbidden_trait_map, member_of)
-        return _alloc_candidates_single_provider(context, resources, rp_ids)
+        return _alloc_candidates_single_provider(context, resources, rp_tuples)
 
     @classmethod
     # TODO(efried): This is only a writer context because it accesses the
@@ -4173,9 +4207,9 @@ def reshape(ctx, inventories, allocations):
 
     :param ctx: `nova.api.openstack.placement.context.RequestContext` object
                 containing the DB transaction context.
-    :param inventories: dict, keyed by resource provider UUID, of
-                        `InventoryList` objects representing the replaced
-                        inventory information for the provider.
+    :param inventories: dict, keyed by ResourceProvider, of `InventoryList`
+                        objects representing the replaced inventory information
+                        for the provider.
     :param allocations: `AllocationList` object containing all allocations for
                         all consumers being modified by the reshape operation.
     :raises: `exception.ConcurrentUpdateDetected` when any resource provider or
@@ -4186,8 +4220,11 @@ def reshape(ctx, inventories, allocations):
     # in this transaction. We keep a cache of these because as we perform the
     # various operations on the providers, their generations increment and we
     # want to "inject" the changed resource provider objects into the
-    # AllocationList's objects before calling AllocationList.replace_all()
-    affected_providers = {}
+    # AllocationList's objects before calling AllocationList.replace_all().
+    # We start with the providers in the allocation objects, but only use one
+    # if we don't find it in the inventories.
+    affected_providers = {alloc.resource_provider.uuid: alloc.resource_provider
+                          for alloc in allocations}
     # We have to do the inventory changes in two steps because:
     # - we can't delete inventories with allocations; and
     # - we can't create allocations on nonexistent inventories.
@@ -4200,10 +4237,19 @@ def reshape(ctx, inventories, allocations):
     # allocated, but that's allowed by the code. If the final picture is
     # overcommitted, we'll get an appropriate exception when we replace the
     # allocations at the end.
-    for rp_uuid, new_inv_list in inventories.items():
+    for rp, new_inv_list in inventories.items():
         LOG.debug("reshaping: *interim* inventory replacement for provider %s",
-                  rp_uuid)
-        rp = new_inv_list[0].resource_provider
+                  rp.uuid)
+        # Update the cache. This may be replacing an entry that came from
+        # allocations, or adding a new entry from inventories.
+        affected_providers[rp.uuid] = rp
+
+        # Optimization: If the new inventory is empty, the below would be
+        # replacing it with itself (and incrementing the generation)
+        # unnecessarily.
+        if not new_inv_list:
+            continue
+
         # A dict, keyed by resource class, of the Inventory objects. We start
         # with the original inventory list.
         inv_by_rc = {inv.resource_class: inv for inv in
@@ -4215,7 +4261,6 @@ def reshape(ctx, inventories, allocations):
             inv_by_rc[inv.resource_class] = inv
         # Set the interim inventory structure.
         rp.set_inventory(InventoryList(objects=list(inv_by_rc.values())))
-        affected_providers[rp_uuid] = rp
 
     # NOTE(jaypipes): The above inventory replacements will have
     # incremented the resource provider generations, so we need to look in
@@ -4231,11 +4276,7 @@ def reshape(ctx, inventories, allocations):
     allocations.replace_all()
 
     # And finally, we can set the inventories to their actual desired state.
-    for rp_uuid, new_inv_list in inventories.items():
+    for rp, new_inv_list in inventories.items():
         LOG.debug("reshaping: *final* inventory replacement for provider %s",
-                  rp_uuid)
-        # TODO(efried): If we wanted this to be more efficient, we could keep
-        # track of providers for which all inventories are being deleted in the
-        # above loop and just do those and skip the rest, since they're already
-        # in their final form.
-        new_inv_list[0].resource_provider.set_inventory(new_inv_list)
+                  rp.uuid)
+        rp.set_inventory(new_inv_list)

@@ -12,6 +12,7 @@
 
 from nova import test
 from nova.tests import fixtures as nova_fixtures
+from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import integrated_helpers
 from nova.tests.unit.image import fake as image_fake
 from nova.tests.unit import policy_fixture
@@ -40,7 +41,7 @@ class ColdMigrateTargetHostThenLiveMigrateTest(
         super(ColdMigrateTargetHostThenLiveMigrateTest, self).setUp()
         self.useFixture(policy_fixture.RealPolicyFixture())
         self.useFixture(nova_fixtures.NeutronFixture(self))
-        self.useFixture(nova_fixtures.PlacementFixture())
+        self.useFixture(func_fixtures.PlacementFixture())
 
         api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
             api_version='v2.1'))
@@ -59,9 +60,9 @@ class ColdMigrateTargetHostThenLiveMigrateTest(
         self.start_service('conductor')
         self.start_service('scheduler')
 
+        self.addCleanup(fake.restore_nodes)
         for host in ('host1', 'host2'):
             fake.set_nodes([host])
-            self.addCleanup(fake.restore_nodes)
             self.start_service('compute', host=host)
 
     def test_cold_migrate_target_host_then_live_migrate(self):

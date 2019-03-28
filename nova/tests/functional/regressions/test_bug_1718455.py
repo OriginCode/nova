@@ -14,6 +14,7 @@ import time
 
 from nova import test
 from nova.tests import fixtures as nova_fixtures
+from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import integrated_helpers
 from nova.tests.unit import fake_network
 import nova.tests.unit.image.fake
@@ -46,7 +47,7 @@ class TestLiveMigrateOneOfConcurrentlyCreatedInstances(
 
         self.useFixture(policy_fixture.RealPolicyFixture())
         self.useFixture(nova_fixtures.NeutronFixture(self))
-        self.useFixture(nova_fixtures.PlacementFixture())
+        self.useFixture(func_fixtures.PlacementFixture())
 
         api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
             api_version='v2.1'))
@@ -70,7 +71,6 @@ class TestLiveMigrateOneOfConcurrentlyCreatedInstances(
         self.addCleanup(fake.restore_nodes)
         self.start_service('compute', host='host1')
         fake.set_nodes(['host2'])
-        self.addCleanup(fake.restore_nodes)
         self.start_service('compute', host='host2')
 
         fake_network.set_stub_network_methods(self)

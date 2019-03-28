@@ -71,7 +71,7 @@ class BuildRequest(base.NovaObject):
             LOG.debug('Failed to load instance from BuildRequest with uuid '
                       '%s because it is None', self.instance_uuid)
             raise exception.BuildRequestNotFound(uuid=self.instance_uuid)
-        except ovoo_exc.IncompatibleObjectVersion as exc:
+        except ovoo_exc.IncompatibleObjectVersion:
             # This should only happen if proper service upgrade strategies are
             # not followed. Log the exception and raise BuildRequestNotFound.
             # If the instance can't be loaded this object is useless and may
@@ -80,7 +80,8 @@ class BuildRequest(base.NovaObject):
                       'with uuid %(instance_uuid)s. Found version %(version)s '
                       'which is not supported here.',
                       dict(instance_uuid=self.instance_uuid,
-                          version=exc.objver))
+                           version=jsonutils.loads(
+                               db_instance)["nova_object.version"]))
             LOG.exception('Could not deserialize instance in BuildRequest')
             raise exception.BuildRequestNotFound(uuid=self.instance_uuid)
         # NOTE(sbauza): The instance primitive should already have the deleted
@@ -445,7 +446,10 @@ class BuildRequestList(base.ObjectListBase, base.NovaObject):
         if marker:
             for i, build_req in enumerate(sorted_build_reqs):
                 if build_req.instance.uuid == marker:
-                    marker_index = i
+                    # The marker is the last seen item in the last page, so
+                    # we increment the index to the next item immediately
+                    # after the marker so the marker is not returned.
+                    marker_index = i + 1
                     break
             else:
                 raise exception.MarkerNotFound(marker=marker)

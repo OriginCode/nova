@@ -18,6 +18,7 @@ import nova.compute.resource_tracker
 from nova import exception
 from nova import test
 from nova.tests import fixtures as nova_fixtures
+from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.unit import cast_as_call
 from nova.tests.unit import fake_network
 import nova.tests.unit.image.fake
@@ -50,7 +51,7 @@ class TestRetryBetweenComputeNodeBuilds(test.TestCase):
 
         # We need the computes reporting into placement for the filter
         # scheduler to pick a host.
-        self.useFixture(nova_fixtures.PlacementFixture())
+        self.useFixture(func_fixtures.PlacementFixture())
 
         api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
             api_version='v2.1'))
@@ -63,7 +64,6 @@ class TestRetryBetweenComputeNodeBuilds(test.TestCase):
 
         self.start_service('conductor')
         self.start_service('consoleauth')
-        self.start_service('scheduler')
 
         # We start two compute services because we're going to fake one
         # of them to fail the build so we can trigger the retry code.
@@ -77,8 +77,9 @@ class TestRetryBetweenComputeNodeBuilds(test.TestCase):
         self.addCleanup(fake.restore_nodes)
         self.start_service('compute', host='host1')
         fake.set_nodes(['host2'])
-        self.addCleanup(fake.restore_nodes)
         self.start_service('compute', host='host2')
+
+        self.scheduler_service = self.start_service('scheduler')
 
         self.useFixture(cast_as_call.CastAsCall(self))
 
@@ -150,9 +151,14 @@ class TestRetryBetweenComputeNodeBuilds(test.TestCase):
         self.assertEqual(2, self.attempts)
 
 
-class TestRetryBetweenComputeNodeBuildsCachingScheduler(
+class TestRetryBetweenComputeNodeBuildsNoAllocations(
         TestRetryBetweenComputeNodeBuilds):
-    """Tests the reschedule scenario using the CachingScheduler."""
+    """Tests the reschedule scenario using a scheduler driver which does
+    not use Placement.
+    """
     def setUp(self):
-        self.flags(driver='caching_scheduler', group='scheduler')
-        super(TestRetryBetweenComputeNodeBuildsCachingScheduler, self).setUp()
+        super(TestRetryBetweenComputeNodeBuildsNoAllocations, self).setUp()
+        # We need to mock the FilterScheduler to not use Placement so that
+        # allocations won't be created during scheduling.
+        self.scheduler_service.manager.driver.USES_ALLOCATION_CANDIDATES = \
+            False

@@ -14,6 +14,7 @@
 import collections
 
 import mock
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 from oslo_versionedobjects import fixture
 
@@ -24,7 +25,6 @@ from nova.objects import base
 from nova.objects import fields
 from nova import test
 from nova.tests.unit.objects import test_objects
-from nova.tests import uuidsentinel as uuids
 
 
 class TestNotificationBase(test.NoDBTestCase):
@@ -370,11 +370,17 @@ notification_object_data = {
     'AuditPeriodPayload': '1.0-2b429dd307b8374636703b843fa3f9cb',
     'BandwidthPayload': '1.0-ee2616a7690ab78406842a2b68e34130',
     'BlockDevicePayload': '1.0-29751e1b6d41b1454e36768a1e764df8',
-    'EventType': '1.15-a93b5b3b54ebf6c5a158dfcd985d15c5',
+    'CellMappingPayload': '1.0-cf7faeb3cdd6b0c742ff74c80b88fb11',
+    'ComputeTaskNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
+    'ComputeTaskPayload': '1.0-e3d34762c14d131c98337b72e8c600e1',
+    'DestinationPayload': '1.0-4ccf26318dd18c4377dada2b1e74ec2e',
+    'EventType': '1.19-000a76e83b06a9de11d365465a755a5e',
     'ExceptionNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
     'ExceptionPayload': '1.1-6c43008bd81885a63bc7f7c629f0793b',
     'FlavorNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
     'FlavorPayload': '1.4-2e7011b8b4e59167fe8b7a0a81f0d452',
+    'ImageMetaPayload': '1.0-0e65beeacb3393beed564a57bc2bc989',
+    'ImageMetaPropsPayload': '1.0-0665065e198b4ab1b03aa80f442d2302',
     'InstanceActionNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
     'InstanceActionPayload': '1.7-8c77f0c85a83d325fded152376ca809a',
     'InstanceActionRebuildNotification':
@@ -391,27 +397,39 @@ notification_object_data = {
     '1.0-a73147b93b520ff0061865849d3dfa56',
     'InstanceActionVolumeSwapPayload': '1.7-d3252403a9437bcdc80f1075214f8b45',
     'InstanceCreateNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
-    'InstanceCreatePayload': '1.10-291b44932569b8ff864d911814293cfc',
+    'InstanceCreatePayload': '1.11-7513127966bc8f270946634d099e71c0',
     'InstancePayload': '1.7-78354572f699b9a6ad9996b199d03375',
     'InstanceActionSnapshotNotification':
         '1.0-a73147b93b520ff0061865849d3dfa56',
     'InstanceActionSnapshotPayload': '1.8-6a3a66f823b56268ea4b759c83e38c31',
     'InstanceExistsNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
     'InstanceExistsPayload': '1.1-b7095abb18f5b75f39dc1aa59942535d',
+    'InstanceNUMACellPayload': '1.0-2f13614648bc46f2e29578a206561ef6',
+    'InstanceNUMATopologyPayload': '1.0-247361b152047c18ae9ad1da2544a3c9',
+    'InstancePCIRequestPayload': '1.0-12d0d61baf183daaafd93cbeeed2956f',
+    'InstancePCIRequestsPayload': '1.0-6751cffe0c0fabd212aad624f672429a',
     'InstanceStateUpdatePayload': '1.0-07e111c0fa0f6db0f79b0726d593e3da',
     'InstanceUpdateNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
     'InstanceUpdatePayload': '1.8-375131acb12e612a460f68211a2b3a35',
     'IpPayload': '1.0-8ecf567a99e516d4af094439a7632d34',
     'KeypairNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
     'KeypairPayload': '1.0-6daebbbde0e1bf35c1556b1ecd9385c1',
+    'LibvirtErrorNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
+    'LibvirtErrorPayload': '1.0-9e7a8f0b895dd15531d5a6f3aa95d58e',
     'MetricPayload': '1.0-bcdbe85048f335132e4c82a1b8fa3da8',
     'MetricsNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
     'MetricsPayload': '1.0-65c69b15b4de5a8c01971cb5bb9ab650',
     'NotificationPublisher': '2.2-b6ad48126247e10b46b6b0240e52e614',
+    'RequestSpecPayload': '1.1-64d30723a2e381d0cd6a16a877002c64',
+    'SchedulerRetriesPayload': '1.0-03a07d09575ef52cced5b1b24301d0b4',
+    'SelectDestinationsNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
     'ServerGroupNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
     'ServerGroupPayload': '1.1-4ded2997ea1b07038f7af33ef5c45f7f',
     'ServiceStatusNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
     'ServiceStatusPayload': '1.1-7b6856bd879db7f3ecbcd0ca9f35f92f',
+    'VirtCPUTopologyPayload': '1.0-1b1600fe55465209682d96bbe3209f27',
+    'VolumeUsageNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
+    'VolumeUsagePayload': '1.0-5f99d8b978a32040eecac0975e5a53e9',
 }
 
 

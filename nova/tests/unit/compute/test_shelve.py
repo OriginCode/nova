@@ -12,6 +12,7 @@
 
 import mock
 from oslo_utils import fixture as utils_fixture
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 
 from nova.compute import claims
@@ -28,7 +29,7 @@ from nova import objects
 from nova import test
 from nova.tests.unit.compute import test_compute
 from nova.tests.unit.image import fake as fake_image
-from nova.tests import uuidsentinel as uuids
+
 
 CONF = nova.conf.CONF
 
@@ -224,16 +225,24 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
         fake_bdms = objects.BlockDeviceMappingList()
         mock_get_bdms.return_value = fake_bdms
 
-        with mock.patch.object(instance, 'save'):
-            self.compute.shelve_offload_instance(self.context, instance,
-                                                 clean_shutdown=clean_shutdown)
-            mock_notify.assert_has_calls([
-                mock.call(self.context, instance, 'fake-mini',
-                          action='shelve_offload', phase='start',
-                          bdms=fake_bdms),
-                mock.call(self.context, instance, 'fake-mini',
-                          action='shelve_offload', phase='end',
-                          bdms=fake_bdms)])
+        def stub_instance_save(inst, *args, **kwargs):
+            # If the vm_state is changed to SHELVED_OFFLOADED make sure we
+            # have already freed up allocations in placement.
+            if inst.vm_state == vm_states.SHELVED_OFFLOADED:
+                self.assertTrue(mock_delete_alloc.called,
+                                'Allocations must be deleted before the '
+                                'vm_status can change to shelved_offloaded.')
+
+        self.stub_out('nova.objects.Instance.save', stub_instance_save)
+        self.compute.shelve_offload_instance(self.context, instance,
+                                             clean_shutdown=clean_shutdown)
+        mock_notify.assert_has_calls([
+            mock.call(self.context, instance, 'fake-mini',
+                      action='shelve_offload', phase='start',
+                      bdms=fake_bdms),
+            mock.call(self.context, instance, 'fake-mini',
+                      action='shelve_offload', phase='end',
+                      bdms=fake_bdms)])
 
         self.assertEqual(vm_states.SHELVED_OFFLOADED, instance.vm_state)
         self.assertIsNone(instance.task_state)
@@ -687,7 +696,7 @@ class ShelveComputeAPITestCase(test_compute.BaseTestCase):
         with test.nested(
             mock.patch.object(compute_utils, 'is_volume_backed_instance',
                               return_value=boot_from_volume),
-            mock.patch.object(self.compute_api, '_create_image',
+            mock.patch.object(compute_utils, 'create_image',
                               return_value=dict(id='fake-image-id')),
             mock.patch.object(instance, 'save'),
             mock.patch.object(self.compute_api, '_record_action_start'),

@@ -16,6 +16,7 @@ import datetime
 
 import iso8601
 import mock
+from oslo_utils.fixture import uuidsentinel
 
 from nova.api.openstack.compute import availability_zone as az_v21
 from nova.api.openstack.compute import servers as servers_v21
@@ -30,7 +31,6 @@ from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit.image import fake
 from nova.tests.unit import matchers
 from nova.tests.unit.objects import test_service
-from nova.tests import uuidsentinel
 
 
 FAKE_UUID = fakes.FAKE_UUID
@@ -168,6 +168,8 @@ class ServersControllerCreateTestV21(test.TestCase):
         super(ServersControllerCreateTestV21, self).setUp()
 
         self.instance_cache_num = 0
+        # Neutron security groups are tested in test_neutron_security_groups.py
+        self.flags(use_neutron=False)
         fakes.stub_out_nw_api(self)
         self._set_up_controller()
 

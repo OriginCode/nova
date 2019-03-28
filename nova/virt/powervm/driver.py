@@ -13,6 +13,7 @@
 #    under the License.
 """Connection to PowerVM hypervisor through NovaLink."""
 
+import os_resource_classes as orc
 from oslo_log import log as logging
 from oslo_utils import excutils
 from oslo_utils import importutils
@@ -115,10 +116,11 @@ class PowerVMDriver(driver.ComputeDriver):
                  {'op': op, 'display_name': instance.display_name,
                   'name': instance.name}, instance=instance)
 
-    def get_info(self, instance):
+    def get_info(self, instance, use_cache=True):
         """Get the current status of an instance.
 
         :param instance: nova.objects.instance.Instance object
+        :param use_cache: unused in this driver
         :returns: An InstanceInfo object.
         """
         return vm.get_vm_info(self.adapter, instance)
@@ -156,6 +158,9 @@ class PowerVMDriver(driver.ComputeDriver):
         #               custom-resource-classes-pike
         # Do this here so it refreshes each time this method is called.
         self.host_wrapper = pvm_ms.System.get(self.adapter)[0]
+        return self._get_available_resource()
+
+    def _get_available_resource(self):
         # Get host information
         data = pvm_host.build_host_resource_from_ms(self.host_wrapper)
 
@@ -164,6 +169,62 @@ class PowerVMDriver(driver.ComputeDriver):
         data["local_gb_used"] = self.disk_dvr.capacity_used
 
         return data
+
+    def update_provider_tree(self, provider_tree, nodename, allocations=None):
+        """Update a ProviderTree with current provider and inventory data.
+
+        :param nova.compute.provider_tree.ProviderTree provider_tree:
+            A nova.compute.provider_tree.ProviderTree object representing all
+            the providers in the tree associated with the compute node, and any
+            sharing providers (those with the ``MISC_SHARES_VIA_AGGREGATE``
+            trait) associated via aggregate with any of those providers (but
+            not *their* tree- or aggregate-associated providers), as currently
+            known by placement.
+        :param nodename:
+            String name of the compute node (i.e.
+            ComputeNode.hypervisor_hostname) for which the caller is requesting
+            updated provider information.
+        :param allocations: Currently ignored by this driver.
+        """
+        # Get (legacy) resource information. Same as get_available_resource,
+        # but we don't need to refresh self.host_wrapper as it was *just*
+        # refreshed by get_available_resource in the resource tracker's
+        # update_available_resource flow.
+        data = self._get_available_resource()
+
+        # NOTE(yikun): If the inv record does not exists, the allocation_ratio
+        # will use the CONF.xxx_allocation_ratio value if xxx_allocation_ratio
+        # is set, and fallback to use the initial_xxx_allocation_ratio
+        # otherwise.
+        inv = provider_tree.data(nodename).inventory
+        ratios = self._get_allocation_ratios(inv)
+        # TODO(efried): Fix these to reflect something like reality
+        cpu_reserved = CONF.reserved_host_cpus
+        mem_reserved = CONF.reserved_host_memory_mb
+        disk_reserved = self._get_reserved_host_disk_gb_from_config()
+
+        inventory = {
+            orc.VCPU: {
+                'total': data['vcpus'],
+                'max_unit': data['vcpus'],
+                'allocation_ratio': ratios[orc.VCPU],
+                'reserved': cpu_reserved,
+            },
+            orc.MEMORY_MB: {
+                'total': data['memory_mb'],
+                'max_unit': data['memory_mb'],
+                'allocation_ratio': ratios[orc.MEMORY_MB],
+                'reserved': mem_reserved,
+            },
+            orc.DISK_GB: {
+                # TODO(efried): Proper DISK_GB sharing when SSP driver in play
+                'total': int(data['local_gb']),
+                'max_unit': int(data['local_gb']),
+                'allocation_ratio': ratios[orc.DISK_GB],
+                'reserved': disk_reserved,
+            },
+        }
+        provider_tree.update_inventory(nodename, inventory)
 
     def spawn(self, context, instance, image_meta, injected_files,
               admin_password, allocations, network_info=None,
@@ -574,12 +635,13 @@ class PowerVMDriver(driver.ComputeDriver):
         # Run the flow
         tf_base.run(flow, instance=instance)
 
-    def extend_volume(self, connection_info, instance):
+    def extend_volume(self, connection_info, instance, requested_size):
         """Extend the disk attached to the instance.
 
         :param dict connection_info: The connection for the extended volume.
         :param nova.objects.instance.Instance instance:
             The instance whose volume gets extended.
+        :param int requested_size: The requested new volume size in bytes.
         :return: None
         """
 

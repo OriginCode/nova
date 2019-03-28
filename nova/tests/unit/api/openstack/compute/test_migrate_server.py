@@ -13,7 +13,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import fixtures
 import mock
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import uuidutils
 import six
 import webob
@@ -26,7 +28,6 @@ from nova import objects
 from nova import test
 from nova.tests.unit.api.openstack.compute import admin_only_action_common
 from nova.tests.unit.api.openstack import fakes
-from nova.tests import uuidsentinel as uuids
 
 
 class MigrateServerTestsV21(admin_only_action_common.CommonTests):
@@ -46,6 +47,10 @@ class MigrateServerTestsV21(admin_only_action_common.CommonTests):
         self.stub_out('nova.api.openstack.compute.migrate_server.'
                       'MigrateServerController',
                       lambda *a, **kw: self.controller)
+        self.mock_list_port = self.useFixture(
+            fixtures.MockPatch(
+                'nova.network.neutronv2.api.API.list_ports')).mock
+        self.mock_list_port.return_value = {'ports': []}
 
     def _get_migration_body(self, **kwargs):
         return {'os-migrateLive': self._get_params(**kwargs)}
@@ -127,7 +132,8 @@ class MigrateServerTestsV21(admin_only_action_common.CommonTests):
             mock_resize.assert_called_once_with(
                 self.context, instance, host_name=self.host_name)
         self.mock_get.assert_called_once_with(self.context, instance.uuid,
-                                              expected_attrs=None)
+                                              expected_attrs=None,
+                                              cell_down_support=False)
 
     def test_migrate_too_many_instances(self):
         exc_info = exception.TooManyInstances(overs='', req='', used=0,
@@ -149,7 +155,8 @@ class MigrateServerTestsV21(admin_only_action_common.CommonTests):
                 'hostname', self.force, self.async_)
 
         self.mock_get.assert_called_once_with(self.context, instance.uuid,
-                                              expected_attrs=None)
+                                              expected_attrs=['numa_topology'],
+                                              cell_down_support=False)
 
     def test_migrate_live_enabled(self):
         param = self._get_params(host='hostname')
@@ -226,7 +233,8 @@ class MigrateServerTestsV21(admin_only_action_common.CommonTests):
                 self.context, instance, False, self.disk_over_commit,
                 'hostname', self.force, self.async_)
         self.mock_get.assert_called_once_with(self.context, instance.uuid,
-                                              expected_attrs=None)
+                                              expected_attrs=['numa_topology'],
+                                              cell_down_support=False)
 
     def test_migrate_live_compute_service_unavailable(self):
         self._test_migrate_live_failed_with_exception(
@@ -344,13 +352,13 @@ class MigrateServerTestsV230(MigrateServerTestsV225):
 
     def _test_live_migrate(self, force=False):
         if force is True:
-            litteral_force = 'true'
+            literal_force = 'true'
         else:
-            litteral_force = 'false'
+            literal_force = 'false'
         method_translations = {'_migrate_live': 'live_migrate'}
         body_map = {'_migrate_live': {'os-migrateLive': {'host': 'hostname',
                                       'block_migration': 'auto',
-                                      'force': litteral_force}}}
+                                      'force': literal_force}}}
         args_map = {'_migrate_live': ((None, None, 'hostname', force,
                                        self.async_), {})}
         self._test_actions(['_migrate_live'], body_map=body_map,
@@ -443,7 +451,8 @@ class MigrateServerTestsV234(MigrateServerTestsV230):
                 self.context, instance, None, self.disk_over_commit,
                 'hostname', self.force, self.async_)
         self.mock_get.assert_called_once_with(self.context, instance.uuid,
-                                              expected_attrs=None)
+                                              expected_attrs=['numa_topology'],
+                                              cell_down_support=False)
 
     def test_migrate_live_unexpected_error(self):
         body = {'os-migrateLive':
@@ -461,7 +470,8 @@ class MigrateServerTestsV234(MigrateServerTestsV230):
                 self.context, instance, None, self.disk_over_commit,
                 'hostname', self.force, self.async_)
         self.mock_get.assert_called_once_with(self.context, instance.uuid,
-                                              expected_attrs=None)
+                                              expected_attrs=['numa_topology'],
+                                              cell_down_support=False)
 
 
 class MigrateServerTestsV256(MigrateServerTestsV234):
@@ -556,6 +566,34 @@ class MigrateServerTestsV256(MigrateServerTestsV234):
     def test_migrate_to_same_host(self):
         exc_info = exception.CannotMigrateToSameHost()
         self._test_migrate_exception(exc_info, webob.exc.HTTPBadRequest)
+
+
+class MigrateServerTestsV268(MigrateServerTestsV256):
+    force = False
+
+    def setUp(self):
+        super(MigrateServerTestsV268, self).setUp()
+        self.req.api_version_request = api_version_request.APIVersionRequest(
+            '2.68')
+
+    def test_live_migrate(self):
+        method_translations = {'_migrate_live': 'live_migrate'}
+        body_map = {'_migrate_live': {'os-migrateLive': {'host': 'hostname',
+                                      'block_migration': 'auto'}}}
+        args_map = {'_migrate_live': ((None, None, 'hostname', False,
+                                       self.async_), {})}
+        self._test_actions(['_migrate_live'], body_map=body_map,
+                           method_translations=method_translations,
+                           args_map=args_map)
+
+    def test_live_migrate_with_forced_host(self):
+        body = {'os-migrateLive': {'host': 'hostname',
+                                   'block_migration': 'auto',
+                                   'force': 'true'}}
+        ex = self.assertRaises(self.validation_error,
+                               self.controller._migrate_live,
+                               self.req, fakes.FAKE_UUID, body=body)
+        self.assertIn('force', six.text_type(ex))
 
 
 class MigrateServerPolicyEnforcementV21(test.NoDBTestCase):

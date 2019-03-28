@@ -34,6 +34,7 @@ from oslo_config import cfg
 from oslo_serialization import base64
 from oslo_serialization import jsonutils
 from oslo_utils import encodeutils
+from oslo_utils.fixture import uuidsentinel as uuids
 import requests
 import six
 import webob
@@ -55,7 +56,6 @@ from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit import fake_block_device
 from nova.tests.unit import fake_network
 from nova.tests.unit import fake_requests
-from nova.tests import uuidsentinel as uuids
 from nova import utils
 from nova.virt import netutils
 
@@ -1617,6 +1617,23 @@ class MetadataHandlerTestCase(test.TestCase):
         mock_get_im.assert_called_once_with(ctxt, 'foo')
         imd.assert_called_once_with(inst, 'bar')
 
+    @mock.patch.object(objects.Instance, 'get_by_uuid')
+    @mock.patch.object(objects.InstanceMapping, 'get_by_instance_uuid')
+    def test_get_metadata_by_instance_id_with_local_meta(self, mock_get_im,
+                                                         mock_get_inst):
+        # Test that if local_metadata_per_cell is set to True, we don't
+        # query API DB for instance mapping.
+        self.flags(local_metadata_per_cell=True, group='api')
+        ctxt = context.RequestContext()
+        inst = objects.Instance()
+        mock_get_inst.return_value = inst
+
+        with mock.patch.object(base, 'InstanceMetadata') as imd:
+            base.get_metadata_by_instance_id('foo', 'bar', ctxt=ctxt)
+
+        mock_get_im.assert_not_called()
+        imd.assert_called_once_with(inst, 'bar')
+
 
 class MetadataPasswordTestCase(test.TestCase):
     def setUp(self):
@@ -1655,7 +1672,10 @@ class MetadataPasswordTestCase(test.TestCase):
 
     @mock.patch('nova.objects.InstanceMapping.get_by_instance_uuid')
     @mock.patch('nova.objects.Instance.get_by_uuid')
-    def _try_set_password(self, get_by_uuid, get_mapping, val=b'bar'):
+    def _try_set_password(self, get_by_uuid, get_mapping, val=b'bar',
+                          use_local_meta=False):
+        if use_local_meta:
+            self.flags(local_metadata_per_cell=True, group='api')
         request = webob.Request.blank('')
         request.method = 'POST'
         request.body = val
@@ -1667,11 +1687,18 @@ class MetadataPasswordTestCase(test.TestCase):
             save.assert_called_once_with()
 
         self.assertIn('password_0', self.instance.system_metadata)
-        get_mapping.assert_called_once_with(mock.ANY, self.instance.uuid)
+        if use_local_meta:
+            get_mapping.assert_not_called()
+        else:
+            get_mapping.assert_called_once_with(mock.ANY, self.instance.uuid)
 
     def test_set_password(self):
         self.mdinst.password = ''
         self._try_set_password()
+
+    def test_set_password_local_meta(self):
+        self.mdinst.password = ''
+        self._try_set_password(use_local_meta=True)
 
     def test_conflict(self):
         self.mdinst.password = 'foo'

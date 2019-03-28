@@ -34,21 +34,27 @@ class SupportDirectIOTestCase(test.NoDBTestCase):
             self.addCleanup(delattr, os, 'O_DIRECT')
         self.einval = OSError()
         self.einval.errno = errno.EINVAL
-        self.test_path = os.path.join('.', '.directio.test')
+        self.enoent = OSError()
+        self.enoent.errno = errno.ENOENT
+        self.test_path = os.path.join('.', '.directio.test.123')
         self.io_flags = os.O_CREAT | os.O_WRONLY | os.O_DIRECT
 
         open_patcher = mock.patch('os.open')
         write_patcher = mock.patch('os.write')
         close_patcher = mock.patch('os.close')
         unlink_patcher = mock.patch('os.unlink')
+        random_string_patcher = mock.patch(
+            'nova.privsep.utils.generate_random_string', return_value='123')
         self.addCleanup(open_patcher.stop)
         self.addCleanup(write_patcher.stop)
         self.addCleanup(close_patcher.stop)
         self.addCleanup(unlink_patcher.stop)
+        self.addCleanup(random_string_patcher.stop)
         self.mock_open = open_patcher.start()
         self.mock_write = write_patcher.start()
         self.mock_close = close_patcher.start()
         self.mock_unlink = unlink_patcher.start()
+        random_string_patcher.start()
 
     def test_supports_direct_io(self):
         self.mock_open.return_value = 3
@@ -100,8 +106,18 @@ class SupportDirectIOTestCase(test.NoDBTestCase):
         self.mock_close.assert_called_once_with(3)
         self.mock_unlink.assert_called_once_with(self.test_path)
 
-    def test_supports_direct_io_with_oserror_in_open(self):
+    def test_supports_direct_io_with_oserror_in_open_einval(self):
         self.mock_open.side_effect = self.einval
+
+        self.assertFalse(nova.privsep.utils.supports_direct_io('.'))
+
+        self.mock_open.assert_called_once_with(self.test_path, self.io_flags)
+        self.mock_write.assert_not_called()
+        self.mock_close.assert_not_called()
+        self.mock_unlink.assert_called_once_with(self.test_path)
+
+    def test_supports_direct_io_with_oserror_in_open_enoent(self):
+        self.mock_open.side_effect = self.enoent
 
         self.assertFalse(nova.privsep.utils.supports_direct_io('.'))
 

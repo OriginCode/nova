@@ -24,7 +24,9 @@ import datetime
 
 from eventlet import greenthread
 import mock
+import os_resource_classes as orc
 from oslo_utils import fixture as utils_fixture
+from oslo_utils.fixture import uuidsentinel
 from oslo_utils import units
 from oslo_utils import uuidutils
 from oslo_vmware import exceptions as vexc
@@ -42,7 +44,6 @@ from nova import exception
 from nova.image import glance
 from nova.network import model as network_model
 from nova import objects
-from nova import rc_fields as fields
 from nova import test
 from nova.tests.unit import fake_diagnostics
 from nova.tests.unit import fake_instance
@@ -52,7 +53,6 @@ from nova.tests.unit.objects import test_diagnostics
 from nova.tests.unit import utils
 from nova.tests.unit.virt.vmwareapi import fake as vmwareapi_fake
 from nova.tests.unit.virt.vmwareapi import stubs
-from nova.tests import uuidsentinel
 from nova.virt import driver as v_driver
 from nova.virt.vmwareapi import constants
 from nova.virt.vmwareapi import driver
@@ -65,6 +65,7 @@ from nova.virt.vmwareapi import vim_util
 from nova.virt.vmwareapi import vm_util
 from nova.virt.vmwareapi import vmops
 from nova.virt.vmwareapi import volumeops
+
 
 CONF = nova.conf.CONF
 
@@ -2138,21 +2139,21 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
         mock_get_avail_ds.return_value = [ds1, ds2, ds3]
         inv = self.conn.get_inventory(self.node_name)
         expected = {
-            fields.ResourceClass.VCPU: {
+            orc.VCPU: {
                 'total': 32,
                 'reserved': 0,
                 'min_unit': 1,
                 'max_unit': 16,
                 'step_size': 1,
             },
-            fields.ResourceClass.MEMORY_MB: {
+            orc.MEMORY_MB: {
                 'total': 2048,
                 'reserved': 512,
                 'min_unit': 1,
                 'max_unit': 1024,
                 'step_size': 1,
             },
-            fields.ResourceClass.DISK_GB: {
+            orc.DISK_GB: {
                 'total': 95,
                 'reserved': 0,
                 'min_unit': 1,
@@ -2348,23 +2349,20 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
         self.assertEqual(2, len(ds_util._DS_DC_MAPPING))
 
     def test_pre_live_migration(self):
-        migrate_data = objects.migrate_data.LiveMigrateData()
-        self.assertRaises(NotImplementedError,
-                          self.conn.pre_live_migration, self.context,
-                          'fake_instance', 'fake_block_device_info',
-                          'fake_network_info', 'fake_disk_info', migrate_data)
-
-    def test_live_migration(self):
-        self.assertRaises(NotImplementedError,
-                          self.conn.live_migration, self.context,
-                          'fake_instance', 'fake_dest', 'fake_post_method',
-                          'fake_recover_method')
+        migrate_data = objects.VMwareLiveMigrateData()
+        migrate_data.cluster_name = 'fake-cluster'
+        migrate_data.datastore_regex = 'datastore1'
+        ret = self.conn.pre_live_migration(self.context, 'fake-instance',
+                                     'fake-block-dev-info', 'fake-net-info',
+                                     'fake-disk-info', migrate_data)
+        self.assertIs(migrate_data, ret)
 
     def test_rollback_live_migration_at_destination(self):
-        self.assertRaises(NotImplementedError,
-                          self.conn.rollback_live_migration_at_destination,
-                          self.context, 'fake_instance', 'fake_network_info',
-                          'fake_block_device_info')
+        with mock.patch.object(self.conn, "destroy") as mock_destroy:
+            self.conn.rollback_live_migration_at_destination(self.context,
+                    "instance", [], None)
+            mock_destroy.assert_called_once_with(self.context,
+                    "instance", [], None)
 
     def test_post_live_migration(self):
         self.assertIsNone(self.conn.post_live_migration(self.context,

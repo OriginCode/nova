@@ -122,15 +122,6 @@ def enable_hairpin(interface):
 
 
 @nova.privsep.sys_admin_pctxt.entrypoint
-def delete_bridge(interface):
-    """Delete a bridge.
-
-    :param interface: the name of the bridge
-    """
-    processutils.execute('brctl', 'delbr', interface)
-
-
-@nova.privsep.sys_admin_pctxt.entrypoint
 def plug_infiniband_vif(vnic_mac, device_id, fabric, net_model, pci_slot):
     processutils.execute('ebrctl', 'add-port', vnic_mac, device_id,
                          fabric, net_model, pci_slot)
@@ -163,38 +154,6 @@ def plug_plumgrid_vif(dev, iface_id, vif_address, net_id, tenant_id):
 def unplug_plumgrid_vif(dev):
     processutils.execute('ifc_ctl', 'gateway', 'ifdown', dev)
     processutils.execute('ifc_ctl', 'gateway', 'del_port', dev)
-
-
-@nova.privsep.sys_admin_pctxt.entrypoint
-def plug_contrail_vif(project_id, vm_id, vm_name, vif_id, net_id, port_type,
-                      dev_name, mac, ip_addr, ip6_addr):
-    cmd = (
-        'vrouter-port-control',
-        '--oper=add',
-        '--vm_project_uuid=%s' % project_id,
-        '--instance_uuid=%s' % vm_id,
-        ' --vm_name=%s' % vm_name,
-        '--uuid=%s' % vif_id,
-        '--vn_uuid=%s' % net_id,
-        '--port_type=%s' % port_type,
-        '--tap_name=%s' % dev_name,
-        '--mac=%s' % mac,
-        '--ip_address=%s' % ip_addr,
-        '--ipv6_address=%s' % ip6_addr,
-        '--tx_vlan_id=-1',
-        '--rx_vlan_id=-1',
-    )
-    processutils.execute(*cmd)
-
-
-@nova.privsep.sys_admin_pctxt.entrypoint
-def unplug_contrail_vif(port_id):
-    cmd = (
-        'vrouter-port-control',
-        '--oper=delete',
-        '--uuid=%s' % port_id,
-    )
-    processutils.execute(*cmd)
 
 
 @nova.privsep.sys_admin_pctxt.entrypoint

@@ -126,11 +126,11 @@ def _get_server_version(context, url):
 
         # NOTE(andreykurilin): endpoint URL has at least 2 formats:
         #   1. The classic (legacy) endpoint:
-        #       http://{host}:{optional_port}/v{1 or 2 or 3}/{project-id}
-        #       http://{host}:{optional_port}/v{1 or 2 or 3}
+        #       http://{host}:{optional_port}/v{2 or 3}/{project-id}
+        #       http://{host}:{optional_port}/v{2 or 3}
         #   3. Under wsgi:
-        #       http://{host}:{optional_port}/volume/v{1 or 2 or 3}
-        for ver in ['v1', 'v2', 'v3']:
+        #       http://{host}:{optional_port}/volume/v{2 or 3}
+        for ver in ['v2', 'v3']:
             if u.path.endswith(ver) or "/{0}/".format(ver) in u.path:
                 path = u.path[:u.path.rfind(ver)]
                 version_url = '%s://%s%s' % (u.scheme, u.netloc, path)
@@ -200,9 +200,11 @@ def _get_cinderclient_parameters(context):
     service_type, service_name, interface = CONF.cinder.catalog_info.split(':')
 
     service_parameters = {'service_type': service_type,
-                          'service_name': service_name,
                           'interface': interface,
                           'region_name': CONF.cinder.os_region_name}
+    # Only include the service_name if it's provided.
+    if service_name:
+        service_parameters['service_name'] = service_name
 
     if CONF.cinder.endpoint_template:
         url = CONF.cinder.endpoint_template % context.to_dict()
@@ -326,6 +328,16 @@ def _untranslate_volume_summary_view(context, vol):
         d['service_uuid'] = vol.service_uuid
 
     return d
+
+
+def _untranslate_volume_type_view(volume_type):
+    """Maps keys for volume type view."""
+    v = {}
+
+    v['id'] = volume_type.id
+    v['name'] = volume_type.name
+
+    return v
 
 
 def _untranslate_snapshot_summary_view(context, snapshot):
@@ -687,6 +699,16 @@ class API(object):
         cinderclient(context).volume_snapshots.delete(snapshot_id)
 
     @translate_cinder_exception
+    def get_all_volume_types(self, context):
+        items = cinderclient(context).volume_types.list()
+        rvals = []
+
+        for item in items:
+            rvals.append(_untranslate_volume_type_view(item))
+
+        return rvals
+
+    @translate_cinder_exception
     def get_volume_encryption_metadata(self, context, volume_id):
         return cinderclient(context).volumes.get_encryption_metadata(volume_id)
 
@@ -746,12 +768,15 @@ class API(object):
             return _translate_attachment_ref(attachment_ref)
         except cinder_exception.ClientException as ex:
             with excutils.save_and_reraise_exception():
-                LOG.error(('Create attachment failed for volume '
-                           '%(volume_id)s. Error: %(msg)s Code: %(code)s'),
-                          {'volume_id': volume_id,
-                           'msg': six.text_type(ex),
-                           'code': getattr(ex, 'code', None)},
-                          instance_uuid=instance_id)
+                # NOTE: It is unnecessary to output BadRequest(400) error log,
+                # because operators don't need to debug such cases.
+                if getattr(ex, 'code', None) != 400:
+                    LOG.error(('Create attachment failed for volume '
+                               '%(volume_id)s. Error: %(msg)s Code: %(code)s'),
+                              {'volume_id': volume_id,
+                               'msg': six.text_type(ex),
+                               'code': getattr(ex, 'code', None)},
+                              instance_uuid=instance_id)
 
     @translate_attachment_exception
     def attachment_get(self, context, attachment_id):

@@ -17,6 +17,7 @@
 import sys
 
 import mock
+from oslo_service import fixture as service_fixture
 from oslo_utils import encodeutils
 import six
 import testtools
@@ -34,8 +35,6 @@ if sys.version_info > (3,):
     long = int
 
 
-# Make RetryDecorator not actually sleep on retries
-@mock.patch('oslo_service.loopingcall.LoopingCallBase._sleep', new=mock.Mock())
 class GuestTestCase(test.NoDBTestCase):
 
     def setUp(self):
@@ -47,6 +46,9 @@ class GuestTestCase(test.NoDBTestCase):
 
         self.domain = mock.Mock(spec=fakelibvirt.virDomain)
         self.guest = libvirt_guest.Guest(self.domain)
+
+        # Make RetryDecorator not actually sleep on retries
+        self.useFixture(service_fixture.SleepFixture())
 
     def test_repr(self):
         self.domain.ID.return_value = 99
@@ -326,6 +328,28 @@ class GuestTestCase(test.NoDBTestCase):
         # Some time later, we can do the wait/retry to ensure detach
         self.assertRaises(exception.DeviceNotFound, retry_detach)
 
+    @mock.patch.object(libvirt_guest.Guest, "detach_device")
+    def test_detach_device_with_retry_operation_internal(self, mock_detach):
+        # This simulates a retry of the transient/live domain detach
+        # failing because the device is not found
+        conf = mock.Mock(spec=vconfig.LibvirtConfigGuestDevice)
+        conf.to_xml.return_value = "</xml>"
+        self.domain.isPersistent.return_value = True
+
+        get_config = mock.Mock(return_value=conf)
+        fake_device = "vdb"
+        fake_exc = fakelibvirt.make_libvirtError(
+            fakelibvirt.libvirtError, "",
+            error_message="operation failed: disk vdb not found",
+            error_code=fakelibvirt.VIR_ERR_INTERNAL_ERROR,
+            error_domain=fakelibvirt.VIR_FROM_DOMAIN)
+        mock_detach.side_effect = [None, fake_exc]
+        retry_detach = self.guest.detach_device_with_retry(
+            get_config, fake_device, live=True,
+            inc_sleep_time=.01, max_retry_count=3)
+        # Some time later, we can do the wait/retry to ensure detach
+        self.assertRaises(exception.DeviceNotFound, retry_detach)
+
     def test_detach_device_with_retry_invalid_argument(self):
         # This simulates a persistent domain detach failing because
         # the device is not found
@@ -547,6 +571,34 @@ class GuestTestCase(test.NoDBTestCase):
             self.guest.get_interface_by_cfg(cfg))
         self.assertIsNone(self.guest.get_interface_by_cfg(None))
 
+    def test_get_interface_by_cfg_vhostuser(self):
+        self.domain.XMLDesc.return_value = """<domain>
+  <devices>
+    <interface type="vhostuser">
+      <mac address='fa:16:3e:55:3e:e4'/>
+      <source type='unix' path='/var/run/openvswitch/vhued80c655-4e'
+       mode='server'/>
+      <target dev='vhued80c655-4e'/>
+      <model type='virtio'/>
+      <alias name='net0'/>
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x03'
+       function='0x0'/>
+    </interface>
+  </devices>
+</domain>"""
+        cfg = vconfig.LibvirtConfigGuestInterface()
+        cfg.parse_str("""<interface type="vhostuser">
+  <mac address='fa:16:3e:55:3e:e4'/>
+  <model type="virtio"/>
+  <source type='unix' path='/var/run/openvswitch/vhued80c655-4e'
+   mode='server'/>
+  <alias name='net0'/>
+  <address type='pci' domain='0x0000' bus='0x00' slot='0x03' function='0x0'/>
+  </interface>""")
+        self.assertIsNotNone(
+            self.guest.get_interface_by_cfg(cfg))
+        self.assertIsNone(self.guest.get_interface_by_cfg(None))
+
     def test_get_info(self):
         self.domain.info.return_value = (1, 2, 3, 4, 5)
         self.domain.ID.return_value = 6
@@ -668,10 +720,6 @@ class GuestTestCase(test.NoDBTestCase):
     def test_migrate_configure_max_downtime(self):
         self.guest.migrate_configure_max_downtime(1000)
         self.domain.migrateSetMaxDowntime.assert_called_once_with(1000)
-
-    def test_migrate_configure_max_speed(self):
-        self.guest.migrate_configure_max_speed(1000)
-        self.domain.migrateSetMaxSpeed.assert_called_once_with(1000)
 
 
 class GuestBlockTestCase(test.NoDBTestCase):
@@ -818,6 +866,10 @@ class GuestBlockTestCase(test.NoDBTestCase):
         self.domain.blockJobInfo.side_effect = fakelibvirt.libvirtError('fake')
         self.assertRaises(fakelibvirt.libvirtError,
                           self.gblock.is_job_complete)
+
+    def test_blockStats(self):
+        self.gblock.blockStats()
+        self.domain.blockStats.assert_called_once_with('vda')
 
 
 class JobInfoTestCase(test.NoDBTestCase):

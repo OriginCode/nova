@@ -185,7 +185,8 @@ class NetworkAPI(base.Base):
 
     def allocate_for_instance(self, context, instance, vpn,
                               requested_networks, macs=None,
-                              security_groups=None, bind_host_id=None):
+                              security_groups=None, bind_host_id=None,
+                              attach=False, resource_provider_mapping=None):
         """Allocates all network structures for an instance.
 
         :param context: The request context.
@@ -199,6 +200,12 @@ class NetworkAPI(base.Base):
         :param security_groups: None or security groups to allocate for
             instance.
         :param bind_host_id: the host ID to attach to the ports being created.
+        :param attach: Boolean indicating if a port is being attached to an
+            existing running instance. Should be False during server create.
+        :param resource_provider_mapping: a dict keyed by ids of the entities
+            (for example Neutron port) requesting resources for this instance
+            mapped to a list of resource provider UUIDs that are fulfilling
+            such a resource request.
         :returns: network info as from get_instance_nw_info() below
         """
         raise NotImplementedError()
@@ -270,19 +277,21 @@ class NetworkAPI(base.Base):
         """
         raise NotImplementedError()
 
-    def create_resource_requests(self, context, requested_networks):
+    def create_resource_requests(self, context, requested_networks,
+                                 pci_requests=None):
         """Retrieve all information for the networks passed at the time of
         creating the server.
 
         :param context: The request context.
         :param requested_networks: The networks requested for the server.
-        :type requested_networks: nova.objects.RequestedNetworkList
+        :type requested_networks: nova.objects.NetworkRequestList
         :param pci_requests: The list of PCI requests to which additional PCI
-            requests created here will be added.
+                             requests created here will be added.
         :type pci_requests: nova.objects.InstancePCIRequests
 
-        :returns: An instance of ``objects.NetworkMetadata`` for use by the
-            scheduler or None.
+        :returns: A tuple with an instance of ``objects.NetworkMetadata`` for
+                  use by the scheduler or None and a list of RequestGroup
+                  objects representing the resource needs of each request ports
         """
         raise NotImplementedError()
 
@@ -390,7 +399,7 @@ class NetworkAPI(base.Base):
         return False
 
     def bind_ports_to_host(self, context, instance, host,
-                           vnic_type=None, profile=None):
+                           vnic_types=None, port_profiles=None):
         """Attempts to bind the ports from the instance on the given host
 
         If the ports are already actively bound to another host, like the
@@ -411,17 +420,17 @@ class NetworkAPI(base.Base):
         :param host: the host on which to bind the ports which
                      are attached to the instance
         :type host: str
-        :param vnic_type: optional vnic type string for the host
-                          port binding
-        :type vnic_type: str
-        :param profile: optional vif profile dict for the host port
-                        binding; note that the port binding profile is mutable
+        :param vnic_types: optional dict for the host port binding
+        :type vnic_types: dict of <port_id> : <vnic_type>
+        :param port_profiles: optional dict per port ID for the host port
+                        binding profile.
+                        note that the port binding profile is mutable
                         via the networking "Port Binding" API so callers that
                         pass in a profile should ensure they have the latest
                         version from neutron with their changes merged,
                         which can be determined using the "revision_number"
                         attribute of the port.
-        :type profile: dict
+        :type port_profiles: dict of <port_id> : <port_profile>
         :raises: PortBindingFailed if any of the ports failed to be bound to
                  the destination host
         :returns: dict, keyed by port ID, of a new host port

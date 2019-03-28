@@ -28,9 +28,11 @@ echo '1. test with all local storage (use default for volumes)'
 echo 'NOTE: test_volume_backed_live_migration is skipped due to https://bugs.launchpad.net/nova/+bug/1524898'
 run_tempest "block migration test" "^.*test_live_migration(?!.*(test_volume_backed_live_migration))"
 
+# TODO(mriedem): Run $BASE/new/nova/gate/test_evacuate.sh for local storage
+
 #all tests bellow this line use shared storage, need to update tempest.conf
 echo 'disabling block_migration in tempest'
-$ANSIBLE primary --sudo -f 5 -i "$WORKSPACE/inventory" -m ini_file -a "dest=$BASE/new/tempest/etc/tempest.conf section=compute-feature-enabled option=block_migration_for_live_migration value=False"
+$ANSIBLE primary --become -f 5 -i "$WORKSPACE/inventory" -m ini_file -a "dest=$BASE/new/tempest/etc/tempest.conf section=compute-feature-enabled option=block_migration_for_live_migration value=False"
 
 echo '2. NFS testing is skipped due to setup failures with Ubuntu 16.04'
 #echo '2. test with NFS for root + ephemeral disks'
@@ -42,19 +44,12 @@ echo '2. NFS testing is skipped due to setup failures with Ubuntu 16.04'
 #nfs_teardown
 
 echo '3. test with Ceph for root + ephemeral disks'
+# Discover and set variables for the OS version so the devstack-plugin-ceph
+# scripts can find the correct repository to install the ceph packages.
+GetOSVersion
 prepare_ceph
 GLANCE_API_CONF=${GLANCE_API_CONF:-/etc/glance/glance-api.conf}
 configure_and_start_glance
-
-# Deal with grenade craziness...
-if [ "$GRENADE_OLD_BRANCH" ]; then
-    # NOTE(mriedem): Grenade runs in singleconductor mode, so it won't use
-    # /etc/nova/nova-cpu.conf so we have to overwrite NOVA_CPU_CONF which is
-    # read in configure_and_start_nova.
-    if ! is_service_enabled n-super-cond; then
-        NOVA_CPU_CONF=$NOVA_CONF
-    fi
-fi
 
 configure_and_start_nova
 run_tempest "Ceph nova&glance test" "^.*test_live_migration(?!.*(test_volume_backed_live_migration))"

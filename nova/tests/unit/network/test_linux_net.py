@@ -24,6 +24,7 @@ import netifaces
 from oslo_concurrency import processutils
 from oslo_serialization import jsonutils
 from oslo_utils import fileutils
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 
 import nova.conf
@@ -32,11 +33,10 @@ from nova.db import api as db
 from nova import exception
 from nova.network import driver
 from nova.network import linux_net
-from nova.network import linux_utils as linux_net_utils
 from nova import objects
 from nova import test
-from nova.tests import uuidsentinel as uuids
 from nova import utils
+
 
 CONF = nova.conf.CONF
 
@@ -589,21 +589,24 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
         self.assertEqual(expected, actual)
 
     @mock.patch.object(linux_net.iptables_manager.ipv4['filter'], 'add_rule')
-    @mock.patch.object(utils, 'execute')
-    def test_linux_bridge_driver_plug(self, mock_execute, mock_add_rule):
+    @mock.patch('nova.privsep.linux_net.add_bridge',
+                return_value=('', ''))
+    @mock.patch('nova.privsep.linux_net.set_device_enabled')
+    @mock.patch('nova.privsep.linux_net.routes_show',
+                return_value=('fake', 0))
+    @mock.patch('nova.privsep.linux_net.lookup_ip', return_value=('', ''))
+    def test_linux_bridge_driver_plug(self, mock_lookup_ip, mock_routes_show,
+                                      mock_enabled, mock_add_bridge,
+                                      mock_add_rule):
         """Makes sure plug doesn't drop FORWARD by default.
 
         Ensures bug 890195 doesn't reappear.
         """
 
-        def fake_execute(*args, **kwargs):
-            return "", ""
-
         def verify_add_rule(chain, rule):
             self.assertEqual('FORWARD', chain)
             self.assertIn('ACCEPT', rule)
 
-        mock_execute.side_effect = fake_execute
         mock_add_rule.side_effect = verify_add_rule
 
         driver = linux_net.LinuxBridgeInterfaceDriver()
@@ -611,7 +614,7 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
                      "share_address": False}, "fakemac")
         self.assertEqual(2, mock_add_rule.call_count)
 
-    @mock.patch('nova.network.linux_utils.device_exists')
+    @mock.patch('nova.privsep.linux_net.device_exists')
     @mock.patch.object(utils, 'execute')
     def test_linux_ovs_driver_plug_exception(self, mock_execute,
                                              mock_device_exists):
@@ -873,21 +876,32 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
         self.assertEqual(expected, executes)
 
     @mock.patch.object(utils, 'execute')
-    def _test_initialize_gateway(self, existing, expected, mock_execute,
-                                 routes=''):
+    @mock.patch('nova.privsep.linux_net.routes_show')
+    @mock.patch('nova.privsep.linux_net.route_delete')
+    @mock.patch('nova.privsep.linux_net.route_add_deprecated')
+    @mock.patch('nova.privsep.linux_net.lookup_ip')
+    @mock.patch('nova.privsep.linux_net.change_ip')
+    @mock.patch('nova.privsep.linux_net.address_command_deprecated')
+    def _test_initialize_gateway(self, existing, expected,
+                                 mock_address_command, mock_change_ip,
+                                 mock_lookup_ip, mock_route_add,
+                                 mock_route_delete, mock_routes,
+                                 mock_execute, routes='',
+                                 routes_show_called=True, deleted_routes=None,
+                                 added_routes=None, changed_interfaces=None,
+                                 address_commands=None):
         self.flags(fake_network=False)
+        mock_lookup_ip.return_value = (existing, '')
         executes = []
 
         def fake_execute(*args, **kwargs):
             executes.append(args)
-            if args[0] == 'ip' and args[1] == 'addr' and args[2] == 'show':
-                return existing, ""
-            if args[0] == 'ip' and args[1] == 'route' and args[2] == 'show':
-                return routes, ""
             if args[0] == 'sysctl':
                 return '1\n', ''
 
         mock_execute.side_effect = fake_execute
+        mock_routes.return_value = (routes, '')
+        mock_lookup_ip.return_value = (existing, '')
 
         network = {'dhcp_server': '192.168.1.1',
                    'cidr': '192.168.1.0/24',
@@ -896,6 +910,18 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
         self.driver.initialize_gateway_device('eth0', network)
         self.assertEqual(expected, executes)
         self.assertTrue(mock_execute.called)
+        self.assertTrue(mock_lookup_ip.called)
+
+        if routes_show_called:
+            mock_routes.assert_called_once_with('eth0')
+        if deleted_routes:
+            mock_route_delete.assert_has_calls(deleted_routes)
+        if added_routes:
+            mock_route_add.assert_has_calls(added_routes)
+        if changed_interfaces:
+            mock_change_ip.assert_has_calls(changed_interfaces)
+        if address_commands:
+            mock_address_command.assert_has_calls(address_commands)
 
     def test_initialize_gateway_moves_wrong_ip(self):
         existing = ("2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> "
@@ -906,18 +932,20 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
             "    valid_lft forever preferred_lft forever\n")
         expected = [
             ('sysctl', '-n', 'net.ipv4.ip_forward'),
-            ('ip', 'addr', 'show', 'dev', 'eth0', 'scope', 'global'),
-            ('ip', 'route', 'show', 'dev', 'eth0'),
-            ('ip', 'addr', 'del', '192.168.0.1/24',
-             'brd', '192.168.0.255', 'scope', 'global', 'dev', 'eth0'),
-            ('ip', 'addr', 'add', '192.168.1.1/24',
-             'brd', '192.168.1.255', 'dev', 'eth0'),
-            ('ip', 'addr', 'add', '192.168.0.1/24',
-             'brd', '192.168.0.255', 'scope', 'global', 'dev', 'eth0'),
-            ('ip', '-f', 'inet6', 'addr', 'change',
-             '2001:db8::/64', 'dev', 'eth0'),
         ]
-        self._test_initialize_gateway(existing, expected)
+        self._test_initialize_gateway(
+            existing, expected,
+            changed_interfaces=[mock.call('eth0', '2001:db8::/64')],
+            address_commands=[
+                mock.call('eth0', 'del', ['192.168.0.1/24', 'brd',
+                                          '192.168.0.255',
+                                          'scope', 'global']),
+                mock.call('eth0', 'add', ['192.168.1.1/24', 'brd',
+                                          '192.168.1.255']),
+                mock.call('eth0', 'add', ['192.168.0.1/24', 'brd',
+                                          '192.168.0.255',
+                                          'scope', 'global'])]
+        )
 
     def test_initialize_gateway_ip_with_dynamic_flag(self):
         existing = ("2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> "
@@ -929,18 +957,20 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
             "    valid_lft forever preferred_lft forever\n")
         expected = [
             ('sysctl', '-n', 'net.ipv4.ip_forward'),
-            ('ip', 'addr', 'show', 'dev', 'eth0', 'scope', 'global'),
-            ('ip', 'route', 'show', 'dev', 'eth0'),
-            ('ip', 'addr', 'del', '192.168.0.1/24',
-             'brd', '192.168.0.255', 'scope', 'global', 'dev', 'eth0'),
-            ('ip', 'addr', 'add', '192.168.1.1/24',
-             'brd', '192.168.1.255', 'dev', 'eth0'),
-            ('ip', 'addr', 'add', '192.168.0.1/24',
-             'brd', '192.168.0.255', 'scope', 'global', 'dev', 'eth0'),
-            ('ip', '-f', 'inet6', 'addr', 'change',
-             '2001:db8::/64', 'dev', 'eth0'),
         ]
-        self._test_initialize_gateway(existing, expected)
+        self._test_initialize_gateway(
+            existing, expected,
+            changed_interfaces=[mock.call('eth0', '2001:db8::/64')],
+            address_commands=[
+                mock.call('eth0', 'del',
+                          ['192.168.0.1/24', 'brd', '192.168.0.255',
+                           'scope', 'global']),
+                mock.call('eth0', 'add',
+                          ['192.168.1.1/24', 'brd', '192.168.1.255']),
+                mock.call('eth0', 'add',
+                          ['192.168.0.1/24', 'brd', '192.168.0.255',
+                           'scope', 'global'])]
+        )
 
     def test_initialize_gateway_resets_route(self):
         routes = ("default via 192.168.0.1 dev eth0\n"
@@ -953,24 +983,27 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
             "    valid_lft forever preferred_lft forever\n")
         expected = [
             ('sysctl', '-n', 'net.ipv4.ip_forward'),
-            ('ip', 'addr', 'show', 'dev', 'eth0', 'scope', 'global'),
-            ('ip', 'route', 'show', 'dev', 'eth0'),
-            ('ip', 'route', 'del', 'default', 'dev', 'eth0'),
-            ('ip', 'route', 'del', '192.168.100.0/24', 'dev', 'eth0'),
-            ('ip', 'addr', 'del', '192.168.0.1/24',
-             'brd', '192.168.0.255', 'scope', 'global', 'dev', 'eth0'),
-            ('ip', 'addr', 'add', '192.168.1.1/24',
-             'brd', '192.168.1.255', 'dev', 'eth0'),
-            ('ip', 'addr', 'add', '192.168.0.1/24',
-             'brd', '192.168.0.255', 'scope', 'global', 'dev', 'eth0'),
-            ('ip', 'route', 'add', 'default', 'via', '192.168.0.1',
-             'dev', 'eth0'),
-            ('ip', 'route', 'add', '192.168.100.0/24', 'via', '192.168.0.254',
-             'dev', 'eth0', 'proto', 'static'),
-            ('ip', '-f', 'inet6', 'addr', 'change',
-             '2001:db8::/64', 'dev', 'eth0'),
         ]
-        self._test_initialize_gateway(existing, expected, routes=routes)
+        self._test_initialize_gateway(
+            existing, expected, routes=routes,
+            deleted_routes=[mock.call('eth0', 'default'),
+                            mock.call('eth0', '192.168.100.0/24')],
+            added_routes=[mock.call(['default', 'via', '192.168.0.1',
+                                      'dev', 'eth0']),
+                          mock.call(['192.168.100.0/24', 'via',
+                                     '192.168.0.254',
+                                     'dev', 'eth0', 'proto', 'static'])],
+            changed_interfaces=[mock.call('eth0', '2001:db8::/64')],
+            address_commands=[
+                mock.call('eth0', 'del',
+                          ['192.168.0.1/24', 'brd', '192.168.0.255',
+                           'scope', 'global']),
+                mock.call('eth0', 'add',
+                          ['192.168.1.1/24', 'brd', '192.168.1.255']),
+                mock.call('eth0', 'add',
+                          ['192.168.0.1/24', 'brd', '192.168.0.255',
+                           'scope', 'global'])]
+        )
 
     def test_initialize_gateway_no_move_right_ip(self):
         existing = ("2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> "
@@ -982,11 +1015,11 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
             "    valid_lft forever preferred_lft forever\n")
         expected = [
             ('sysctl', '-n', 'net.ipv4.ip_forward'),
-            ('ip', 'addr', 'show', 'dev', 'eth0', 'scope', 'global'),
-            ('ip', '-f', 'inet6', 'addr', 'change',
-             '2001:db8::/64', 'dev', 'eth0'),
         ]
-        self._test_initialize_gateway(existing, expected)
+        self._test_initialize_gateway(
+            existing, expected,
+            routes_show_called=False,
+            changed_interfaces=[mock.call('eth0', '2001:db8::/64')])
 
     def test_initialize_gateway_add_if_blank(self):
         existing = ("2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> "
@@ -996,14 +1029,14 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
             "    valid_lft forever preferred_lft forever\n")
         expected = [
             ('sysctl', '-n', 'net.ipv4.ip_forward'),
-            ('ip', 'addr', 'show', 'dev', 'eth0', 'scope', 'global'),
-            ('ip', 'route', 'show', 'dev', 'eth0'),
-            ('ip', 'addr', 'add', '192.168.1.1/24',
-             'brd', '192.168.1.255', 'dev', 'eth0'),
-            ('ip', '-f', 'inet6', 'addr', 'change',
-             '2001:db8::/64', 'dev', 'eth0'),
         ]
-        self._test_initialize_gateway(existing, expected)
+        self._test_initialize_gateway(
+            existing, expected,
+            changed_interfaces=[mock.call('eth0', '2001:db8::/64')],
+            address_commands=[
+                mock.call('eth0', 'add',
+                          ['192.168.1.1/24', 'brd', '192.168.1.255'])]
+        )
 
     @mock.patch.object(linux_net, 'ensure_ebtables_rules')
     @mock.patch.object(linux_net.iptables_manager, 'apply')
@@ -1132,27 +1165,30 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
             '_execute': [
                 mock.call('brctl', 'addif', 'bridge', 'eth0',
                           run_as_root=True, check_exit_code=False),
-                mock.call('ip', 'link', 'set', 'bridge', 'address', fake_mac,
-                          run_as_root=True),
-                mock.call('ip', 'link', 'set', 'eth0', 'up',
-                          run_as_root=True, check_exit_code=False),
-                mock.call('ip', 'route', 'show', 'dev', 'eth0'),
-                mock.call('ip', 'addr', 'show', 'dev', 'eth0', 'scope',
-                          'global'),
                 ]
             }
         with test.nested(
-            mock.patch('nova.network.linux_utils.device_exists',
+            mock.patch('nova.privsep.linux_net.lookup_ip',
+                       return_value=('', '')),
+            mock.patch('nova.privsep.linux_net.device_exists',
                        return_value=True),
+            mock.patch('nova.privsep.linux_net.set_device_enabled'),
+            mock.patch('nova.privsep.linux_net.set_device_macaddr'),
+            mock.patch('nova.privsep.linux_net.routes_show',
+                       return_value=('fake', '')),
             mock.patch.object(linux_net, '_execute', return_value=('', '')),
             mock.patch.object(netifaces, 'ifaddresses')
-        ) as (device_exists, _execute, ifaddresses):
+        ) as (lookup_ip, device_exists, device_enabled, set_device_macaddr,
+              routes_show, _execute, ifaddresses):
             ifaddresses.return_value = fake_ifaces
             driver = linux_net.LinuxBridgeInterfaceDriver()
             driver.ensure_bridge('bridge', 'eth0')
             device_exists.assert_has_calls(calls['device_exists'])
             _execute.assert_has_calls(calls['_execute'])
             ifaddresses.assert_called_once_with('eth0')
+            device_enabled.assert_called_once_with('eth0')
+            set_device_macaddr.assert_called_once_with('bridge', fake_mac)
+            lookup_ip.assert_called_once_with('eth0')
 
     def test_ensure_bridge_brclt_addif_exception(self):
         def fake_execute(*cmd, **kwargs):
@@ -1162,7 +1198,7 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
                 return ('', '')
 
         with test.nested(
-            mock.patch('nova.network.linux_utils.device_exists',
+            mock.patch('nova.privsep.linux_net.device_exists',
                        return_value=True),
             mock.patch.object(linux_net, '_execute', fake_execute)
         ) as (device_exists, _):
@@ -1171,7 +1207,8 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
                               driver.ensure_bridge, 'bridge', 'eth0')
             device_exists.assert_called_once_with('bridge')
 
-    def test_ensure_bridge_brclt_addbr_neutron_race(self):
+    @mock.patch('nova.privsep.linux_net.set_device_enabled')
+    def test_ensure_bridge_brclt_addbr_neutron_race(self, mock_enabled):
         def fake_execute(*cmd, **kwargs):
             if ('brctl', 'addbr', 'brq1234567-89') == cmd:
                 return ('', "device brq1234567-89 already exists; "
@@ -1180,33 +1217,13 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
                 return ('', '')
 
         with test.nested(
-            mock.patch('nova.network.linux_utils.device_exists',
+            mock.patch('nova.privsep.linux_net.device_exists',
                        return_value=False),
-            mock.patch.object(linux_net, '_execute', fake_execute)
+            mock.patch('nova.privsep.linux_net.add_bridge', fake_execute)
         ) as (device_exists, _):
             driver = linux_net.LinuxBridgeInterfaceDriver()
             driver.ensure_bridge('brq1234567-89', '')
             device_exists.assert_called_once_with('brq1234567-89')
-
-    def _create_veth_pair(self, calls):
-        with mock.patch.object(utils, 'execute', return_value=('', '')) as ex:
-            linux_net_utils.create_veth_pair('fake-dev1', 'fake-dev2')
-            ex.assert_has_calls(calls)
-
-    def test_create_veth_pair(self):
-        calls = [
-            mock.call('ip', 'link', 'add', 'fake-dev1', 'type', 'veth',
-                      'peer', 'name', 'fake-dev2', run_as_root=True),
-            mock.call('ip', 'link', 'set', 'fake-dev1', 'up',
-                      run_as_root=True),
-            mock.call('ip', 'link', 'set', 'fake-dev1', 'promisc', 'on',
-                      run_as_root=True),
-            mock.call('ip', 'link', 'set', 'fake-dev2', 'up',
-                      run_as_root=True),
-            mock.call('ip', 'link', 'set', 'fake-dev2', 'promisc', 'on',
-                      run_as_root=True)
-        ]
-        self._create_veth_pair(calls)
 
     def test_exec_ebtables_success(self):
         executes = []
@@ -1217,7 +1234,7 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
 
         with mock.patch.object(self.driver, '_execute',
                                side_effect=fake_execute):
-            self.driver._exec_ebtables('fake')
+            self.driver._exec_ebtables('fake', ['fake'])
             self.assertEqual(1, len(executes))
 
     def _ebtables_race_stderr(self):
@@ -1246,7 +1263,7 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
                 mock.patch.object(self.driver, '_execute',
                                   side_effect=fake_execute):
             self.assertRaises(processutils.ProcessExecutionError,
-                              self.driver._exec_ebtables, 'fake')
+                              self.driver._exec_ebtables, 'fake', ['fake'])
             max_calls = CONF.ebtables_exec_attempts
             self.assertEqual(max_calls, len(executes))
 
@@ -1265,7 +1282,7 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
                 mock.patch.object(self.driver, '_execute',
                               side_effect=fake_execute):
             self.assertRaises(processutils.ProcessExecutionError,
-                              self.driver._exec_ebtables, 'fake')
+                              self.driver._exec_ebtables, 'fake', 'fake')
             self.assertEqual(1, len(executes))
 
     def test_exec_ebtables_fail_once(self):
@@ -1285,26 +1302,27 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
         with mock.patch.object(time, 'sleep', side_effect=fake_sleep), \
                 mock.patch.object(self.driver, '_execute',
                                   side_effect=fake_execute):
-            self.driver._exec_ebtables('fake')
+            self.driver._exec_ebtables('fake', 'fake')
             self.assertEqual(2, len(executes))
 
     @mock.patch('os.path.exists', return_value=True)
-    @mock.patch('nova.utils.execute')
-    def test_remove_bridge(self, mock_execute, mock_exists):
+    @mock.patch('nova.privsep.linux_net.set_device_disabled')
+    @mock.patch('nova.privsep.linux_net.delete_bridge')
+    def test_remove_bridge(self, mock_delete, mock_disabled, mock_exists):
         linux_net.LinuxBridgeInterfaceDriver.remove_bridge('fake-bridge')
-        expected_exists_args = mock.call('/sys/class/net/fake-bridge')
-        expected_execute_args = [
-            mock.call('ip', 'link', 'set', 'fake-bridge', 'down',
-                      run_as_root=True),
-            mock.call('brctl', 'delbr', 'fake-bridge', run_as_root=True)]
 
-        self.assertIn(expected_exists_args, mock_exists.mock_calls)
-        self.assertEqual(expected_execute_args, mock_execute.mock_calls)
+        self.assertIn(mock.call('/sys/class/net/fake-bridge'),
+                      mock_exists.mock_calls)
+        mock_disabled.assert_called_once_with('fake-bridge')
+        mock_delete.assert_called_once_with('fake-bridge')
 
     @mock.patch.object(linux_net, '_execute')
-    @mock.patch('nova.network.linux_utils.device_exists', return_value=False)
-    @mock.patch('nova.network.linux_utils.set_device_mtu')
-    def test_ensure_vlan(self, mock_set_device_mtu, mock_device_exists,
+    @mock.patch('nova.privsep.linux_net.device_exists', return_value=False)
+    @mock.patch('nova.privsep.linux_net.set_device_mtu')
+    @mock.patch('nova.privsep.linux_net.set_device_enabled')
+    @mock.patch('nova.privsep.linux_net.set_device_macaddr')
+    def test_ensure_vlan(self, mock_set_macaddr, mock_set_enabled,
+                         mock_set_device_mtu, mock_device_exists,
                          mock_execute):
         interface = linux_net.LinuxBridgeInterfaceDriver.ensure_vlan(
                         1, 'eth0', 'MAC', 'MTU', "vlan_name")
@@ -1314,17 +1332,16 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
         expected_execute_args = [
             mock.call('ip', 'link', 'add', 'link', 'eth0', 'name', 'vlan_name',
                       'type', 'vlan', 'id', 1, check_exit_code=[0, 2, 254],
-                      run_as_root=True),
-            mock.call('ip', 'link', 'set', 'vlan_name', 'address', 'MAC',
-                       check_exit_code=[0, 2, 254], run_as_root=True),
-            mock.call('ip', 'link', 'set', 'vlan_name', 'up',
-                      check_exit_code=[0, 2, 254], run_as_root=True)]
+                      run_as_root=True)
+            ]
         self.assertEqual(expected_execute_args, mock_execute.mock_calls)
         mock_set_device_mtu.assert_called_once_with('vlan_name', 'MTU')
+        mock_set_enabled.assert_called_once_with('vlan_name')
+        mock_set_macaddr.assert_called_once_with('vlan_name', 'MAC')
 
     @mock.patch.object(linux_net, '_execute')
-    @mock.patch('nova.network.linux_utils.device_exists', return_value=True)
-    @mock.patch('nova.network.linux_utils.set_device_mtu')
+    @mock.patch('nova.privsep.linux_net.device_exists', return_value=True)
+    @mock.patch('nova.privsep.linux_net.set_device_mtu')
     def test_ensure_vlan_device_exists(self, mock_set_device_mtu,
                                        mock_device_exists, mock_execute):
         interface = linux_net.LinuxBridgeInterfaceDriver.ensure_vlan(1, 'eth0')
@@ -1334,7 +1351,7 @@ class LinuxNetworkTestCase(test.NoDBTestCase):
         mock_set_device_mtu.assert_called_once_with('vlan1', None)
 
     @mock.patch('os.path.exists', return_value=True)
-    @mock.patch('nova.utils.execute',
+    @mock.patch('nova.privsep.linux_net.set_device_disabled',
                 side_effect=processutils.ProcessExecutionError())
     def test_remove_bridge_negative(self, mock_execute, mock_exists):
         self.assertRaises(processutils.ProcessExecutionError,

@@ -67,9 +67,6 @@ class FlavorsTestV21(test.TestCase):
             self._prefix + url, version=self.microversion)
 
     def _set_expected_body(self, expected, flavor):
-        # NOTE(oomichi): On v2.1 API, some extensions of v2.0 are merged
-        # as core features and we can get the following parameters as the
-        # default.
         expected['OS-FLV-EXT-DATA:ephemeral'] = flavor.ephemeral_gb
         expected['OS-FLV-DISABLED:disabled'] = flavor.disabled
         expected['swap'] = flavor.swap
@@ -777,54 +774,6 @@ class FlavorsTestV2_61(FlavorsTestV2_55):
     """Run the same tests as we would for v2.55 but with a extra_specs."""
     microversion = '2.61'
     expect_extra_specs = True
-
-
-class FlavorsPolicyEnforcementV21(test.NoDBTestCase):
-
-    def setUp(self):
-        super(FlavorsPolicyEnforcementV21, self).setUp()
-        self.flavor_controller = flavors_v21.FlavorsController()
-        fakes.stub_out_flavor_get_by_flavor_id(self)
-        fakes.stub_out_flavor_get_all(self)
-        self.req = fakes.HTTPRequest.blank('')
-
-    def test_show_flavor_access_policy_failed(self):
-        rule_name = "os_compute_api:os-flavor-access"
-        self.policy.set_rules({rule_name: "project:non_fake"})
-        resp = self.flavor_controller.show(self.req, '1')
-        self.assertNotIn('os-flavor-access:is_public', resp['flavor'])
-
-    def test_detail_flavor_access_policy_failed(self):
-        rule_name = "os_compute_api:os-flavor-access"
-        self.policy.set_rules({rule_name: "project:non_fake"})
-        resp = self.flavor_controller.detail(self.req)
-        self.assertNotIn('os-flavor-access:is_public', resp['flavors'][0])
-
-    def test_show_flavor_rxtx_policy_failed(self):
-        rule_name = "os_compute_api:os-flavor-rxtx"
-        self.policy.set_rules({rule_name: "project:non_fake"})
-        resp = self.flavor_controller.show(self.req, '1')
-        self.assertNotIn('rxtx_factor', resp['flavor'])
-
-    def test_detail_flavor_rxtx_policy_failed(self):
-        rule_name = "os_compute_api:os-flavor-rxtx"
-        self.policy.set_rules({rule_name: "project:non_fake"})
-        resp = self.flavor_controller.detail(self.req)
-        self.assertNotIn('rxtx_factor', resp['flavors'][0])
-
-    def test_create_flavor_extended_policy_failed(self):
-        rules = {"os_compute_api:os-flavor-rxtx": "project:non_fake",
-                 "os_compute_api:os-flavor-access": "project:non_fake"}
-        self.policy.set_rules(rules)
-        resp = self.flavor_controller.detail(self.req)
-        self.assertNotIn('rxtx_factor', resp['flavors'][0])
-
-    def test_update_flavor_extended_policy_failed(self):
-        rules = {"os_compute_api:os-flavor-rxtx": "project:non_fake",
-                 "os_compute_api:os-flavor-access": "project:non_fake"}
-        self.policy.set_rules(rules)
-        resp = self.flavor_controller.detail(self.req)
-        self.assertNotIn('rxtx_factor', resp['flavors'][0])
 
 
 class DisabledFlavorsWithRealDBTestV21(test.TestCase):

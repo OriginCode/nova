@@ -18,37 +18,32 @@ import contextlib
 import copy
 import functools
 import random
-import re
-import retrying
 import time
 
 from keystoneauth1 import exceptions as ks_exc
+import os_resource_classes as orc
 import os_traits
 from oslo_log import log as logging
 from oslo_middleware import request_id
+from oslo_utils import excutils
 from oslo_utils import versionutils
+import retrying
 
 from nova.compute import provider_tree
-from nova.compute import utils as compute_utils
 import nova.conf
 from nova import exception
 from nova.i18n import _
 from nova import objects
-from nova import rc_fields as fields
 from nova.scheduler import utils as scheduler_utils
 from nova import utils
 
+
 CONF = nova.conf.CONF
 LOG = logging.getLogger(__name__)
-VCPU = fields.ResourceClass.VCPU
-MEMORY_MB = fields.ResourceClass.MEMORY_MB
-DISK_GB = fields.ResourceClass.DISK_GB
-_RE_INV_IN_USE = re.compile("Inventory for (.+) on resource provider "
-                            "(.+) in use")
 WARN_EVERY = 10
-PLACEMENT_CLIENT_SEMAPHORE = 'placement_client'
+RESHAPER_VERSION = '1.30'
 CONSUMER_GENERATION_VERSION = '1.28'
-GRANULAR_AC_VERSION = '1.25'
+NESTED_AC_VERSION = '1.29'
 ALLOW_RESERVED_EQUAL_TOTAL_INVENTORY_VERSION = '1.26'
 POST_RPS_RETURNS_PAYLOAD_API_VERSION = '1.20'
 AGGREGATE_GENERATION_VERSION = '1.19'
@@ -57,6 +52,8 @@ POST_ALLOCATIONS_API_VERSION = '1.13'
 
 AggInfo = collections.namedtuple('AggInfo', ['aggregates', 'generation'])
 TraitInfo = collections.namedtuple('TraitInfo', ['traits', 'generation'])
+ProviderAllocInfo = collections.namedtuple(
+    'ProviderAllocInfo', ['allocations'])
 
 
 def warn_limit(self, msg):
@@ -124,50 +121,6 @@ def retries(f):
     return wrapper
 
 
-def _compute_node_to_inventory_dict(compute_node):
-    """Given a supplied `objects.ComputeNode` object, return a dict, keyed
-    by resource class, of various inventory information.
-
-    :param compute_node: `objects.ComputeNode` object to translate
-    """
-    result = {}
-
-    # NOTE(jaypipes): Ironic virt driver will return 0 values for vcpus,
-    # memory_mb and disk_gb if the Ironic node is not available/operable
-    if compute_node.vcpus > 0:
-        result[VCPU] = {
-            'total': compute_node.vcpus,
-            'reserved': CONF.reserved_host_cpus,
-            'min_unit': 1,
-            'max_unit': compute_node.vcpus,
-            'step_size': 1,
-            'allocation_ratio': compute_node.cpu_allocation_ratio,
-        }
-    if compute_node.memory_mb > 0:
-        result[MEMORY_MB] = {
-            'total': compute_node.memory_mb,
-            'reserved': CONF.reserved_host_memory_mb,
-            'min_unit': 1,
-            'max_unit': compute_node.memory_mb,
-            'step_size': 1,
-            'allocation_ratio': compute_node.ram_allocation_ratio,
-        }
-    if compute_node.local_gb > 0:
-        # TODO(johngarbutt) We should either move to reserved_host_disk_gb
-        # or start tracking DISK_MB.
-        reserved_disk_gb = compute_utils.convert_mb_to_ceil_gb(
-            CONF.reserved_host_disk_mb)
-        result[DISK_GB] = {
-            'total': compute_node.local_gb,
-            'reserved': reserved_disk_gb,
-            'min_unit': 1,
-            'max_unit': compute_node.local_gb,
-            'step_size': 1,
-            'allocation_ratio': compute_node.disk_allocation_ratio,
-        }
-    return result
-
-
 def _instance_to_allocations_dict(instance):
     """Given an `objects.Instance` object, return a dict, keyed by resource
     class of the amount used by the instance.
@@ -187,16 +140,15 @@ def _move_operation_alloc_request(source_allocs, dest_alloc_req):
     contains resources claimed against both source and destination, accounting
     for shared providers.
 
-    Also accounts for a resize to the same host where the source and dest
-    compute node resource providers are going to be the same. In that case
-    we sum the resource allocations for the single provider.
+    This is expected to only be used during an evacuate operation.
 
     :param source_allocs: Dict, keyed by resource provider UUID, of resources
                           allocated on the source host
     :param dest_alloc_req: The allocation_request for resources against the
                            destination host
     """
-    LOG.debug("Doubling-up allocation_request for move operation.")
+    LOG.debug("Doubling-up allocation_request for move operation. Current "
+              "allocations: %s", source_allocs)
     # Remove any allocations against resource providers that are
     # already allocated against on the source host (like shared storage
     # providers)
@@ -212,36 +164,10 @@ def _move_operation_alloc_request(source_allocs, dest_alloc_req):
         if rp_uuid in new_rp_uuids:
             new_alloc_req['allocations'][rp_uuid] = dest_alloc_req[
                 'allocations'][rp_uuid]
-        elif not new_rp_uuids:
-            # If there are no new_rp_uuids that means we're resizing to
-            # the same host so we need to sum the allocations for
-            # the compute node (and possibly shared providers) using both
-            # the current and new allocations.
-            # Note that we sum the allocations rather than take the max per
-            # resource class between the current and new allocations because
-            # the compute node/resource tracker is going to adjust for
-            # decrementing any old allocations as necessary, the scheduler
-            # shouldn't make assumptions about that.
-            scheduler_utils.merge_resources(
-                new_alloc_req['allocations'][rp_uuid]['resources'],
-                dest_alloc_req['allocations'][rp_uuid]['resources'])
 
     LOG.debug("New allocation_request containing both source and "
               "destination hosts in move operation: %s", new_alloc_req)
     return new_alloc_req
-
-
-def _extract_inventory_in_use(body):
-    """Given an HTTP response body, extract the resource classes that were
-    still in use when we tried to delete inventory.
-
-    :returns: String of resource classes or None if there was no InventoryInUse
-              error in the response body.
-    """
-    match = _RE_INV_IN_USE.search(body)
-    if match:
-        return match.group(1)
-    return None
 
 
 def get_placement_request_id(response):
@@ -249,6 +175,10 @@ def get_placement_request_id(response):
         return response.headers.get(request_id.HTTP_RESP_HEADER_REQUEST_ID)
 
 
+# TODO(mriedem): Consider making SchedulerReportClient a global singleton so
+# that things like the compute API do not have to lazy-load it. That would
+# likely require inspecting methods that use a ProviderTree cache to see if
+# they need locks.
 class SchedulerReportClient(object):
     """Client class for updating the scheduler."""
 
@@ -262,19 +192,52 @@ class SchedulerReportClient(object):
         self._adapter = adapter
         # An object that contains a nova-compute-side cache of resource
         # provider and inventory information
-        self._provider_tree = provider_tree.ProviderTree()
+        self._provider_tree = None
         # Track the last time we updated providers' aggregates and traits
-        self._association_refresh_time = {}
+        self._association_refresh_time = None
         self._client = self._create_client()
         # NOTE(danms): Keep track of how naggy we've been
         self._warn_count = 0
 
-    @utils.synchronized(PLACEMENT_CLIENT_SEMAPHORE)
+    def clear_provider_cache(self, init=False):
+        if not init:
+            LOG.info("Clearing the report client's provider cache.")
+        self._provider_tree = provider_tree.ProviderTree()
+        self._association_refresh_time = {}
+
+    def _clear_provider_cache_for_tree(self, rp_uuid):
+        """Clear the provider cache for only the tree containing rp_uuid.
+
+        This exists for situations where we encounter an error updating
+        placement, and therefore need to refresh the provider tree cache before
+        redriving the update. However, it would be wasteful and inefficient to
+        clear the *entire* cache, which may contain many separate trees (e.g.
+        ironic nodes or sharing providers) which should be unaffected by the
+        error.
+
+        :param rp_uuid: UUID of a resource provider, which may be anywhere in a
+                        a tree hierarchy, i.e. need not be a root. For non-root
+                        providers, we still clear the cache for the entire tree
+                        including descendants, ancestors up to the root,
+                        siblings/cousins and *their* ancestors/descendants.
+        """
+        try:
+            uuids = self._provider_tree.get_provider_uuids_in_tree(rp_uuid)
+        except ValueError:
+            # If the provider isn't in the tree, it should also not be in the
+            # timer dict, so nothing to clear.
+            return
+
+        # get_provider_uuids_in_tree returns UUIDs in top-down order, so the
+        # first one is the root; and .remove() is recursive.
+        self._provider_tree.remove(uuids[0])
+        for uuid in uuids:
+            self._association_refresh_time.pop(uuid, None)
+
     def _create_client(self):
         """Create the HTTP session accessing the placement service."""
         # Flush provider tree and associations so we start from a clean slate.
-        self._provider_tree = provider_tree.ProviderTree()
-        self._association_refresh_time = {}
+        self.clear_provider_cache(init=True)
         client = self._adapter or utils.get_ksa_adapter('placement')
         # Set accept header on every request to ensure we notify placement
         # service of our response body media type preferences.
@@ -346,7 +309,9 @@ class SchedulerReportClient(object):
             "Candidates are in either 'foo' or 'bar', but definitely in 'baz'"
 
         """
-        version = GRANULAR_AC_VERSION
+        # Note that claim_resources() will use this version as well to
+        # make allocations by `PUT /allocations/{consumer_uuid}`
+        version = NESTED_AC_VERSION
         qparams = resources.to_querystring()
         url = "/allocation_candidates?%s" % qparams
         resp = self.get(url, version=version,
@@ -403,8 +368,7 @@ class SchedulerReportClient(object):
         LOG.error(msg, args)
         raise exception.ResourceProviderAggregateRetrievalFailed(uuid=rp_uuid)
 
-    @safe_connect
-    def _get_provider_traits(self, context, rp_uuid):
+    def get_provider_traits(self, context, rp_uuid):
         """Queries the placement API for a resource provider's traits.
 
         :param context: The security context
@@ -416,6 +380,8 @@ class SchedulerReportClient(object):
         :raise: ResourceProviderTraitRetrievalFailed on errors.  In particular,
                 we raise this exception (as opposed to returning None or the
                 empty set()) if the specified resource provider does not exist.
+        :raise: keystoneauth1.exceptions.ClientException if placement API
+                communication fails.
         """
         resp = self.get("/resource_providers/%s/traits" % rp_uuid,
                         version='1.6', global_request_id=context.global_id)
@@ -433,6 +399,27 @@ class SchedulerReportClient(object):
             {'placement_req_id': placement_req_id, 'uuid': rp_uuid,
              'status_code': resp.status_code, 'err_text': resp.text})
         raise exception.ResourceProviderTraitRetrievalFailed(uuid=rp_uuid)
+
+    def get_resource_provider_name(self, context, uuid):
+        """Return the name of a RP. It tries to use the internal of RPs or
+        falls back to calling placement directly.
+
+        :param context: The security context
+        :param uuid: UUID identifier for the resource provider to look up
+        :return: The name of the RP
+        :raise: ResourceProviderRetrievalFailed if the RP is not in the cache
+            and the communication with the placement is failed.
+        :raise: ResourceProviderNotFound if the RP does not exists.
+        """
+
+        try:
+            return self._provider_tree.data(uuid).name
+        except ValueError:
+            rsp = self._get_resource_provider(context, uuid)
+            if rsp is None:
+                raise exception.ResourceProviderNotFound(name_or_uuid=uuid)
+            else:
+                return rsp['name']
 
     @safe_connect
     def _get_resource_provider(self, context, uuid):
@@ -643,55 +630,55 @@ class SchedulerReportClient(object):
         # NOTE(efried): We currently have no code path where we need to set the
         # parent_provider_uuid on a previously-parent-less provider - so we do
         # NOT handle that scenario here.
-        # TODO(efried): Reinstate this optimization if possible.
-        # For now, this is removed due to the following:
-        # - update_provider_tree adds a child with some bogus inventory (bad
-        #   resource class) or trait (invalid trait name).
-        # - update_from_provider_tree creates the child in placement and adds
-        #   it to the cache, then attempts to add the bogus inventory/trait.
-        #   The latter fails, so update_from_provider_tree invalidates the
-        #   cache entry by removing the child from the cache.
-        # - Ordinarily, we would rely on the code below (_get_providers_in_tree
-        #   and _provider_tree.populate_from_iterable) to restore the child to
-        #   the cache on the next iteration.  BUT since the root is still
-        #   present in the cache, the commented-out block will cause that part
-        #   of this method to be skipped.
-        # if self._provider_tree.exists(uuid):
-        #     # If we had the requested provider locally, refresh it and its
-        #     # descendants, but only if stale.
-        #     for u in self._provider_tree.get_provider_uuids(uuid):
-        #         self._refresh_associations(context, u, force=False)
-        #     return uuid
 
-        # We don't have it locally; check placement or create it.
-        created_rp = None
-        rps_to_refresh = self._get_providers_in_tree(context, uuid)
-        if not rps_to_refresh:
-            created_rp = self._create_resource_provider(
-                context, uuid, name or uuid,
-                parent_provider_uuid=parent_provider_uuid)
-            # If @safe_connect can't establish a connection to the placement
-            # service, like if placement isn't running or nova-compute is
-            # mis-configured for authentication, we'll get None back and need
-            # to treat it like we couldn't create the provider (because we
-            # couldn't).
-            if created_rp is None:
-                raise exception.ResourceProviderCreationFailed(
-                    name=name or uuid)
-            # Don't add the created_rp to rps_to_refresh.  Since we just
-            # created it, it has no aggregates or traits.
+        # If we already have the root provider in the cache, and it's not
+        # stale, don't refresh it; and use the cache to determine the
+        # descendants to (soft) refresh.
+        # NOTE(efried): This assumes the compute service only cares about
+        # providers it "owns". If that ever changes, we'll need a way to find
+        # out about out-of-band changes here. Options that have been
+        # brainstormed at this time:
+        # - Make this condition more frequently True
+        # - Some kind of notification subscription so a separate thread is
+        #   alerted when <thing we care about happens in placement>.
+        # - "Cascading generations" - i.e. a change to a leaf node percolates
+        #   generation bump up the tree so that we bounce 409 the next time we
+        #   try to update anything and have to refresh.
+        if (self._provider_tree.exists(uuid)
+                and not self._associations_stale(uuid)):
+            uuids_to_refresh = [
+                u for u in self._provider_tree.get_provider_uuids(uuid)
+                if self._associations_stale(u)]
+        else:
+            # We either don't have it locally or it's stale. Pull or create it.
+            created_rp = None
+            rps_to_refresh = self._get_providers_in_tree(context, uuid)
+            if not rps_to_refresh:
+                created_rp = self._create_resource_provider(
+                    context, uuid, name or uuid,
+                    parent_provider_uuid=parent_provider_uuid)
+                # If @safe_connect can't establish a connection to the
+                # placement service, like if placement isn't running or
+                # nova-compute is mis-configured for authentication, we'll get
+                # None back and need to treat it like we couldn't create the
+                # provider (because we couldn't).
+                if created_rp is None:
+                    raise exception.ResourceProviderCreationFailed(
+                        name=name or uuid)
+                # Don't add the created_rp to rps_to_refresh.  Since we just
+                # created it, it has no aggregates or traits.
+                # But do mark it as having just been "refreshed".
+                self._association_refresh_time[uuid] = time.time()
 
-        self._provider_tree.populate_from_iterable(
-            rps_to_refresh or [created_rp])
+            self._provider_tree.populate_from_iterable(
+                rps_to_refresh or [created_rp])
+
+            uuids_to_refresh = [rp['uuid'] for rp in rps_to_refresh]
 
         # At this point, the whole tree exists in the local cache.
 
-        for rp_to_refresh in rps_to_refresh:
-            # NOTE(efried): _refresh_associations doesn't refresh inventory
-            # (yet) - see that method's docstring for the why.
-            self._refresh_and_get_inventory(context, rp_to_refresh['uuid'])
-            self._refresh_associations(context, rp_to_refresh['uuid'],
-                                       force=True)
+        for uuid_to_refresh in uuids_to_refresh:
+            self._refresh_associations(context, uuid_to_refresh, force=True)
 
         return uuid
 
@@ -733,6 +720,7 @@ class SchedulerReportClient(object):
         url = '/resource_providers/%s/inventories' % rp_uuid
         result = self.get(url, global_request_id=context.global_id)
         if not result:
+            # TODO(efried): Log.
             return None
         return result.json()
 
@@ -749,6 +737,9 @@ class SchedulerReportClient(object):
         if curr is None:
             return None
 
+        LOG.debug('Updating ProviderTree inventory for provider %s from '
+                  '_refresh_and_get_inventory using data: %s', rp_uuid,
+                  curr['inventories'])
         self._provider_tree.update_inventory(
             rp_uuid, curr['inventories'],
             generation=curr['resource_provider_generation'])
@@ -757,31 +748,33 @@ class SchedulerReportClient(object):
 
     def _refresh_associations(self, context, rp_uuid, force=False,
                               refresh_sharing=True):
-        """Refresh aggregates, traits, and (optionally) aggregate-associated
-        sharing providers for the specified resource provider uuid.
+        """Refresh inventories, aggregates, traits, and (optionally) aggregate-
+        associated sharing providers for the specified resource provider uuid.
 
         Only refresh if there has been no refresh during the lifetime of
         this process, CONF.compute.resource_provider_association_refresh
         seconds have passed, or the force arg has been set to True.
 
-        Note that we do *not* refresh inventories.  The reason is largely
-        historical: all code paths that get us here are doing inventory refresh
-        themselves.
-
         :param context: The security context
         :param rp_uuid: UUID of the resource provider to check for fresh
-                        aggregates and traits
+                        inventories, aggregates, and traits
         :param force: If True, force the refresh
         :param refresh_sharing: If True, fetch all the providers associated
                                 by aggregate with the specified provider,
-                                including their traits and aggregates (but not
-                                *their* sharing providers).
+                                including their inventories, traits, and
+                                aggregates (but not *their* sharing providers).
         :raise: On various placement API errors, one of:
                 - ResourceProviderAggregateRetrievalFailed
                 - ResourceProviderTraitRetrievalFailed
                 - ResourceProviderRetrievalFailed
+        :raise: keystoneauth1.exceptions.ClientException if placement API
+                communication fails.
         """
         if force or self._associations_stale(rp_uuid):
+            # Refresh inventories
+            msg = "Refreshing inventories for resource provider %s"
+            LOG.debug(msg, rp_uuid)
+            self._refresh_and_get_inventory(context, rp_uuid)
             # Refresh aggregates
             agg_info = self._get_provider_aggregates(context, rp_uuid)
             # If @safe_connect makes the above return None, this will raise
@@ -797,9 +790,7 @@ class SchedulerReportClient(object):
                 rp_uuid, aggs, generation=generation)
 
             # Refresh traits
-            trait_info = self._get_provider_traits(context, rp_uuid)
-            # If @safe_connect makes the above return None, this will raise
-            # TypeError. Good.
+            trait_info = self.get_provider_traits(context, rp_uuid)
             traits, generation = trait_info.traits, trait_info.generation
             msg = ("Refreshing trait associations for resource provider %s, "
                    "traits: %s")
@@ -820,11 +811,11 @@ class SchedulerReportClient(object):
                         self._provider_tree.new_root(
                             rp['name'], rp['uuid'],
                             generation=rp['generation'])
-                    # Now we have to (populate or) refresh that guy's traits
-                    # and aggregates (but not *his* aggregate-associated
-                    # providers).  No need to override force=True for newly-
-                    # added providers - the missing timestamp will always
-                    # trigger them to refresh.
+                    # Now we have to (populate or) refresh that provider's
+                    # traits, aggregates, and inventories (but not *its*
+                    # aggregate-associated providers). No need to override
+                    # force=True for newly-added providers - the missing
+                    # timestamp will always trigger them to refresh.
                     self._refresh_associations(context, rp['uuid'],
                                                force=force,
                                                refresh_sharing=False)
@@ -837,144 +828,20 @@ class SchedulerReportClient(object):
         Associations are stale if association_refresh_time for this uuid is not
         set or is more than CONF.compute.resource_provider_association_refresh
         seconds ago.
+
+        Always False if CONF.compute.resource_provider_association_refresh is
+        zero.
         """
+        rpar = CONF.compute.resource_provider_association_refresh
         refresh_time = self._association_refresh_time.get(uuid, 0)
-        return ((time.time() - refresh_time) >
-                CONF.compute.resource_provider_association_refresh)
-
-    def _update_inventory_attempt(self, context, rp_uuid, inv_data):
-        """Update the inventory for this resource provider if needed.
-
-        :param context: The security context
-        :param rp_uuid: The resource provider UUID for the operation
-        :param inv_data: The new inventory for the resource provider
-        :returns: True if the inventory was updated (or did not need to be),
-                  False otherwise.
-        """
-        # TODO(jaypipes): Should we really be calling the placement API to get
-        # the current inventory for every resource provider each and every time
-        # update_resource_stats() is called? :(
-        curr = self._refresh_and_get_inventory(context, rp_uuid)
-        if curr is None:
+        # If refresh is disabled, associations are "never" stale. (But still
+        # load them if we haven't yet done so.)
+        if rpar == 0 and refresh_time != 0:
+            # TODO(efried): If refresh is disabled, we could avoid touching the
+            # _association_refresh_time dict anywhere, but that would take some
+            # nontrivial refactoring.
             return False
-
-        cur_gen = curr['resource_provider_generation']
-
-        # Check to see if we need to update placement's view
-        if not self._provider_tree.has_inventory_changed(rp_uuid, inv_data):
-            return True
-
-        payload = {
-            'resource_provider_generation': cur_gen,
-            'inventories': inv_data,
-        }
-        url = '/resource_providers/%s/inventories' % rp_uuid
-        # NOTE(vdrok): in microversion 1.26 it is allowed to have inventory
-        # records with reserved value equal to total
-        version = ALLOW_RESERVED_EQUAL_TOTAL_INVENTORY_VERSION
-        result = self.put(url, payload, version=version,
-                          global_request_id=context.global_id)
-        if result.status_code == 409:
-            LOG.info('[%(placement_req_id)s] Inventory update conflict for '
-                     '%(resource_provider_uuid)s with generation ID '
-                     '%(generation)s',
-                     {'placement_req_id': get_placement_request_id(result),
-                      'resource_provider_uuid': rp_uuid,
-                      'generation': cur_gen})
-            # NOTE(jaypipes): There may be cases when we try to set a
-            # provider's inventory that results in attempting to delete an
-            # inventory record for a resource class that has an active
-            # allocation. We need to catch this particular case and raise an
-            # exception here instead of returning False, since we should not
-            # re-try the operation in this case.
-            #
-            # A use case for where this can occur is the following:
-            #
-            # 1) Provider created for each Ironic baremetal node in Newton
-            # 2) Inventory records for baremetal node created for VCPU,
-            #    MEMORY_MB and DISK_GB
-            # 3) A Nova instance consumes the baremetal node and allocation
-            #    records are created for VCPU, MEMORY_MB and DISK_GB matching
-            #    the total amount of those resource on the baremetal node.
-            # 3) Upgrade to Ocata and now resource tracker wants to set the
-            #    provider's inventory to a single record of resource class
-            #    CUSTOM_IRON_SILVER (or whatever the Ironic node's
-            #    "resource_class" attribute is)
-            # 4) Scheduler report client sends the inventory list containing a
-            #    single CUSTOM_IRON_SILVER record and placement service
-            #    attempts to delete the inventory records for VCPU, MEMORY_MB
-            #    and DISK_GB. An exception is raised from the placement service
-            #    because allocation records exist for those resource classes,
-            #    and a 409 Conflict is returned to the compute node. We need to
-            #    trigger a delete of the old allocation records and then set
-            #    the new inventory, and then set the allocation record to the
-            #    new CUSTOM_IRON_SILVER record.
-            rc = _extract_inventory_in_use(result.text)
-            if rc is not None:
-                raise exception.InventoryInUse(
-                    resource_classes=rc,
-                    resource_provider=rp_uuid,
-                )
-
-            # Invalidate our cache and re-fetch the resource provider
-            # to be sure to get the latest generation.
-            self._provider_tree.remove(rp_uuid)
-            # NOTE(jaypipes): We don't need to pass a name parameter to
-            # _ensure_resource_provider() because we know the resource provider
-            # record already exists. We're just reloading the record here.
-            self._ensure_resource_provider(context, rp_uuid)
-            return False
-        elif not result:
-            placement_req_id = get_placement_request_id(result)
-            LOG.warning('[%(placement_req_id)s] Failed to update inventory '
-                        'for resource provider %(uuid)s: %(status)i %(text)s',
-                        {'placement_req_id': placement_req_id,
-                         'uuid': rp_uuid,
-                         'status': result.status_code,
-                         'text': result.text})
-            # log the body at debug level
-            LOG.debug('[%(placement_req_id)s] Failed inventory update request '
-                      'for resource provider %(uuid)s with body: %(payload)s',
-                      {'placement_req_id': placement_req_id,
-                       'uuid': rp_uuid,
-                       'payload': payload})
-            return False
-
-        if result.status_code != 200:
-            placement_req_id = get_placement_request_id(result)
-            LOG.info('[%(placement_req_id)s] Received unexpected response '
-                     'code %(code)i while trying to update inventory for '
-                     'resource provider %(uuid)s: %(text)s',
-                     {'placement_req_id': placement_req_id,
-                      'uuid': rp_uuid,
-                      'code': result.status_code,
-                      'text': result.text})
-            return False
-
-        # Update our view of the generation for next time
-        updated_inventories_result = result.json()
-        new_gen = updated_inventories_result['resource_provider_generation']
-
-        self._provider_tree.update_inventory(rp_uuid, inv_data,
-                                             generation=new_gen)
-        LOG.debug('Updated inventory for %s at generation %i',
-                  rp_uuid, new_gen)
-        return True
-
-    @safe_connect
-    def _update_inventory(self, context, rp_uuid, inv_data):
-        for attempt in (1, 2, 3):
-            if not self._provider_tree.exists(rp_uuid):
-                # NOTE(danms): Either we failed to fetch/create the RP
-                # on our first attempt, or a previous attempt had to
-                # invalidate the cache, and we were unable to refresh
-                # it. Bail and try again next time.
-                LOG.warning('Unable to refresh my resource provider record')
-                return False
-            if self._update_inventory_attempt(context, rp_uuid, inv_data):
-                return True
-            time.sleep(1)
-        return False
+        return (time.time() - refresh_time) > rpar
 
     def get_provider_tree_and_ensure_root(self, context, rp_uuid, name=None,
                                           parent_provider_uuid=None):
@@ -1004,73 +871,14 @@ class SchedulerReportClient(object):
         self._ensure_resource_provider(
             context, rp_uuid, name=name,
             parent_provider_uuid=parent_provider_uuid)
-        # Ensure inventories are up to date (for *all* cached RPs)
-        for uuid in self._provider_tree.get_provider_uuids():
-            self._refresh_and_get_inventory(context, uuid)
         # Return a *copy* of the tree.
         return copy.deepcopy(self._provider_tree)
 
-    def set_inventory_for_provider(self, context, rp_uuid, rp_name, inv_data,
-                                   parent_provider_uuid=None):
+    def set_inventory_for_provider(self, context, rp_uuid, inv_data):
         """Given the UUID of a provider, set the inventory records for the
         provider to the supplied dict of resources.
 
-        :param context: The security context
-        :param rp_uuid: UUID of the resource provider to set inventory for
-        :param rp_name: Name of the resource provider in case we need to create
-                        a record for it in the placement API
-        :param inv_data: Dict, keyed by resource class name, of inventory data
-                         to set against the provider
-        :param parent_provider_uuid:
-                If the provider is not a root, this is required, and represents
-                the UUID of the immediate parent, which is a provider for which
-                this method has already been invoked.
-
-        :raises: exc.InvalidResourceClass if a supplied custom resource class
-                 name does not meet the placement API's format requirements.
-        """
-        self._ensure_resource_provider(
-            context, rp_uuid, rp_name,
-            parent_provider_uuid=parent_provider_uuid)
-
-        # Auto-create custom resource classes coming from a virt driver
-        self._ensure_resource_classes(context, set(inv_data))
-
-        # NOTE(efried): Do not use the DELETE API introduced in microversion
-        # 1.5, even if the new inventory is empty.  It provides no way of
-        # sending the generation down, so no way to trigger/detect a conflict
-        # if an out-of-band update occurs between when we GET the latest and
-        # when we invoke the DELETE.  See bug #1746374.
-        self._update_inventory(context, rp_uuid, inv_data)
-
-    def _set_inventory_for_provider(self, context, rp_uuid, inv_data):
-        """Given the UUID of a provider, set the inventory records for the
-        provider to the supplied dict of resources.
-
-        Compare and contrast with set_inventory_for_provider above.  This one
-        is specially formulated for use by update_from_provider_tree.  Like the
-        other method, we DO need to _ensure_resource_class - i.e. automatically
-        create new resource classes specified in the inv_data.  However, UNLIKE
-        the other method:
-        - We don't use the DELETE API when inventory is empty, because that guy
-          doesn't return content, and we need to update the cached provider
-          tree with the new generation.
-        - We raise exceptions (rather than returning a boolean) which are
-          handled in a consistent fashion by update_from_provider_tree.
-        - We don't invalidate the cache on failure.  That's controlled at a
-          broader scope (based on errors from ANY of the set_*_for_provider
-          methods, etc.) by update_from_provider_tree.
-        - We don't retry.  In this code path, retries happen at the level of
-          the resource tracker on the next iteration.
-        - We take advantage of the cache and no-op if inv_data isn't different
-          from what we have locally.  This is an optimization, not essential.
-        - We don't _ensure_resource_provider or refresh_and_get_inventory,
-          because that's already been done in the code paths leading up to
-          update_from_provider_tree (by get_provider_tree).  This is an
-          optimization, not essential.
-
-        In short, this version is more in the spirit of set_traits_for_provider
-        and set_aggregates_for_provider.
+        The provider must exist - this method does not attempt to create it.
 
         :param context: The security context
         :param rp_uuid: The UUID of the provider whose inventory is to be
@@ -1089,8 +897,6 @@ class SchedulerReportClient(object):
         :raises: ResourceProviderUpdateFailed on any other placement API
                  failure.
         """
-        # TODO(efried): Consolidate/refactor to one set_inventory_for_provider.
-
         # NOTE(efried): This is here because _ensure_resource_class already has
         # @safe_connect, so we don't want to decorate this whole method with it
         @safe_connect
@@ -1103,6 +909,8 @@ class SchedulerReportClient(object):
 
         # If not different from what we've got, short out
         if not self._provider_tree.has_inventory_changed(rp_uuid, inv_data):
+            LOG.debug('Inventory has not changed for provider %s based '
+                      'on inventory data: %s', rp_uuid, inv_data)
             return
 
         # Ensure non-standard resource classes exist, creating them if needed.
@@ -1118,6 +926,9 @@ class SchedulerReportClient(object):
         resp = do_put(url, payload)
 
         if resp.status_code == 200:
+            LOG.debug('Updated inventory for provider %s with generation %s '
+                      'in Placement from set_inventory_for_provider using '
+                      'data: %s', rp_uuid, generation, inv_data)
             json = resp.json()
             self._provider_tree.update_inventory(
                 rp_uuid, json['inventories'],
@@ -1140,12 +951,12 @@ class SchedulerReportClient(object):
         if resp.status_code == 409:
             # If a conflict attempting to remove inventory in a resource class
             # with active allocations, raise InventoryInUse
-            rc = _extract_inventory_in_use(resp.text)
-            if rc is not None:
-                raise exception.InventoryInUse(
-                    resource_classes=rc,
-                    resource_provider=rp_uuid,
-                )
+            err = resp.json()['errors'][0]
+            # TODO(efried): If there's ever a lib exporting symbols for error
+            # codes, use it.
+            if err['code'] == 'placement.inventory.inuse':
+                # The error detail includes the resource class and provider.
+                raise exception.InventoryInUse(err['detail'])
             # Other conflicts are generation mismatch: raise conflict exception
             raise exception.ResourceProviderUpdateConflict(
                 uuid=rp_uuid, generation=generation, error=resp.text)
@@ -1230,7 +1041,7 @@ class SchedulerReportClient(object):
 
         url = '/resource_providers/%s/traits' % rp_uuid
         # NOTE(efried): Don't use the DELETE API when traits is empty, because
-        # that guy doesn't return content, and we need to update the cached
+        # that method doesn't return content, and we need to update the cached
         # provider tree with the new generation.
         traits = list(traits) if traits else []
         generation = self._provider_tree.data(rp_uuid).generation
@@ -1379,7 +1190,7 @@ class SchedulerReportClient(object):
         # resource class.
         version = '1.7'
         to_ensure = set(n for n in names
-                        if n.startswith(fields.ResourceClass.CUSTOM_NAMESPACE))
+                        if n.startswith(orc.CUSTOM_NAMESPACE))
 
         for name in to_ensure:
             # no payload on the put request
@@ -1398,27 +1209,77 @@ class SchedulerReportClient(object):
                 LOG.error(msg, args)
                 raise exception.InvalidResourceClass(resource_class=name)
 
-    def update_compute_node(self, context, compute_node):
-        """Creates or updates stats for the supplied compute node.
+    def _reshape(self, context, inventories, allocations):
+        """Perform atomic inventory & allocation data migration.
 
         :param context: The security context
-        :param compute_node: updated nova.objects.ComputeNode to report
-        :raises `exception.InventoryInUse` if the compute node has had changes
-                to its inventory but there are still active allocations for
-                resource classes that would be deleted by an update to the
-                placement API.
+        :param inventories: A dict, keyed by resource provider UUID, of:
+                { "inventories": { inventory dicts, keyed by resource class },
+                  "resource_provider_generation": $RP_GEN }
+        :param allocations: A dict, keyed by consumer UUID, of:
+                { "project_id": $PROJ_ID,
+                  "user_id": $USER_ID,
+                  "consumer_generation": $CONSUMER_GEN,
+                  "allocations": {
+                      $RP_UUID: {
+                          "resources": { $RC: $AMOUNT, ... }
+                      },
+                      ...
+                  }
+                }
+        :return: The Response object representing a successful API call.
+        :raises: ReshapeFailed if the POST /reshaper request fails.
+        :raises: keystoneauth1.exceptions.ClientException if placement API
+                 communication fails.
         """
-        self._ensure_resource_provider(context, compute_node.uuid,
-                                       compute_node.hypervisor_hostname)
-        inv_data = _compute_node_to_inventory_dict(compute_node)
-        # NOTE(efried): Do not use the DELETE API introduced in microversion
-        # 1.5, even if the new inventory is empty.  It provides no way of
-        # sending the generation down, so no way to trigger/detect a conflict
-        # if an out-of-band update occurs between when we GET the latest and
-        # when we invoke the DELETE.  See bug #1746374.
-        self._update_inventory(context, compute_node.uuid, inv_data)
+        # We have to make sure any new resource classes exist
+        for invs in inventories.values():
+            self._ensure_resource_classes(context, list(invs['inventories']))
+        payload = {"inventories": inventories, "allocations": allocations}
+        resp = self.post('/reshaper', payload, version=RESHAPER_VERSION,
+                         global_request_id=context.global_id)
+        if not resp:
+            raise exception.ReshapeFailed(error=resp.text)
 
-    def update_from_provider_tree(self, context, new_tree):
+        return resp
+
+    def _set_up_and_do_reshape(self, context, old_tree, new_tree, allocations):
+        LOG.info("Performing resource provider inventory and allocation "
+                 "data migration.")
+        new_uuids = new_tree.get_provider_uuids()
+        inventories = {}
+        for rp_uuid in new_uuids:
+            data = new_tree.data(rp_uuid)
+            inventories[rp_uuid] = {
+                "inventories": data.inventory,
+                "resource_provider_generation": data.generation
+            }
+        # Even though we're going to delete them immediately, we still want
+        # to send "inventory changes" for to-be-removed providers in this
+        # reshape request so they're done atomically. This prevents races
+        # where the scheduler could allocate between here and when we
+        # delete the providers.
+        to_remove = set(old_tree.get_provider_uuids()) - set(new_uuids)
+        for rp_uuid in to_remove:
+            inventories[rp_uuid] = {
+                "inventories": {},
+                "resource_provider_generation":
+                    old_tree.data(rp_uuid).generation
+            }
+        # Now we're ready to POST /reshaper. This can raise ReshapeFailed,
+        # but we also need to convert any other exception (including e.g.
+        # PlacementAPIConnectFailure) to ReshapeFailed because we want any
+        # failure here to be fatal to the caller.
+        try:
+            self._reshape(context, inventories, allocations)
+        except exception.ReshapeFailed:
+            raise
+        except Exception as e:
+            # Make sure the original stack trace gets logged.
+            LOG.exception('Reshape failed')
+            raise exception.ReshapeFailed(error=e)
+
+    def update_from_provider_tree(self, context, new_tree, allocations=None):
         """Flush changes from a specified ProviderTree back to placement.
 
         The specified ProviderTree is compared against the local cache.  Any
@@ -1433,23 +1294,36 @@ class SchedulerReportClient(object):
         :param context: The security context
         :param new_tree: A ProviderTree instance representing the desired state
                          of providers in placement.
+        :param allocations: A dict, keyed by consumer UUID, of allocation
+                            records of the form returned by
+                            GET /allocations/{consumer_uuid} representing the
+                            comprehensive final picture of the allocations for
+                            each consumer therein. A value of None indicates
+                            that no reshape is being performed.
+        :raises: ResourceProviderUpdateConflict if a generation conflict was
+                 encountered - i.e. we are attempting to update placement based
+                 on a stale view of it.
         :raises: ResourceProviderSyncFailed if any errors were encountered
-                 attempting to perform the necessary API operations.
+                 attempting to perform the necessary API operations, except
+                 reshape (see below).
+        :raises: ReshapeFailed if a reshape was signaled (allocations not None)
+                 and it fails for any reason.
         """
         # NOTE(efried): We currently do not handle the "rename" case.  This is
         # where new_tree contains a provider named Y whose UUID already exists
-        # but is named X.  Today the only way the consumer could accomplish
-        # this is by deleting the provider and recreating it with the new name.
+        # but is named X.
 
         @contextlib.contextmanager
         def catch_all(rp_uuid):
             """Convert all "expected" exceptions from placement API helpers to
-            True or False.  Saves having to do try/except for every helper call
-            below.
+            ResourceProviderSyncFailed* and invalidate the caches for the tree
+            around `rp_uuid`.
+
+            * Except ResourceProviderUpdateConflict, which signals the caller
+              to redrive the operation; and ReshapeFailed, which triggers
+              special error handling behavior in the resource tracker and
+              compute manager.
             """
-            class Status(object):
-                success = True
-            s = Status()
             # TODO(efried): Make a base exception class from which all these
             # can inherit.
             helper_exceptions = (
@@ -1460,24 +1334,26 @@ class SchedulerReportClient(object):
                 exception.ResourceProviderInUse,
                 exception.ResourceProviderRetrievalFailed,
                 exception.ResourceProviderTraitRetrievalFailed,
-                exception.ResourceProviderUpdateConflict,
                 exception.ResourceProviderUpdateFailed,
                 exception.TraitCreationFailed,
                 exception.TraitRetrievalFailed,
+                # NOTE(efried): We do not trap/convert ReshapeFailed - that one
+                # needs to bubble up right away and be handled specially.
             )
             try:
-                yield s
+                yield
+            except exception.ResourceProviderUpdateConflict:
+                # Invalidate the tree around the failing provider and reraise
+                # the conflict exception. This signals the resource tracker to
+                # redrive the update right away rather than waiting until the
+                # next periodic.
+                with excutils.save_and_reraise_exception():
+                    self._clear_provider_cache_for_tree(rp_uuid)
             except helper_exceptions:
-                s.success = False
-                # Invalidate the caches
-                try:
-                    self._provider_tree.remove(rp_uuid)
-                except ValueError:
-                    pass
-                self._association_refresh_time.pop(rp_uuid, None)
-
-        # Overall indicator of success.  Will be set to False on any exception.
-        success = True
+                # Invalidate the relevant part of the cache. It gets rebuilt on
+                # the next pass.
+                self._clear_provider_cache_for_tree(rp_uuid)
+                raise exception.ResourceProviderSyncFailed()
 
         # Helper methods herein will be updating the local cache (this is
         # intentional) so we need to grab up front any data we need to operate
@@ -1485,84 +1361,159 @@ class SchedulerReportClient(object):
         old_tree = self._provider_tree
         old_uuids = old_tree.get_provider_uuids()
         new_uuids = new_tree.get_provider_uuids()
-
-        # Do provider deletion first, since it has the best chance of failing
-        # for non-generation-conflict reasons (i.e. allocations).
-        uuids_to_remove = set(old_uuids) - set(new_uuids)
-        # We have to do deletions in bottom-up order, so we don't error
-        # attempting to delete a parent who still has children.
-        for uuid in reversed(old_uuids):
-            if uuid not in uuids_to_remove:
-                continue
-            with catch_all(uuid) as status:
-                self._delete_provider(uuid)
-            success = success and status.success
-
-        # Now create (or load) any "new" providers
         uuids_to_add = set(new_uuids) - set(old_uuids)
+        uuids_to_remove = set(old_uuids) - set(new_uuids)
+
+        # In case a reshape is happening, we first have to create (or load) any
+        # "new" providers.
         # We have to do additions in top-down order, so we don't error
         # attempting to create a child before its parent exists.
         for uuid in new_uuids:
             if uuid not in uuids_to_add:
                 continue
             provider = new_tree.data(uuid)
-            with catch_all(uuid) as status:
+            with catch_all(uuid):
                 self._ensure_resource_provider(
                     context, uuid, name=provider.name,
                     parent_provider_uuid=provider.parent_uuid)
-            success = success and status.success
+                # We have to stuff the freshly-created provider's generation
+                # into the new_tree so we don't get conflicts updating its
+                # inventories etc. later.
+                # TODO(efried): We don't have a good way to set the generation
+                # independently; this is a hack.
+                new_tree.update_inventory(
+                    uuid, new_tree.data(uuid).inventory,
+                    generation=self._provider_tree.data(uuid).generation)
+
+        # If we need to reshape, do it here.
+        if allocations is not None:
+            # NOTE(efried): We do not catch_all here, because ReshapeFailed
+            # needs to bubble up right away and be handled specially.
+            self._set_up_and_do_reshape(context, old_tree, new_tree,
+                                        allocations)
+            # The reshape updated provider generations, so the ones we have in
+            # the cache are now stale. The inventory update below will short
+            # out, but we would still bounce with a provider generation
+            # conflict on the trait and aggregate updates.
+            for uuid in new_uuids:
+                # TODO(efried): GET /resource_providers?uuid=in:[list] would be
+                # handy here. Meanwhile, this is an already-written, if not
+                # obvious, way to refresh provider generations in the cache.
+                with catch_all(uuid):
+                    self._refresh_and_get_inventory(context, uuid)
+
+        # Now we can do provider deletions, because we should have moved any
+        # allocations off of them via reshape.
+        # We have to do deletions in bottom-up order, so we don't error
+        # attempting to delete a parent who still has children. (We get the
+        # UUIDs in bottom-up order by reversing old_uuids, which was given to
+        # us in top-down order per ProviderTree.get_provider_uuids().)
+        for uuid in reversed(old_uuids):
+            if uuid not in uuids_to_remove:
+                continue
+            with catch_all(uuid):
+                self._delete_provider(uuid)
 
         # At this point the local cache should have all the same providers as
         # new_tree.  Whether we added them or not, walk through and diff/flush
-        # inventories, traits, and aggregates as necessary (the helper methods
-        # are set up to check and short out when the relevant property does not
-        # differ from what's in the cache).
+        # inventories, traits, and aggregates as necessary. Note that, if we
+        # reshaped above, any inventory changes have already been done. But the
+        # helper methods are set up to check and short out when the relevant
+        # property does not differ from what's in the cache.
         # If we encounter any error and remove a provider from the cache, all
         # its descendants are also removed, and set_*_for_provider methods on
         # it wouldn't be able to get started. Walking the tree in bottom-up
-        # order ensures we at least try to process all of the providers.
+        # order ensures we at least try to process all of the providers. (We
+        # get the UUIDs in bottom-up order by reversing new_uuids, which was
+        # given to us in top-down order per ProviderTree.get_provider_uuids().)
         for uuid in reversed(new_uuids):
             pd = new_tree.data(uuid)
-            with catch_all(pd.uuid) as status:
-                self._set_inventory_for_provider(
+            with catch_all(pd.uuid):
+                self.set_inventory_for_provider(
                     context, pd.uuid, pd.inventory)
                 self.set_aggregates_for_provider(
                     context, pd.uuid, pd.aggregates)
                 self.set_traits_for_provider(context, pd.uuid, pd.traits)
-            success = success and status.success
 
-        if not success:
-            raise exception.ResourceProviderSyncFailed()
+    # TODO(efried): Cut users of this method over to get_allocs_for_consumer
+    def get_allocations_for_consumer(self, context, consumer):
+        """Legacy method for allocation retrieval.
 
-    @safe_connect
-    def get_allocations_for_consumer(self, context, consumer,
-                                     include_generation=False):
+        Callers should move to using get_allocs_for_consumer, which handles
+        errors properly and returns the entire payload.
+
+        :param context: The nova.context.RequestContext auth context
+        :param consumer: UUID of the consumer resource
+        :returns: A dict of the form:
+                {
+                    $RP_UUID: {
+                              "generation": $RP_GEN,
+                              "resources": {
+                                  $RESOURCE_CLASS: $AMOUNT
+                                  ...
+                              },
+                    },
+                    ...
+                }
+        """
+        try:
+            return self.get_allocs_for_consumer(
+                context, consumer)['allocations']
+        except ks_exc.ClientException as e:
+            LOG.warning("Failed to get allocations for consumer %(consumer)s: "
+                        "%(error)s", {'consumer': consumer, 'error': e})
+            # Because this is what @safe_connect did
+            return None
+        except exception.ConsumerAllocationRetrievalFailed as e:
+            LOG.warning(e)
+            # Because this is how we used to treat non-200
+            return {}
+
+    def get_allocs_for_consumer(self, context, consumer):
         """Makes a GET /allocations/{consumer} call to Placement.
 
         :param context: The nova.context.RequestContext auth context
         :param consumer: UUID of the consumer resource
-        :param include_generation: True if the response should be the
-            full allocations response including ``consumer_generation`` (new
-            in microversion 1.28), False if only the "allocations" dict from
-            the response body should be returned.
-        :returns: dict, see ``include_generation`` for details on format;
-            returns None if unable to connect to Placement (see safe_connect)
+        :return: Dict of the form:
+                { "allocations": {
+                      $RP_UUID: {
+                          "generation": $RP_GEN,
+                          "resources": {
+                              $RESOURCE_CLASS: $AMOUNT
+                              ...
+                          },
+                      },
+                      ...
+                  },
+                  "consumer_generation": $CONSUMER_GEN,
+                  "project_id": $PROJ_ID,
+                  "user_id": $USER_ID,
+                }
+        :raises: keystoneauth1.exceptions.base.ClientException on failure to
+                 communicate with the placement API
+        :raises: ConsumerAllocationRetrievalFailed if the placement API call
+                 fails
         """
-        url = '/allocations/%s' % consumer
-        resp = self.get(
-            url, version=CONSUMER_GENERATION_VERSION,
-            global_request_id=context.global_id)
+        resp = self.get('/allocations/%s' % consumer,
+                        version=CONSUMER_GENERATION_VERSION,
+                        global_request_id=context.global_id)
         if not resp:
-            return {}
-        else:
-            # TODO(efried): refactor all callers to accept the whole response
-            # so we can get rid of this condition
-            if include_generation:
-                return resp.json()
-            return resp.json()['allocations']
+            # TODO(efried): Use code/title/detail to make a better exception
+            raise exception.ConsumerAllocationRetrievalFailed(
+                consumer_uuid=consumer, error=resp.text)
+
+        return resp.json()
 
     def get_allocations_for_consumer_by_provider(self, context, rp_uuid,
                                                  consumer):
+        """Return allocations for a consumer and a resource provider.
+
+        :param context: The nova.context.RequestContext auth context
+        :param rp_uuid: UUID of the resource provider
+        :param consumer: UUID of the consumer
+        :return: the resources dict of the consumer's allocation keyed by
+                 resource classes
+        """
         # NOTE(cdent): This trims to just the allocations being
         # used on this resource provider. In the future when there
         # are shared resources there might be other providers.
@@ -1573,26 +1524,6 @@ class SchedulerReportClient(object):
         return allocations.get(
             rp_uuid, {}).get('resources', {})
 
-    def _allocate_for_instance(self, context, rp_uuid, instance):
-        my_allocations = _instance_to_allocations_dict(instance)
-        current_allocations = self.get_allocations_for_consumer_by_provider(
-            context, rp_uuid, instance.uuid)
-        if current_allocations == my_allocations:
-            allocstr = ','.join(['%s=%s' % (k, v)
-                                 for k, v in my_allocations.items()])
-            LOG.debug('Instance %(uuid)s allocations are unchanged: %(alloc)s',
-                      {'uuid': instance.uuid, 'alloc': allocstr})
-            return
-
-        LOG.debug('Sending allocation for instance %s',
-                  my_allocations,
-                  instance=instance)
-        res = self.put_allocations(context, rp_uuid, instance.uuid,
-                                   my_allocations, instance.project_id,
-                                   instance.user_id)
-        if res:
-            LOG.info('Submitted allocation for instance', instance=instance)
-
     # NOTE(jaypipes): Currently, this method is ONLY used in two places:
     # 1. By the scheduler to allocate resources on the selected destination
     #    hosts.
@@ -1600,13 +1531,12 @@ class SchedulerReportClient(object):
     #    destination host. This is a short-term fix for Pike which should be
     #    replaced in Queens by conductor calling the scheduler in the force
     #    host case.
-    # This method should not be called by the resource tracker; instead, the
-    # _allocate_for_instance() method is used which does not perform any
-    # checking that a move operation is in place.
+    # This method should not be called by the resource tracker.
     @safe_connect
     @retries
     def claim_resources(self, context, consumer_uuid, alloc_request,
-                        project_id, user_id, allocation_request_version=None):
+                        project_id, user_id, allocation_request_version,
+                        consumer_generation=None):
         """Creates allocation records for the supplied instance UUID against
         the supplied resource providers.
 
@@ -1617,9 +1547,9 @@ class SchedulerReportClient(object):
         operations from being scheduled to improperly, we create a "doubled-up"
         allocation that consumes resources on *both* the source and the
         destination host during the move operation. When the move operation
-        completes, the destination host (via _allocate_for_instance()) will
-        end up setting allocations for the instance only on the destination
-        host thereby freeing up resources on the source host appropriately.
+        completes, the destination host will end up setting allocations for the
+        instance only on the destination host thereby freeing up resources on
+        the source host appropriately.
 
         :param context: The security context
         :param consumer_uuid: The instance's UUID.
@@ -1629,30 +1559,16 @@ class SchedulerReportClient(object):
         :param user_id: The user_id associated with the allocations.
         :param allocation_request_version: The microversion used to request the
                                            allocations.
+        :param consumer_generation: The expected generation of the consumer.
+                                    None if a new consumer is expected
         :returns: True if the allocations were created, False otherwise.
+        :raise AllocationUpdateFailed: If consumer_generation in the
+                                       alloc_request does not match with the
+                                       placement view.
         """
-        # Older clients might not send the allocation_request_version, so
-        # default to 1.10.
-        # TODO(alex_xu): In the rocky, all the client should send the
-        # allocation_request_version. So remove this default value.
-        allocation_request_version = allocation_request_version or '1.10'
         # Ensure we don't change the supplied alloc request since it's used in
         # a loop within the scheduler against multiple instance claims
         ar = copy.deepcopy(alloc_request)
-
-        # If the allocation_request_version less than 1.12, then convert the
-        # allocation array format to the dict format. This conversion can be
-        # remove in Rocky release.
-        if versionutils.convert_version_to_tuple(
-                allocation_request_version) < (1, 12):
-            ar = {
-                'allocations': {
-                    alloc['resource_provider']['uuid']: {
-                        'resources': alloc['resources']
-                    } for alloc in ar['allocations']
-                }
-            }
-            allocation_request_version = '1.12'
 
         url = '/allocations/%s' % consumer_uuid
 
@@ -1661,195 +1577,353 @@ class SchedulerReportClient(object):
         # We first need to determine if this is a move operation and if so
         # create the "doubled-up" allocation that exists for the duration of
         # the move operation against both the source and destination hosts
-        r = self.get(url, global_request_id=context.global_id)
+        r = self.get(url, global_request_id=context.global_id,
+                     version=CONSUMER_GENERATION_VERSION)
         if r.status_code == 200:
-            current_allocs = r.json()['allocations']
+            body = r.json()
+            current_allocs = body['allocations']
             if current_allocs:
+                if 'consumer_generation' not in ar:
+                    # this is non-forced evacuation. Evacuation does not use
+                    # the migration.uuid to hold the source host allocation
+                    # therefore when the scheduler calls claim_resources() then
+                    # the two allocations need to be combined. Scheduler does
+                    # not know that this is not a new consumer as it only sees
+                    # allocation candidates.
+                    # Therefore we need to use the consumer generation from
+                    # the above GET.
+                    # If between the GET and the PUT the consumer generation
+                    # changes in placement then we raise
+                    # AllocationUpdateFailed.
+                    # NOTE(gibi): This only detect a small portion of possible
+                    # cases when allocation is modified outside of the this
+                    # code path. The rest can only be detected if nova would
+                    # cache at least the consumer generation of the instance.
+                    consumer_generation = body['consumer_generation']
+                else:
+                    # this is forced evacuation and the caller
+                    # claim_resources_on_destination() provides the consumer
+                    # generation it sees in the conductor when it generates the
+                    # request.
+                    consumer_generation = ar['consumer_generation']
                 payload = _move_operation_alloc_request(current_allocs, ar)
 
         payload['project_id'] = project_id
         payload['user_id'] = user_id
-        r = self.put(url, payload, version=allocation_request_version,
-                     global_request_id=context.global_id)
+
+        if (versionutils.convert_version_to_tuple(
+                allocation_request_version) >=
+                versionutils.convert_version_to_tuple(
+                    CONSUMER_GENERATION_VERSION)):
+            payload['consumer_generation'] = consumer_generation
+
+        r = self._put_allocations(
+            context,
+            consumer_uuid,
+            payload,
+            version=allocation_request_version)
         if r.status_code != 204:
-            # NOTE(jaypipes): Yes, it sucks doing string comparison like this
-            # but we have no error codes, only error messages.
-            if 'concurrently updated' in r.text:
+            err = r.json()['errors'][0]
+            if err['code'] == 'placement.concurrent_update':
+                # NOTE(jaypipes): Yes, it sucks doing string comparison like
+                # this but we have no error codes, only error messages.
+                # TODO(gibi): Use more granular error codes when available
+                if 'consumer generation conflict' in err['detail']:
+                    reason = ('another process changed the consumer %s after '
+                              'the report client read the consumer state '
+                              'during the claim ' % consumer_uuid)
+                    raise exception.AllocationUpdateFailed(
+                        consumer_uuid=consumer_uuid, error=reason)
+
+                # this is not a consumer generation conflict so it can only be
+                # a resource provider generation conflict. The caller does not
+                # provide resource provider generation so this is just a
+                # placement internal race. We can blindly retry locally.
                 reason = ('another process changed the resource providers '
                           'involved in our attempt to put allocations for '
                           'consumer %s' % consumer_uuid)
                 raise Retry('claim_resources', reason)
-            else:
-                LOG.warning(
-                    'Unable to submit allocation for instance '
-                    '%(uuid)s (%(code)i %(text)s)',
-                    {'uuid': consumer_uuid,
-                     'code': r.status_code,
-                     'text': r.text})
         return r.status_code == 204
 
-    @safe_connect
-    def remove_provider_from_instance_allocation(self, context, consumer_uuid,
-                                                 rp_uuid, user_id, project_id,
-                                                 resources):
-        """Grabs an allocation for a particular consumer UUID, strips parts of
-        the allocation that refer to a supplied resource provider UUID, and
-        then PUTs the resulting allocation back to the placement API for the
+    def remove_resources_from_instance_allocation(
+            self, context, consumer_uuid, resources):
+        """Removes certain resources from the current allocation of the
         consumer.
 
-        This is used to reconcile the "doubled-up" allocation that the
-        scheduler constructs when claiming resources against the destination
-        host during a move operation.
-
-        If the move was between hosts, the entire allocation for rp_uuid will
-        be dropped. If the move is a resize on the same host, then we will
-        subtract resources from the single allocation to ensure we do not
-        exceed the reserved or max_unit amounts for the resource on the host.
-
-        :param context: The security context
-        :param consumer_uuid: The instance/consumer UUID
-        :param rp_uuid: The UUID of the provider whose resources we wish to
-                        remove from the consumer's allocation
-        :param user_id: The instance's user
-        :param project_id: The instance's project
-        :param resources: The resources to be dropped from the allocation
+        :param context: the request context
+        :param consumer_uuid: the uuid of the consumer to update
+        :param resources: a dict of resources. E.g.:
+                              {
+                                  <rp_uuid>: {
+                                      <resource class>: amount
+                                      <other resource class>: amount
+                                  }
+                                  <other_ rp_uuid>: {
+                                      <other resource class>: amount
+                                  }
+                              }
+        :raises AllocationUpdateFailed: if the requested resource cannot be
+                removed from the current allocation (e.g. rp is missing from
+                the allocation) or there was multiple generation conflict and
+                we run out of retires.
+        :raises ConsumerAllocationRetrievalFailed: If the current allocation
+                cannot be read from placement.
+        :raises: keystoneauth1.exceptions.base.ClientException on failure to
+                 communicate with the placement API
         """
-        url = '/allocations/%s' % consumer_uuid
 
-        # Grab the "doubled-up" allocation that we will manipulate
-        r = self.get(url, global_request_id=context.global_id)
-        if r.status_code != 200:
-            LOG.warning("Failed to retrieve allocations for %s. Got HTTP %s",
-                        consumer_uuid, r.status_code)
-            return False
+        # NOTE(gibi): It is just a small wrapper to raise instead of return
+        # if we run out of retries.
+        if not self._remove_resources_from_instance_allocation(
+                context, consumer_uuid, resources):
+            error_reason = _("Cannot remove resources %s from the allocation "
+                             "due to multiple successive generation conflicts "
+                             "in placement.")
+            raise exception.AllocationUpdateFailed(
+                consumer_uuid=consumer_uuid,
+                error=error_reason % resources)
 
-        current_allocs = r.json()['allocations']
-        if not current_allocs:
-            LOG.error("Expected to find current allocations for %s, but "
-                      "found none.", consumer_uuid)
-            return False
-
-        # If the host isn't in the current allocation for the instance, don't
-        # do anything
-        if rp_uuid not in current_allocs:
-            LOG.warning("Expected to find allocations referencing resource "
-                        "provider %s for %s, but found none.",
-                        rp_uuid, consumer_uuid)
+    @retries
+    def _remove_resources_from_instance_allocation(
+            self, context, consumer_uuid, resources):
+        if not resources:
+            # Nothing to remove so do not query or update allocation in
+            # placement.
+            # The True value is only here because the retry decorator returns
+            # False when runs out of retries. It would be nicer to raise in
+            # that case too.
             return True
 
-        compute_providers = [uuid for uuid, alloc in current_allocs.items()
-                             if 'VCPU' in alloc['resources']]
-        LOG.debug('Current allocations for instance: %s', current_allocs,
-                  instance_uuid=consumer_uuid)
-        LOG.debug('Instance %s has resources on %i compute nodes',
-                  consumer_uuid, len(compute_providers))
+        current_allocs = self.get_allocs_for_consumer(context, consumer_uuid)
 
-        new_allocs = [
-            {
-                'resource_provider': {
-                    'uuid': alloc_rp_uuid,
-                },
-                'resources': alloc['resources'],
-            }
-            for alloc_rp_uuid, alloc in current_allocs.items()
-            if alloc_rp_uuid != rp_uuid
-        ]
+        if not current_allocs['allocations']:
+            error_reason = _("Cannot remove resources %(resources)s from "
+                             "allocation %(allocations)s. The allocation is "
+                             "empty.")
+            raise exception.AllocationUpdateFailed(
+                consumer_uuid=consumer_uuid,
+                error=error_reason %
+                      {'resources': resources, 'allocations': current_allocs})
 
-        if len(compute_providers) == 1:
-            # NOTE(danms): We are in a resize to same host scenario. Since we
-            # are the only provider then we need to merge back in the doubled
-            # allocation with our part subtracted
-            peer_alloc = {
-                'resource_provider': {
-                    'uuid': rp_uuid,
-                },
-                'resources': current_allocs[rp_uuid]['resources']
-            }
-            LOG.debug('Original resources from same-host '
-                      'allocation: %s', peer_alloc['resources'])
-            scheduler_utils.merge_resources(peer_alloc['resources'],
-                                            resources, -1)
-            LOG.debug('Subtracting old resources from same-host '
-                      'allocation: %s', peer_alloc['resources'])
-            new_allocs.append(peer_alloc)
+        try:
+            for rp_uuid, resources_to_remove in resources.items():
+                allocation_on_rp = current_allocs['allocations'][rp_uuid]
+                for rc, value in resources_to_remove.items():
+                    allocation_on_rp['resources'][rc] -= value
 
-        payload = {'allocations': new_allocs}
-        payload['project_id'] = project_id
-        payload['user_id'] = user_id
-        LOG.debug("Sending updated allocation %s for instance %s after "
-                  "removing resources for %s.",
-                  new_allocs, consumer_uuid, rp_uuid)
-        r = self.put(url, payload, version='1.10',
+                    if allocation_on_rp['resources'][rc] < 0:
+                        error_reason = _(
+                            "Cannot remove resources %(resources)s from "
+                            "allocation %(allocations)s. There are not enough "
+                            "allocated resources left on %(rp_uuid)s resource "
+                            "provider to remove %(amount)d amount of "
+                            "%(resource_class)s resources.")
+                        raise exception.AllocationUpdateFailed(
+                            consumer_uuid=consumer_uuid,
+                            error=error_reason %
+                                  {'resources': resources,
+                                   'allocations': current_allocs,
+                                   'rp_uuid': rp_uuid,
+                                   'amount': value,
+                                   'resource_class': rc})
+
+                    if allocation_on_rp['resources'][rc] == 0:
+                        # if no allocation left for this rc then remove it
+                        # from the allocation
+                        del allocation_on_rp['resources'][rc]
+        except KeyError as e:
+            error_reason = _("Cannot remove resources %(resources)s from "
+                             "allocation %(allocations)s. Key %(missing_key)s "
+                             "is missing from the allocation.")
+            # rp_uuid is missing from the allocation or resource class is
+            # missing from the allocation
+            raise exception.AllocationUpdateFailed(
+                consumer_uuid=consumer_uuid,
+                error=error_reason %
+                      {'resources': resources,
+                       'allocations': current_allocs,
+                       'missing_key': e})
+
+        # we have to remove the rps from the allocation that has no resources
+        # any more
+        current_allocs['allocations'] = {
+            rp_uuid: alloc
+            for rp_uuid, alloc in current_allocs['allocations'].items()
+            if alloc['resources']}
+
+        r = self._put_allocations(
+            context, consumer_uuid, current_allocs)
+
+        if r.status_code != 204:
+            err = r.json()['errors'][0]
+            if err['code'] == 'placement.concurrent_update':
+                reason = ('another process changed the resource providers or '
+                          'the consumer involved in our attempt to update '
+                          'allocations for consumer %s so we cannot remove '
+                          'resources %s from the current allocation %s' %
+                          (consumer_uuid, resources, current_allocs))
+                # NOTE(gibi): automatic retry is meaningful if we can still
+                # remove the resources from the updated allocations. Retry
+                # works here as this function (re)queries the allocations.
+                raise Retry(
+                    'remove_resources_from_instance_allocation', reason)
+
+        # It is only here because the retry decorator returns False when runs
+        # out of retries. It would be nicer to raise in that case too.
+        return True
+
+    def remove_provider_tree_from_instance_allocation(self, context,
+                                                      consumer_uuid,
+                                                      root_rp_uuid):
+        """Removes every allocation from the consumer that is on the
+        specified provider tree.
+
+        Note that this function does not try to remove allocations from sharing
+        providers.
+
+        :param context: The security context
+        :param consumer_uuid: The UUID of the consumer to manipulate
+        :param root_rp_uuid: The root of the provider tree
+        :raises: keystoneauth1.exceptions.base.ClientException on failure to
+                 communicate with the placement API
+        :raises: ConsumerAllocationRetrievalFailed if this call cannot read
+                 the current state of the allocations from placement
+        :raises: ResourceProviderRetrievalFailed if it cannot collect the RPs
+                 in the tree specified by root_rp_uuid.
+        """
+        current_allocs = self.get_allocs_for_consumer(context, consumer_uuid)
+        if not current_allocs['allocations']:
+            LOG.error("Expected to find current allocations for %s, but "
+                      "found none.", consumer_uuid)
+            # TODO(gibi): do not return False as none of the callers
+            # do anything with the return value except log
+            return False
+
+        rps = self._get_providers_in_tree(context, root_rp_uuid)
+        rp_uuids = [rp['uuid'] for rp in rps]
+
+        # go through the current allocations and remove every RP from it that
+        # belongs to the RP tree identified by the root_rp_uuid parameter
+        has_changes = False
+        for rp_uuid in rp_uuids:
+            changed = bool(
+                current_allocs['allocations'].pop(rp_uuid, None))
+            has_changes = has_changes or changed
+
+        # If nothing changed then don't do anything
+        if not has_changes:
+            LOG.warning(
+                "Expected to find allocations referencing resource "
+                "provider tree rooted at %s for %s, but found none.",
+                root_rp_uuid, consumer_uuid)
+            # TODO(gibi): do not return a value as none of the callers
+            # do anything with the return value except logging
+            return True
+
+        r = self._put_allocations(context, consumer_uuid, current_allocs)
+        # TODO(gibi): do not return a value as none of the callers
+        # do anything with the return value except logging
+        return r.status_code == 204
+
+    def _put_allocations(
+            self, context, consumer_uuid, payload,
+            version=CONSUMER_GENERATION_VERSION):
+        url = '/allocations/%s' % consumer_uuid
+        r = self.put(url, payload, version=version,
                      global_request_id=context.global_id)
         if r.status_code != 204:
             LOG.warning("Failed to save allocation for %s. Got HTTP %s: %s",
                         consumer_uuid, r.status_code, r.text)
-        return r.status_code == 204
+        return r
 
     @safe_connect
     @retries
-    def set_and_clear_allocations(self, context, rp_uuid, consumer_uuid,
-                                  alloc_data, project_id, user_id,
-                                  consumer_to_clear=None):
-        """Create allocation records for the supplied consumer UUID while
-        simultaneously clearing any allocations identified by the uuid
-        in consumer_to_clear, for example a migration uuid when moving an
-        instance to another host. This is for atomically managing so-called
-        "doubled" migration records.
+    def move_allocations(self, context, source_consumer_uuid,
+                         target_consumer_uuid):
+        """Move allocations from one consumer to the other
 
-        :note Currently we only allocate against a single resource provider.
-              Once shared storage and things like NUMA allocations are a
-              reality, this will change to allocate against multiple providers.
+        Note that this call moves the current allocation from the source
+        consumer to the target consumer. If parallel update happens on either
+        consumer during this call then Placement will detect that and
+        this code will raise AllocationMoveFailed. If you want to move a known
+        piece of allocation from source to target then this function might not
+        be what you want as it always moves what source has in Placement.
+
+        If the target consumer has allocations but the source consumer does
+        not, this method assumes the allocations were already moved and
+        returns True.
 
         :param context: The security context
-        :param rp_uuid: The UUID of the resource provider to allocate against.
-        :param consumer_uuid: The consumer UUID for which allocations are
-                              being set.
-        :param alloc_data: Dict, keyed by resource class, of amounts to
-                           consume.
-        :param project_id: The project_id associated with the allocations.
-        :param user_id: The user_id associated with the allocations.
-        :param consumer_to_clear: A UUID identifying allocations for a
-                                  consumer that should be cleared.
-        :returns: True if the allocations were created, False otherwise.
-        :raises: Retry if the operation should be retried due to a concurrent
-                 update.
+        :param source_consumer_uuid: the UUID of the consumer from which
+                                     allocations are moving
+        :param target_consumer_uuid: the UUID of the target consumer for the
+                                     allocations
+        :returns: True if the move was successful (or already done),
+                  False otherwise.
+        :raises AllocationMoveFailed: If the source or the target consumer has
+                                      been modified while this call tries to
+                                      move allocations.
         """
-        # FIXME(cdent): Fair amount of duplicate with put in here, but now
-        # just working things through.
-        payload = {
-            consumer_uuid: {
-                'allocations': {
-                    rp_uuid: {
-                        'resources': alloc_data
-                    }
-                },
-                'project_id': project_id,
-                'user_id': user_id,
+        source_alloc = self.get_allocs_for_consumer(
+            context, source_consumer_uuid)
+        target_alloc = self.get_allocs_for_consumer(
+            context, target_consumer_uuid)
+
+        if target_alloc and target_alloc['allocations']:
+            # Check to see if the source allocations still exist because if
+            # they don't they might have already been moved to the target.
+            if not (source_alloc and source_alloc['allocations']):
+                LOG.info('Allocations not found for consumer %s; assuming '
+                         'they were already moved to consumer %s',
+                         source_consumer_uuid, target_consumer_uuid)
+                return True
+            LOG.warning('Overwriting current allocation %(allocation)s on '
+                        'consumer %(consumer)s',
+                        {'allocation': target_alloc,
+                         'consumer': target_consumer_uuid})
+
+        new_allocs = {
+            source_consumer_uuid: {
+                # 'allocations': {} means we are removing the allocation from
+                # the source consumer
+                'allocations': {},
+                'project_id': source_alloc['project_id'],
+                'user_id': source_alloc['user_id'],
+                'consumer_generation': source_alloc['consumer_generation']},
+            target_consumer_uuid: {
+                'allocations': source_alloc['allocations'],
+                # NOTE(gibi): Is there any case when we need to keep the
+                # project_id and user_id of the target allocation that we are
+                # about to overwrite?
+                'project_id': source_alloc['project_id'],
+                'user_id': source_alloc['user_id'],
+                'consumer_generation': target_alloc.get('consumer_generation')
             }
         }
-        if consumer_to_clear:
-            payload[consumer_to_clear] = {
-                'allocations': {},
-                'project_id': project_id,
-                'user_id': user_id,
-            }
-        r = self.post('/allocations', payload,
-                      version=POST_ALLOCATIONS_API_VERSION,
+        r = self.post('/allocations', new_allocs,
+                      version=CONSUMER_GENERATION_VERSION,
                       global_request_id=context.global_id)
         if r.status_code != 204:
-            # NOTE(jaypipes): Yes, it sucks doing string comparison like this
-            # but we have no error codes, only error messages.
-            if 'concurrently updated' in r.text:
+            err = r.json()['errors'][0]
+            if err['code'] == 'placement.concurrent_update':
+                # NOTE(jaypipes): Yes, it sucks doing string comparison like
+                # this but we have no error codes, only error messages.
+                # TODO(gibi): Use more granular error codes when available
+                if 'consumer generation conflict' in err['detail']:
+                    raise exception.AllocationMoveFailed(
+                        source_consumer=source_consumer_uuid,
+                        target_consumer=target_consumer_uuid,
+                        error=r.text)
+
                 reason = ('another process changed the resource providers '
                           'involved in our attempt to post allocations for '
-                          'consumer %s' % consumer_uuid)
-                raise Retry('set_and_clear_allocations', reason)
+                          'consumer %s' % target_consumer_uuid)
+                raise Retry('move_allocations', reason)
             else:
                 LOG.warning(
-                    'Unable to post allocations for instance '
+                    'Unable to post allocations for consumer '
                     '%(uuid)s (%(code)i %(text)s)',
-                    {'uuid': consumer_uuid,
+                    {'uuid': target_consumer_uuid,
                      'code': r.status_code,
                      'text': r.text})
         return r.status_code == 204
@@ -1857,7 +1931,7 @@ class SchedulerReportClient(object):
     @safe_connect
     @retries
     def put_allocations(self, context, rp_uuid, consumer_uuid, alloc_data,
-                        project_id, user_id):
+                        project_id, user_id, consumer_generation):
         """Creates allocation records for the supplied instance UUID against
         the supplied resource provider.
 
@@ -1872,75 +1946,211 @@ class SchedulerReportClient(object):
                            consume.
         :param project_id: The project_id associated with the allocations.
         :param user_id: The user_id associated with the allocations.
+        :param consumer_generation: The current generation of the consumer or
+                                    None if this the initial allocation of the
+                                    consumer
         :returns: True if the allocations were created, False otherwise.
         :raises: Retry if the operation should be retried due to a concurrent
-                 update.
+                 resource provider update.
+        :raises: AllocationUpdateFailed if placement returns a consumer
+                                        generation conflict
         """
+
         payload = {
-            'allocations': [
-                {
-                    'resource_provider': {
-                        'uuid': rp_uuid,
-                    },
-                    'resources': alloc_data,
-                },
-            ],
+            'allocations': {
+                rp_uuid: {'resources': alloc_data},
+            },
             'project_id': project_id,
             'user_id': user_id,
+            'consumer_generation': consumer_generation
         }
-        url = '/allocations/%s' % consumer_uuid
-        r = self.put(url, payload, version='1.8',
-                     global_request_id=context.global_id)
+        r = self._put_allocations(context, consumer_uuid, payload)
         if r.status_code != 204:
+            err = r.json()['errors'][0]
             # NOTE(jaypipes): Yes, it sucks doing string comparison like this
             # but we have no error codes, only error messages.
-            if 'concurrently updated' in r.text:
+            # TODO(gibi): Use more granular error codes when available
+            if err['code'] == 'placement.concurrent_update':
+                if 'consumer generation conflict' in err['detail']:
+                    raise exception.AllocationUpdateFailed(
+                        consumer_uuid=consumer_uuid, error=err['detail'])
+                # this is not a consumer generation conflict so it can only be
+                # a resource provider generation conflict. The caller does not
+                # provide resource provider generation so this is just a
+                # placement internal race. We can blindly retry locally.
                 reason = ('another process changed the resource providers '
                           'involved in our attempt to put allocations for '
                           'consumer %s' % consumer_uuid)
                 raise Retry('put_allocations', reason)
-            else:
-                LOG.warning(
-                    'Unable to submit allocation for instance '
-                    '%(uuid)s (%(code)i %(text)s)',
-                    {'uuid': consumer_uuid,
-                     'code': r.status_code,
-                     'text': r.text})
         return r.status_code == 204
 
     @safe_connect
-    def delete_allocation_for_instance(self, context, uuid):
+    def delete_allocation_for_instance(self, context, uuid,
+                                       consumer_type='instance'):
+        """Delete the instance allocation from placement
+
+        :param context: The security context
+        :param uuid: the instance or migration UUID which will be used
+                     as the consumer UUID towards placement
+        :param consumer_type: The type of the consumer specified by uuid.
+                              'instance' or 'migration' (Default: instance)
+        :return: Returns True if the allocation is successfully deleted by this
+                 call. Returns False if the allocation does not exist.
+        :raises AllocationDeleteFailed: If the allocation cannot be read from
+                placement or it is changed by another process while we tried to
+                delete it.
+        """
         url = '/allocations/%s' % uuid
-        r = self.delete(url, global_request_id=context.global_id)
-        if r:
-            LOG.info('Deleted allocation for instance %s', uuid)
-            return True
-        else:
-            # Check for 404 since we don't need to log a warning if we tried to
-            # delete something which doesn't actually exist.
-            if r.status_code != 404:
-                LOG.warning('Unable to delete allocation for instance '
-                            '%(uuid)s: (%(code)i %(text)s)',
-                            {'uuid': uuid,
-                             'code': r.status_code,
-                             'text': r.text})
+        # We read the consumer generation then try to put an empty allocation
+        # for that consumer. If between the GET and the PUT the consumer
+        # generation changes then we raise AllocationDeleteFailed.
+        # NOTE(gibi): This only detect a small portion of possible cases when
+        # allocation is modified outside of the delete code path. The rest can
+        # only be detected if nova would cache at least the consumer generation
+        # of the instance.
+        # NOTE(gibi): placement does not return 404 for non-existing consumer
+        # but returns an empty consumer instead. Putting an empty allocation to
+        # that non-existing consumer won't be 404 or other error either.
+        r = self.get(url, global_request_id=context.global_id,
+                     version=CONSUMER_GENERATION_VERSION)
+        if not r:
+            # at the moment there is no way placement returns a failure so we
+            # could even delete this code
+            LOG.warning('Unable to delete allocation for %(consumer_type)s '
+                        '%(uuid)s: (%(code)i %(text)s)',
+                        {'consumer_type': consumer_type,
+                         'uuid': uuid,
+                         'code': r.status_code,
+                         'text': r.text})
+            raise exception.AllocationDeleteFailed(consumer_uuid=uuid,
+                                                   error=r.text)
+        allocations = r.json()
+        if allocations['allocations'] == {}:
+            # the consumer did not exist in the first place
+            LOG.debug('Cannot delete allocation for %s consumer in placement '
+                      'as consumer does not exists', uuid)
             return False
 
-    def update_instance_allocation(self, context, compute_node, instance,
-                                   sign):
-        if sign > 0:
-            self._allocate_for_instance(context, compute_node.uuid, instance)
+        # removing all resources from the allocation will auto delete the
+        # consumer in placement
+        allocations['allocations'] = {}
+        r = self.put(url, allocations, global_request_id=context.global_id,
+                     version=CONSUMER_GENERATION_VERSION)
+        if r.status_code == 204:
+            LOG.info('Deleted allocation for %(consumer_type)s %(uuid)s',
+                     {'consumer_type': consumer_type,
+                      'uuid': uuid})
+            return True
         else:
-            self.delete_allocation_for_instance(context, instance.uuid)
+            LOG.warning('Unable to delete allocation for %(consumer_type)s '
+                        '%(uuid)s: (%(code)i %(text)s)',
+                        {'consumer_type': consumer_type,
+                         'uuid': uuid,
+                         'code': r.status_code,
+                         'text': r.text})
+            raise exception.AllocationDeleteFailed(consumer_uuid=uuid,
+                                                   error=r.text)
 
-    @safe_connect
     def get_allocations_for_resource_provider(self, context, rp_uuid):
+        """Retrieves the allocations for a specific provider.
+
+        :param context: The nova.context.RequestContext auth context
+        :param rp_uuid: The UUID of the provider.
+        :return: ProviderAllocInfo namedtuple.
+        :raises: keystoneauth1.exceptions.base.ClientException on failure to
+                 communicate with the placement API
+        :raises: ResourceProviderAllocationRetrievalFailed if the placement API
+                 call fails.
+        """
         url = '/resource_providers/%s/allocations' % rp_uuid
         resp = self.get(url, global_request_id=context.global_id)
         if not resp:
-            return {}
-        else:
-            return resp.json()['allocations']
+            raise exception.ResourceProviderAllocationRetrievalFailed(
+                rp_uuid=rp_uuid, error=resp.text)
+
+        data = resp.json()
+        return ProviderAllocInfo(allocations=data['allocations'])
+
+    def get_allocations_for_provider_tree(self, context, nodename):
+        """Retrieve allocation records associated with all providers in the
+        provider tree.
+
+        This method uses the cache exclusively to discover providers. The
+        caller must ensure that the cache is populated.
+
+        This method is (and should remain) used exclusively in the reshaper
+        flow by the resource tracker.
+
+        Note that, in addition to allocations on providers in this compute
+        node's provider tree, this method will return allocations on sharing
+        providers if those allocations are associated with a consumer on this
+        compute node. This is intentional and desirable. But it may also return
+        allocations belonging to other hosts, e.g. if this is happening in the
+        middle of an evacuate. ComputeDriver.update_provider_tree is supposed
+        to ignore such allocations if they appear.
+
+        :param context: The security context
+        :param nodename: The name of a node for whose tree we are getting
+                allocations.
+        :returns: A dict, keyed by consumer UUID, of allocation records:
+                { $CONSUMER_UUID: {
+                      # The shape of each "allocations" dict below is identical
+                      # to the return from GET /allocations/{consumer_uuid}
+                      "allocations": {
+                          $RP_UUID: {
+                              "generation": $RP_GEN,
+                              "resources": {
+                                  $RESOURCE_CLASS: $AMOUNT,
+                                  ...
+                              },
+                          },
+                          ...
+                      },
+                      "project_id": $PROJ_ID,
+                      "user_id": $USER_ID,
+                      "consumer_generation": $CONSUMER_GEN,
+                  },
+                  ...
+                }
+        :raises: keystoneauth1.exceptions.ClientException if placement API
+                 communication fails.
+        :raises: ResourceProviderAllocationRetrievalFailed if a placement API
+                 call fails.
+        :raises: ValueError if there's no provider with the specified nodename.
+        """
+        # NOTE(efried): Despite our best efforts, there are some scenarios
+        # (e.g. mid-evacuate) where we can still wind up returning allocations
+        # against providers belonging to other hosts. We count on the consumer
+        # of this information (i.e. the reshaper flow of a virt driver's
+        # update_provider_tree) to ignore allocations associated with any
+        # provider it is not reshaping - and it should never be reshaping
+        # providers belonging to other hosts.
+
+        # We can't get *all* allocations for associated sharing providers
+        # because some of those will belong to consumers on other hosts. So we
+        # have to discover all the consumers associated with the providers in
+        # the "local" tree (we use the nodename to figure out which providers
+        # are "local").
+        # All we want to do at this point is accumulate the set of consumers we
+        # care about.
+        consumers = set()
+        # TODO(efried): This could be more efficient if placement offered an
+        # operation like GET /allocations?rp_uuid=in:<list>
+        for u in self._provider_tree.get_provider_uuids(name_or_uuid=nodename):
+            alloc_info = self.get_allocations_for_resource_provider(context, u)
+            # The allocations dict is keyed by consumer UUID
+            consumers.update(alloc_info.allocations)
+
+        # Now get all the allocations for each of these consumers to build the
+        # result. This will include allocations on sharing providers, which is
+        # intentional and desirable. But it may also include allocations
+        # belonging to other hosts, e.g. if this is happening in the middle of
+        # an evacuate. ComputeDriver.update_provider_tree is supposed to ignore
+        # such allocations if they appear.
+        # TODO(efried): This could be more efficient if placement offered an
+        # operation like GET /allocations?consumer_uuid=in:<list>
+        return {consumer: self.get_allocs_for_consumer(context, consumer)
+                for consumer in consumers}
 
     def delete_resource_provider(self, context, compute_node, cascade=False):
         """Deletes the ResourceProvider record for the compute_node.

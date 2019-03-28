@@ -45,13 +45,12 @@ CELL_CACHE = {}
 # NOTE(melwitt): Used for the scatter-gather utility to indicate we timed out
 # waiting for a result from a cell.
 did_not_respond_sentinel = object()
-# NOTE(melwitt): Used for the scatter-gather utility to indicate an exception
-# was raised gathering a result from a cell.
-raised_exception_sentinel = object()
 # FIXME(danms): Keep a global cache of the cells we find the
 # first time we look. This needs to be refreshed on a timer or
 # trigger.
 CELLS = []
+# Timeout value for waiting for cells to respond
+CELL_TIMEOUT = 60
 
 
 class _ContextAuthPlugin(plugin.BaseAuthPlugin):
@@ -145,6 +144,7 @@ class RequestContext(context.RequestContext):
         # provided by this module
         self.db_connection = None
         self.mq_connection = None
+        self.cell_uuid = None
 
         self.user_auth_plugin = user_auth_plugin
         if self.is_admin is None:
@@ -371,16 +371,19 @@ def set_target_cell(context, cell_mapping):
                 if not cell_mapping.transport_url.startswith('none'):
                     context.mq_connection = rpc.create_transport(
                         cell_mapping.transport_url)
+                context.cell_uuid = cell_mapping.uuid
                 CELL_CACHE[cell_mapping.uuid] = (context.db_connection,
                                                  context.mq_connection)
             else:
                 context.db_connection = cell_tuple[0]
                 context.mq_connection = cell_tuple[1]
+                context.cell_uuid = cell_mapping.uuid
 
         get_or_set_cached_cell_and_set_connections()
     else:
         context.db_connection = None
         context.mq_connection = None
+        context.cell_uuid = None
 
 
 @contextmanager
@@ -423,7 +426,7 @@ def scatter_gather_cells(context, cell_mappings, timeout, fn, *args, **kwargs):
     :param kwargs: The kwargs for the function to call for each cell
     :returns: A dict {cell_uuid: result} containing the joined results. The
               did_not_respond_sentinel will be returned if a cell did not
-              respond within the timeout. The raised_exception_sentinel will
+              respond within the timeout. The exception object will
               be returned if the call to a cell raised an exception. The
               exception will be logged.
     """
@@ -436,9 +439,11 @@ def scatter_gather_cells(context, cell_mappings, timeout, fn, *args, **kwargs):
         try:
             with target_cell(context, cell_mapping) as cctxt:
                 result = fn(cctxt, *args, **kwargs)
-        except Exception:
-            LOG.exception('Error gathering result from cell %s', cell_uuid)
-            result = raised_exception_sentinel
+        except Exception as e:
+            # Only log the exception traceback for non-nova exceptions.
+            if not isinstance(e, exception.NovaException):
+                LOG.exception('Error gathering result from cell %s', cell_uuid)
+            result = e.__class__(e.args)
         # The queue is already synchronized.
         queue.put((cell_uuid, result))
 
@@ -482,12 +487,17 @@ def load_cells():
         LOG.error('No cells are configured, unable to continue')
 
 
+def is_cell_failure_sentinel(record):
+    return (record is did_not_respond_sentinel or
+            isinstance(record, Exception))
+
+
 def scatter_gather_skip_cell0(context, fn, *args, **kwargs):
     """Target all cells except cell0 in parallel and return their results.
 
-    The first parameter in the signature of the function to call for each cell
-    should be of type RequestContext. There is a 60 second timeout for waiting
-    on all results to be gathered.
+    The first parameter in the signature of the function to call for
+    each cell should be of type RequestContext. There is a timeout for
+    waiting on all results to be gathered.
 
     :param context: The RequestContext for querying cells
     :param fn: The function to call for each cell
@@ -496,22 +506,45 @@ def scatter_gather_skip_cell0(context, fn, *args, **kwargs):
     :param kwargs: The kwargs for the function to call for each cell
     :returns: A dict {cell_uuid: result} containing the joined results. The
               did_not_respond_sentinel will be returned if a cell did not
-              respond within the timeout. The raised_exception_sentinel will
+              respond within the timeout. The exception object will
               be returned if the call to a cell raised an exception. The
               exception will be logged.
     """
     load_cells()
     cell_mappings = [cell for cell in CELLS if not cell.is_cell0()]
-    return scatter_gather_cells(context, cell_mappings, 60, fn, *args,
-                                **kwargs)
+    return scatter_gather_cells(context, cell_mappings, CELL_TIMEOUT,
+                                fn, *args, **kwargs)
+
+
+def scatter_gather_single_cell(context, cell_mapping, fn, *args, **kwargs):
+    """Target the provided cell and return its results or sentinels in case of
+    failure.
+
+    The first parameter in the signature of the function to call for each cell
+    should be of type RequestContext.
+
+    :param context: The RequestContext for querying cells
+    :param cell_mapping: The CellMapping to target
+    :param fn: The function to call for each cell
+    :param args: The args for the function to call for each cell, not including
+                 the RequestContext
+    :param kwargs: The kwargs for the function to call for this cell
+    :returns: A dict {cell_uuid: result} containing the joined results. The
+              did_not_respond_sentinel will be returned if the cell did not
+              respond within the timeout. The exception object will
+              be returned if the call to the cell raised an exception. The
+              exception will be logged.
+    """
+    return scatter_gather_cells(context, [cell_mapping], CELL_TIMEOUT, fn,
+                                *args, **kwargs)
 
 
 def scatter_gather_all_cells(context, fn, *args, **kwargs):
     """Target all cells in parallel and return their results.
 
-    The first parameter in the signature of the function to call for each cell
-    should be of type RequestContext. There is a 60 second timeout for waiting
-    on all results to be gathered.
+    The first parameter in the signature of the function to call for
+    each cell should be of type RequestContext. There is a timeout for
+    waiting on all results to be gathered.
 
     :param context: The RequestContext for querying cells
     :param fn: The function to call for each cell
@@ -520,9 +553,10 @@ def scatter_gather_all_cells(context, fn, *args, **kwargs):
     :param kwargs: The kwargs for the function to call for each cell
     :returns: A dict {cell_uuid: result} containing the joined results. The
               did_not_respond_sentinel will be returned if a cell did not
-              respond within the timeout. The raised_exception_sentinel will
+              respond within the timeout. The exception object will
               be returned if the call to a cell raised an exception. The
               exception will be logged.
     """
     load_cells()
-    return scatter_gather_cells(context, CELLS, 60, fn, *args, **kwargs)
+    return scatter_gather_cells(context, CELLS, CELL_TIMEOUT,
+                                fn, *args, **kwargs)

@@ -13,6 +13,7 @@
 #    under the License.
 
 import mock
+from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova.cells import rpcapi as cells_rpcapi
 from nova import context
@@ -26,7 +27,6 @@ from nova import test
 from nova.tests.unit import fake_block_device
 from nova.tests.unit import fake_instance
 from nova.tests.unit.objects import test_objects
-from nova.tests import uuidsentinel as uuids
 
 
 class _TestBlockDeviceMappingObject(object):
@@ -423,6 +423,17 @@ class _TestBlockDeviceMappingObject(object):
         data = lambda x: x['nova_object.data']
         primitive = data(bdm.obj_to_primitive(target_version='1.18'))
         self.assertNotIn('uuid', primitive)
+        self.assertIn('volume_id', primitive)
+
+    def test_obj_make_compatible_pre_1_20(self):
+        values = {'source_type': 'volume', 'volume_id': 'fake-vol-id',
+                  'destination_type': 'volume',
+                  'instance_uuid': uuids.instance,
+                  'volume_type': 'fake-lvm-1'}
+        bdm = objects.BlockDeviceMapping(context=self.context, **values)
+        data = lambda x: x['nova_object.data']
+        primitive = data(bdm.obj_to_primitive(target_version='1.19'))
+        self.assertNotIn('volume_type', primitive)
         self.assertIn('volume_id', primitive)
 
 

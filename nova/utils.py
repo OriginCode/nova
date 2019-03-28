@@ -34,6 +34,7 @@ import eventlet
 from keystoneauth1 import exceptions as ks_exc
 from keystoneauth1 import loading as ks_loading
 import netaddr
+import os_resource_classes as orc
 from os_service_types import service_types
 from oslo_concurrency import lockutils
 from oslo_concurrency import processutils
@@ -48,8 +49,10 @@ from oslo_utils import timeutils
 from oslo_utils import units
 import six
 from six.moves import range
+from six.moves import reload_module
 
 import nova.conf
+from nova import debugger
 from nova import exception
 from nova.i18n import _, _LE, _LI, _LW
 import nova.network
@@ -242,9 +245,13 @@ def ssh_execute(dest, *cmd, **kwargs):
 
 
 def generate_uid(topic, size=8):
+    random_string = generate_random_string(size)
+    return '%s-%s' % (topic, random_string)
+
+
+def generate_random_string(size=8):
     characters = '01234567890abcdefghijklmnopqrstuvwxyz'
-    choices = [random.choice(characters) for _x in range(size)]
-    return '%s-%s' % (topic, ''.join(choices))
+    return ''.join([random.choice(characters) for _x in range(size)])
 
 
 # Default symbols to use for passwords. Avoids visually confusing characters.
@@ -286,8 +293,6 @@ def last_completed_audit_period(unit=None, before=None):
         rightnow = before
     else:
         rightnow = timeutils.utcnow()
-    if unit not in ('month', 'day', 'year', 'hour'):
-        raise ValueError(_('Time period must be hour, day, month or year'))
     if unit == 'month':
         if offset == 0:
             offset = 1
@@ -337,7 +342,7 @@ def last_completed_audit_period(unit=None, before=None):
             end = end - datetime.timedelta(days=1)
         begin = end - datetime.timedelta(days=1)
 
-    elif unit == 'hour':
+    else:  # unit == 'hour'
         end = rightnow.replace(minute=offset, second=0, microsecond=0)
         if end >= rightnow:
             end = end - datetime.timedelta(hours=1)
@@ -733,25 +738,12 @@ def check_string_length(value, name=None, min_length=0, max_length=None):
     :param min_length: the min_length of the string
     :param max_length: the max_length of the string
     """
-    if not isinstance(value, six.string_types):
-        if name is None:
-            msg = _("The input is not a string or unicode")
-        else:
-            msg = _("%s is not a string or unicode") % name
-        raise exception.InvalidInput(message=msg)
-
-    if name is None:
-        name = value
-
-    if len(value) < min_length:
-        msg = _("%(name)s has a minimum character requirement of "
-                "%(min_length)s.") % {'name': name, 'min_length': min_length}
-        raise exception.InvalidInput(message=msg)
-
-    if max_length and len(value) > max_length:
-        msg = _("%(name)s has more than %(max_length)s "
-                "characters.") % {'name': name, 'max_length': max_length}
-        raise exception.InvalidInput(message=msg)
+    try:
+        strutils.check_string_length(value, name=name,
+                                     min_length=min_length,
+                                     max_length=max_length)
+    except (ValueError, TypeError) as exc:
+        raise exception.InvalidInput(message=exc.args[0])
 
 
 def validate_integer(value, name, min_value=None, max_value=None):
@@ -951,9 +943,12 @@ def get_image_metadata_from_volume(volume):
         val = properties.pop(attr, None)
         if attr in ('min_ram', 'min_disk'):
             image_meta[attr] = int(val or 0)
-    # NOTE(yjiang5): Always set the image status as 'active'
-    # and depends on followed volume_api.check_attach() to
-    # verify it. This hack should be harmless with that check.
+    # NOTE(mriedem): Set the status to 'active' as a really old hack
+    # from when this method was in the compute API class and is
+    # needed for _validate_flavor_image which makes sure the image
+    # is 'active'. For volume-backed servers, if the volume is not
+    # available because the image backing the volume is not active,
+    # then the compute API trying to reserve the volume should fail.
     image_meta['status'] = 'active'
     return image_meta
 
@@ -1040,7 +1035,7 @@ def filter_and_format_resource_metadata(resource_type, resource_list,
             return resource.get('uuid')
 
     def _match_any(pattern_list, string):
-        if isinstance(pattern_list, str):
+        if isinstance(pattern_list, six.string_types):
             pattern_list = [pattern_list]
         return any([re.match(pattern, string)
                     for pattern in pattern_list])
@@ -1298,6 +1293,34 @@ def generate_hostid(host, project_id):
     return ""
 
 
+def monkey_patch():
+    if debugger.enabled():
+        # turn off thread patching to enable the remote debugger
+        eventlet.monkey_patch(thread=False)
+    elif os.name == 'nt':
+        # for nova-compute running on Windows(Hyper-v)
+        # pipes don't support non-blocking I/O
+        eventlet.monkey_patch(os=False)
+    else:
+        eventlet.monkey_patch()
+
+    # NOTE(rgerganov): oslo.context is storing a global thread-local variable
+    # which keeps the request context for the current thread. If oslo.context
+    # is imported before calling monkey_patch(), then this thread-local won't
+    # be green. To workaround this, reload the module after calling
+    # monkey_patch()
+    reload_module(importutils.import_module('oslo_context.context'))
+
+
+if six.PY2:
+    nested_contexts = contextlib.nested
+else:
+    @contextlib.contextmanager
+    def nested_contexts(*contexts):
+        with contextlib.ExitStack() as stack:
+            yield [stack.enter_context(c) for c in contexts]
+
+
 def run_once(message, logger, cleanup=None):
     """This is a utility function decorator to ensure a function
     is run once and only once in an interpreter instance.
@@ -1339,3 +1362,15 @@ def run_once(message, logger, cleanup=None):
         wrapper.reset = functools.partial(reset, wrapper)
         return wrapper
     return outer_wrapper
+
+
+def normalize_rc_name(rc_name):
+    """Normalize a resource class name to standard form."""
+    if rc_name is None:
+        return None
+    # Replace non-alphanumeric characters with underscores
+    norm_name = re.sub('[^0-9A-Za-z]+', '_', rc_name)
+    # Bug #1762789: Do .upper after replacing non alphanumerics.
+    norm_name = norm_name.upper()
+    norm_name = orc.CUSTOM_NAMESPACE + norm_name
+    return norm_name

@@ -32,14 +32,14 @@ ironic = None
 IRONIC_GROUP = nova.conf.ironic.ironic_group
 
 # The API version required by the Ironic driver
-IRONIC_API_VERSION = (1, 38)
+IRONIC_API_VERSION = (1, 46)
 # NOTE(TheJulia): This version should ALWAYS be the _last_ release
 # supported version of the API version used by nova. If a feature
-# needs 1.38 to be negotiated to operate properly, then the version
+# needs a higher version to be negotiated to operate properly, then the version
 # above should be updated, and this version should only be changed
 # once a cycle to the API version desired for features merging in
 # that cycle.
-PRIOR_IRONIC_API_VERSION = (1, 37)
+PRIOR_IRONIC_API_VERSION = (1, 38)
 
 
 class IronicClientWrapper(object):
@@ -99,6 +99,12 @@ class IronicClientWrapper(object):
         kwargs['os_ironic_api_version'] = [
             '%d.%d' % IRONIC_API_VERSION, '%d.%d' % PRIOR_IRONIC_API_VERSION]
 
+        ironic_conf = CONF[IRONIC_GROUP.name]
+        # valid_interfaces is a list. ironicclient passes this kwarg through to
+        # ksa, which is set up to handle 'interface' as either a list or a
+        # single value.
+        kwargs['interface'] = ironic_conf.valid_interfaces
+
         # NOTE(clenimar/efried): by default, the endpoint is taken from the
         # service catalog. Use `endpoint_override` if you want to override it.
         if CONF.ironic.api_endpoint:
@@ -122,7 +128,7 @@ class IronicClientWrapper(object):
 
         try:
             cli = ironic.client.get_client(IRONIC_API_VERSION[0],
-                                           ironic_url=ironic_url,
+                                           endpoint=ironic_url,
                                            session=sess, **kwargs)
             # Cache the client so we don't have to reconstruct and
             # reauthenticate it every time we need it.

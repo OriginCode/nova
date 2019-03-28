@@ -16,6 +16,7 @@
 """Test of Policy Engine For Nova."""
 
 import os.path
+import subprocess
 
 import mock
 from oslo_policy import policy as oslo_policy
@@ -192,9 +193,9 @@ class PolicyTestCase(test.NoDBTestCase):
             old_policy, new_policy, default_rule, self.context)
 
         mock_warning.assert_called_once_with("Start using the new "
-            "action '{0}'. The existing action '{1}' is being deprecated and "
-            "will be removed in future release.".format(new_policy,
-                                                        old_policy))
+            "action '%(new_policy)s'. The existing action '%(old_policy)s' "
+            "is being deprecated and will be removed in future release.",
+            {'new_policy': new_policy, 'old_policy': old_policy})
         self.assertTrue(using_old_action)
 
     def test_verify_deprecated_policy_using_new_action(self):
@@ -279,6 +280,7 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:servers:create:forced_host",
 "os_compute_api:servers:detail:get_all_tenants",
 "os_compute_api:servers:index:get_all_tenants",
+"os_compute_api:servers:allow_all_filters",
 "os_compute_api:servers:show:host_status",
 "os_compute_api:servers:migrations:force_complete",
 "os_compute_api:servers:migrations:delete",
@@ -307,7 +309,6 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-flavor-extra-specs:create",
 "os_compute_api:os-flavor-extra-specs:update",
 "os_compute_api:os-flavor-extra-specs:delete",
-"os_compute_api:os-flavor-manage",
 "os_compute_api:os-flavor-manage:create",
 "os_compute_api:os-flavor-manage:update",
 "os_compute_api:os-flavor-manage:delete",
@@ -336,6 +337,7 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-quota-class-sets:update",
 "os_compute_api:os-server-external-events:create",
 "os_compute_api:os-volumes-attachments:update",
+"os_compute_api:servers:create:zero_disk_flavor",
 "os_compute_api:servers:migrations:index",
 "os_compute_api:servers:migrations:show",
 )
@@ -368,13 +370,11 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-suspend-server:resume",
 "os_compute_api:os-tenant-networks",
 "os_compute_api:extensions",
-"os_compute_api:os-config-drive",
 "os_compute_api:servers:confirm_resize",
 "os_compute_api:servers:create",
 "os_compute_api:servers:create:attach_network",
 "os_compute_api:servers:create:attach_volume",
 "os_compute_api:servers:create:trusted_certs",
-"os_compute_api:servers:create:zero_disk_flavor",
 "os_compute_api:servers:create_image",
 "os_compute_api:servers:delete",
 "os_compute_api:servers:detail",
@@ -398,27 +398,18 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-console-output",
 "os_compute_api:os-remote-consoles",
 "os_compute_api:os-deferred-delete",
-"os_compute_api:os-extended-status",
-"os_compute_api:os-extended-availability-zone",
-"os_compute_api:os-extended-volumes",
 "os_compute_api:os-flavor-access",
-"os_compute_api:os-flavor-rxtx",
-"os_compute_api:flavors",
 "os_compute_api:os-flavor-extra-specs:index",
 "os_compute_api:os-flavor-extra-specs:show",
 "os_compute_api:os-floating-ip-pools",
 "os_compute_api:os-floating-ips",
-"os_compute_api:image-size",
 "os_compute_api:os-instance-actions",
-"os_compute_api:os-keypairs",
 "os_compute_api:limits",
 "os_compute_api:os-multinic",
 "os_compute_api:os-networks:view",
 "os_compute_api:os-rescue",
 "os_compute_api:os-security-groups",
 "os_compute_api:os-server-password",
-"os_compute_api:os-server-usage",
-"os_compute_api:os-server-groups",
 "os_compute_api:os-server-tags:delete",
 "os_compute_api:os-server-tags:delete_all",
 "os_compute_api:os-server-tags:index",
@@ -439,9 +430,6 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-availability-zone:list",
 )
 
-        self.non_admin_only_rules = (
-"os_compute_api:os-hide-server-addresses",)
-
         self.allow_all_rules = (
 "os_compute_api:os-quota-sets:defaults",
 )
@@ -459,12 +447,6 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
                               self.non_admin_context, rule,
                               {'project_id': 'fake', 'user_id': 'fake'})
             policy.authorize(self.admin_context, rule, self.target)
-
-    def test_non_admin_only_rules(self):
-        for rule in self.non_admin_only_rules:
-            self.assertRaises(exception.PolicyNotAuthorized, policy.authorize,
-                              self.admin_context, rule, self.target)
-            policy.authorize(self.non_admin_context, rule, self.target)
 
     def test_admin_or_owner_rules(self):
         for rule in self.admin_or_owner_rules:
@@ -485,6 +467,21 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
         special_rules = ('admin_api', 'admin_or_owner', 'context_is_admin',
                          'os_compute_api:os-quota-class-sets:show')
         result = set(rules.keys()) - set(self.admin_only_rules +
-            self.admin_or_owner_rules + self.non_admin_only_rules +
+            self.admin_or_owner_rules +
             self.allow_all_rules + special_rules)
         self.assertEqual(set([]), result)
+
+
+class GeneratePolicyFileTestCase(test.NoDBTestCase):
+
+    def test_policy_generator_from_command_line(self):
+        # This test ensures nova.policy:get_enforcer ignores unexpected
+        # arguments before handing them off to oslo.config, which will fail and
+        # prevent users from generating policy files.
+        ret_val = subprocess.Popen(
+            ['oslopolicy-policy-generator', '--namespace', 'nova'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        ret_val.communicate()
+        self.assertEqual(0, ret_val.returncode)

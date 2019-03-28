@@ -8,7 +8,8 @@ Enables administrators to perform an action on a server. Specify the
 action in the request body.
 
 You can inject network information into, migrate, live-migrate,
-reset networking on, and reset the state of a server.
+reset networking on, reset the state of a server,
+and evacuate a server from a failed host to a new host.
 
 
 Inject Network Information (injectNetworkInfo Action)
@@ -135,6 +136,10 @@ asynchronously, results of these checks are available in ``instance-actions``.
 Nova responds immediately, and no pre-live-migration checks are returned.
 The instance will not immediately change state to ``ERROR``, if a failure of
 the live-migration checks occurs.
+
+Starting from API version 2.68, the ``force`` parameter is no longer accepted
+as this could not be meaningfully supported by servers with complex resource
+allocations.
 
 Normal response codes: 202
 

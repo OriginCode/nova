@@ -60,24 +60,26 @@ Nova Database
 
 ``nova-manage db archive_deleted_rows [--max_rows <number>] [--verbose] [--until-complete] [--purge]``
     Move deleted rows from production tables to shadow tables. Note that the
-    corresponding rows in the instance_mappings and request_specs tables of the
-    API database are purged when instance records are archived and thus,
-    CONF.api_database.connection is required in the config file. Specifying
-    --verbose will print the results of the archive operation for any tables that
-    were changed. Specifying --until-complete will make the command run
-    continuously until all deleted rows are archived. Use the --max_rows option,
-    which defaults to 1000, as a batch size for each iteration. Specifying --purge
-    will cause a `full` DB purge to be completed after archival. If a date range
-    is desired for the purge, then run ``nova-manage db purge --before
+    corresponding rows in the ``instance_mappings``, ``request_specs`` and
+    ``instance_group_member`` tables of the API database are purged when
+    instance records are archived and thus, ``CONF.api_database.connection`` is
+    required in the config file. Specifying ``--verbose`` will print the results
+    of the archive operation for any tables that were changed. Specifying
+    ``--until-complete`` will make the command run continuously until all
+    deleted rows are archived. Use the ``--max_rows`` option, which defaults to
+    1000, as a batch size for each iteration (note that the purged API database
+    table records are not included in this batch size). Specifying ``--purge``
+    will cause a `full` DB purge to be completed after archival. If a date
+    range is desired for the purge, then run ``nova-manage db purge --before
     <date>`` manually after archiving is complete.
 
 ``nova-manage db purge [--all] [--before <date>] [--verbose] [--all-cells]``
-    Delete rows from shadow tables. Specifying --all will delete all data from
-    all shadow tables. Specifying --before will delete data from all shadow tables
+    Delete rows from shadow tables. Specifying ``--all`` will delete all data from
+    all shadow tables. Specifying ``--before`` will delete data from all shadow tables
     that is older than the date provided. Date strings may be fuzzy, such as
-    ``Oct 21 2015``. Specifying --verbose will cause information to be printed about
-    purged records. Specifying --all-cells will cause the purge to be applied against
-    all cell databases. For --all-cells to work, the api database connection
+    ``Oct 21 2015``. Specifying ``--verbose`` will cause information to be printed about
+    purged records. Specifying ``--all-cells`` will cause the purge to be applied against
+    all cell databases. For ``--all-cells`` to work, the api database connection
     information must be configured. Returns exit code 0 if rows were deleted, 1 if
     required arguments are not provided, 2 if an invalid date is provided, 3 if no
     data was deleted, 4 if the list of cells cannot be obtained.
@@ -104,6 +106,36 @@ Nova Database
    may depend on others having completed. If it exits with status 2, intervention is
    required to resolve the issue causing remaining updates to fail. It should be
    considered successfully completed only when the exit status is 0.
+
+   For example::
+
+     $ nova-manage db online_data_migrations
+     Running batches of 50 until complete
+     2 rows matched query migrate_instances_add_request_spec, 0 migrated
+     2 rows matched query populate_queued_for_delete, 2 migrated
+     +---------------------------------------------+--------------+-----------+
+     |                  Migration                  | Total Needed | Completed |
+     +---------------------------------------------+--------------+-----------+
+     |         create_incomplete_consumers         |      0       |     0     |
+     | delete_build_requests_with_no_instance_uuid |      0       |     0     |
+     |      migrate_instances_add_request_spec     |      2       |     0     |
+     |          migrate_keypairs_to_api_db         |      0       |     0     |
+     |       migrate_quota_classes_to_api_db       |      0       |     0     |
+     |        migrate_quota_limits_to_api_db       |      0       |     0     |
+     |          migration_migrate_to_uuid          |      0       |     0     |
+     |     populate_missing_availability_zones     |      0       |     0     |
+     |          populate_queued_for_delete         |      2       |     2     |
+     |                populate_uuids               |      0       |     0     |
+     |     service_uuids_online_data_migration     |      0       |     0     |
+     +---------------------------------------------+--------------+-----------+
+
+   In the above example, the ``migrate_instances_add_request_spec`` migration
+   found two candidate records but did not need to perform any kind of data
+   migration for either of them. In the case of the
+   ``populate_queued_for_delete`` migration, two candidate records were found
+   which did require a data migration. Since ``--max-count`` defaults to 50
+   and only two records were migrated with no more candidates remaining, the
+   command completed successfully with exit code 0.
 
 ``nova-manage db ironic_flavor_migration [--all] [--host] [--node] [--resource_class]``
    Perform the ironic flavor migration process against the database

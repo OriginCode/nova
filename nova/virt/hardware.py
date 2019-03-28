@@ -15,6 +15,7 @@
 import collections
 import fractions
 import itertools
+import math
 
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
@@ -187,6 +188,10 @@ def get_number_of_serial_ports(flavor, image_meta):
     :param flavor: Flavor object to read extra specs from
     :param image_meta: nova.objects.ImageMeta object instance
 
+    :raises: exception.ImageSerialPortNumberInvalid if the serial port count
+             is not a valid integer
+    :raises: exception.ImageSerialPortNumberExceedFlavorValue if the serial
+             port count defined in image is greater than that of flavor
     :returns: number of serial ports
     """
     flavor_num_ports, image_num_ports = _get_flavor_image_meta(
@@ -251,7 +256,7 @@ def _score_cpu_topology(topology, wanttopology):
     return score
 
 
-def _get_cpu_topology_constraints(flavor, image_meta):
+def get_cpu_topology_constraints(flavor, image_meta):
     """Get the topology constraints declared in flavor or image
 
     Extracts the topology constraints from the configuration defined in
@@ -286,8 +291,8 @@ def _get_cpu_topology_constraints(flavor, image_meta):
     :raises: exception.ImageVCPUTopologyRangeExceeded if the preferred
              counts set against the image exceed the maximum counts set
              against the image or flavor
-    :raises: ValueError if one of the provided flavor properties is a
-             non-integer
+    :raises: exception.InvalidRequest if one of the provided flavor properties
+             is a non-integer
     :returns: A two-tuple of objects.VirtCPUTopology instances. The
               first element corresponds to the preferred topology,
               while the latter corresponds to the maximum topology,
@@ -300,9 +305,13 @@ def _get_cpu_topology_constraints(flavor, image_meta):
     flavor_max_threads, image_max_threads = _get_flavor_image_meta(
         'cpu_max_threads', flavor, image_meta, 0)
     # image metadata is already of the correct type
-    flavor_max_sockets = int(flavor_max_sockets)
-    flavor_max_cores = int(flavor_max_cores)
-    flavor_max_threads = int(flavor_max_threads)
+    try:
+        flavor_max_sockets = int(flavor_max_sockets)
+        flavor_max_cores = int(flavor_max_cores)
+        flavor_max_threads = int(flavor_max_threads)
+    except ValueError as e:
+        msg = _('Invalid flavor extra spec. Error: %s') % six.text_type(e)
+        raise exception.InvalidRequest(msg)
 
     LOG.debug("Flavor limits %(sockets)d:%(cores)d:%(threads)d",
               {"sockets": flavor_max_sockets,
@@ -336,9 +345,13 @@ def _get_cpu_topology_constraints(flavor, image_meta):
         'cpu_cores', flavor, image_meta, 0)
     flavor_threads, image_threads = _get_flavor_image_meta(
         'cpu_threads', flavor, image_meta, 0)
-    flavor_sockets = int(flavor_sockets)
-    flavor_cores = int(flavor_cores)
-    flavor_threads = int(flavor_threads)
+    try:
+        flavor_sockets = int(flavor_sockets)
+        flavor_cores = int(flavor_cores)
+        flavor_threads = int(flavor_threads)
+    except ValueError as e:
+        msg = _('Invalid flavor extra spec. Error: %s') % six.text_type(e)
+        raise exception.InvalidRequest(msg)
 
     LOG.debug("Flavor pref %(sockets)d:%(cores)d:%(threads)d",
               {"sockets": flavor_sockets,
@@ -561,7 +574,7 @@ def _get_desirable_cpu_topologies(flavor, image_meta, allow_threads=True,
               {"flavor": flavor, "image_meta": image_meta,
                "threads": allow_threads})
 
-    preferred, maximum = _get_cpu_topology_constraints(flavor, image_meta)
+    preferred, maximum = get_cpu_topology_constraints(flavor, image_meta)
     LOG.debug("Topology preferred %(preferred)s, maximum %(maximum)s",
               {"preferred": preferred, "maximum": maximum})
 
@@ -636,7 +649,7 @@ def _numa_cell_supports_pagesize_request(host_cell, inst_cell):
     def verify_pagesizes(host_cell, inst_cell, avail_pagesize):
         inst_cell_mem = inst_cell.memory * units.Ki
         for pagesize in avail_pagesize:
-            if host_cell.can_fit_hugepages(pagesize, inst_cell_mem):
+            if host_cell.can_fit_pagesize(pagesize, inst_cell_mem):
                 return pagesize
 
     if inst_cell.pagesize == MEMPAGES_SMALL:
@@ -743,8 +756,12 @@ def _pack_instance_onto_cores(host_cell, instance_cell,
         threads) and 2 (number of 'orphan' CPUs) and get 2 as the number of
         threads.
         """
-        return fractions.gcd(threads_per_core, _orphans(instance_cell,
-                                                        threads_per_core))
+        # fractions.gcd is deprecated in favor of math.gcd starting in py35
+        if six.PY2:
+            gcd = fractions.gcd
+        else:
+            gcd = math.gcd
+        return gcd(threads_per_core, _orphans(instance_cell, threads_per_core))
 
     def _get_pinning(threads_no, sibling_set, instance_cores):
         """Determines pCPUs/vCPUs mapping
@@ -1038,13 +1055,16 @@ def _numa_fit_instance_cell(host_cell, instance_cell, limit_cell=None,
         # The instance provides a NUMA topology but does not define any
         # particular page size for its memory.
         if host_cell.mempages:
-            # The host supports explicit page sizes.  Use the smallest
-            # available page size.
+            # The host supports explicit page sizes. Use a pagesize-aware
+            # memory check using the smallest available page size.
             pagesize = _get_smallest_pagesize(host_cell)
             LOG.debug('No specific pagesize requested for instance, '
-                      'selectionned pagesize: %d', pagesize)
-            if not host_cell.can_fit_hugepages(
-                    pagesize, instance_cell.memory * units.Ki):
+                      'selected pagesize: %d', pagesize)
+            # we want to allow overcommit in this case as we're not using
+            # hugepages
+            if not host_cell.can_fit_pagesize(pagesize,
+                                              instance_cell.memory * units.Ki,
+                                              use_free=False):
                 LOG.debug('Not enough available memory to schedule instance '
                           'with pagesize %(pagesize)d. Required: '
                           '%(required)s, available: %(available)s, total: '
@@ -1055,8 +1075,12 @@ def _numa_fit_instance_cell(host_cell, instance_cell, limit_cell=None,
                            'pagesize': pagesize})
                 return
         else:
-            # NOTE (ndipanov): do not allow an instance to overcommit against
-            # itself on any NUMA cell
+            # The host does not support explicit page sizes. Ignore pagesizes
+            # completely.
+            # NOTE(stephenfin): Do not allow an instance to overcommit against
+            # itself on any NUMA cell, i.e. with 'ram_allocation_ratio = 2.0'
+            # on a host with 1GB RAM, we should allow two 1GB instances but not
+            # one 2GB instance.
             if instance_cell.memory > host_cell.memory:
                 LOG.debug('Not enough host cell memory to fit instance cell. '
                           'Required: %(required)d, actual: %(actual)d',
@@ -1282,10 +1306,24 @@ def _get_cpu_policy_constraint(flavor, image_meta):
     :param image_meta: ``nova.objects.ImageMeta`` instance
     :raises: exception.ImageCPUPinningForbidden if policy is defined on both
         image and flavor and these policies conflict.
+    :raises: exception.InvalidCPUAllocationPolicy if policy is defined with
+        invalid value in image or flavor.
     :returns: The CPU policy requested.
     """
     flavor_policy, image_policy = _get_flavor_image_meta(
         'cpu_policy', flavor, image_meta)
+
+    if flavor_policy and (flavor_policy not in fields.CPUAllocationPolicy.ALL):
+        raise exception.InvalidCPUAllocationPolicy(
+            source='flavor extra specs',
+            requested=flavor_policy,
+            available=str(fields.CPUAllocationPolicy.ALL))
+
+    if image_policy and (image_policy not in fields.CPUAllocationPolicy.ALL):
+        raise exception.InvalidCPUAllocationPolicy(
+            source='image properties',
+            requested=image_policy,
+            available=str(fields.CPUAllocationPolicy.ALL))
 
     if flavor_policy == fields.CPUAllocationPolicy.DEDICATED:
         cpu_policy = flavor_policy
@@ -1309,10 +1347,26 @@ def _get_cpu_thread_policy_constraint(flavor, image_meta):
     :param image_meta: ``nova.objects.ImageMeta`` instance
     :raises: exception.ImageCPUThreadPolicyForbidden if policy is defined on
         both image and flavor and these policies conflict.
+    :raises: exception.InvalidCPUThreadAllocationPolicy if policy is defined
+        with invalid value in image or flavor.
     :returns: The CPU thread policy requested.
     """
     flavor_policy, image_policy = _get_flavor_image_meta(
         'cpu_thread_policy', flavor, image_meta)
+
+    if flavor_policy and (
+            flavor_policy not in fields.CPUThreadAllocationPolicy.ALL):
+        raise exception.InvalidCPUThreadAllocationPolicy(
+            source='flavor extra specs',
+            requested=flavor_policy,
+            available=str(fields.CPUThreadAllocationPolicy.ALL))
+
+    if image_policy and (
+            image_policy not in fields.CPUThreadAllocationPolicy.ALL):
+        raise exception.InvalidCPUThreadAllocationPolicy(
+            source='image properties',
+            requested=image_policy,
+            available=str(fields.CPUThreadAllocationPolicy.ALL))
 
     if flavor_policy in [None, fields.CPUThreadAllocationPolicy.PREFER]:
         policy = flavor_policy or image_policy
@@ -1484,6 +1538,12 @@ def numa_get_constraints(flavor, image_meta):
              policy conflicts with CPU allocation policy
     :raises: exception.ImageCPUThreadPolicyForbidden if a CPU thread policy
              specified in a flavor conflicts with one defined in image metadata
+    :raises: exception.BadRequirementEmulatorThreadsPolicy if CPU emulator
+             threads policy conflicts with CPU allocation policy
+    :raises: exception.InvalidCPUAllocationPolicy if policy is defined with
+             invalid value in image or flavor.
+    :raises: exception.InvalidCPUThreadAllocationPolicy if policy is defined
+             with invalid value in image or flavor.
     :returns: objects.InstanceNUMATopology, or None
     """
     numa_topology = None

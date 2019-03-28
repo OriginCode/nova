@@ -12,11 +12,10 @@
 #    under the License.
 """Standard Resource Class Fields."""
 
-# NOTE(cdent): This is kept as its own independent file as it is used by
-# both the placement and nova sides of the placement interaction. On the
-# placement side we don't want to import all the nova fields, nor all the
-# nova objects (which are automatically loaded and registered if the
-# nova.objects package is imported).
+# NOTE(cdent): This file is only used by the placement code within
+# nova. Other uses of resource classes in nova make use of the
+# os-resource-classes library. The placement code within nova
+# continues to use this so that that code can remain unchanged.
 
 import re
 
@@ -41,12 +40,19 @@ class ResourceClass(fields.StringField):
     IPV4_ADDRESS = 'IPV4_ADDRESS'
     VGPU = 'VGPU'
     VGPU_DISPLAY_HEAD = 'VGPU_DISPLAY_HEAD'
+    # Standard resource class for network bandwidth egress measured in
+    # kilobits per second.
+    NET_BW_EGR_KILOBIT_PER_SEC = 'NET_BW_EGR_KILOBIT_PER_SEC'
+    # Standard resource class for network bandwidth ingress measured in
+    # kilobits per second.
+    NET_BW_IGR_KILOBIT_PER_SEC = 'NET_BW_IGR_KILOBIT_PER_SEC'
 
     # The ordering here is relevant. If you must add a value, only
     # append.
     STANDARD = (VCPU, MEMORY_MB, DISK_GB, PCI_DEVICE, SRIOV_NET_VF,
                 NUMA_SOCKET, NUMA_CORE, NUMA_THREAD, NUMA_MEMORY_MB,
-                IPV4_ADDRESS, VGPU, VGPU_DISPLAY_HEAD)
+                IPV4_ADDRESS, VGPU, VGPU_DISPLAY_HEAD,
+                NET_BW_EGR_KILOBIT_PER_SEC, NET_BW_IGR_KILOBIT_PER_SEC)
 
     @classmethod
     def normalize_name(cls, rc_name):

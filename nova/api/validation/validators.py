@@ -16,12 +16,12 @@ Internal implementation of request Body validating middleware.
 
 """
 
-import base64
 import re
 
 import jsonschema
 from jsonschema import exceptions as jsonschema_exc
 import netaddr
+from oslo_serialization import base64
 from oslo_utils import timeutils
 from oslo_utils import uuidutils
 import rfc3986
@@ -58,9 +58,7 @@ def _validate_base64_format(instance):
     try:
         if isinstance(instance, six.text_type):
             instance = instance.encode('utf-8')
-        base64.decodestring(instance)
-    except base64.binascii.Error:
-        return False
+        base64.decode_as_bytes(instance)
     except TypeError:
         # The name must be string type. If instance isn't string type, the
         # TypeError will be raised at here.
@@ -89,8 +87,17 @@ def _validate_uuid_format(instance):
 
 @jsonschema.FormatChecker.cls_checks('uri')
 def _validate_uri(instance):
-    return rfc3986.is_valid_uri(instance, require_scheme=True,
-                                require_authority=True)
+    uri = rfc3986.uri_reference(instance)
+    validator = rfc3986.validators.Validator().require_presence_of(
+        'scheme', 'host',
+    ).check_validity_of(
+        'scheme', 'userinfo', 'host', 'path', 'query', 'fragment',
+    )
+    try:
+        validator.validate(uri)
+    except rfc3986.exceptions.RFC3986Exception:
+        return False
+    return True
 
 
 @jsonschema.FormatChecker.cls_checks('name_with_leading_trailing_spaces',

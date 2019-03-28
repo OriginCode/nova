@@ -15,6 +15,7 @@
 #    under the License.
 
 import mock
+from oslo_utils.fixture import uuidsentinel as uuids
 import six
 import webob
 
@@ -29,7 +30,6 @@ from nova.objects import base as obj_base
 from nova import test
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit import fake_network
-from nova.tests import uuidsentinel as uuids
 
 
 FAKE_UUID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
@@ -61,7 +61,8 @@ def network_api_get_floating_ips_by_project(self, context):
              'fixed_ip': None}]
 
 
-def compute_api_get(self, context, instance_id, expected_attrs=None):
+def compute_api_get(self, context, instance_id, expected_attrs=None,
+                    cell_down_support=False):
     return objects.Instance(uuid=FAKE_UUID, id=instance_id,
                             instance_type_id=1, host='bob')
 
@@ -672,7 +673,8 @@ class FloatingIpTestV21(test.TestCase):
 
     def test_floating_ip_associate_invalid_instance(self):
 
-        def fake_get(self, context, id, expected_attrs=None):
+        def fake_get(self, context, id, expected_attrs=None,
+                     cell_down_support=False):
             raise exception.InstanceNotFound(instance_id=id)
 
         self.stubs.Set(compute.api.API, "get", fake_get)

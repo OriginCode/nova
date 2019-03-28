@@ -70,7 +70,7 @@ def _translate_volume_summary_view(context, vol):
         #                    }
         #                }
         attachment = list(vol['attachments'].items())[0]
-        d['attachments'] = [_translate_attachment_detail_view(vol['id'],
+        d['attachments'] = [_translate_attachment_summary_view(vol['id'],
             attachment[0],
             attachment[1].get('mountpoint'))]
     else:
@@ -209,14 +209,20 @@ class VolumeController(wsgi.Controller):
         return wsgi.ResponseObject(result, headers=dict(location=location))
 
 
-def _translate_attachment_detail_view(volume_id, instance_uuid, mountpoint):
-    """Maps keys for attachment details view."""
+def _translate_attachment_detail_view(bdm, show_tag=False):
+    """Maps keys for attachment details view.
 
-    d = _translate_attachment_summary_view(volume_id,
-            instance_uuid,
-            mountpoint)
+    :param bdm: BlockDeviceMapping object for an attached volume
+    :param show_tag: True if the "tag" field should be in the response, False
+        to exclude the "tag" field from the response
+    """
 
-    # No additional data / lookups at the moment
+    d = _translate_attachment_summary_view(
+        bdm.volume_id, bdm.instance_uuid, bdm.device_name)
+
+    if show_tag:
+        d['tag'] = bdm.tag
+
     return d
 
 
@@ -276,11 +282,10 @@ class VolumeAttachmentController(wsgi.Controller):
         limited_list = common.limited(bdms, req)
 
         results = []
+        show_tag = api_version_request.is_supported(req, '2.70')
         for bdm in limited_list:
             if bdm.volume_id:
-                va = _translate_attachment_summary_view(bdm.volume_id,
-                                                        bdm.instance_uuid,
-                                                        bdm.device_name)
+                va = _translate_attachment_detail_view(bdm, show_tag=show_tag)
                 results.append(va)
 
         return {'volumeAttachments': results}
@@ -303,14 +308,12 @@ class VolumeAttachmentController(wsgi.Controller):
                    {'instance': server_id, 'volume': volume_id})
             raise exc.HTTPNotFound(explanation=msg)
 
-        assigned_mountpoint = bdm.device_name
+        show_tag = api_version_request.is_supported(req, '2.70')
         return {'volumeAttachment': _translate_attachment_detail_view(
-            volume_id,
-            instance.uuid,
-            assigned_mountpoint)}
+            bdm, show_tag=show_tag)}
 
     # TODO(mriedem): This API should return a 202 instead of a 200 response.
-    @wsgi.expected_errors((400, 404, 409))
+    @wsgi.expected_errors((400, 403, 404, 409))
     @validation.schema(volumes_schema.create_volume_attachment, '2.0', '2.48')
     @validation.schema(volumes_schema.create_volume_attachment_v249, '2.49')
     def create(self, req, server_id, body):
@@ -352,13 +355,21 @@ class VolumeAttachmentController(wsgi.Controller):
                 exception.MultiattachNotSupportedOldMicroversion,
                 exception.MultiattachToShelvedNotSupported) as e:
             raise exc.HTTPBadRequest(explanation=e.format_message())
+        except exception.TooManyDiskDevices as e:
+            raise exc.HTTPForbidden(explanation=e.format_message())
 
         # The attach is async
+        # NOTE(mriedem): It would be nice to use
+        # _translate_attachment_summary_view here but that does not include
+        # the 'device' key if device is None or the empty string which would
+        # be a backward incompatible change.
         attachment = {}
         attachment['id'] = volume_id
         attachment['serverId'] = server_id
         attachment['volumeId'] = volume_id
         attachment['device'] = device
+        if api_version_request.is_supported(req, '2.70'):
+            attachment['tag'] = tag
         return {'volumeAttachment': attachment}
 
     @wsgi.response(202)

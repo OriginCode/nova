@@ -38,10 +38,16 @@ Response
   - id: attachment_id_required
   - serverId: server_id
   - volumeId: volumeId_resp
+  - tag: device_tag_bdm_attachment_resp
 
 **Example List volume attachments for an instance: JSON response**
 
 .. literalinclude:: ../../doc/api_samples/os-volumes/list-volume-attachments-resp.json
+   :language: javascript
+
+**Example List tagged volume attachments for an instance (v2.70): JSON response**
+
+.. literalinclude:: ../../doc/api_samples/os-volumes/v2.70/list-volume-attachments-resp.json
    :language: javascript
 
 Attach a volume to an instance
@@ -94,10 +100,16 @@ Response
   - id: attachment_id_required
   - serverId: server_id
   - volumeId: volumeId_resp
+  - tag: device_tag_bdm_attachment_resp
 
 **Example Attach a volume to an instance: JSON response**
 
 .. literalinclude:: ../../doc/api_samples/os-volumes/attach-volume-to-server-resp.json
+   :language: javascript
+
+**Example Attach a tagged volume to an instance (v2.70): JSON response**
+
+.. literalinclude:: ../../doc/api_samples/os-volumes/v2.70/attach-volume-to-server-resp.json
    :language: javascript
 
 Show a detail of a volume attachment
@@ -129,10 +141,16 @@ Response
   - id: attachment_id_required
   - serverId: server_id
   - volumeId: volumeId_resp
+  - tag: device_tag_bdm_attachment_resp
 
 **Example Show a detail of a volume attachment: JSON response**
 
 .. literalinclude:: ../../doc/api_samples/os-volumes/volume-attachment-detail-resp.json
+   :language: javascript
+
+**Example Show a detail of a tagged volume attachment (v2.70): JSON response**
+
+.. literalinclude:: ../../doc/api_samples/os-volumes/v2.70/volume-attachment-detail-resp.json
    :language: javascript
 
 Update a volume attachment
@@ -145,9 +163,19 @@ Update a volume attachment.
 .. note:: This action only valid when the server is in ACTIVE, PAUSED and RESIZED state,
           or a conflict(409) error will be returned.
 
-Policy defaults enable only users with the administrative role or
-the owner of the server to perform this operation. Cloud providers
-can change these permissions through the ``policy.json`` file.
+.. warning:: This API is typically meant to only be used as part of a larger
+             orchestrated volume migration operation initiated in the block
+             storage service via the ``os-retype`` or ``os-migrate_volume``
+             volume actions. Direct usage of this API is not recommended and
+             may result in needing to hard reboot the server to update details
+             within the guest such as block storage serial IDs. Furthermore,
+             this API is only implemented by `certain compute drivers`_.
+
+.. _certain compute drivers: https://docs.openstack.org/nova/latest/user/support-matrix.html#operation_swap_volume
+
+Policy defaults enable only users with the administrative role to perform
+this operation. Cloud providers can change these permissions through the
+``policy.json`` file.
 
 Normal response codes: 202
 

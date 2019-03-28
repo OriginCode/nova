@@ -22,10 +22,9 @@ inline callbacks.
 """
 
 import eventlet  # noqa
-eventlet.monkey_patch(os=False)
+eventlet.monkey_patch()
 
 import abc
-import contextlib
 import copy
 import datetime
 import inspect
@@ -35,7 +34,6 @@ import pprint
 import sys
 
 import fixtures
-import mock
 from oslo_cache import core as cache
 from oslo_concurrency import lockutils
 from oslo_config import cfg
@@ -43,6 +41,7 @@ from oslo_config import fixture as config_fixture
 from oslo_log.fixture import logging_error as log_fixture
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 from oslo_versionedobjects import fixture as ovo_fixture
 from oslotest import mock_fixture
@@ -50,7 +49,7 @@ from oslotest import moxstubout
 import six
 import testtools
 
-from nova.api.openstack.placement.objects import resource_provider
+from nova.compute import resource_tracker
 from nova import context
 from nova.db import api as db
 from nova import exception
@@ -60,8 +59,8 @@ from nova import objects
 from nova.objects import base as objects_base
 from nova.tests import fixtures as nova_fixtures
 from nova.tests.unit import conf_fixture
+from nova.tests.unit import matchers
 from nova.tests.unit import policy_fixture
-from nova.tests import uuidsentinel as uuids
 from nova import utils
 from nova.virt import images
 
@@ -77,13 +76,8 @@ _TRUE_VALUES = ('True', 'true', '1', 'yes')
 CELL1_NAME = 'cell1'
 
 
-if six.PY2:
-    nested = contextlib.nested
-else:
-    @contextlib.contextmanager
-    def nested(*contexts):
-        with contextlib.ExitStack() as stack:
-            yield [stack.enter_context(c) for c in contexts]
+# For compatibility with the large number of tests which use test.nested
+nested = utils.nested_contexts
 
 
 class SampleNetworks(fixtures.Fixture):
@@ -150,29 +144,6 @@ class skipIf(object):
         else:
             raise TypeError('skipUnless can be used only with functions or '
                             'classes')
-
-
-def _patch_mock_to_raise_for_invalid_assert_calls():
-    def raise_for_invalid_assert_calls(wrapped):
-        def wrapper(_self, name):
-            valid_asserts = [
-                'assert_called_with',
-                'assert_called_once_with',
-                'assert_has_calls',
-                'assert_any_calls']
-
-            if name.startswith('assert') and name not in valid_asserts:
-                raise AttributeError('%s is not a valid mock assert method'
-                                     % name)
-
-            return wrapped(_self, name)
-        return wrapper
-    mock.Mock.__getattr__ = raise_for_invalid_assert_calls(
-        mock.Mock.__getattr__)
-
-# NOTE(gibi): needs to be called only once at import time
-# to patch the mock lib
-_patch_mock_to_raise_for_invalid_assert_calls()
 
 
 class NovaExceptionReraiseFormatError(object):
@@ -290,7 +261,6 @@ class TestCase(testtools.TestCase):
             # NOTE(danms): Full database setup involves a cell0, cell1,
             # and the relevant mappings.
             self.useFixture(nova_fixtures.Database(database='api'))
-            self.useFixture(nova_fixtures.Database(database='placement'))
             self._setup_cells()
             self.useFixture(nova_fixtures.DefaultFlavorsFixture())
         elif not self.USES_DB_SELF:
@@ -311,12 +281,6 @@ class TestCase(testtools.TestCase):
         # caching of that value.
         utils._IS_NEUTRON = None
 
-        # Reset the traits sync and rc cache flags
-        def _reset_traits():
-            resource_provider._TRAITS_SYNCED = False
-        _reset_traits()
-        self.addCleanup(_reset_traits)
-        resource_provider._RC_CACHE = None
         # Reset the global QEMU version flag.
         images.QEMU_VERSION = None
 
@@ -326,8 +290,6 @@ class TestCase(testtools.TestCase):
         self.addCleanup(self._clear_attrs)
         self.useFixture(fixtures.EnvironmentVariable('http_proxy'))
         self.policy = self.useFixture(policy_fixture.PolicyFixture())
-        self.placement_policy = self.useFixture(
-            policy_fixture.PlacementPolicyFixture())
 
         self.useFixture(nova_fixtures.PoisonFunctions())
 
@@ -455,8 +417,9 @@ class TestCase(testtools.TestCase):
         # So this helper method tries to simulate a better compute service
         # restart by cleaning up some of the internal state of the compute
         # manager.
+        host, driver = compute.manager.host, compute.manager.driver
         compute.stop()
-        compute.manager._resource_tracker = None
+        compute.manager.rt = resource_tracker.ResourceTracker(host, driver)
         compute.start()
 
     def assertJsonEqual(self, expected, observed, message=''):
@@ -548,6 +511,9 @@ class TestCase(testtools.TestCase):
             error.observed = observed
             error.difference = difference
             raise error
+
+    def assertXmlEqual(self, expected, observed):
+        self.assertThat(observed, matchers.XMLMatches(expected))
 
     def assertPublicAPISignatures(self, baseinst, inst):
         def get_public_apis(inst):

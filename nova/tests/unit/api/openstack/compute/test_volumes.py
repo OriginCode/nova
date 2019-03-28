@@ -20,6 +20,7 @@ import fixtures
 import mock
 from oslo_serialization import jsonutils
 from oslo_utils import encodeutils
+from oslo_utils.fixture import uuidsentinel as uuids
 import six
 from six.moves import urllib
 import webob
@@ -41,8 +42,8 @@ from nova import test
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit import fake_block_device
 from nova.tests.unit import fake_instance
-from nova.tests import uuidsentinel as uuids
 from nova.volume import cinder
+
 
 CONF = nova.conf.CONF
 
@@ -58,7 +59,8 @@ FAKE_UUID_C = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
 IMAGE_UUID = 'c905cedb-7281-47e4-8a62-f26bc5fc4c77'
 
 
-def fake_get_instance(self, context, instance_id, expected_attrs=None):
+def fake_get_instance(self, context, instance_id, expected_attrs=None,
+                      cell_down_support=False):
     return fake_instance.fake_instance_obj(context, **{'uuid': instance_id})
 
 

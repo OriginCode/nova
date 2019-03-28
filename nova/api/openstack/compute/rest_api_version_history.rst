@@ -308,7 +308,7 @@ Both the original form of header and the new form is supported.
 Nova API hypervisor.cpu_info change from string to JSON object.
 
 From this version of the API the hypervisor's 'cpu_info' field will be
-will returned as JSON object (not string) by sending GET request
+returned as JSON object (not string) by sending GET request
 to the /v2.1/os-hypervisors/{hypervisor_id}.
 
 2.29
@@ -842,3 +842,91 @@ in server group APIs:
 
 Add support for abort live migrations in ``queued`` and ``preparing`` status
 for API ``DELETE /servers/{server_id}/migrations/{migration_id}``.
+
+2.66
+----
+
+The ``changes-before`` filter can be included as a request parameter of the
+following APIs to filter by changes before or equal to the resource
+``updated_at`` time:
+
+* ``GET /servers``
+* ``GET /servers/detail``
+* ``GET /servers/{server_id}/os-instance-actions``
+* ``GET /os-migrations``
+
+2.67
+----
+
+Adds the ``volume_type`` parameter to ``block_device_mapping_v2``, which can
+be used to specify cinder ``volume_type`` when creating a server.
+
+2.68
+----
+
+Remove support for forced live migration and evacuate server actions.
+
+2.69
+----
+
+Add support for returning minimal constructs for ``GET /servers``,
+``GET /servers/detail``, ``GET /servers/{server_id}`` and ``GET /os-services``
+when there is a transient unavailability condition in the deployment like an
+infrastructure failure. Starting from this microversion, the responses from the
+down part of the infrastructure for the above four requests will have missing
+key values to make it more resilient. The response body will only have a
+minimal set of information obtained from the available information in the API
+database for the down cells. See `handling down cells
+<https://developer.openstack.org/api-guide/compute/down_cells.html>`__ for
+more information.
+
+2.70
+----
+
+Exposes virtual device tags for volume attachments and virtual interfaces
+(ports). A ``tag`` parameter is added to the response body for the following
+APIs:
+
+**Volumes**
+
+* GET /servers/{server_id}/os-volume_attachments (list)
+* GET /servers/{server_id}/os-volume_attachments/{volume_id} (show)
+* POST /servers/{server_id}/os-volume_attachments (attach)
+
+**Ports**
+
+* GET /servers/{server_id}/os-interface (list)
+* GET /servers/{server_id}/os-interface/{port_id} (show)
+* POST /servers/{server_id}/os-interface (attach)
+
+2.71
+----
+
+The ``server_groups`` parameter will be in the response body of the following
+APIs to list the server groups to which the server belongs:
+
+* ``GET /servers/{server_id}``
+* ``PUT /servers/{server_id}``
+* ``POST /servers/{server_id}/action (rebuild)``
+
+2.72 (Maximum in Stein)
+-----------------------
+
+API microversion 2.72 adds support for creating servers with neutron ports
+that has resource request, e.g. neutron ports with
+`QoS minimum bandwidth rule`_. Deleting servers with such ports have
+already been handled properly as well as detaching these type of ports.
+
+API limitations:
+
+* Creating servers with Neutron networks having QoS minimum bandwidth rule
+  is not supported.
+
+* Attaching Neutron ports and networks having QoS minimum bandwidth rule
+  is not supported.
+
+* Moving (resizing, migrating, live-migrating, evacuating,
+  unshelving after shelve offload) servers with ports having resource
+  request is not yet supported.
+
+.. _QoS minimum bandwidth rule: https://docs.openstack.org/neutron/latest/admin/config-qos-min-bw.html

@@ -20,6 +20,7 @@ from keystoneauth1 import loading as ks_loading
 from keystoneauth1 import session
 from keystoneclient import exceptions as keystone_exception
 import mock
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 import six
 
@@ -28,8 +29,8 @@ from nova import context
 from nova import exception
 from nova import test
 from nova.tests.unit.fake_instance import fake_instance_obj
-from nova.tests import uuidsentinel as uuids
 from nova.volume import cinder
+
 
 CONF = nova.conf.CONF
 
@@ -67,6 +68,12 @@ class FakeSnapshot(object):
         self.progress = '99%'
         self.volume_id = volume_id
         self.project_id = 'fake_project'
+
+
+class FakeVolumeType(object):
+    def __init__(self, volume_type_name, volume_type_id):
+        self.id = volume_type_id
+        self.name = volume_type_name
 
 
 class FakeAttachment(object):
@@ -895,6 +902,27 @@ class CinderApiTestCase(test.NoDBTestCase):
             'snapshot_id', {'status': 'error', 'progress': '90%'})
 
     @mock.patch('nova.volume.cinder.cinderclient')
+    def test_get_all_volume_types(self, mock_cinderclient):
+        volume_type1 = FakeVolumeType('lvm_1', 'volume_type_id1')
+        volume_type2 = FakeVolumeType('lvm_2', 'volume_type_id2')
+        volume_type_list = [volume_type1, volume_type2]
+
+        mock_volume_types = mock.MagicMock()
+        mock_cinderclient.return_value = mock.MagicMock(
+            volume_types=mock_volume_types)
+        mock_volume_types.list.return_value = volume_type_list
+
+        volume_types = self.api.get_all_volume_types(self.ctx)
+        self.assertEqual(2, len(volume_types))
+        self.assertEqual(['volume_type_id1', 'volume_type_id2'],
+                         [vol_type['id'] for vol_type in volume_types])
+        self.assertEqual(['lvm_1', 'lvm_2'],
+                         [vol_type['name'] for vol_type in volume_types])
+
+        mock_cinderclient.assert_called_once_with(self.ctx)
+        mock_volume_types.list.assert_called_once_with()
+
+    @mock.patch('nova.volume.cinder.cinderclient')
     def test_get_volume_encryption_metadata(self, mock_cinderclient):
         mock_volumes = mock.MagicMock()
         mock_cinderclient.return_value = mock.MagicMock(volumes=mock_volumes)
@@ -988,10 +1016,11 @@ class CinderClientTestCase(test.NoDBTestCase):
         self.ctxt = context.RequestContext('fake-user', 'fake-project')
         # Mock out the keystoneauth stuff.
         self.mock_session = mock.Mock(autospec=session.Session)
-        load_session = mock.patch('keystoneauth1.loading.'
+        patcher = mock.patch('keystoneauth1.loading.'
                                   'load_session_from_conf_options',
-                                  return_value=self.mock_session).start()
-        self.addCleanup(load_session.stop)
+                                  return_value=self.mock_session)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     @mock.patch('cinderclient.client.get_volume_api_from_url',
                 return_value='3')

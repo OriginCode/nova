@@ -23,15 +23,14 @@ Verify operation of the Compute service.
       +----+--------------------+------------+----------+---------+-------+----------------------------+
       | Id | Binary             | Host       | Zone     | Status  | State | Updated At                 |
       +----+--------------------+------------+----------+---------+-------+----------------------------+
-      |  1 | nova-consoleauth   | controller | internal | enabled | up    | 2016-02-09T23:11:15.000000 |
-      |  2 | nova-scheduler     | controller | internal | enabled | up    | 2016-02-09T23:11:15.000000 |
-      |  3 | nova-conductor     | controller | internal | enabled | up    | 2016-02-09T23:11:16.000000 |
-      |  4 | nova-compute       | compute1   | nova     | enabled | up    | 2016-02-09T23:11:20.000000 |
+      |  1 | nova-scheduler     | controller | internal | enabled | up    | 2016-02-09T23:11:15.000000 |
+      |  2 | nova-conductor     | controller | internal | enabled | up    | 2016-02-09T23:11:16.000000 |
+      |  3 | nova-compute       | compute1   | nova     | enabled | up    | 2016-02-09T23:11:20.000000 |
       +----+--------------------+------------+----------+---------+-------+----------------------------+
 
    .. note::
 
-      This output should indicate three service components enabled on the
+      This output should indicate two service components enabled on the
       controller node and one service component enabled on the compute node.
 
 #. List API endpoints in the Identity service to verify connectivity with the
@@ -96,24 +95,35 @@ Verify operation of the Compute service.
       | 9a76d9f9-9620-4f2e-8c69-6c5691fae163 | cirros      | active      |
       +--------------------------------------+-------------+-------------+
 
-#. Check the cells and placement API are working successfully:
+#. Check the cells and placement API are working successfully and that other
+   necessary prerequisites are in place:
+
+   .. _verify-install-nova-status:
 
    .. code-block:: console
 
       # nova-status upgrade check
 
-      +---------------------------+
-      | Upgrade Check Results     |
-      +---------------------------+
-      | Check: Cells v2           |
-      | Result: Success           |
-      | Details: None             |
-      +---------------------------+
-      | Check: Placement API      |
-      | Result: Success           |
-      | Details: None             |
-      +---------------------------+
-      | Check: Resource Providers |
-      | Result: Success           |
-      | Details: None             |
-      +---------------------------+
+      +--------------------------------------------------------------------+
+      | Upgrade Check Results                                              |
+      +--------------------------------------------------------------------+
+      | Check: Cells v2                                                    |
+      | Result: Success                                                    |
+      | Details: None                                                      |
+      +--------------------------------------------------------------------+
+      | Check: Placement API                                               |
+      | Result: Success                                                    |
+      | Details: None                                                      |
+      +--------------------------------------------------------------------+
+      | Check: Ironic Flavor Migration                                     |
+      | Result: Success                                                    |
+      | Details: None                                                      |
+      +--------------------------------------------------------------------+
+      | Check: Request Spec Migration                                      |
+      | Result: Success                                                    |
+      | Details: None                                                      |
+      +--------------------------------------------------------------------+
+      | Check: Console Auths                                               |
+      | Result: Success                                                    |
+      | Details: None                                                      |
+      +--------------------------------------------------------------------+

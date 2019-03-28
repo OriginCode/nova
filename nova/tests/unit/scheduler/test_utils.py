@@ -11,8 +11,8 @@
 #    under the License.
 
 import mock
+from oslo_utils.fixture import uuidsentinel as uuids
 
-from nova.api.openstack.placement import lib as plib
 from nova import context as nova_context
 from nova import exception
 from nova import objects
@@ -20,7 +20,7 @@ from nova.scheduler.client import report
 from nova.scheduler import utils
 from nova import test
 from nova.tests.unit import fake_instance
-from nova.tests import uuidsentinel as uuids
+from nova.tests.unit.scheduler import fakes
 
 
 class TestUtils(test.NoDBTestCase):
@@ -64,7 +64,7 @@ class TestUtils(test.NoDBTestCase):
                                 ephemeral_gb=5,
                                 swap=0)
         expected_resources = utils.ResourceRequest()
-        expected_resources._rg_by_id[None] = plib.RequestGroup(
+        expected_resources._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
                 'VCPU': 1,
@@ -85,7 +85,7 @@ class TestUtils(test.NoDBTestCase):
                                     'trait:CUSTOM_FLAVOR_TRAIT': 'required',
                                     'trait:CUSTOM_IMAGE_TRAIT2': 'required'})
         expected_resources = utils.ResourceRequest()
-        expected_resources._rg_by_id[None] = plib.RequestGroup(
+        expected_resources._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
                 'VCPU': 1,
@@ -110,7 +110,7 @@ class TestUtils(test.NoDBTestCase):
                                 ephemeral_gb=0,
                                 swap=0)
         expected_resources = utils.ResourceRequest()
-        expected_resources._rg_by_id[None] = plib.RequestGroup(
+        expected_resources._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
                 'VCPU': 1,
@@ -127,7 +127,7 @@ class TestUtils(test.NoDBTestCase):
                                 swap=0,
                                 extra_specs={"resources:CUSTOM_TEST_CLASS": 1})
         expected_resources = utils.ResourceRequest()
-        expected_resources._rg_by_id[None] = plib.RequestGroup(
+        expected_resources._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
                 "VCPU": 1,
@@ -149,7 +149,7 @@ class TestUtils(test.NoDBTestCase):
                                     "resources:MEMORY_MB": 99,
                                     "resources:DISK_GB": 99})
         expected_resources = utils.ResourceRequest()
-        expected_resources._rg_by_id[None] = plib.RequestGroup(
+        expected_resources._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
                 "VCPU": 99,
@@ -169,7 +169,7 @@ class TestUtils(test.NoDBTestCase):
                                     "resources:VCPU": 0,
                                     "resources:DISK_GB": 0})
         expected_resources = utils.ResourceRequest()
-        expected_resources._rg_by_id[None] = plib.RequestGroup(
+        expected_resources._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
                 "MEMORY_MB": 1024,
@@ -187,7 +187,7 @@ class TestUtils(test.NoDBTestCase):
                                     "resources:VGPU": 1,
                                     "resources:VGPU_DISPLAY_HEAD": 1})
         expected_resources = utils.ResourceRequest()
-        expected_resources._rg_by_id[None] = plib.RequestGroup(
+        expected_resources._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
                 "VCPU": 1,
@@ -243,20 +243,20 @@ class TestUtils(test.NoDBTestCase):
                          'group_policy': 'none'})
         expected_resources = utils.ResourceRequest()
         expected_resources._group_policy = 'none'
-        expected_resources._rg_by_id[None] = plib.RequestGroup(
+        expected_resources._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
                 'DISK_GB': 10,
                 'CUSTOM_THING': 123,
             }
         )
-        expected_resources._rg_by_id['1'] = plib.RequestGroup(
+        expected_resources._rg_by_id['1'] = objects.RequestGroup(
             resources={
                 'VGPU': 1,
                 'VGPU_DISPLAY_HEAD': 2,
             }
         )
-        expected_resources._rg_by_id['3'] = plib.RequestGroup(
+        expected_resources._rg_by_id['3'] = objects.RequestGroup(
             resources={
                 'VCPU': 2,
             },
@@ -265,12 +265,12 @@ class TestUtils(test.NoDBTestCase):
                 'CUSTOM_SILVER',
             }
         )
-        expected_resources._rg_by_id['24'] = plib.RequestGroup(
+        expected_resources._rg_by_id['24'] = objects.RequestGroup(
             resources={
                 'SRIOV_NET_VF': 2,
             },
         )
-        expected_resources._rg_by_id['42'] = plib.RequestGroup(
+        expected_resources._rg_by_id['42'] = objects.RequestGroup(
             resources={
                 'SRIOV_NET_VF': 1,
             }
@@ -299,21 +299,13 @@ class TestUtils(test.NoDBTestCase):
 
         destination.require_aggregates(['foo', 'bar'])
         req = utils.resources_from_request_spec(reqspec)
-        self.assertEqual([('foo', 'bar',)],
-                         req.get_request_group(None).member_of)
+        self.assertEqual([['foo', 'bar']],
+                         req.get_request_group(None).aggregates)
 
         destination.require_aggregates(['baz'])
         req = utils.resources_from_request_spec(reqspec)
-        self.assertEqual([('foo', 'bar'), ('baz',)],
-                         req.get_request_group(None).member_of)
-
-        # Test stringification
-        self.assertEqual(
-            'RequestGroup(use_same_provider=False, '
-            'resources={DISK_GB:1, MEMORY_MB:1024, VCPU:1}, '
-            'traits=[], '
-            'aggregates=[[baz], [foo, bar]])',
-            str(req))
+        self.assertEqual([['foo', 'bar'], ['baz']],
+                         req.get_request_group(None).aggregates)
 
     def test_resources_from_request_spec_no_aggregates(self):
         flavor = objects.Flavor(vcpus=1, memory_mb=1024,
@@ -322,19 +314,19 @@ class TestUtils(test.NoDBTestCase):
         reqspec = objects.RequestSpec(flavor=flavor)
 
         req = utils.resources_from_request_spec(reqspec)
-        self.assertEqual([], req.get_request_group(None).member_of)
+        self.assertEqual([], req.get_request_group(None).aggregates)
 
         reqspec.requested_destination = None
         req = utils.resources_from_request_spec(reqspec)
-        self.assertEqual([], req.get_request_group(None).member_of)
+        self.assertEqual([], req.get_request_group(None).aggregates)
 
         reqspec.requested_destination = objects.Destination()
         req = utils.resources_from_request_spec(reqspec)
-        self.assertEqual([], req.get_request_group(None).member_of)
+        self.assertEqual([], req.get_request_group(None).aggregates)
 
         reqspec.requested_destination.aggregates = None
         req = utils.resources_from_request_spec(reqspec)
-        self.assertEqual([], req.get_request_group(None).member_of)
+        self.assertEqual([], req.get_request_group(None).aggregates)
 
     @mock.patch("nova.scheduler.utils.ResourceRequest.from_extra_specs")
     def test_process_extra_specs_granular_called(self, mock_proc):
@@ -377,7 +369,7 @@ class TestUtils(test.NoDBTestCase):
                                 ephemeral_gb=0,
                                 swap=0)
         expected = utils.ResourceRequest()
-        expected._rg_by_id[None] = plib.RequestGroup(
+        expected._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
                 'VCPU': 1,
@@ -400,7 +392,7 @@ class TestUtils(test.NoDBTestCase):
                                 swap=0)
         fake_spec = objects.RequestSpec(flavor=flavor, force_nodes=['test'])
         expected = utils.ResourceRequest()
-        expected._rg_by_id[None] = plib.RequestGroup(
+        expected._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
                 'VCPU': 1,
@@ -424,7 +416,7 @@ class TestUtils(test.NoDBTestCase):
                                 swap=0)
         fake_spec = objects.RequestSpec(flavor=flavor, force_hosts=['test'])
         expected = utils.ResourceRequest()
-        expected._rg_by_id[None] = plib.RequestGroup(
+        expected._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
                 'VCPU': 1,
@@ -439,6 +431,42 @@ class TestUtils(test.NoDBTestCase):
             'resources=DISK_GB%3A15%2CMEMORY_MB%3A1024%2CVCPU%3A1'
         )
         self.assertEqual(expected_querystring, resources.to_querystring())
+
+    def test_resources_from_request_spec_having_requested_resources(self):
+        flavor = objects.Flavor(
+                vcpus=1,
+                memory_mb=1024,
+                root_gb=10,
+                ephemeral_gb=5,
+                swap=0)
+        rg1 = objects.RequestGroup()
+        rg2 = objects.RequestGroup()
+        reqspec = objects.RequestSpec(flavor=flavor,
+                                      requested_resources=[rg1, rg2])
+        req = utils.resources_from_request_spec(reqspec)
+        self.assertEqual({'MEMORY_MB': 1024, 'DISK_GB': 15, 'VCPU': 1},
+                         req.get_request_group(None).resources)
+        self.assertIs(rg1, req.get_request_group(1))
+        self.assertIs(rg2, req.get_request_group(2))
+
+    def test_resources_from_request_spec_requested_resources_unfilled(self):
+        flavor = objects.Flavor(
+                vcpus=1,
+                memory_mb=1024,
+                root_gb=10,
+                ephemeral_gb=5,
+                swap=0)
+        reqspec = objects.RequestSpec(flavor=flavor)
+        req = utils.resources_from_request_spec(reqspec)
+        self.assertEqual({'MEMORY_MB': 1024, 'DISK_GB': 15, 'VCPU': 1},
+                         req.get_request_group(None).resources)
+        self.assertEqual(1, len(list(req.resource_groups())))
+
+        reqspec = objects.RequestSpec(flavor=flavor, requested_resources=[])
+        req = utils.resources_from_request_spec(reqspec)
+        self.assertEqual({'MEMORY_MB': 1024, 'DISK_GB': 15, 'VCPU': 1},
+                         req.get_request_group(None).resources)
+        self.assertEqual(1, len(list(req.resource_groups())))
 
     @mock.patch('nova.compute.utils.is_volume_backed_instance',
                 return_value=False)
@@ -538,7 +566,7 @@ class TestUtils(test.NoDBTestCase):
         # Build up a ResourceRequest from the inside to compare against.
         expected = utils.ResourceRequest()
         expected._group_policy = 'isolate'
-        expected._rg_by_id[None] = plib.RequestGroup(
+        expected._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
                 'VCPU': 2,
@@ -552,7 +580,7 @@ class TestUtils(test.NoDBTestCase):
                 'CUSTOM_BRONZE',
             },
         )
-        expected._rg_by_id['1'] = plib.RequestGroup(
+        expected._rg_by_id['1'] = objects.RequestGroup(
             resources={
                 'SRIOV_NET_VF': 1,
                 'IPV4_ADDRESS': 1,
@@ -564,7 +592,7 @@ class TestUtils(test.NoDBTestCase):
                 'CUSTOM_PHYSNET_NET2',
             },
         )
-        expected._rg_by_id['2'] = plib.RequestGroup(
+        expected._rg_by_id['2'] = objects.RequestGroup(
             resources={
                 'SRIOV_NET_VF': 1,
                 'IPV4_ADDRESS': 2,
@@ -574,7 +602,7 @@ class TestUtils(test.NoDBTestCase):
                 'HW_NIC_ACCEL_SSL',
             }
         )
-        expected._rg_by_id['3'] = plib.RequestGroup(
+        expected._rg_by_id['3'] = objects.RequestGroup(
             resources={
                 'DISK_GB': 5,
             }
@@ -595,25 +623,19 @@ class TestUtils(test.NoDBTestCase):
         )
         self.assertEqual(expected_querystring, rr.to_querystring())
 
-        # Test stringification
-        self.assertEqual(
-            'RequestGroup(use_same_provider=False, '
-            'resources={MEMORY_MB:2048, VCPU:2}, '
-            'traits=[CUSTOM_MAGIC, HW_CPU_X86_AVX, !CUSTOM_BRONZE], '
-            'aggregates=[]), '
-            'RequestGroup(use_same_provider=True, '
-            'resources={DISK_GB:5}, '
-            'traits=[], '
-            'aggregates=[]), '
-            'RequestGroup(use_same_provider=True, '
-            'resources={IPV4_ADDRESS:1, SRIOV_NET_VF:1}, '
-            'traits=[CUSTOM_PHYSNET_NET1, !CUSTOM_PHYSNET_NET2], '
-            'aggregates=[]), '
-            'RequestGroup(use_same_provider=True, '
-            'resources={IPV4_ADDRESS:2, SRIOV_NET_VF:1}, '
-            'traits=[CUSTOM_PHYSNET_NET2, HW_NIC_ACCEL_SSL], '
-            'aggregates=[])',
-            str(rr))
+    def test_more_than_one_resource_request_without_group_policy_warns(self):
+        extra_specs = {
+            'resources:VCPU': '2',
+            'resources1:CUSTOM_FOO': '1'
+        }
+        rr = utils.ResourceRequest.from_extra_specs(extra_specs)
+        rr.add_request_group(objects.RequestGroup(resources={'CUSTOM_BAR': 5}))
+
+        rr.to_querystring()
+        self.assertIn(
+            "There is more than one numbered request group in the allocation "
+            "candidate query but the flavor did not specify any group policy.",
+            self.stdlog.logger.output)
 
     def test_resource_request_from_extra_specs_append_request(self):
         extra_specs = {
@@ -622,7 +644,7 @@ class TestUtils(test.NoDBTestCase):
             'trait:HW_CPU_X86_AVX': 'required',
         }
         existing_req = utils.ResourceRequest()
-        existing_req._rg_by_id[None] = plib.RequestGroup(
+        existing_req._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             required_traits={
                 'CUSTOM_MAGIC',
@@ -630,7 +652,7 @@ class TestUtils(test.NoDBTestCase):
         )
         # Build up a ResourceRequest from the inside to compare against.
         expected = utils.ResourceRequest()
-        expected._rg_by_id[None] = plib.RequestGroup(
+        expected._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
                 'VCPU': 2,
@@ -653,7 +675,7 @@ class TestUtils(test.NoDBTestCase):
 
         # Build up a ResourceRequest from the inside to compare against.
         expected = utils.ResourceRequest()
-        expected._rg_by_id[None] = plib.RequestGroup(
+        expected._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             required_traits={
                 'CUSTOM_TRUSTED',
@@ -667,7 +689,7 @@ class TestUtils(test.NoDBTestCase):
         image_meta_props = objects.ImageMetaProps.from_dict(props)
 
         existing_req = utils.ResourceRequest()
-        existing_req._rg_by_id[None] = plib.RequestGroup(
+        existing_req._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
                 'VCPU': 2,
@@ -679,7 +701,7 @@ class TestUtils(test.NoDBTestCase):
         )
         # Build up a ResourceRequest from the inside to compare against.
         expected = utils.ResourceRequest()
-        expected._rg_by_id[None] = plib.RequestGroup(
+        expected._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
                 'VCPU': 2,
@@ -696,54 +718,28 @@ class TestUtils(test.NoDBTestCase):
             expected, utils.ResourceRequest.from_image_props(image_meta_props,
                                                              req=existing_req))
 
-    def test_merge_resources(self):
-        resources = {
-            'VCPU': 1, 'MEMORY_MB': 1024,
-        }
-        new_resources = {
-            'VCPU': 2, 'MEMORY_MB': 2048, 'CUSTOM_FOO': 1,
-        }
-        doubled = {
-            'VCPU': 3, 'MEMORY_MB': 3072, 'CUSTOM_FOO': 1,
-        }
-        saved_orig = dict(resources)
-        utils.merge_resources(resources, new_resources)
-        # Check to see that we've doubled our resources
-        self.assertEqual(doubled, resources)
-        # and then removed those doubled resources
-        utils.merge_resources(resources, saved_orig, -1)
-        self.assertEqual(new_resources, resources)
+    def test_resource_request_add_group_inserts_the_group(self):
+        req = utils.ResourceRequest()
+        rg1 = objects.RequestGroup()
+        req.add_request_group(rg1)
+        rg2 = objects.RequestGroup()
+        req.add_request_group(rg2)
+        self.assertIs(rg1, req.get_request_group(1))
+        self.assertIs(rg2, req.get_request_group(2))
 
-    def test_merge_resources_zero(self):
-        """Test 0 value resources are ignored."""
-        resources = {
-            'VCPU': 1, 'MEMORY_MB': 1024,
-        }
-        new_resources = {
-            'VCPU': 2, 'MEMORY_MB': 2048, 'DISK_GB': 0,
-        }
-        # The result should not include the zero valued resource.
-        doubled = {
-            'VCPU': 3, 'MEMORY_MB': 3072,
-        }
-        utils.merge_resources(resources, new_resources)
-        self.assertEqual(doubled, resources)
+    def test_resource_request_add_group_inserts_the_group_implicit_group(self):
+        req = utils.ResourceRequest()
+        # this implicitly creates the unnumbered group
+        unnumbered_rg = req.get_request_group(None)
 
-    def test_merge_resources_original_zeroes(self):
-        """Confirm that merging that result in a zero in the original
-        excludes the zeroed resource class.
-        """
-        resources = {
-            'VCPU': 3, 'MEMORY_MB': 1023, 'DISK_GB': 1,
-        }
-        new_resources = {
-            'VCPU': 1, 'MEMORY_MB': 512, 'DISK_GB': 1,
-        }
-        merged = {
-            'VCPU': 2, 'MEMORY_MB': 511,
-        }
-        utils.merge_resources(resources, new_resources, -1)
-        self.assertEqual(merged, resources)
+        rg1 = objects.RequestGroup()
+        req.add_request_group(rg1)
+        rg2 = objects.RequestGroup()
+        req.add_request_group(rg2)
+
+        self.assertIs(rg1, req.get_request_group(1))
+        self.assertIs(rg2, req.get_request_group(2))
+        self.assertIs(unnumbered_rg, req.get_request_group(None))
 
     def test_claim_resources_on_destination_no_source_allocations(self):
         """Tests the negative scenario where the instance does not have
@@ -757,7 +753,7 @@ class TestUtils(test.NoDBTestCase):
         dest_node = objects.ComputeNode(uuid=uuids.dest_node, host='dest-host')
 
         @mock.patch.object(reportclient,
-                           'get_allocations_for_consumer_by_provider',
+                           'get_allocs_for_consumer',
                            return_value={})
         @mock.patch.object(reportclient,
                            'claim_resources',
@@ -766,7 +762,7 @@ class TestUtils(test.NoDBTestCase):
             utils.claim_resources_on_destination(
                 self.context, reportclient, instance, source_node, dest_node)
             mock_get_allocs.assert_called_once_with(
-                self.context, uuids.source_node, instance.uuid)
+                self.context, instance.uuid)
 
         test()
 
@@ -780,21 +776,35 @@ class TestUtils(test.NoDBTestCase):
             uuid=uuids.source_node, host=instance.host)
         dest_node = objects.ComputeNode(uuid=uuids.dest_node, host='dest-host')
         source_res_allocs = {
-            'VCPU': instance.vcpus,
-            'MEMORY_MB': instance.memory_mb,
-            # This would really include ephemeral and swap too but we're lazy.
-            'DISK_GB': instance.root_gb
+            'allocations': {
+                uuids.source_node: {
+                    'resources': {
+                        'VCPU': instance.vcpus,
+                        'MEMORY_MB': instance.memory_mb,
+                        # This would really include ephemeral and swap too but
+                        # we're lazy.
+                        'DISK_GB': instance.root_gb
+                    }
+                }
+            },
+            'consumer_generation': 1,
+            'project_id': uuids.project_id,
+            'user_id': uuids.user_id
         }
         dest_alloc_request = {
             'allocations': {
                 uuids.dest_node: {
-                    'resources': source_res_allocs
+                    'resources': {
+                        'VCPU': instance.vcpus,
+                        'MEMORY_MB': instance.memory_mb,
+                        'DISK_GB': instance.root_gb
+                    }
                 }
-            }
+            },
         }
 
         @mock.patch.object(reportclient,
-                           'get_allocations_for_consumer_by_provider',
+                           'get_allocs_for_consumer',
                            return_value=source_res_allocs)
         @mock.patch.object(reportclient,
                            'claim_resources', return_value=False)
@@ -806,11 +816,11 @@ class TestUtils(test.NoDBTestCase):
                               self.context, reportclient, instance,
                               source_node, dest_node)
             mock_get_allocs.assert_called_once_with(
-                self.context, uuids.source_node, instance.uuid)
+                self.context, instance.uuid)
             mock_claim.assert_called_once_with(
                 self.context, instance.uuid, dest_alloc_request,
                 instance.project_id, instance.user_id,
-                allocation_request_version='1.12')
+                allocation_request_version='1.28', consumer_generation=1)
 
         test()
 
@@ -822,32 +832,41 @@ class TestUtils(test.NoDBTestCase):
             uuid=uuids.source_node, host=instance.host)
         dest_node = objects.ComputeNode(uuid=uuids.dest_node, host='dest-host')
         source_res_allocs = {
-            'VCPU': instance.vcpus,
-            'MEMORY_MB': instance.memory_mb,
-            # This would really include ephemeral and swap too but we're lazy.
-            'DISK_GB': instance.root_gb
+            uuids.source_node: {
+                'resources': {
+                    'VCPU': instance.vcpus,
+                    'MEMORY_MB': instance.memory_mb,
+                    # This would really include ephemeral and swap too but
+                    # we're lazy.
+                    'DISK_GB': instance.root_gb
+                }
+            }
         }
         dest_alloc_request = {
             'allocations': {
                 uuids.dest_node: {
-                    'resources': source_res_allocs
+                    'resources': {
+                        'VCPU': instance.vcpus,
+                        'MEMORY_MB': instance.memory_mb,
+                        'DISK_GB': instance.root_gb
+                    }
                 }
-            }
+            },
         }
 
         @mock.patch.object(reportclient,
-                           'get_allocations_for_consumer_by_provider')
+                           'get_allocs_for_consumer')
         @mock.patch.object(reportclient,
                            'claim_resources', return_value=True)
         def test(mock_claim, mock_get_allocs):
             utils.claim_resources_on_destination(
                 self.context, reportclient, instance, source_node, dest_node,
-                source_res_allocs)
+                source_res_allocs, consumer_generation=None)
             self.assertFalse(mock_get_allocs.called)
             mock_claim.assert_called_once_with(
                 self.context, instance.uuid, dest_alloc_request,
                 instance.project_id, instance.user_id,
-                allocation_request_version='1.12')
+                allocation_request_version='1.28', consumer_generation=None)
 
         test()
 
@@ -858,8 +877,8 @@ class TestUtils(test.NoDBTestCase):
         call the placement client to claim resources for the instance.
         """
         mock_is_rebuild.return_value = False
-        ctx = mock.Mock(user_id=uuids.user_id)
-        spec_obj = mock.Mock(project_id=uuids.project_id)
+        ctx = nova_context.RequestContext(user_id=uuids.user_id)
+        spec_obj = objects.RequestSpec(project_id=uuids.project_id)
         instance_uuid = uuids.instance
         alloc_req = mock.sentinel.alloc_req
         mock_client.claim_resources.return_value = True
@@ -869,12 +888,23 @@ class TestUtils(test.NoDBTestCase):
 
         mock_client.claim_resources.assert_called_once_with(
             ctx, uuids.instance, mock.sentinel.alloc_req, uuids.project_id,
-            uuids.user_id, allocation_request_version=None)
+            uuids.user_id, allocation_request_version=None,
+            consumer_generation=None)
         self.assertTrue(res)
+
+        # Now do it again but with RequestSpec.user_id set.
+        spec_obj.user_id = uuids.spec_user_id
+        mock_client.reset_mock()
+        utils.claim_resources(ctx, mock_client, spec_obj, instance_uuid,
+                              alloc_req)
+        mock_client.claim_resources.assert_called_once_with(
+            ctx, uuids.instance, mock.sentinel.alloc_req, uuids.project_id,
+            uuids.spec_user_id, allocation_request_version=None,
+            consumer_generation=None)
 
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient')
     @mock.patch('nova.scheduler.utils.request_is_rebuild')
-    def test_claim_resouces_for_policy_check(self, mock_is_rebuild,
+    def test_claim_resources_for_policy_check(self, mock_is_rebuild,
             mock_client):
         mock_is_rebuild.return_value = True
         ctx = mock.Mock(user_id=uuids.user_id)
@@ -883,3 +913,52 @@ class TestUtils(test.NoDBTestCase):
         self.assertTrue(res)
         mock_is_rebuild.assert_called_once_with(mock.sentinel.spec_obj)
         self.assertFalse(mock_client.claim_resources.called)
+
+    def test_get_weight_multiplier(self):
+        host_attr = {'vcpus_total': 4, 'vcpus_used': 6,
+                     'cpu_allocation_ratio': 1.0}
+        host1 = fakes.FakeHostState('fake-host', 'node', host_attr)
+
+        host1.aggregates = [
+            objects.Aggregate(
+                id=1,
+                name='foo',
+                hosts=['fake-host'],
+                metadata={'cpu_weight_multiplier': 'invalid'},
+            )]
+        # Get value from default given value if the agg meta is invalid.
+        self.assertEqual(
+            1.0,
+            utils.get_weight_multiplier(host1, 'cpu_weight_multiplier', 1.0)
+        )
+
+        host1.aggregates = [
+            objects.Aggregate(
+                id=1,
+                name='foo',
+                hosts=['fake-host'],
+                metadata={'cpu_weight_multiplier': '1.9'},
+            )]
+        # Get value from aggregate metadata
+        self.assertEqual(
+            1.9,
+            utils.get_weight_multiplier(host1, 'cpu_weight_multiplier', 1.0)
+        )
+
+        host1.aggregates = [
+            objects.Aggregate(
+                id=1,
+                name='foo',
+                hosts=['fake-host'],
+                metadata={'cpu_weight_multiplier': '1.9'}),
+            objects.Aggregate(
+                id=2,
+                name='foo',
+                hosts=['fake-host'],
+                metadata={'cpu_weight_multiplier': '1.8'}),
+        ]
+        # Get min value from aggregate metadata
+        self.assertEqual(
+            1.8,
+            utils.get_weight_multiplier(host1, 'cpu_weight_multiplier', 1.0)
+        )

@@ -14,9 +14,12 @@
 #    under the License.
 
 import copy
+import datetime
 
+import iso8601
 import mock
 from oslo_policy import policy as oslo_policy
+from oslo_utils.fixture import uuidsentinel as uuids
 import six
 from webob import exc
 
@@ -29,8 +32,10 @@ from nova import objects
 from nova import policy
 from nova import test
 from nova.tests.unit.api.openstack import fakes
+from nova.tests.unit import fake_instance
 from nova.tests.unit import fake_server_actions
-from nova.tests import uuidsentinel as uuids
+from nova import utils
+
 
 FAKE_UUID = fake_server_actions.FAKE_UUID
 FAKE_REQUEST_ID = fake_server_actions.FAKE_REQUEST_ID1
@@ -125,7 +130,8 @@ class InstanceActionsTestV21(test.NoDBTestCase):
     expect_event_hostId = False
     expect_event_host = False
 
-    def fake_get(self, context, instance_uuid, expected_attrs=None):
+    def fake_get(self, context, instance_uuid, expected_attrs=None,
+                 cell_down_support=False):
         return objects.Instance(uuid=instance_uuid)
 
     def setUp(self):
@@ -143,6 +149,13 @@ class InstanceActionsTestV21(test.NoDBTestCase):
         return fakes.HTTPRequest.blank(fake_url,
                                        use_admin_context=use_admin_context,
                                        version=self.wsgi_api_version)
+
+    def _get_http_req_with_version(self, action, use_admin_context=False,
+                                   version="2.21"):
+        fake_url = '/123/servers/12/%s' % action
+        return fakes.HTTPRequest.blank(fake_url,
+                                       use_admin_context=use_admin_context,
+                                       version=version)
 
     def _set_policy_rules(self):
         rules = {'compute:get': '',
@@ -240,7 +253,8 @@ class InstanceActionsTestV21(test.NoDBTestCase):
         self.assertRaises(exc.HTTPNotFound, self.controller.index, req,
                           FAKE_UUID)
         self.mock_get.assert_called_once_with(req.environ['nova.context'],
-                                              FAKE_UUID, expected_attrs=None)
+                                              FAKE_UUID, expected_attrs=None,
+                                              cell_down_support=False)
 
     def test_show_instance_not_found(self):
         self.mock_get.side_effect = exception.InstanceNotFound(
@@ -249,13 +263,15 @@ class InstanceActionsTestV21(test.NoDBTestCase):
         self.assertRaises(exc.HTTPNotFound, self.controller.show, req,
                           FAKE_UUID, 'fake')
         self.mock_get.assert_called_once_with(req.environ['nova.context'],
-                                              FAKE_UUID, expected_attrs=None)
+                                              FAKE_UUID, expected_attrs=None,
+                                              cell_down_support=False)
 
 
 class InstanceActionsTestV221(InstanceActionsTestV21):
     wsgi_api_version = "2.21"
 
-    def fake_get(self, context, instance_uuid, expected_attrs=None):
+    def fake_get(self, context, instance_uuid, expected_attrs=None,
+                 cell_down_support=False):
         self.assertEqual('yes', context.read_deleted)
         return objects.Instance(uuid=instance_uuid)
 
@@ -314,7 +330,125 @@ class InstanceActionsTestV258(InstanceActionsTestV251):
                       six.text_type(ex))
 
 
-class InstanceActionsTestV262(InstanceActionsTestV251):
+class InstanceActionsTestV262(InstanceActionsTestV258):
     wsgi_api_version = "2.62"
     expect_event_hostId = True
     expect_event_host = True
+    instance_project_id = '26cde4489f6749a08834741678df3c4a'
+
+    def fake_get(self, context, instance_uuid, expected_attrs=None,
+                 cell_down_support=False):
+        return objects.Instance(uuid=instance_uuid,
+                                project_id=self.instance_project_id)
+
+    @mock.patch.object(compute_api.InstanceActionAPI, 'action_events_get')
+    @mock.patch.object(compute_api.InstanceActionAPI,
+                       'action_get_by_request_id')
+    def test_get_action_with_events_project_id_none(self, mock_action_get,
+                                                    mock_action_events):
+        fake_request_id = 'req-%s' % uuids.req1
+
+        mock_action_get.return_value = objects.InstanceAction(
+            id=789,
+            action='stop',
+            instance_uuid=uuids.instance,
+            request_id=fake_request_id,
+            user_id=None,
+            project_id=None,
+            start_time=datetime.datetime(2019, 2, 28, 14, 28, 0, 0),
+            finish_time=None,
+            message='',
+            created_at=None,
+            updated_at=None,
+            deleted_at=None,
+            deleted=False)
+
+        mock_action_events.return_value = [
+            objects.InstanceActionEvent(
+                id=5,
+                action_id=789,
+                event='compute_stop_instance',
+                start_time=datetime.datetime(2019, 2, 28, 14, 28, 0, 0),
+                finish_time=datetime.datetime(2019, 2, 28, 14, 30, 0, 0),
+                result='Success',
+                traceback='',
+                created_at=None,
+                updated_at=None,
+                deleted_at=None,
+                deleted=False,
+                host='host2')]
+
+        req = self._get_http_req('os-instance-actions/1',
+                                 use_admin_context=True)
+        res_dict = self.controller.show(req, uuids.instance, fake_request_id)
+
+        # Assert that 'project_id' is null (None) in the response
+        self.assertIsNone(res_dict['instanceAction']['project_id'])
+        self.assertEqual('host2',
+                         res_dict['instanceAction']['events'][0]['host'])
+        # Assert that the 'hostId' is based on 'host' and the project ID
+        # of the server
+        self.assertEqual(utils.generate_hostid(
+            res_dict['instanceAction']['events'][0]['host'],
+            self.instance_project_id),
+            res_dict['instanceAction']['events'][0]['hostId'])
+
+
+class InstanceActionsTestV266(InstanceActionsTestV258):
+    wsgi_api_version = "2.66"
+
+    def test_get_action_with_invalid_changes_before(self):
+        """Tests get paging with a invalid changes-before."""
+        req = self._get_http_req('os-instance-actions?'
+                                 'changes-before=wrong_time')
+        ex = self.assertRaises(exception.ValidationError,
+                               self.controller.index, req)
+        self.assertIn('Invalid input for query parameters changes-before',
+                      six.text_type(ex))
+
+    @mock.patch('nova.compute.api.InstanceActionAPI.actions_get')
+    @mock.patch('nova.api.openstack.common.get_instance')
+    def test_get_action_with_changes_since_and_changes_before(
+            self, mock_get_instance, mock_action_get):
+        param = 'changes-since=2012-12-05T00:00:00Z&' \
+                'changes-before=2012-12-05T01:00:00Z'
+        req = self._get_http_req_with_version('os-instance-actions?%s' %
+                                              param, use_admin_context=True,
+                                              version=self.wsgi_api_version)
+        instance = fake_instance.fake_instance_obj(req.environ['nova.context'])
+        mock_get_instance.return_value = instance
+
+        self.controller.index(req, FAKE_UUID)
+        filters = {'changes-since': datetime.datetime(
+                       2012, 12, 5, 0, 0, tzinfo=iso8601.iso8601.UTC),
+                   'changes-before': datetime.datetime(
+                       2012, 12, 5, 1, 0, tzinfo=iso8601.iso8601.UTC)}
+        mock_action_get.assert_called_once_with(req.environ['nova.context'],
+                                                instance, limit=1000,
+                                                marker=None,
+                                                filters=filters)
+
+    def test_instance_actions_filters_with_distinct_changes_time_bad_request(
+            self):
+        changes_since = '2018-09-04T05:45:27Z'
+        changes_before = '2018-09-03T05:45:27Z'
+        req = self._get_http_req('os-instance-actions?'
+                                 'changes-since=%s&changes-before=%s' %
+                                 (changes_since, changes_before))
+        ex = self.assertRaises(exc.HTTPBadRequest, self.controller.index,
+                               req, FAKE_UUID)
+        self.assertIn('The value of changes-since must be less than '
+                      'or equal to changes-before', six.text_type(ex))
+
+    def test_get_action_with_changes_before_old_microversion(self):
+        """Tests that the changes-before query parameter is an error before
+        microversion 2.66.
+        """
+        param = 'changes-before=2018-09-13T15:13:03Z'
+        req = self._get_http_req_with_version('os-instance-actions?%s' %
+                                              param, use_admin_context=True,
+                                              version="2.65")
+        ex = self.assertRaises(exception.ValidationError,
+                               self.controller.index, req)
+        detail = 'Additional properties are not allowed'
+        self.assertIn(detail, six.text_type(ex))

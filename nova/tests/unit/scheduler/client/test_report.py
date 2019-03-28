@@ -9,25 +9,27 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
-
+import copy
 import time
 
 import fixtures
 from keystoneauth1 import exceptions as ks_exc
 import mock
+import os_resource_classes as orc
 from oslo_serialization import jsonutils
+from oslo_utils.fixture import uuidsentinel as uuids
+import six
 from six.moves.urllib import parse
 
 import nova.conf
 from nova import context
 from nova import exception
 from nova import objects
-from nova import rc_fields as fields
 from nova.scheduler.client import report
 from nova.scheduler import utils as scheduler_utils
 from nova import test
 from nova.tests.unit import fake_requests
-from nova.tests import uuidsentinel as uuids
+
 
 CONF = nova.conf.CONF
 
@@ -269,10 +271,11 @@ class TestPutAllocations(SchedulerReportClientTestCase):
         resp = self.client.put_allocations(self.context, rp_uuid,
                                            consumer_uuid, data,
                                            mock.sentinel.project_id,
-                                           mock.sentinel.user_id)
+                                           mock.sentinel.user_id,
+                                           mock.sentinel.consumer_generation)
         self.assertTrue(resp)
         mock_put.assert_called_once_with(
-            expected_url, mock.ANY, version='1.8',
+            expected_url, mock.ANY, version='1.28',
             global_request_id=self.context.global_id)
 
     @mock.patch.object(report.LOG, 'warning')
@@ -287,20 +290,47 @@ class TestPutAllocations(SchedulerReportClientTestCase):
         resp = self.client.put_allocations(self.context, rp_uuid,
                                            consumer_uuid, data,
                                            mock.sentinel.project_id,
-                                           mock.sentinel.user_id)
+                                           mock.sentinel.user_id,
+                                           mock.sentinel.consumer_generation)
         self.assertFalse(resp)
         mock_put.assert_called_once_with(
-            expected_url, mock.ANY, version='1.8',
+            expected_url, mock.ANY, version='1.28',
             global_request_id=self.context.global_id)
         log_msg = mock_warn.call_args[0][0]
-        self.assertIn("Unable to submit allocation for instance", log_msg)
+        self.assertIn("Failed to save allocation for", log_msg)
+
+    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.put')
+    def test_put_allocations_fail_due_to_consumer_generation_conflict(
+            self, mock_put):
+        mock_put.return_value = fake_requests.FakeResponse(
+            status_code=409,
+            content=jsonutils.dumps(
+                {'errors': [{'code': 'placement.concurrent_update',
+                             'detail': 'consumer generation conflict'}]}))
+
+        rp_uuid = mock.sentinel.rp
+        consumer_uuid = mock.sentinel.consumer
+        data = {"MEMORY_MB": 1024}
+        expected_url = "/allocations/%s" % consumer_uuid
+        self.assertRaises(exception.AllocationUpdateFailed,
+                          self.client.put_allocations,
+                          self.context, rp_uuid,
+                          consumer_uuid, data,
+                          mock.sentinel.project_id,
+                          mock.sentinel.user_id,
+                          mock.sentinel.consumer_generation)
+
+        mock_put.assert_called_once_with(
+            expected_url, mock.ANY, version='1.28',
+            global_request_id=self.context.global_id)
 
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.put')
     def test_put_allocations_retries_conflict(self, mock_put):
-
-        failed = mock.MagicMock()
-        failed.status_code = 409
-        failed.text = "concurrently updated"
+        failed = fake_requests.FakeResponse(
+            status_code=409,
+            content=jsonutils.dumps(
+                {'errors': [{'code': 'placement.concurrent_update',
+                             'detail': ''}]}))
 
         succeeded = mock.MagicMock()
         succeeded.status_code = 204
@@ -314,18 +344,21 @@ class TestPutAllocations(SchedulerReportClientTestCase):
         resp = self.client.put_allocations(self.context, rp_uuid,
                                            consumer_uuid, data,
                                            mock.sentinel.project_id,
-                                           mock.sentinel.user_id)
+                                           mock.sentinel.user_id,
+                                           mock.sentinel.consumer_generation)
         self.assertTrue(resp)
         mock_put.assert_has_calls([
-            mock.call(expected_url, mock.ANY, version='1.8',
+            mock.call(expected_url, mock.ANY, version='1.28',
                       global_request_id=self.context.global_id)] * 2)
 
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.put')
     def test_put_allocations_retry_gives_up(self, mock_put):
 
-        failed = mock.MagicMock()
-        failed.status_code = 409
-        failed.text = "concurrently updated"
+        failed = fake_requests.FakeResponse(
+            status_code=409,
+            content=jsonutils.dumps(
+                {'errors': [{'code': 'placement.concurrent_update',
+                             'detail': ''}]}))
 
         mock_put.return_value = failed
 
@@ -336,56 +369,12 @@ class TestPutAllocations(SchedulerReportClientTestCase):
         resp = self.client.put_allocations(self.context, rp_uuid,
                                            consumer_uuid, data,
                                            mock.sentinel.project_id,
-                                           mock.sentinel.user_id)
+                                           mock.sentinel.user_id,
+                                           mock.sentinel.consumer_generation)
         self.assertFalse(resp)
         mock_put.assert_has_calls([
-            mock.call(expected_url, mock.ANY, version='1.8',
+            mock.call(expected_url, mock.ANY, version='1.28',
             global_request_id=self.context.global_id)] * 3)
-
-    def test_claim_resources_success_with_old_version(self):
-        get_resp_mock = mock.Mock(status_code=200)
-        get_resp_mock.json.return_value = {
-            'allocations': {},  # build instance, not move
-        }
-        self.ks_adap_mock.get.return_value = get_resp_mock
-        resp_mock = mock.Mock(status_code=204)
-        self.ks_adap_mock.put.return_value = resp_mock
-        consumer_uuid = uuids.consumer_uuid
-        alloc_req = {
-            'allocations': [
-                {
-                    'resource_provider': {
-                        'uuid': uuids.cn1
-                    },
-                    'resources': {
-                        'VCPU': 1,
-                        'MEMORY_MB': 1024,
-                    }
-                },
-            ],
-        }
-
-        project_id = uuids.project_id
-        user_id = uuids.user_id
-        res = self.client.claim_resources(
-            self.context, consumer_uuid, alloc_req, project_id, user_id)
-
-        expected_url = "/allocations/%s" % consumer_uuid
-        expected_payload = {
-            'allocations': {
-                alloc['resource_provider']['uuid']: {
-                    'resources': alloc['resources']
-                }
-                for alloc in alloc_req['allocations']
-            }
-        }
-        expected_payload['project_id'] = project_id
-        expected_payload['user_id'] = user_id
-        self.ks_adap_mock.put.assert_called_once_with(
-            expected_url, microversion='1.12', json=expected_payload,
-            headers={'X-Openstack-Request-Id': self.context.global_id})
-
-        self.assertTrue(res)
 
     def test_claim_resources_success(self):
         get_resp_mock = mock.Mock(status_code=200)
@@ -425,35 +414,24 @@ class TestPutAllocations(SchedulerReportClientTestCase):
 
         self.assertTrue(res)
 
-    def test_claim_resources_success_move_operation_no_shared(self):
-        """Tests that when a move operation is detected (existing allocations
-        for the same instance UUID) that we end up constructing an appropriate
-        allocation that contains the original resources on the source host
-        as well as the resources on the destination host.
+    def test_claim_resources_older_alloc_req(self):
+        """Test the case when a stale allocation request is sent to the report
+        client to claim
         """
         get_resp_mock = mock.Mock(status_code=200)
         get_resp_mock.json.return_value = {
-            'allocations': {
-                uuids.source: {
-                    'resource_provider_generation': 42,
-                    'resources': {
-                        'VCPU': 1,
-                        'MEMORY_MB': 1024,
-                    },
-                },
-            },
+            'allocations': {},  # build instance, not move
         }
-
         self.ks_adap_mock.get.return_value = get_resp_mock
         resp_mock = mock.Mock(status_code=204)
         self.ks_adap_mock.put.return_value = resp_mock
         consumer_uuid = uuids.consumer_uuid
         alloc_req = {
             'allocations': {
-                uuids.destination: {
+                uuids.cn1: {
                     'resources': {
                         'VCPU': 1,
-                        'MEMORY_MB': 1024
+                        'MEMORY_MB': 1024,
                     }
                 },
             },
@@ -466,147 +444,32 @@ class TestPutAllocations(SchedulerReportClientTestCase):
                                           allocation_request_version='1.12')
 
         expected_url = "/allocations/%s" % consumer_uuid
-        # New allocation should include resources claimed on both the source
-        # and destination hosts
         expected_payload = {
             'allocations': {
-                uuids.source: {
-                    'resources': {
-                        'VCPU': 1,
-                        'MEMORY_MB': 1024
-                    }
-                },
-                uuids.destination: {
-                    'resources': {
-                        'VCPU': 1,
-                        'MEMORY_MB': 1024
-                    }
-                },
-            },
-        }
-        expected_payload['project_id'] = project_id
-        expected_payload['user_id'] = user_id
+                rp_uuid: res
+                for rp_uuid, res in alloc_req['allocations'].items()},
+            # no consumer generation in the payload as the caller requested
+            # older microversion to be used
+            'project_id': project_id,
+            'user_id': user_id}
         self.ks_adap_mock.put.assert_called_once_with(
-            expected_url, microversion='1.12', json=mock.ANY,
+            expected_url, microversion='1.12', json=expected_payload,
             headers={'X-Openstack-Request-Id': self.context.global_id})
-        # We have to pull the json body from the mock call_args to validate
-        # it separately otherwise hash seed issues get in the way.
-        actual_payload = self.ks_adap_mock.put.call_args[1]['json']
-        self.assertEqual(expected_payload, actual_payload)
-
-        self.assertTrue(res)
-
-    def test_claim_resources_success_move_operation_with_shared(self):
-        """Tests that when a move operation is detected (existing allocations
-        for the same instance UUID) that we end up constructing an appropriate
-        allocation that contains the original resources on the source host
-        as well as the resources on the destination host but that when a shared
-        storage provider is claimed against in both the original allocation as
-        well as the new allocation request, we don't double that allocation
-        resource request up.
-        """
-        get_resp_mock = mock.Mock(status_code=200)
-        get_resp_mock.json.return_value = {
-            'allocations': {
-                uuids.source: {
-                    'resource_provider_generation': 42,
-                    'resources': {
-                        'VCPU': 1,
-                        'MEMORY_MB': 1024,
-                    },
-                },
-                uuids.shared_storage: {
-                    'resource_provider_generation': 42,
-                    'resources': {
-                        'DISK_GB': 100,
-                    },
-                },
-            },
-        }
-
-        self.ks_adap_mock.get.return_value = get_resp_mock
-        resp_mock = mock.Mock(status_code=204)
-        self.ks_adap_mock.put.return_value = resp_mock
-        consumer_uuid = uuids.consumer_uuid
-        alloc_req = {
-            'allocations': {
-                uuids.destination: {
-                    'resources': {
-                        'VCPU': 1,
-                        'MEMORY_MB': 1024,
-                    }
-                },
-                uuids.shared_storage: {
-                    'resources': {
-                        'DISK_GB': 100,
-                    }
-                },
-            }
-        }
-
-        project_id = uuids.project_id
-        user_id = uuids.user_id
-        res = self.client.claim_resources(self.context, consumer_uuid,
-                                          alloc_req, project_id, user_id,
-                                          allocation_request_version='1.12')
-
-        expected_url = "/allocations/%s" % consumer_uuid
-        # New allocation should include resources claimed on both the source
-        # and destination hosts but not have a doubled-up request for the disk
-        # resources on the shared provider
-        expected_payload = {
-            'allocations': {
-                uuids.source: {
-                    'resources': {
-                        'VCPU': 1,
-                        'MEMORY_MB': 1024
-                    }
-                },
-                uuids.shared_storage: {
-                    'resources': {
-                        'DISK_GB': 100
-                    }
-                },
-                uuids.destination: {
-                    'resources': {
-                        'VCPU': 1,
-                        'MEMORY_MB': 1024
-                    }
-                },
-            },
-        }
-        expected_payload['project_id'] = project_id
-        expected_payload['user_id'] = user_id
-        self.ks_adap_mock.put.assert_called_once_with(
-            expected_url, microversion='1.12', json=mock.ANY,
-            headers={'X-Openstack-Request-Id': self.context.global_id})
-        # We have to pull the allocations from the json body from the
-        # mock call_args to validate it separately otherwise hash seed
-        # issues get in the way.
-        actual_payload = self.ks_adap_mock.put.call_args[1]['json']
-        self.assertEqual(expected_payload, actual_payload)
-
         self.assertTrue(res)
 
     def test_claim_resources_success_resize_to_same_host_no_shared(self):
-        """Tests that when a resize to the same host operation is detected
-        (existing allocations for the same instance UUID and same resource
-        provider) that we end up constructing an appropriate allocation that
-        contains the original resources on the source host as well as the
-        resources on the destination host, which in this case are the same.
+        """Tests resize to the same host operation. In this case allocation
+        exists against the same host RP but with the migration_uuid.
         """
         get_current_allocations_resp_mock = mock.Mock(status_code=200)
+        # source host allocation held by the migration_uuid so it is not
+        # not returned to the claim code as that asks for the instance_uuid
+        # consumer
         get_current_allocations_resp_mock.json.return_value = {
-            'allocations': {
-                uuids.same_host: {
-                    'resource_provider_generation': 42,
-                    'resources': {
-                        'VCPU': 1,
-                        'MEMORY_MB': 1024,
-                        'DISK_GB': 20
-                    },
-                },
-            },
+            'allocations': {},
+            "consumer_generation": 1,
+            "project_id": uuids.project_id,
+            "user_id": uuids.user_id
         }
 
         self.ks_adap_mock.get.return_value = get_current_allocations_resp_mock
@@ -615,8 +478,7 @@ class TestPutAllocations(SchedulerReportClientTestCase):
         consumer_uuid = uuids.consumer_uuid
         # This is the resize-up allocation where VCPU, MEMORY_MB and DISK_GB
         # are all being increased but on the same host. We also throw a custom
-        # resource class in the new allocation to make sure it's not lost and
-        # that we don't have a KeyError when merging the allocations.
+        # resource class in the new allocation to make sure it's not lost
         alloc_req = {
             'allocations': {
                 uuids.same_host: {
@@ -628,33 +490,36 @@ class TestPutAllocations(SchedulerReportClientTestCase):
                     }
                 },
             },
+            # this allocation request comes from the scheduler therefore it
+            # does not have consumer_generation in it.
+            "project_id": uuids.project_id,
+            "user_id": uuids.user_id
         }
 
         project_id = uuids.project_id
         user_id = uuids.user_id
         res = self.client.claim_resources(self.context, consumer_uuid,
                                           alloc_req, project_id, user_id,
-                                          allocation_request_version='1.12')
+                                          allocation_request_version='1.28')
 
         expected_url = "/allocations/%s" % consumer_uuid
-        # New allocation should include doubled resources claimed on the same
-        # host.
         expected_payload = {
             'allocations': {
                 uuids.same_host: {
                     'resources': {
-                        'VCPU': 3,
-                        'MEMORY_MB': 3072,
-                        'DISK_GB': 60,
+                        'VCPU': 2,
+                        'MEMORY_MB': 2048,
+                        'DISK_GB': 40,
                         'CUSTOM_FOO': 1
                     }
                 },
             },
-        }
-        expected_payload['project_id'] = project_id
-        expected_payload['user_id'] = user_id
+            # report client assumes a new consumer in this case
+            'consumer_generation': None,
+            'project_id': project_id,
+            'user_id': user_id}
         self.ks_adap_mock.put.assert_called_once_with(
-            expected_url, microversion='1.12', json=mock.ANY,
+            expected_url, microversion='1.28', json=mock.ANY,
             headers={'X-Openstack-Request-Id': self.context.global_id})
         # We have to pull the json body from the mock call_args to validate
         # it separately otherwise hash seed issues get in the way.
@@ -664,31 +529,19 @@ class TestPutAllocations(SchedulerReportClientTestCase):
         self.assertTrue(res)
 
     def test_claim_resources_success_resize_to_same_host_with_shared(self):
-        """Tests that when a resize to the same host operation is detected
-        (existing allocations for the same instance UUID and same resource
-        provider) that we end up constructing an appropriate allocation that
-        contains the original resources on the source host as well as the
-        resources on the destination host, which in this case are the same.
-        This test adds the fun wrinkle of throwing a shared storage provider
-        in the mix when doing resize to the same host.
+        """Tests resize to the same host operation. In this case allocation
+        exists against the same host RP and the shared RP but with the
+        migration_uuid.
         """
         get_current_allocations_resp_mock = mock.Mock(status_code=200)
+        # source host allocation held by the migration_uuid so it is not
+        # not returned to the claim code as that asks for the instance_uuid
+        # consumer
         get_current_allocations_resp_mock.json.return_value = {
-            'allocations': {
-                uuids.same_host: {
-                    'resource_provider_generation': 42,
-                    'resources': {
-                        'VCPU': 1,
-                        'MEMORY_MB': 1024
-                    },
-                },
-                uuids.shared_storage: {
-                    'resource_provider_generation': 42,
-                    'resources': {
-                        'DISK_GB': 20,
-                    },
-                },
-            },
+            'allocations': {},
+            "consumer_generation": 1,
+            "project_id": uuids.project_id,
+            "user_id": uuids.user_id
         }
 
         self.ks_adap_mock.get.return_value = get_current_allocations_resp_mock
@@ -696,13 +549,15 @@ class TestPutAllocations(SchedulerReportClientTestCase):
         self.ks_adap_mock.put.return_value = put_allocations_resp_mock
         consumer_uuid = uuids.consumer_uuid
         # This is the resize-up allocation where VCPU, MEMORY_MB and DISK_GB
-        # are all being increased but DISK_GB is on a shared storage provider.
+        # are all being increased but on the same host. We also throw a custom
+        # resource class in the new allocation to make sure it's not lost
         alloc_req = {
             'allocations': {
                 uuids.same_host: {
                     'resources': {
                         'VCPU': 2,
-                        'MEMORY_MB': 2048
+                        'MEMORY_MB': 2048,
+                        'CUSTOM_FOO': 1
                     }
                 },
                 uuids.shared_storage: {
@@ -711,36 +566,40 @@ class TestPutAllocations(SchedulerReportClientTestCase):
                     }
                 },
             },
+            # this allocation request comes from the scheduler therefore it
+            # does not have consumer_generation in it.
+            "project_id": uuids.project_id,
+            "user_id": uuids.user_id
         }
 
         project_id = uuids.project_id
         user_id = uuids.user_id
         res = self.client.claim_resources(self.context, consumer_uuid,
                                           alloc_req, project_id, user_id,
-                                          allocation_request_version='1.12')
+                                          allocation_request_version='1.28')
 
         expected_url = "/allocations/%s" % consumer_uuid
-        # New allocation should include doubled resources claimed on the same
-        # host.
         expected_payload = {
             'allocations': {
                 uuids.same_host: {
                     'resources': {
-                        'VCPU': 3,
-                        'MEMORY_MB': 3072
+                        'VCPU': 2,
+                        'MEMORY_MB': 2048,
+                        'CUSTOM_FOO': 1
                     }
                 },
                 uuids.shared_storage: {
                     'resources': {
-                        'DISK_GB': 60
+                        'DISK_GB': 40,
                     }
                 },
             },
-        }
-        expected_payload['project_id'] = project_id
-        expected_payload['user_id'] = user_id
+            # report client assumes a new consumer in this case
+            'consumer_generation': None,
+            'project_id': project_id,
+            'user_id': user_id}
         self.ks_adap_mock.put.assert_called_once_with(
-            expected_url, microversion='1.12', json=mock.ANY,
+            expected_url, microversion='1.28', json=mock.ANY,
             headers={'X-Openstack-Request-Id': self.context.global_id})
         # We have to pull the json body from the mock call_args to validate
         # it separately otherwise hash seed issues get in the way.
@@ -749,19 +608,399 @@ class TestPutAllocations(SchedulerReportClientTestCase):
 
         self.assertTrue(res)
 
-    def test_claim_resources_fail_retry_success(self):
+    def test_claim_resources_success_evacuate_no_shared(self):
+        """Tests non-forced evacuate. In this case both the source and the
+        dest allocation are held by the instance_uuid in placement. So the
+        claim code needs to merge allocations. The second claim comes from the
+        scheduler and therefore it does not have consumer_generation in it.
+        """
+        # the source allocation is also held by the instance_uuid so report
+        # client will see it.
+        current_allocs = {
+            'allocations': {
+                uuids.source_host: {
+                    'generation': 42,
+                    'resources': {
+                        'VCPU': 1,
+                        'MEMORY_MB': 1024,
+                        'DISK_GB': 20
+                    },
+                },
+            },
+            "consumer_generation": 1,
+            "project_id": uuids.project_id,
+            "user_id": uuids.user_id
+        }
+        self.ks_adap_mock.get.return_value = fake_requests.FakeResponse(
+            status_code=200,
+            content=jsonutils.dumps(current_allocs))
+        put_allocations_resp_mock = fake_requests.FakeResponse(status_code=204)
+        self.ks_adap_mock.put.return_value = put_allocations_resp_mock
+        consumer_uuid = uuids.consumer_uuid
+        # this is an evacuate so we have the same resources request towards the
+        # dest host
+        alloc_req = {
+            'allocations': {
+                uuids.dest_host: {
+                    'resources': {
+                        'VCPU': 1,
+                        'MEMORY_MB': 1024,
+                        'DISK_GB': 20,
+                    }
+                },
+            },
+            # this allocation request comes from the scheduler therefore it
+            # does not have consumer_generation in it.
+            "project_id": uuids.project_id,
+            "user_id": uuids.user_id
+        }
+
+        project_id = uuids.project_id
+        user_id = uuids.user_id
+        res = self.client.claim_resources(self.context, consumer_uuid,
+                                          alloc_req, project_id, user_id,
+                                          allocation_request_version='1.28')
+
+        expected_url = "/allocations/%s" % consumer_uuid
+        # we expect that both the source and dest allocations are here
+        expected_payload = {
+            'allocations': {
+                uuids.source_host: {
+                    'resources': {
+                        'VCPU': 1,
+                        'MEMORY_MB': 1024,
+                        'DISK_GB': 20
+                    },
+                },
+                uuids.dest_host: {
+                    'resources': {
+                        'VCPU': 1,
+                        'MEMORY_MB': 1024,
+                        'DISK_GB': 20,
+                    }
+                },
+            },
+            # report client uses the consumer_generation that it got from
+            # placement when asked for the existing allocations
+            'consumer_generation': 1,
+            'project_id': project_id,
+            'user_id': user_id}
+        self.ks_adap_mock.put.assert_called_once_with(
+            expected_url, microversion='1.28', json=mock.ANY,
+            headers={'X-Openstack-Request-Id': self.context.global_id})
+        # We have to pull the json body from the mock call_args to validate
+        # it separately otherwise hash seed issues get in the way.
+        actual_payload = self.ks_adap_mock.put.call_args[1]['json']
+        self.assertEqual(expected_payload, actual_payload)
+
+        self.assertTrue(res)
+
+    def test_claim_resources_success_evacuate_with_shared(self):
+        """Similar test that test_claim_resources_success_evacuate_no_shared
+        but adds shared disk into the mix.
+        """
+        # the source allocation is also held by the instance_uuid so report
+        # client will see it.
+        current_allocs = {
+            'allocations': {
+                uuids.source_host: {
+                    'generation': 42,
+                    'resources': {
+                        'VCPU': 1,
+                        'MEMORY_MB': 1024,
+                    },
+                },
+                uuids.shared_storage: {
+                    'generation': 42,
+                    'resources': {
+                        'DISK_GB': 20,
+                    },
+                },
+            },
+            "consumer_generation": 1,
+            "project_id": uuids.project_id,
+            "user_id": uuids.user_id
+        }
+        self.ks_adap_mock.get.return_value = fake_requests.FakeResponse(
+            status_code=200,
+            content = jsonutils.dumps(current_allocs))
+        self.ks_adap_mock.put.return_value = fake_requests.FakeResponse(
+            status_code=204)
+        consumer_uuid = uuids.consumer_uuid
+        # this is an evacuate so we have the same resources request towards the
+        # dest host
+        alloc_req = {
+            'allocations': {
+                uuids.dest_host: {
+                    'resources': {
+                        'VCPU': 1,
+                        'MEMORY_MB': 1024,
+                    },
+                },
+                uuids.shared_storage: {
+                    'generation': 42,
+                    'resources': {
+                        'DISK_GB': 20,
+                    },
+                },
+            },
+            # this allocation request comes from the scheduler therefore it
+            # does not have consumer_generation in it.
+            "project_id": uuids.project_id,
+            "user_id": uuids.user_id
+        }
+
+        project_id = uuids.project_id
+        user_id = uuids.user_id
+        res = self.client.claim_resources(self.context, consumer_uuid,
+                                          alloc_req, project_id, user_id,
+                                          allocation_request_version='1.28')
+
+        expected_url = "/allocations/%s" % consumer_uuid
+        # we expect that both the source and dest allocations are here plus the
+        # shared storage allocation
+        expected_payload = {
+            'allocations': {
+                uuids.source_host: {
+                    'resources': {
+                        'VCPU': 1,
+                        'MEMORY_MB': 1024,
+                    },
+                },
+                uuids.dest_host: {
+                    'resources': {
+                        'VCPU': 1,
+                        'MEMORY_MB': 1024,
+                    }
+                },
+                uuids.shared_storage: {
+                    'resources': {
+                        'DISK_GB': 20,
+                    },
+                },
+            },
+            # report client uses the consumer_generation that got from
+            # placement when asked for the existing allocations
+            'consumer_generation': 1,
+            'project_id': project_id,
+            'user_id': user_id}
+        self.ks_adap_mock.put.assert_called_once_with(
+            expected_url, microversion='1.28', json=mock.ANY,
+            headers={'X-Openstack-Request-Id': self.context.global_id})
+        # We have to pull the json body from the mock call_args to validate
+        # it separately otherwise hash seed issues get in the way.
+        actual_payload = self.ks_adap_mock.put.call_args[1]['json']
+        self.assertEqual(expected_payload, actual_payload)
+
+        self.assertTrue(res)
+
+    def test_claim_resources_success_force_evacuate_no_shared(self):
+        """Tests forced evacuate. In this case both the source and the
+        dest allocation are held by the instance_uuid in placement. So the
+        claim code needs to merge allocations. The second claim comes from the
+        conductor and therefore it does have consumer_generation in it.
+        """
+        # the source allocation is also held by the instance_uuid so report
+        # client will see it.
+        current_allocs = {
+            'allocations': {
+                uuids.source_host: {
+                    'generation': 42,
+                    'resources': {
+                        'VCPU': 1,
+                        'MEMORY_MB': 1024,
+                        'DISK_GB': 20
+                    },
+                },
+            },
+            "consumer_generation": 1,
+            "project_id": uuids.project_id,
+            "user_id": uuids.user_id
+        }
+
+        self.ks_adap_mock.get.return_value = fake_requests.FakeResponse(
+            status_code=200,
+            content=jsonutils.dumps(current_allocs))
+        self.ks_adap_mock.put.return_value = fake_requests.FakeResponse(
+            status_code=204)
+        consumer_uuid = uuids.consumer_uuid
+        # this is an evacuate so we have the same resources request towards the
+        # dest host
+        alloc_req = {
+            'allocations': {
+                uuids.dest_host: {
+                    'resources': {
+                        'VCPU': 1,
+                        'MEMORY_MB': 1024,
+                        'DISK_GB': 20,
+                    }
+                },
+            },
+            # this allocation request comes from the conductor that read the
+            # allocation from placement therefore it has consumer_generation in
+            # it.
+            "consumer_generation": 1,
+            "project_id": uuids.project_id,
+            "user_id": uuids.user_id
+        }
+
+        project_id = uuids.project_id
+        user_id = uuids.user_id
+        res = self.client.claim_resources(self.context, consumer_uuid,
+                                          alloc_req, project_id, user_id,
+                                          allocation_request_version='1.28')
+
+        expected_url = "/allocations/%s" % consumer_uuid
+        # we expect that both the source and dest allocations are here
+        expected_payload = {
+            'allocations': {
+                uuids.source_host: {
+                    'resources': {
+                        'VCPU': 1,
+                        'MEMORY_MB': 1024,
+                        'DISK_GB': 20
+                    },
+                },
+                uuids.dest_host: {
+                    'resources': {
+                        'VCPU': 1,
+                        'MEMORY_MB': 1024,
+                        'DISK_GB': 20,
+                    }
+                },
+            },
+            # report client uses the consumer_generation that it got in the
+            # allocation request
+            'consumer_generation': 1,
+            'project_id': project_id,
+            'user_id': user_id}
+        self.ks_adap_mock.put.assert_called_once_with(
+            expected_url, microversion='1.28', json=mock.ANY,
+            headers={'X-Openstack-Request-Id': self.context.global_id})
+        # We have to pull the json body from the mock call_args to validate
+        # it separately otherwise hash seed issues get in the way.
+        actual_payload = self.ks_adap_mock.put.call_args[1]['json']
+        self.assertEqual(expected_payload, actual_payload)
+
+        self.assertTrue(res)
+
+    def test_claim_resources_success_force_evacuate_with_shared(self):
+        """Similar test that
+        test_claim_resources_success_force_evacuate_no_shared but adds shared
+        disk into the mix.
+        """
+        # the source allocation is also held by the instance_uuid so report
+        # client will see it.
+        current_allocs = {
+            'allocations': {
+                uuids.source_host: {
+                    'generation': 42,
+                    'resources': {
+                        'VCPU': 1,
+                        'MEMORY_MB': 1024,
+                    },
+                },
+                uuids.shared_storage: {
+                    'generation': 42,
+                    'resources': {
+                        'DISK_GB': 20,
+                    },
+                },
+            },
+            "consumer_generation": 1,
+            "project_id": uuids.project_id,
+            "user_id": uuids.user_id
+        }
+
+        self.ks_adap_mock.get.return_value = fake_requests.FakeResponse(
+            status_code=200,
+            content=jsonutils.dumps(current_allocs))
+        self.ks_adap_mock.put.return_value = fake_requests.FakeResponse(
+            status_code=204)
+        consumer_uuid = uuids.consumer_uuid
+        # this is an evacuate so we have the same resources request towards the
+        # dest host
+        alloc_req = {
+            'allocations': {
+                uuids.dest_host: {
+                    'resources': {
+                        'VCPU': 1,
+                        'MEMORY_MB': 1024,
+                    },
+                },
+                uuids.shared_storage: {
+                    'generation': 42,
+                    'resources': {
+                        'DISK_GB': 20,
+                    },
+                },
+            },
+            # this allocation request comes from the conductor that read the
+            # allocation from placement therefore it has consumer_generation in
+            # it.
+            "consumer_generation": 1,
+            "project_id": uuids.project_id,
+            "user_id": uuids.user_id
+        }
+
+        project_id = uuids.project_id
+        user_id = uuids.user_id
+        res = self.client.claim_resources(self.context, consumer_uuid,
+                                          alloc_req, project_id, user_id,
+                                          allocation_request_version='1.28')
+
+        expected_url = "/allocations/%s" % consumer_uuid
+        # we expect that both the source and dest allocations are here plus the
+        # shared storage allocation
+        expected_payload = {
+            'allocations': {
+                uuids.source_host: {
+                    'resources': {
+                        'VCPU': 1,
+                        'MEMORY_MB': 1024,
+                    },
+                },
+                uuids.dest_host: {
+                    'resources': {
+                        'VCPU': 1,
+                        'MEMORY_MB': 1024,
+                    }
+                },
+                uuids.shared_storage: {
+                    'resources': {
+                        'DISK_GB': 20,
+                    },
+                },
+            },
+            # report client uses the consumer_generation that it got in the
+            # allocation request
+            'consumer_generation': 1,
+            'project_id': project_id,
+            'user_id': user_id}
+        self.ks_adap_mock.put.assert_called_once_with(
+            expected_url, microversion='1.28', json=mock.ANY,
+            headers={'X-Openstack-Request-Id': self.context.global_id})
+        # We have to pull the json body from the mock call_args to validate
+        # it separately otherwise hash seed issues get in the way.
+        actual_payload = self.ks_adap_mock.put.call_args[1]['json']
+        self.assertEqual(expected_payload, actual_payload)
+
+        self.assertTrue(res)
+
+    def test_claim_resources_fail_due_to_rp_generation_retry_success(self):
         get_resp_mock = mock.Mock(status_code=200)
         get_resp_mock.json.return_value = {
             'allocations': {},  # build instance, not move
         }
         self.ks_adap_mock.get.return_value = get_resp_mock
         resp_mocks = [
-            mock.Mock(
-                status_code=409,
-                text='Inventory changed while attempting to allocate: '
-                     'Another thread concurrently updated the data. '
-                     'Please retry your update'),
-            mock.Mock(status_code=204),
+            fake_requests.FakeResponse(
+                409,
+                jsonutils.dumps(
+                    {'errors': [
+                        {'code': 'placement.concurrent_update',
+                         'detail': ''}]})),
+            fake_requests.FakeResponse(204)
         ]
         self.ks_adap_mock.put.side_effect = resp_mocks
         consumer_uuid = uuids.consumer_uuid
@@ -780,7 +1019,7 @@ class TestPutAllocations(SchedulerReportClientTestCase):
         user_id = uuids.user_id
         res = self.client.claim_resources(self.context, consumer_uuid,
                                           alloc_req, project_id, user_id,
-                                          allocation_request_version='1.12')
+                                          allocation_request_version='1.28')
 
         expected_url = "/allocations/%s" % consumer_uuid
         expected_payload = {
@@ -790,10 +1029,11 @@ class TestPutAllocations(SchedulerReportClientTestCase):
         }
         expected_payload['project_id'] = project_id
         expected_payload['user_id'] = user_id
+        expected_payload['consumer_generation'] = None
         # We should have exactly two calls to the placement API that look
         # identical since we're retrying the same HTTP request
         expected_calls = [
-            mock.call(expected_url, microversion='1.12', json=expected_payload,
+            mock.call(expected_url, microversion='1.28', json=expected_payload,
                       headers={'X-Openstack-Request-Id':
                                self.context.global_id})] * 2
         self.assertEqual(len(expected_calls),
@@ -809,7 +1049,13 @@ class TestPutAllocations(SchedulerReportClientTestCase):
             'allocations': {},  # build instance, not move
         }
         self.ks_adap_mock.get.return_value = get_resp_mock
-        resp_mock = mock.Mock(status_code=409, text='not cool')
+        resp_mock = fake_requests.FakeResponse(
+            409,
+            jsonutils.dumps(
+                {'errors': [
+                    {'code': 'something else',
+                     'detail': 'not cool'}]}))
+
         self.ks_adap_mock.put.return_value = resp_mock
         consumer_uuid = uuids.consumer_uuid
         alloc_req = {
@@ -827,7 +1073,7 @@ class TestPutAllocations(SchedulerReportClientTestCase):
         user_id = uuids.user_id
         res = self.client.claim_resources(self.context, consumer_uuid,
                                           alloc_req, project_id, user_id,
-                                          allocation_request_version='1.12')
+                                          allocation_request_version='1.28')
 
         expected_url = "/allocations/%s" % consumer_uuid
         expected_payload = {
@@ -837,12 +1083,58 @@ class TestPutAllocations(SchedulerReportClientTestCase):
         }
         expected_payload['project_id'] = project_id
         expected_payload['user_id'] = user_id
+        expected_payload['consumer_generation'] = None
         self.ks_adap_mock.put.assert_called_once_with(
-            expected_url, microversion='1.12', json=expected_payload,
+            expected_url, microversion='1.28', json=expected_payload,
             headers={'X-Openstack-Request-Id': self.context.global_id})
 
         self.assertFalse(res)
         self.assertTrue(mock_log.called)
+
+    def test_claim_resources_consumer_generation_failure(self):
+        get_resp_mock = mock.Mock(status_code=200)
+        get_resp_mock.json.return_value = {
+            'allocations': {},  # build instance, not move
+        }
+        self.ks_adap_mock.get.return_value = get_resp_mock
+        resp_mock = fake_requests.FakeResponse(
+            409,
+            jsonutils.dumps(
+                {'errors': [
+                    {'code': 'placement.concurrent_update',
+                     'detail': 'consumer generation conflict'}]}))
+
+        self.ks_adap_mock.put.return_value = resp_mock
+        consumer_uuid = uuids.consumer_uuid
+        alloc_req = {
+            'allocations': {
+                uuids.cn1: {
+                    'resources': {
+                        'VCPU': 1,
+                        'MEMORY_MB': 1024,
+                    }
+                },
+            },
+        }
+
+        project_id = uuids.project_id
+        user_id = uuids.user_id
+        self.assertRaises(exception.AllocationUpdateFailed,
+                          self.client.claim_resources, self.context,
+                          consumer_uuid, alloc_req, project_id, user_id,
+                          allocation_request_version='1.28')
+
+        expected_url = "/allocations/%s" % consumer_uuid
+        expected_payload = {
+            'allocations': {
+                rp_uuid: res
+                for rp_uuid, res in alloc_req['allocations'].items()},
+            'project_id': project_id,
+            'user_id': user_id,
+            'consumer_generation': None}
+        self.ks_adap_mock.put.assert_called_once_with(
+            expected_url, microversion='1.28', json=expected_payload,
+            headers={'X-Openstack-Request-Id': self.context.global_id})
 
     def test_remove_provider_from_inst_alloc_no_shared(self):
         """Tests that the method which manipulates an existing doubled-up
@@ -851,7 +1143,8 @@ class TestPutAllocations(SchedulerReportClientTestCase):
         /allocations/{consumer_uuid} call.
         """
         get_resp_mock = mock.Mock(status_code=200)
-        get_resp_mock.json.return_value = {
+        get_resp_mock.json.side_effect = [
+            {
             'allocations': {
                 uuids.source: {
                     'resource_provider_generation': 42,
@@ -868,45 +1161,51 @@ class TestPutAllocations(SchedulerReportClientTestCase):
                     },
                 },
             },
-        }
+            'consumer_generation': 1,
+            'project_id': uuids.project_id,
+            'user_id': uuids.user_id,
+            },
+            # the second get is for resource providers in the compute tree,
+            # return just the compute
+            {
+                "resource_providers": [
+                    {
+                        "uuid": uuids.source,
+                    },
+                ]
+            },
+        ]
         self.ks_adap_mock.get.return_value = get_resp_mock
         resp_mock = mock.Mock(status_code=204)
         self.ks_adap_mock.put.return_value = resp_mock
         consumer_uuid = uuids.consumer_uuid
         project_id = uuids.project_id
         user_id = uuids.user_id
-        res = self.client.remove_provider_from_instance_allocation(
-            self.context, consumer_uuid, uuids.source, user_id, project_id,
-            mock.Mock())
+        res = self.client.remove_provider_tree_from_instance_allocation(
+            self.context, consumer_uuid, uuids.source)
 
         expected_url = "/allocations/%s" % consumer_uuid
         # New allocations should only include the destination...
         expected_payload = {
-            'allocations': [
-                {
-                    'resource_provider': {
-                        'uuid': uuids.destination,
-                    },
+            'allocations': {
+                uuids.destination: {
+                    'resource_provider_generation': 42,
                     'resources': {
                         'VCPU': 1,
                         'MEMORY_MB': 1024,
                     },
                 },
-            ],
+            },
+            'consumer_generation': 1,
+            'project_id': project_id,
+            'user_id': user_id
         }
-        expected_payload['project_id'] = project_id
-        expected_payload['user_id'] = user_id
         # We have to pull the json body from the mock call_args to validate
         # it separately otherwise hash seed issues get in the way.
         actual_payload = self.ks_adap_mock.put.call_args[1]['json']
-        sort_by_uuid = lambda x: x['resource_provider']['uuid']
-        expected_allocations = sorted(expected_payload['allocations'],
-                                      key=sort_by_uuid)
-        actual_allocations = sorted(actual_payload['allocations'],
-                                    key=sort_by_uuid)
-        self.assertEqual(expected_allocations, actual_allocations)
+        self.assertEqual(expected_payload, actual_payload)
         self.ks_adap_mock.put.assert_called_once_with(
-            expected_url, microversion='1.10', json=mock.ANY,
+            expected_url, microversion='1.28', json=mock.ANY,
             headers={'X-Openstack-Request-Id': self.context.global_id})
 
         self.assertTrue(res)
@@ -919,7 +1218,8 @@ class TestPutAllocations(SchedulerReportClientTestCase):
         call.
         """
         get_resp_mock = mock.Mock(status_code=200)
-        get_resp_mock.json.return_value = {
+        get_resp_mock.json.side_effect = [
+            {
             'allocations': {
                 uuids.source: {
                     'resource_provider_generation': 42,
@@ -942,66 +1242,32 @@ class TestPutAllocations(SchedulerReportClientTestCase):
                     },
                 },
             },
-        }
+            'consumer_generation': 1,
+            'project_id': uuids.project_id,
+            'user_id': uuids.user_id,
+            },
+            # the second get is for resource providers in the compute tree,
+            # return just the compute
+            {
+                "resource_providers": [
+                    {
+                        "uuid": uuids.source,
+                    },
+                ]
+            },
+        ]
         self.ks_adap_mock.get.return_value = get_resp_mock
         resp_mock = mock.Mock(status_code=204)
         self.ks_adap_mock.put.return_value = resp_mock
         consumer_uuid = uuids.consumer_uuid
         project_id = uuids.project_id
         user_id = uuids.user_id
-        res = self.client.remove_provider_from_instance_allocation(
-            self.context, consumer_uuid, uuids.source, user_id, project_id,
-            mock.Mock())
+        res = self.client.remove_provider_tree_from_instance_allocation(
+            self.context, consumer_uuid, uuids.source)
 
         expected_url = "/allocations/%s" % consumer_uuid
         # New allocations should only include the destination...
         expected_payload = {
-            'allocations': [
-                {
-                    'resource_provider': {
-                        'uuid': uuids.shared_storage,
-                    },
-                    'resources': {
-                        'DISK_GB': 100,
-                    },
-                },
-                {
-                    'resource_provider': {
-                        'uuid': uuids.destination,
-                    },
-                    'resources': {
-                        'VCPU': 1,
-                        'MEMORY_MB': 1024,
-                    },
-                },
-            ],
-        }
-        expected_payload['project_id'] = project_id
-        expected_payload['user_id'] = user_id
-        # We have to pull the json body from the mock call_args to validate
-        # it separately otherwise hash seed issues get in the way.
-        actual_payload = self.ks_adap_mock.put.call_args[1]['json']
-        sort_by_uuid = lambda x: x['resource_provider']['uuid']
-        expected_allocations = sorted(expected_payload['allocations'],
-                                      key=sort_by_uuid)
-        actual_allocations = sorted(actual_payload['allocations'],
-                                    key=sort_by_uuid)
-        self.assertEqual(expected_allocations, actual_allocations)
-        self.ks_adap_mock.put.assert_called_once_with(
-            expected_url, microversion='1.10', json=mock.ANY,
-            headers={'X-Openstack-Request-Id': self.context.global_id})
-
-        self.assertTrue(res)
-
-    def test_remove_provider_from_inst_alloc_no_source(self):
-        """Tests that if remove_provider_from_instance_allocation() fails to
-        find any allocations for the source host, it just returns True and
-        does not attempt to rewrite the allocation for the consumer.
-        """
-        get_resp_mock = mock.Mock(status_code=200)
-        # Act like the allocations already did not include the source host for
-        # some reason
-        get_resp_mock.json.return_value = {
             'allocations': {
                 uuids.shared_storage: {
                     'resource_provider_generation': 42,
@@ -1017,14 +1283,63 @@ class TestPutAllocations(SchedulerReportClientTestCase):
                     },
                 },
             },
+            'consumer_generation': 1,
+            'project_id': project_id,
+            'user_id': user_id
         }
+        # We have to pull the json body from the mock call_args to validate
+        # it separately otherwise hash seed issues get in the way.
+        actual_payload = self.ks_adap_mock.put.call_args[1]['json']
+        self.assertEqual(expected_payload, actual_payload)
+        self.ks_adap_mock.put.assert_called_once_with(
+            expected_url, microversion='1.28', json=mock.ANY,
+            headers={'X-Openstack-Request-Id': self.context.global_id})
+
+        self.assertTrue(res)
+
+    def test_remove_provider_from_inst_alloc_no_source(self):
+        """Tests that if remove_provider_tree_from_instance_allocation() fails
+        to find any allocations for the source host, it just returns True and
+        does not attempt to rewrite the allocation for the consumer.
+        """
+        get_resp_mock = mock.Mock(status_code=200)
+        get_resp_mock.json.side_effect = [
+            # Act like the allocations already did not include the source host
+            # for some reason
+            {
+            'allocations': {
+                uuids.shared_storage: {
+                    'resource_provider_generation': 42,
+                    'resources': {
+                        'DISK_GB': 100,
+                    },
+                },
+                uuids.destination: {
+                    'resource_provider_generation': 42,
+                    'resources': {
+                        'VCPU': 1,
+                        'MEMORY_MB': 1024,
+                    },
+                },
+            },
+            'consumer_generation': 1,
+            'project_id': uuids.project_id,
+            'user_id': uuids.user_id,
+            },
+            # the second get is for resource providers in the compute tree,
+            # return just the compute
+            {
+                "resource_providers": [
+                    {
+                        "uuid": uuids.source,
+                    },
+                ]
+            },
+        ]
         self.ks_adap_mock.get.return_value = get_resp_mock
         consumer_uuid = uuids.consumer_uuid
-        project_id = uuids.project_id
-        user_id = uuids.user_id
-        res = self.client.remove_provider_from_instance_allocation(
-            self.context, consumer_uuid, uuids.source, user_id, project_id,
-            mock.Mock())
+        res = self.client.remove_provider_tree_from_instance_allocation(
+            self.context, consumer_uuid, uuids.source)
 
         self.ks_adap_mock.get.assert_called()
         self.ks_adap_mock.put.assert_not_called()
@@ -1032,118 +1347,340 @@ class TestPutAllocations(SchedulerReportClientTestCase):
         self.assertTrue(res)
 
     def test_remove_provider_from_inst_alloc_fail_get_allocs(self):
-        """Tests that we gracefully exit with False from
-        remove_provider_from_instance_allocation() if the call to get the
-        existing allocations fails for some reason
-        """
-        get_resp_mock = mock.Mock(status_code=500)
-        self.ks_adap_mock.get.return_value = get_resp_mock
+        self.ks_adap_mock.get.return_value = fake_requests.FakeResponse(
+            status_code=500)
         consumer_uuid = uuids.consumer_uuid
-        project_id = uuids.project_id
-        user_id = uuids.user_id
-        res = self.client.remove_provider_from_instance_allocation(
-            self.context, consumer_uuid, uuids.source, user_id, project_id,
-            mock.Mock())
+        self.assertRaises(
+            exception.ConsumerAllocationRetrievalFailed,
+            self.client.remove_provider_tree_from_instance_allocation,
+            self.context, consumer_uuid, uuids.source)
 
         self.ks_adap_mock.get.assert_called()
         self.ks_adap_mock.put.assert_not_called()
 
+    def test_remove_provider_from_inst_alloc_consumer_gen_conflict(self):
+        get_resp_mock = mock.Mock(status_code=200)
+        get_resp_mock.json.side_effect = [
+            {
+            'allocations': {
+                uuids.source: {
+                    'resource_provider_generation': 42,
+                    'resources': {
+                        'VCPU': 1,
+                        'MEMORY_MB': 1024,
+                    },
+                },
+                uuids.destination: {
+                    'resource_provider_generation': 42,
+                    'resources': {
+                        'VCPU': 1,
+                        'MEMORY_MB': 1024,
+                    },
+                },
+            },
+            'consumer_generation': 1,
+            'project_id': uuids.project_id,
+            'user_id': uuids.user_id,
+            },
+            # the second get is for resource providers in the compute tree,
+            # return just the compute
+            {
+                "resource_providers": [
+                    {
+                        "uuid": uuids.source,
+                    },
+                ]
+            },
+        ]
+        self.ks_adap_mock.get.return_value = get_resp_mock
+        resp_mock = mock.Mock(status_code=409)
+        self.ks_adap_mock.put.return_value = resp_mock
+        consumer_uuid = uuids.consumer_uuid
+        res = self.client.remove_provider_tree_from_instance_allocation(
+            self.context, consumer_uuid, uuids.source)
+
         self.assertFalse(res)
 
+    def test_remove_provider_tree_from_inst_alloc_nested(self):
+        self.ks_adap_mock.get.side_effect = [
+            fake_requests.FakeResponse(
+                status_code=200,
+                content=jsonutils.dumps(
+                    {
+                        'allocations': {
+                            uuids.source_compute: {
+                                'resource_provider_generation': 42,
+                                'resources': {
+                                    'VCPU': 1,
+                                    'MEMORY_MB': 1024,
+                                },
+                            },
+                            uuids.source_nested: {
+                                'resource_provider_generation': 42,
+                                'resources': {
+                                    'CUSTOM_MAGIC': 1
+                                },
+                            },
+                            uuids.destination: {
+                                'resource_provider_generation': 42,
+                                'resources': {
+                                    'VCPU': 1,
+                                    'MEMORY_MB': 1024,
+                                },
+                            },
+                        },
+                        'consumer_generation': 1,
+                        'project_id': uuids.project_id,
+                        'user_id': uuids.user_id,
+                    })),
+            # the second get is for resource providers in the compute tree,
+            # return both RPs in the source compute tree
+            fake_requests.FakeResponse(
+                status_code=200,
+                content=jsonutils.dumps(
+                    {
+                        "resource_providers": [
+                            {
+                                "uuid": uuids.source_compute,
+                            },
+                            {
+                                "uuid": uuids.source_nested,
+                            },
+                        ]
+                    }))
+        ]
+        self.ks_adap_mock.put.return_value = fake_requests.FakeResponse(
+            status_code=204)
+        consumer_uuid = uuids.consumer_uuid
+        project_id = uuids.project_id
+        user_id = uuids.user_id
+        res = self.client.remove_provider_tree_from_instance_allocation(
+            self.context, consumer_uuid, uuids.source_compute)
 
-class TestSetAndClearAllocations(SchedulerReportClientTestCase):
+        expected_url = "/allocations/%s" % consumer_uuid
+        # New allocations should only include the destination...
+        expected_payload = {
+            'allocations': {
+                uuids.destination: {
+                    'resource_provider_generation': 42,
+                    'resources': {
+                        'VCPU': 1,
+                        'MEMORY_MB': 1024,
+                    },
+                },
+            },
+            'consumer_generation': 1,
+            'project_id': project_id,
+            'user_id': user_id
+        }
+
+        self.assertEqual(
+            [
+                mock.call(
+                    '/allocations/%s' % consumer_uuid,
+                    headers=mock.ANY,
+                    microversion='1.28'
+                ),
+                mock.call(
+                    '/resource_providers?in_tree=%s' % uuids.source_compute,
+                    headers=mock.ANY,
+                    microversion='1.14'
+                )
+            ],
+            self.ks_adap_mock.get.mock_calls)
+
+        # We have to pull the json body from the mock call_args to validate
+        # it separately otherwise hash seed issues get in the way.
+        actual_payload = self.ks_adap_mock.put.call_args[1]['json']
+        self.assertEqual(expected_payload, actual_payload)
+        self.ks_adap_mock.put.assert_called_once_with(
+            expected_url, microversion='1.28', json=mock.ANY,
+            headers={'X-Openstack-Request-Id': self.context.global_id})
+
+        self.assertTrue(res)
+
+
+class TestMoveAllocations(SchedulerReportClientTestCase):
 
     def setUp(self):
-        super(TestSetAndClearAllocations, self).setUp()
+        super(TestMoveAllocations, self).setUp()
         # We want to reuse the mock throughout the class, but with
         # different return values.
-        self.mock_post = mock.patch(
-            'nova.scheduler.client.report.SchedulerReportClient.post').start()
-        self.addCleanup(self.mock_post.stop)
+        patcher = mock.patch(
+            'nova.scheduler.client.report.SchedulerReportClient.post')
+        self.mock_post = patcher.start()
+        self.addCleanup(patcher.stop)
         self.mock_post.return_value.status_code = 204
         self.rp_uuid = mock.sentinel.rp
         self.consumer_uuid = mock.sentinel.consumer
         self.data = {"MEMORY_MB": 1024}
+        patcher = mock.patch(
+            'nova.scheduler.client.report.SchedulerReportClient.get')
+        self.mock_get = patcher.start()
+        self.addCleanup(patcher.stop)
+
         self.project_id = mock.sentinel.project_id
         self.user_id = mock.sentinel.user_id
+
+        self.mock_post.return_value.status_code = 204
+        self.rp_uuid = mock.sentinel.rp
+        self.source_consumer_uuid = mock.sentinel.source_consumer
+        self.target_consumer_uuid = mock.sentinel.target_consumer
+        self.source_consumer_data = {
+            "allocations": {
+                self.rp_uuid: {
+                    "generation": 1,
+                    "resources": {
+                        "MEMORY_MB": 1024
+                    }
+                }
+            },
+            "consumer_generation": 2,
+            "project_id": self.project_id,
+            "user_id": self.user_id
+        }
+        self.source_rsp = mock.Mock()
+        self.source_rsp.json.return_value = self.source_consumer_data
+        self.target_consumer_data = {
+            "allocations": {
+                self.rp_uuid: {
+                    "generation": 1,
+                    "resources": {
+                        "MEMORY_MB": 2048
+                    }
+                }
+            },
+            "consumer_generation": 1,
+            "project_id": self.project_id,
+            "user_id": self.user_id
+        }
+        self.target_rsp = mock.Mock()
+        self.target_rsp.json.return_value = self.target_consumer_data
+        self.mock_get.side_effect = [self.source_rsp, self.target_rsp]
         self.expected_url = '/allocations'
+        self.expected_microversion = '1.28'
 
     def test_url_microversion(self):
-        expected_microversion = '1.13'
-
-        resp = self.client.set_and_clear_allocations(
-            self.context, self.rp_uuid, self.consumer_uuid, self.data,
-            self.project_id, self.user_id)
+        resp = self.client.move_allocations(
+            self.context, self.source_consumer_uuid, self.target_consumer_uuid)
 
         self.assertTrue(resp)
         self.mock_post.assert_called_once_with(
             self.expected_url, mock.ANY,
-            version=expected_microversion,
+            version=self.expected_microversion,
             global_request_id=self.context.global_id)
 
-    def test_payload_no_clear(self):
+    def test_move_to_empty_target(self):
+        self.target_consumer_data = {"allocations": {}}
+        target_rsp = mock.Mock()
+        target_rsp.json.return_value = self.target_consumer_data
+        self.mock_get.side_effect = [self.source_rsp, target_rsp]
+
         expected_payload = {
-            self.consumer_uuid: {
-                'user_id': self.user_id,
-                'project_id': self.project_id,
-                'allocations': {
+            self.target_consumer_uuid: {
+                "allocations": {
                     self.rp_uuid: {
-                        'resources': {
-                            'MEMORY_MB': 1024
-                        }
+                        "resources": {
+                            "MEMORY_MB": 1024
+                        },
+                        "generation": 1
                     }
-                }
-            }
-        }
-
-        resp = self.client.set_and_clear_allocations(
-            self.context, self.rp_uuid, self.consumer_uuid, self.data,
-            self.project_id, self.user_id)
-
-        self.assertTrue(resp)
-        args, kwargs = self.mock_post.call_args
-        payload = args[1]
-        self.assertEqual(expected_payload, payload)
-
-    def test_payload_with_clear(self):
-        expected_payload = {
-            self.consumer_uuid: {
-                'user_id': self.user_id,
-                'project_id': self.project_id,
-                'allocations': {
-                    self.rp_uuid: {
-                        'resources': {
-                            'MEMORY_MB': 1024
-                        }
-                    }
-                }
+                },
+                "consumer_generation": None,
+                "project_id": self.project_id,
+                "user_id": self.user_id,
             },
-            mock.sentinel.migration_uuid: {
-                'user_id': self.user_id,
-                'project_id': self.project_id,
-                'allocations': {}
+            self.source_consumer_uuid: {
+                "allocations": {},
+                "consumer_generation": 2,
+                "project_id": self.project_id,
+                "user_id": self.user_id,
             }
         }
 
-        resp = self.client.set_and_clear_allocations(
-            self.context, self.rp_uuid, self.consumer_uuid, self.data,
-            self.project_id, self.user_id,
-            consumer_to_clear=mock.sentinel.migration_uuid)
+        resp = self.client.move_allocations(
+            self.context, self.source_consumer_uuid, self.target_consumer_uuid)
 
         self.assertTrue(resp)
-        args, kwargs = self.mock_post.call_args
-        payload = args[1]
-        self.assertEqual(expected_payload, payload)
+        self.mock_post.assert_called_once_with(
+            self.expected_url, expected_payload,
+            version=self.expected_microversion,
+            global_request_id=self.context.global_id)
+
+    @mock.patch('nova.scheduler.client.report.LOG.info')
+    def test_move_from_empty_source(self, mock_info):
+        """Tests the case that the target has allocations but the source does
+        not so the move_allocations method assumes the allocations were already
+        moved and returns True without trying to POST /allocations.
+        """
+        source_consumer_data = {"allocations": {}}
+        source_rsp = mock.Mock()
+        source_rsp.json.return_value = source_consumer_data
+        self.mock_get.side_effect = [source_rsp, self.target_rsp]
+
+        resp = self.client.move_allocations(
+            self.context, self.source_consumer_uuid, self.target_consumer_uuid)
+
+        self.assertTrue(resp)
+        self.mock_post.assert_not_called()
+        mock_info.assert_called_once()
+        self.assertIn('Allocations not found for consumer',
+                      mock_info.call_args[0][0])
+
+    def test_move_to_non_empty_target(self):
+        self.mock_get.side_effect = [self.source_rsp, self.target_rsp]
+
+        expected_payload = {
+            self.target_consumer_uuid: {
+                "allocations": {
+                    self.rp_uuid: {
+                        "resources": {
+                            "MEMORY_MB": 1024
+                        },
+                        "generation": 1
+                    }
+                },
+                "consumer_generation": 1,
+                "project_id": self.project_id,
+                "user_id": self.user_id,
+            },
+            self.source_consumer_uuid: {
+                "allocations": {},
+                "consumer_generation": 2,
+                "project_id": self.project_id,
+                "user_id": self.user_id,
+            }
+        }
+
+        resp = self.client.move_allocations(
+            self.context, self.source_consumer_uuid, self.target_consumer_uuid)
+
+        self.assertTrue(resp)
+        self.mock_post.assert_called_once_with(
+            self.expected_url, expected_payload,
+            version=self.expected_microversion,
+            global_request_id=self.context.global_id)
+        self.assertIn('Overwriting current allocation',
+                      self.stdlog.logger.output)
 
     @mock.patch('time.sleep')
-    def test_409_concurrent_update(self, mock_sleep):
-        self.mock_post.return_value.status_code = 409
-        self.mock_post.return_value.text = 'concurrently updated'
+    def test_409_concurrent_provider_update(self, mock_sleep):
+        # there will be 1 normal call and 3 retries
+        self.mock_get.side_effect = [self.source_rsp, self.target_rsp,
+                                     self.source_rsp, self.target_rsp,
+                                     self.source_rsp, self.target_rsp,
+                                     self.source_rsp, self.target_rsp]
+        rsp = fake_requests.FakeResponse(
+            409,
+            jsonutils.dumps(
+                {'errors': [
+                    {'code': 'placement.concurrent_update',
+                     'detail': ''}]}))
 
-        resp = self.client.set_and_clear_allocations(
-            self.context, self.rp_uuid, self.consumer_uuid, self.data,
-            self.project_id, self.user_id,
-            consumer_to_clear=mock.sentinel.migration_uuid)
+        self.mock_post.return_value = rsp
+
+        resp = self.client.move_allocations(
+            self.context, self.source_consumer_uuid, self.target_consumer_uuid)
 
         self.assertFalse(resp)
         # Post was attempted four times.
@@ -1155,10 +1692,8 @@ class TestSetAndClearAllocations(SchedulerReportClientTestCase):
         self.mock_post.return_value.status_code = 503
         self.mock_post.return_value.text = error_message
 
-        resp = self.client.set_and_clear_allocations(
-            self.context, self.rp_uuid, self.consumer_uuid, self.data,
-            self.project_id, self.user_id,
-            consumer_to_clear=mock.sentinel.migration_uuid)
+        resp = self.client.move_allocations(
+            self.context, self.source_consumer_uuid, self.target_consumer_uuid)
 
         self.assertFalse(resp)
         args, kwargs = mock_log.call_args
@@ -1166,6 +1701,17 @@ class TestSetAndClearAllocations(SchedulerReportClientTestCase):
         log_args = args[1]
         self.assertIn('Unable to post allocations', log_message)
         self.assertEqual(error_message, log_args['text'])
+
+    def test_409_concurrent_consumer_update(self):
+        self.mock_post.return_value = fake_requests.FakeResponse(
+            status_code=409,
+            content=jsonutils.dumps(
+                {'errors': [{'code': 'placement.concurrent_update',
+                             'detail': 'consumer generation conflict'}]}))
+
+        self.assertRaises(exception.AllocationMoveFailed,
+            self.client.move_allocations, self.context,
+            self.source_consumer_uuid, self.target_consumer_uuid)
 
 
 class TestProviderOperations(SchedulerReportClientTestCase):
@@ -1176,7 +1722,7 @@ class TestProviderOperations(SchedulerReportClientTestCase):
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
                 '_get_provider_aggregates')
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_get_provider_traits')
+                'get_provider_traits')
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
                 '_get_sharing_providers')
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
@@ -1199,30 +1745,48 @@ class TestProviderOperations(SchedulerReportClientTestCase):
             traits=set(['CUSTOM_GOLD']), generation=43)
         get_shr_mock.return_value = []
 
+        def assert_cache_contents():
+            self.assertTrue(
+                self.client._provider_tree.exists(uuids.compute_node))
+            self.assertTrue(
+                self.client._provider_tree.in_aggregates(uuids.compute_node,
+                                                         [uuids.agg1]))
+            self.assertFalse(
+                self.client._provider_tree.in_aggregates(uuids.compute_node,
+                                                         [uuids.agg2]))
+            self.assertTrue(
+                self.client._provider_tree.has_traits(uuids.compute_node,
+                                                      ['CUSTOM_GOLD']))
+            self.assertFalse(
+                self.client._provider_tree.has_traits(uuids.compute_node,
+                                                      ['CUSTOM_SILVER']))
+            data = self.client._provider_tree.data(uuids.compute_node)
+            self.assertEqual(43, data.generation)
+
         self.client._ensure_resource_provider(self.context, uuids.compute_node)
 
+        assert_cache_contents()
         get_rpt_mock.assert_called_once_with(self.context, uuids.compute_node)
-        self.assertTrue(self.client._provider_tree.exists(uuids.compute_node))
         get_agg_mock.assert_called_once_with(self.context, uuids.compute_node)
-        self.assertTrue(
-            self.client._provider_tree.in_aggregates(uuids.compute_node,
-                                                     [uuids.agg1]))
-        self.assertFalse(
-            self.client._provider_tree.in_aggregates(uuids.compute_node,
-                                                     [uuids.agg2]))
         get_trait_mock.assert_called_once_with(self.context,
                                                uuids.compute_node)
-        self.assertTrue(
-            self.client._provider_tree.has_traits(uuids.compute_node,
-                                                  ['CUSTOM_GOLD']))
-        self.assertFalse(
-            self.client._provider_tree.has_traits(uuids.compute_node,
-                                                  ['CUSTOM_SILVER']))
         get_shr_mock.assert_called_once_with(self.context, set([uuids.agg1]))
-        self.assertEqual(
-            43,
-            self.client._provider_tree.data(uuids.compute_node).generation)
         self.assertFalse(create_rp_mock.called)
+
+        # Now that the cache is populated, a subsequent call should be a no-op.
+        get_rpt_mock.reset_mock()
+        get_agg_mock.reset_mock()
+        get_trait_mock.reset_mock()
+        get_shr_mock.reset_mock()
+
+        self.client._ensure_resource_provider(self.context, uuids.compute_node)
+
+        assert_cache_contents()
+        get_rpt_mock.assert_not_called()
+        get_agg_mock.assert_not_called()
+        get_trait_mock.assert_not_called()
+        get_shr_mock.assert_not_called()
+        create_rp_mock.assert_not_called()
 
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
                 '_create_resource_provider')
@@ -1339,12 +1903,13 @@ class TestProviderOperations(SchedulerReportClientTestCase):
                 self.context, uuids.cn2, 'a-name', parent_provider_uuid=None)
 
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_refresh_associations', new=mock.Mock())
+                '_refresh_associations')
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
                 '_create_resource_provider')
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
                 '_get_providers_in_tree')
-    def test_ensure_resource_provider_tree(self, get_rpt_mock, create_rp_mock):
+    def test_ensure_resource_provider_tree(self, get_rpt_mock, create_rp_mock,
+                                           refresh_mock):
         """Test _ensure_resource_provider with a tree of providers."""
         def _create_resource_provider(context, uuid, name,
                                       parent_provider_uuid=None):
@@ -1356,6 +1921,12 @@ class TestProviderOperations(SchedulerReportClientTestCase):
                 'parent_provider_uuid': parent_provider_uuid
             }
         create_rp_mock.side_effect = _create_resource_provider
+
+        # We at least have to simulate the part of _refresh_associations that
+        # marks a provider as 'seen'
+        def mocked_refresh(context, rp_uuid, **kwargs):
+            self.client._association_refresh_time[rp_uuid] = time.time()
+        refresh_mock.side_effect = mocked_refresh
 
         # Not initially in the placement database, so we have to create it.
         get_rpt_mock.return_value = []
@@ -1388,19 +1959,31 @@ class TestProviderOperations(SchedulerReportClientTestCase):
             self.context, uuids.child2, parent_provider_uuid=uuids.root)
         self.assertEqual(uuids.child2, child2)
 
+        all_rp_uuids = [uuids.root, uuids.child1, uuids.child2,
+                        uuids.grandchild]
+
         # At this point we should get all the providers.
         self.assertEqual(
-            set([uuids.root, uuids.child1, uuids.child2, uuids.grandchild]),
+            set(all_rp_uuids),
             set(self.client._provider_tree.get_provider_uuids()))
+
+        # And now _ensure is a no-op because everything is cached
+        get_rpt_mock.reset_mock()
+        create_rp_mock.reset_mock()
+        refresh_mock.reset_mock()
+
+        for rp_uuid in all_rp_uuids:
+            self.client._ensure_resource_provider(self.context, rp_uuid)
+        get_rpt_mock.assert_not_called()
+        create_rp_mock.assert_not_called()
+        refresh_mock.assert_not_called()
 
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
                 '_get_providers_in_tree')
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_refresh_and_get_inventory')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
                 '_refresh_associations')
     def test_ensure_resource_provider_refresh_fetch(self, mock_ref_assoc,
-                                                    mock_ref_inv, mock_gpit):
+                                                    mock_gpit):
         """Make sure refreshes are called with the appropriate UUIDs and flags
         when we fetch the provider tree from placement.
         """
@@ -1411,8 +1994,6 @@ class TestProviderOperations(SchedulerReportClientTestCase):
                          self.client._ensure_resource_provider(self.context,
                                                                uuids.root))
         mock_gpit.assert_called_once_with(self.context, uuids.root)
-        mock_ref_inv.assert_has_calls([mock.call(self.context, uuid)
-                                       for uuid in tree_uuids])
         mock_ref_assoc.assert_has_calls(
             [mock.call(self.context, uuid, force=True)
              for uuid in tree_uuids])
@@ -1469,8 +2050,8 @@ class TestProviderOperations(SchedulerReportClientTestCase):
             'trait:HW_NIC_OFFLOAD_LRO': 'preferred',
             'group_policy3': 'none',
         })
-        resources.get_request_group(None).member_of = [
-            ('agg1', 'agg2', 'agg3'), ('agg1', 'agg2')]
+        resources.get_request_group(None).aggregates = [
+            ['agg1', 'agg2', 'agg3'], ['agg1', 'agg2']]
         expected_path = '/allocation_candidates'
         expected_query = [
             ('group_policy', 'isolate'),
@@ -1501,7 +2082,7 @@ class TestProviderOperations(SchedulerReportClientTestCase):
         expected_url = '/allocation_candidates?%s' % parse.urlencode(
             expected_query)
         self.ks_adap_mock.get.assert_called_once_with(
-            expected_url, microversion='1.25',
+            expected_url, microversion='1.29',
             headers={'X-Openstack-Request-Id': self.context.global_id})
         self.assertEqual(mock.sentinel.alloc_reqs, alloc_reqs)
         self.assertEqual(mock.sentinel.p_sums, p_sums)
@@ -1541,7 +2122,7 @@ class TestProviderOperations(SchedulerReportClientTestCase):
             expected_query)
         self.assertEqual(mock.sentinel.alloc_reqs, alloc_reqs)
         self.ks_adap_mock.get.assert_called_once_with(
-            expected_url, microversion='1.25',
+            expected_url, microversion='1.29',
             headers={'X-Openstack-Request-Id': self.context.global_id})
         self.assertEqual(mock.sentinel.p_sums, p_sums)
 
@@ -1563,7 +2144,7 @@ class TestProviderOperations(SchedulerReportClientTestCase):
         res = self.client.get_allocation_candidates(self.context, resources)
 
         self.ks_adap_mock.get.assert_called_once_with(
-            mock.ANY, microversion='1.25',
+            mock.ANY, microversion='1.29',
             headers={'X-Openstack-Request-Id': self.context.global_id})
         url = self.ks_adap_mock.get.call_args[0][0]
         split_url = parse.urlsplit(url)
@@ -2021,6 +2602,60 @@ class TestProviderOperations(SchedulerReportClientTestCase):
         self.assertEqual(set(), ptree_data.aggregates)
         self.assertEqual(5, ptree_data.generation)
 
+    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
+                '_get_resource_provider', return_value=mock.NonCallableMock)
+    def test_get_resource_provider_name_from_cache(self, mock_placement_get):
+        expected_name = 'rp'
+        self.client._provider_tree.new_root(
+            expected_name, uuids.rp, generation=0)
+
+        actual_name = self.client.get_resource_provider_name(
+            self.context, uuids.rp)
+
+        self.assertEqual(expected_name, actual_name)
+
+    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
+                '_get_resource_provider')
+    def test_get_resource_provider_name_from_placement(
+            self, mock_placement_get):
+        expected_name = 'rp'
+        mock_placement_get.return_value = {
+            'uuid': uuids.rp,
+            'name': expected_name
+        }
+
+        actual_name = self.client.get_resource_provider_name(
+            self.context, uuids.rp)
+
+        self.assertEqual(expected_name, actual_name)
+        mock_placement_get.assert_called_once_with(self.context, uuids.rp)
+
+    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
+                '_get_resource_provider')
+    def test_get_resource_provider_name_rp_not_found_in_placement(
+            self, mock_placement_get):
+        mock_placement_get.side_effect = \
+            exception.ResourceProviderNotFound(uuids.rp)
+
+        self.assertRaises(
+            exception.ResourceProviderNotFound,
+            self.client.get_resource_provider_name,
+            self.context, uuids.rp)
+
+        mock_placement_get.assert_called_once_with(self.context, uuids.rp)
+
+    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
+                '_get_resource_provider')
+    def test_get_resource_provider_name_placement_unavailable(
+            self, mock_placement_get):
+        mock_placement_get.side_effect = \
+            exception.ResourceProviderRetrievalFailed(uuid=uuids.rp)
+
+        self.assertRaises(
+            exception.ResourceProviderRetrievalFailed,
+            self.client.get_resource_provider_name,
+            self.context, uuids.rp)
+
 
 class TestAggregates(SchedulerReportClientTestCase):
     def test_get_provider_aggregates_found(self):
@@ -2084,7 +2719,7 @@ class TestTraits(SchedulerReportClientTestCase):
                                        'resource_provider_generation': 42}
         self.ks_adap_mock.get.return_value = resp_mock
 
-        result, gen = self.client._get_provider_traits(self.context, uuid)
+        result, gen = self.client.get_provider_traits(self.context, uuid)
 
         expected_url = '/resource_providers/' + uuid + '/traits'
         self.ks_adap_mock.get.assert_called_once_with(
@@ -2108,7 +2743,7 @@ class TestTraits(SchedulerReportClientTestCase):
             resp_mock.status_code = status_code
             self.assertRaises(
                 exception.ResourceProviderTraitRetrievalFailed,
-                self.client._get_provider_traits, self.context, uuid)
+                self.client.get_provider_traits, self.context, uuid)
 
             expected_url = '/resource_providers/' + uuid + '/traits'
             self.ks_adap_mock.get.assert_called_once_with(
@@ -2120,6 +2755,18 @@ class TestTraits(SchedulerReportClientTestCase):
                              log_mock.call_args[0][1]['placement_req_id'])
             self.ks_adap_mock.get.reset_mock()
             log_mock.reset_mock()
+
+    def test_get_provider_traits_placement_comm_error(self):
+        """ksa ClientException raises through."""
+        uuid = uuids.compute_node
+        self.ks_adap_mock.get.side_effect = ks_exc.EndpointNotFound()
+        self.assertRaises(ks_exc.ClientException,
+                          self.client.get_provider_traits, self.context, uuid)
+        expected_url = '/resource_providers/' + uuid + '/traits'
+        self.ks_adap_mock.get.assert_called_once_with(
+            expected_url,
+            headers={'X-Openstack-Request-Id': self.context.global_id},
+            **self.trait_api_kwargs)
 
     def test_ensure_traits(self):
         """Successful paths, various permutations of traits existing or needing
@@ -2269,865 +2916,175 @@ class TestTraits(SchedulerReportClientTestCase):
 
 
 class TestAssociations(SchedulerReportClientTestCase):
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_get_provider_aggregates')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_get_provider_traits')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_get_sharing_providers')
-    def test_refresh_associations_no_last(self, mock_shr_get, mock_trait_get,
-                                          mock_agg_get):
+    def setUp(self):
+        super(TestAssociations, self).setUp()
+
+        self.mock_get_inv = self.useFixture(fixtures.MockPatch(
+            'nova.scheduler.client.report.SchedulerReportClient.'
+            '_get_inventory')).mock
+        self.inv = {
+            'VCPU': {'total': 16},
+            'MEMORY_MB': {'total': 1024},
+            'DISK_GB': {'total': 10},
+        }
+        self.mock_get_inv.return_value = {
+            'resource_provider_generation': 41,
+            'inventories': self.inv,
+        }
+
+        self.mock_get_aggs = self.useFixture(fixtures.MockPatch(
+            'nova.scheduler.client.report.SchedulerReportClient.'
+            '_get_provider_aggregates')).mock
+        self.mock_get_aggs.return_value = report.AggInfo(
+            aggregates=set([uuids.agg1]), generation=42)
+
+        self.mock_get_traits = self.useFixture(fixtures.MockPatch(
+            'nova.scheduler.client.report.SchedulerReportClient.'
+            'get_provider_traits')).mock
+        self.mock_get_traits.return_value = report.TraitInfo(
+            traits=set(['CUSTOM_GOLD']), generation=43)
+
+        self.mock_get_sharing = self.useFixture(fixtures.MockPatch(
+            'nova.scheduler.client.report.SchedulerReportClient.'
+            '_get_sharing_providers')).mock
+
+    def assert_getters_were_called(self, uuid, sharing=True):
+        self.mock_get_inv.assert_called_once_with(self.context, uuid)
+        self.mock_get_aggs.assert_called_once_with(self.context, uuid)
+        self.mock_get_traits.assert_called_once_with(self.context, uuid)
+        if sharing:
+            self.mock_get_sharing.assert_called_once_with(
+                self.context, self.mock_get_aggs.return_value[0])
+        self.assertIn(uuid, self.client._association_refresh_time)
+        self.assertFalse(
+            self.client._provider_tree.has_inventory_changed(uuid, self.inv))
+        self.assertTrue(
+            self.client._provider_tree.in_aggregates(uuid, [uuids.agg1]))
+        self.assertFalse(
+            self.client._provider_tree.in_aggregates(uuid, [uuids.agg2]))
+        self.assertTrue(
+            self.client._provider_tree.has_traits(uuid, ['CUSTOM_GOLD']))
+        self.assertFalse(
+            self.client._provider_tree.has_traits(uuid, ['CUSTOM_SILVER']))
+        self.assertEqual(43, self.client._provider_tree.data(uuid).generation)
+
+    def assert_getters_not_called(self, timer_entry=None):
+        self.mock_get_inv.assert_not_called()
+        self.mock_get_aggs.assert_not_called()
+        self.mock_get_traits.assert_not_called()
+        self.mock_get_sharing.assert_not_called()
+        if timer_entry is None:
+            self.assertFalse(self.client._association_refresh_time)
+        else:
+            self.assertIn(timer_entry, self.client._association_refresh_time)
+
+    def reset_getter_mocks(self):
+        self.mock_get_inv.reset_mock()
+        self.mock_get_aggs.reset_mock()
+        self.mock_get_traits.reset_mock()
+        self.mock_get_sharing.reset_mock()
+
+    def test_refresh_associations_no_last(self):
         """Test that associations are refreshed when stale."""
         uuid = uuids.compute_node
         # Seed the provider tree so _refresh_associations finds the provider
         self.client._provider_tree.new_root('compute', uuid, generation=1)
-        mock_agg_get.return_value = report.AggInfo(
-            aggregates=set([uuids.agg1]), generation=42)
-        mock_trait_get.return_value = report.TraitInfo(
-            traits=set(['CUSTOM_GOLD']), generation=43)
         self.client._refresh_associations(self.context, uuid)
-        mock_agg_get.assert_called_once_with(self.context, uuid)
-        mock_trait_get.assert_called_once_with(self.context, uuid)
-        mock_shr_get.assert_called_once_with(
-            self.context, mock_agg_get.return_value[0])
-        self.assertIn(uuid, self.client._association_refresh_time)
-        self.assertTrue(
-            self.client._provider_tree.in_aggregates(uuid, [uuids.agg1]))
-        self.assertFalse(
-            self.client._provider_tree.in_aggregates(uuid, [uuids.agg2]))
-        self.assertTrue(
-            self.client._provider_tree.has_traits(uuid, ['CUSTOM_GOLD']))
-        self.assertFalse(
-            self.client._provider_tree.has_traits(uuid, ['CUSTOM_SILVER']))
-        self.assertEqual(43, self.client._provider_tree.data(uuid).generation)
+        self.assert_getters_were_called(uuid)
 
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_get_provider_aggregates')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_get_provider_traits')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_get_sharing_providers')
-    def test_refresh_associations_no_refresh_sharing(self, mock_shr_get,
-                                                     mock_trait_get,
-                                                     mock_agg_get):
+    def test_refresh_associations_no_refresh_sharing(self):
         """Test refresh_sharing=False."""
         uuid = uuids.compute_node
         # Seed the provider tree so _refresh_associations finds the provider
         self.client._provider_tree.new_root('compute', uuid, generation=1)
-        mock_agg_get.return_value = report.AggInfo(
-            aggregates=set([uuids.agg1]), generation=42)
-        mock_trait_get.return_value = report.TraitInfo(
-            traits=set(['CUSTOM_GOLD']), generation=43)
         self.client._refresh_associations(self.context, uuid,
                                           refresh_sharing=False)
-        mock_agg_get.assert_called_once_with(self.context, uuid)
-        mock_trait_get.assert_called_once_with(self.context, uuid)
-        mock_shr_get.assert_not_called()
-        self.assertIn(uuid, self.client._association_refresh_time)
-        self.assertTrue(
-            self.client._provider_tree.in_aggregates(uuid, [uuids.agg1]))
-        self.assertFalse(
-            self.client._provider_tree.in_aggregates(uuid, [uuids.agg2]))
-        self.assertTrue(
-            self.client._provider_tree.has_traits(uuid, ['CUSTOM_GOLD']))
-        self.assertFalse(
-            self.client._provider_tree.has_traits(uuid, ['CUSTOM_SILVER']))
-        self.assertEqual(43, self.client._provider_tree.data(uuid).generation)
+        self.assert_getters_were_called(uuid, sharing=False)
 
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_get_provider_aggregates')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_get_provider_traits')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_get_sharing_providers')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
                 '_associations_stale')
-    def test_refresh_associations_not_stale(self, mock_stale, mock_shr_get,
-                                            mock_trait_get, mock_agg_get):
+    def test_refresh_associations_not_stale(self, mock_stale):
         """Test that refresh associations is not called when the map is
         not stale.
         """
         mock_stale.return_value = False
         uuid = uuids.compute_node
         self.client._refresh_associations(self.context, uuid)
-        mock_agg_get.assert_not_called()
-        mock_trait_get.assert_not_called()
-        mock_shr_get.assert_not_called()
-        self.assertFalse(self.client._association_refresh_time)
+        self.assert_getters_not_called()
 
     @mock.patch.object(report.LOG, 'debug')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_get_provider_aggregates')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_get_provider_traits')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_get_sharing_providers')
-    def test_refresh_associations_time(self, mock_shr_get, mock_trait_get,
-                                       mock_agg_get, log_mock):
+    def test_refresh_associations_time(self, log_mock):
         """Test that refresh associations is called when the map is stale."""
         uuid = uuids.compute_node
         # Seed the provider tree so _refresh_associations finds the provider
         self.client._provider_tree.new_root('compute', uuid, generation=1)
-        mock_agg_get.return_value = report.AggInfo(aggregates=set([]),
-                                                   generation=42)
-        mock_trait_get.return_value = report.TraitInfo(traits=set([]),
-                                                       generation=43)
-        mock_shr_get.return_value = []
 
         # Called a first time because association_refresh_time is empty.
         now = time.time()
         self.client._refresh_associations(self.context, uuid)
-        mock_agg_get.assert_called_once_with(self.context, uuid)
-        mock_trait_get.assert_called_once_with(self.context, uuid)
-        mock_shr_get.assert_called_once_with(self.context, set())
+        self.assert_getters_were_called(uuid)
         log_mock.assert_has_calls([
+            mock.call('Refreshing inventories for resource provider %s', uuid),
+            mock.call('Updating ProviderTree inventory for provider %s from '
+                      '_refresh_and_get_inventory using data: %s',
+                      uuid, self.inv),
             mock.call('Refreshing aggregate associations for resource '
-                      'provider %s, aggregates: %s', uuid, 'None'),
+                      'provider %s, aggregates: %s', uuid, uuids.agg1),
             mock.call('Refreshing trait associations for resource '
-                      'provider %s, traits: %s', uuid, 'None')
+                      'provider %s, traits: %s', uuid, 'CUSTOM_GOLD')
         ])
-        self.assertIn(uuid, self.client._association_refresh_time)
 
         # Clear call count.
-        mock_agg_get.reset_mock()
-        mock_trait_get.reset_mock()
-        mock_shr_get.reset_mock()
+        self.reset_getter_mocks()
 
         with mock.patch('time.time') as mock_future:
             # Not called a second time because not enough time has passed.
             mock_future.return_value = (now +
                 CONF.compute.resource_provider_association_refresh / 2)
             self.client._refresh_associations(self.context, uuid)
-            mock_agg_get.assert_not_called()
-            mock_trait_get.assert_not_called()
-            mock_shr_get.assert_not_called()
+            self.assert_getters_not_called(timer_entry=uuid)
 
             # Called because time has passed.
             mock_future.return_value = (now +
                 CONF.compute.resource_provider_association_refresh + 1)
             self.client._refresh_associations(self.context, uuid)
-            mock_agg_get.assert_called_once_with(self.context, uuid)
-            mock_trait_get.assert_called_once_with(self.context, uuid)
-            mock_shr_get.assert_called_once_with(self.context, set())
+            self.assert_getters_were_called(uuid)
 
-
-class TestComputeNodeToInventoryDict(test.NoDBTestCase):
-    def test_compute_node_inventory(self):
+    def test_refresh_associations_disabled(self):
+        """Test that refresh associations can be disabled."""
+        self.flags(resource_provider_association_refresh=0, group='compute')
         uuid = uuids.compute_node
-        name = 'computehost'
-        compute_node = objects.ComputeNode(uuid=uuid,
-                                           hypervisor_hostname=name,
-                                           vcpus=2,
-                                           cpu_allocation_ratio=16.0,
-                                           memory_mb=1024,
-                                           ram_allocation_ratio=1.5,
-                                           local_gb=10,
-                                           disk_allocation_ratio=1.0)
+        # Seed the provider tree so _refresh_associations finds the provider
+        self.client._provider_tree.new_root('compute', uuid, generation=1)
 
-        self.flags(reserved_host_memory_mb=1000)
-        self.flags(reserved_host_disk_mb=200)
-        self.flags(reserved_host_cpus=1)
+        # Called a first time because association_refresh_time is empty.
+        now = time.time()
+        self.client._refresh_associations(self.context, uuid)
+        self.assert_getters_were_called(uuid)
 
-        result = report._compute_node_to_inventory_dict(compute_node)
+        # Clear call count.
+        self.reset_getter_mocks()
 
-        expected = {
-            'VCPU': {
-                'total': compute_node.vcpus,
-                'reserved': CONF.reserved_host_cpus,
-                'min_unit': 1,
-                'max_unit': compute_node.vcpus,
-                'step_size': 1,
-                'allocation_ratio': compute_node.cpu_allocation_ratio,
-            },
-            'MEMORY_MB': {
-                'total': compute_node.memory_mb,
-                'reserved': CONF.reserved_host_memory_mb,
-                'min_unit': 1,
-                'max_unit': compute_node.memory_mb,
-                'step_size': 1,
-                'allocation_ratio': compute_node.ram_allocation_ratio,
-            },
-            'DISK_GB': {
-                'total': compute_node.local_gb,
-                'reserved': 1,  # this is ceil(1000/1024)
-                'min_unit': 1,
-                'max_unit': compute_node.local_gb,
-                'step_size': 1,
-                'allocation_ratio': compute_node.disk_allocation_ratio,
-            },
-        }
-        self.assertEqual(expected, result)
+        with mock.patch('time.time') as mock_future:
+            # A lot of time passes
+            mock_future.return_value = now + 10000000000000
+            self.client._refresh_associations(self.context, uuid)
+            self.assert_getters_not_called(timer_entry=uuid)
 
-    def test_compute_node_inventory_empty(self):
-        uuid = uuids.compute_node
-        name = 'computehost'
-        compute_node = objects.ComputeNode(uuid=uuid,
-                                           hypervisor_hostname=name,
-                                           vcpus=0,
-                                           cpu_allocation_ratio=16.0,
-                                           memory_mb=0,
-                                           ram_allocation_ratio=1.5,
-                                           local_gb=0,
-                                           disk_allocation_ratio=1.0)
-        result = report._compute_node_to_inventory_dict(compute_node)
-        self.assertEqual({}, result)
+            self.reset_getter_mocks()
 
+            # Forever passes
+            mock_future.return_value = float('inf')
+            self.client._refresh_associations(self.context, uuid)
+            self.assert_getters_not_called(timer_entry=uuid)
 
-class TestInventory(SchedulerReportClientTestCase):
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_ensure_resource_provider')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_update_inventory')
-    def test_update_compute_node(self, mock_ui, mock_erp):
-        cn = self.compute_node
-        self.client.update_compute_node(self.context, cn)
-        mock_erp.assert_called_once_with(self.context, cn.uuid,
-                                         cn.hypervisor_hostname)
-        expected_inv_data = {
-            'VCPU': {
-                'total': 8,
-                'reserved': CONF.reserved_host_cpus,
-                'min_unit': 1,
-                'max_unit': 8,
-                'step_size': 1,
-                'allocation_ratio': 16.0,
-            },
-            'MEMORY_MB': {
-                'total': 1024,
-                'reserved': 512,
-                'min_unit': 1,
-                'max_unit': 1024,
-                'step_size': 1,
-                'allocation_ratio': 1.5,
-            },
-            'DISK_GB': {
-                'total': 10,
-                'reserved': 0,
-                'min_unit': 1,
-                'max_unit': 10,
-                'step_size': 1,
-                'allocation_ratio': 1.0,
-            },
-        }
-        mock_ui.assert_called_once_with(
-            self.context,
-            cn.uuid,
-            expected_inv_data,
-        )
+            self.reset_getter_mocks()
 
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_ensure_resource_provider')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_update_inventory')
-    def test_update_compute_node_no_inv(self, mock_ui, mock_erp):
-        """Ensure that if there are no inventory records, we still call
-        _update_inventory().
-        """
-        cn = self.compute_node
-        cn.vcpus = 0
-        cn.memory_mb = 0
-        cn.local_gb = 0
-        self.client.update_compute_node(self.context, cn)
-        mock_erp.assert_called_once_with(self.context, cn.uuid,
-                                         cn.hypervisor_hostname)
-        mock_ui.assert_called_once_with(self.context, cn.uuid, {})
-
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                'get')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                'put')
-    def test_update_inventory_initial_empty(self, mock_put, mock_get):
-        # Ensure _update_inventory() returns a list of Inventories objects
-        # after creating or updating the existing values
-        uuid = uuids.compute_node
-        compute_node = self.compute_node
-        # Make sure the resource provider exists for preventing to call the API
-        self._init_provider_tree(resources_override={})
-
-        mock_get.return_value.json.return_value = {
-            'resource_provider_generation': 43,
-            'inventories': {
-                'VCPU': {'total': 16},
-                'MEMORY_MB': {'total': 1024},
-                'DISK_GB': {'total': 10},
-            }
-        }
-        mock_put.return_value.status_code = 200
-        mock_put.return_value.json.return_value = {
-            'resource_provider_generation': 44,
-            'inventories': {
-                'VCPU': {'total': 16},
-                'MEMORY_MB': {'total': 1024},
-                'DISK_GB': {'total': 10},
-            }
-        }
-
-        inv_data = report._compute_node_to_inventory_dict(compute_node)
-        result = self.client._update_inventory_attempt(
-            self.context, compute_node.uuid, inv_data
-        )
-        self.assertTrue(result)
-
-        exp_url = '/resource_providers/%s/inventories' % uuid
-        mock_get.assert_called_once_with(
-            exp_url, global_request_id=self.context.global_id)
-        # Updated with the new inventory from the PUT call
-        self._validate_provider(uuid, generation=44)
-        expected = {
-            # Called with the newly-found generation from the existing
-            # inventory
-            'resource_provider_generation': 43,
-            'inventories': {
-                'VCPU': {
-                    'total': 8,
-                    'reserved': CONF.reserved_host_cpus,
-                    'min_unit': 1,
-                    'max_unit': compute_node.vcpus,
-                    'step_size': 1,
-                    'allocation_ratio': compute_node.cpu_allocation_ratio,
-                },
-                'MEMORY_MB': {
-                    'total': 1024,
-                    'reserved': CONF.reserved_host_memory_mb,
-                    'min_unit': 1,
-                    'max_unit': compute_node.memory_mb,
-                    'step_size': 1,
-                    'allocation_ratio': compute_node.ram_allocation_ratio,
-                },
-                'DISK_GB': {
-                    'total': 10,
-                    'reserved': 0,  # reserved_host_disk_mb is 0 by default
-                    'min_unit': 1,
-                    'max_unit': compute_node.local_gb,
-                    'step_size': 1,
-                    'allocation_ratio': compute_node.disk_allocation_ratio,
-                },
-            }
-        }
-        mock_put.assert_called_once_with(
-            exp_url, expected, version='1.26',
-            global_request_id=self.context.global_id)
-
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                'get')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                'put')
-    def test_update_inventory(self, mock_put, mock_get):
-        self.flags(reserved_host_disk_mb=1000)
-
-        # Ensure _update_inventory() returns a list of Inventories objects
-        # after creating or updating the existing values
-        uuid = uuids.compute_node
-        compute_node = self.compute_node
-        # Make sure the resource provider exists for preventing to call the API
-        self._init_provider_tree()
-        new_vcpus_total = 240
-
-        mock_get.return_value.json.return_value = {
-            'resource_provider_generation': 43,
-            'inventories': {
-                'VCPU': {'total': 16},
-                'MEMORY_MB': {'total': 1024},
-                'DISK_GB': {'total': 10},
-            }
-        }
-        mock_put.return_value.status_code = 200
-        mock_put.return_value.json.return_value = {
-            'resource_provider_generation': 44,
-            'inventories': {
-                'VCPU': {'total': new_vcpus_total},
-                'MEMORY_MB': {'total': 1024},
-                'DISK_GB': {'total': 10},
-            }
-        }
-
-        inv_data = report._compute_node_to_inventory_dict(compute_node)
-        # Make a change to trigger the update...
-        inv_data['VCPU']['total'] = new_vcpus_total
-        result = self.client._update_inventory_attempt(
-            self.context, compute_node.uuid, inv_data
-        )
-        self.assertTrue(result)
-
-        exp_url = '/resource_providers/%s/inventories' % uuid
-        mock_get.assert_called_once_with(
-            exp_url, global_request_id=self.context.global_id)
-        # Updated with the new inventory from the PUT call
-        self._validate_provider(uuid, generation=44)
-        expected = {
-            # Called with the newly-found generation from the existing
-            # inventory
-            'resource_provider_generation': 43,
-            'inventories': {
-                'VCPU': {
-                    'total': new_vcpus_total,
-                    'reserved': 0,
-                    'min_unit': 1,
-                    'max_unit': compute_node.vcpus,
-                    'step_size': 1,
-                    'allocation_ratio': compute_node.cpu_allocation_ratio,
-                },
-                'MEMORY_MB': {
-                    'total': 1024,
-                    'reserved': CONF.reserved_host_memory_mb,
-                    'min_unit': 1,
-                    'max_unit': compute_node.memory_mb,
-                    'step_size': 1,
-                    'allocation_ratio': compute_node.ram_allocation_ratio,
-                },
-                'DISK_GB': {
-                    'total': 10,
-                    'reserved': 1,  # this is ceil for 1000MB
-                    'min_unit': 1,
-                    'max_unit': compute_node.local_gb,
-                    'step_size': 1,
-                    'allocation_ratio': compute_node.disk_allocation_ratio,
-                },
-            }
-        }
-        mock_put.assert_called_once_with(
-            exp_url, expected, version='1.26',
-            global_request_id=self.context.global_id)
-
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                'get')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                'put')
-    def test_update_inventory_no_update(self, mock_put, mock_get):
-        """Simulate situation where scheduler client is first starting up and
-        ends up loading information from the placement API via a GET against
-        the resource provider's inventory but has no local cached inventory
-        information for a resource provider.
-        """
-        uuid = uuids.compute_node
-        compute_node = self.compute_node
-        # Make sure the resource provider exists for preventing to call the API
-        self._init_provider_tree(generation_override=42, resources_override={})
-        mock_get.return_value.json.return_value = {
-            'resource_provider_generation': 43,
-            'inventories': {
-                'VCPU': {
-                    'total': 8,
-                    'reserved': CONF.reserved_host_cpus,
-                    'min_unit': 1,
-                    'max_unit': compute_node.vcpus,
-                    'step_size': 1,
-                    'allocation_ratio': compute_node.cpu_allocation_ratio,
-                },
-                'MEMORY_MB': {
-                    'total': 1024,
-                    'reserved': CONF.reserved_host_memory_mb,
-                    'min_unit': 1,
-                    'max_unit': compute_node.memory_mb,
-                    'step_size': 1,
-                    'allocation_ratio': compute_node.ram_allocation_ratio,
-                },
-                'DISK_GB': {
-                    'total': 10,
-                    'reserved': 0,
-                    'min_unit': 1,
-                    'max_unit': compute_node.local_gb,
-                    'step_size': 1,
-                    'allocation_ratio': compute_node.disk_allocation_ratio,
-                },
-            }
-        }
-        inv_data = report._compute_node_to_inventory_dict(compute_node)
-        result = self.client._update_inventory_attempt(
-            self.context, compute_node.uuid, inv_data
-        )
-        self.assertTrue(result)
-        exp_url = '/resource_providers/%s/inventories' % uuid
-        mock_get.assert_called_once_with(
-            exp_url, global_request_id=self.context.global_id)
-        # No update so put should not be called
-        self.assertFalse(mock_put.called)
-        # Make sure we updated the generation from the inventory records
-        self._validate_provider(uuid, generation=43)
-
-    @mock.patch.object(report.LOG, 'info')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_get_inventory')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                'put')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_ensure_resource_provider')
-    def test_update_inventory_concurrent_update(self, mock_ensure,
-                                                mock_put, mock_get, mock_info):
-        # Ensure _update_inventory() returns a list of Inventories objects
-        # after creating or updating the existing values
-        uuid = uuids.compute_node
-        compute_node = self.compute_node
-        # Make sure the resource provider exists for preventing to call the API
-        self.client._provider_tree.new_root(
-            compute_node.hypervisor_hostname,
-            compute_node.uuid,
-            generation=42,
-        )
-
-        mock_get.return_value = {
-            'resource_provider_generation': 42,
-            'inventories': {},
-        }
-        mock_put.return_value.status_code = 409
-        mock_put.return_value.text = 'Does not match inventory in use'
-        mock_put.return_value.headers = {'x-openstack-request-id':
-                                         uuids.request_id}
-
-        inv_data = report._compute_node_to_inventory_dict(compute_node)
-        result = self.client._update_inventory_attempt(
-            self.context, compute_node.uuid, inv_data
-        )
-        self.assertFalse(result)
-
-        # Invalidated the cache
-        self.assertFalse(self.client._provider_tree.exists(uuid))
-        # Refreshed our resource provider
-        mock_ensure.assert_called_once_with(self.context, uuid)
-        # Logged the request id in the log message
-        self.assertEqual(uuids.request_id,
-                         mock_info.call_args[0][1]['placement_req_id'])
-
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_get_inventory')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                'put')
-    def test_update_inventory_inventory_in_use(self, mock_put, mock_get):
-        # Ensure _update_inventory() returns a list of Inventories objects
-        # after creating or updating the existing values
-        uuid = uuids.compute_node
-        compute_node = self.compute_node
-        # Make sure the resource provider exists for preventing to call the API
-        self.client._provider_tree.new_root(
-            compute_node.hypervisor_hostname,
-            compute_node.uuid,
-            generation=42,
-        )
-
-        mock_get.return_value = {
-            'resource_provider_generation': 42,
-            'inventories': {},
-        }
-        mock_put.return_value.status_code = 409
-        mock_put.return_value.text = (
-            "update conflict: Inventory for VCPU on "
-            "resource provider 123 in use"
-        )
-
-        inv_data = report._compute_node_to_inventory_dict(compute_node)
-        self.assertRaises(
-            exception.InventoryInUse,
-            self.client._update_inventory_attempt,
-            self.context,
-            compute_node.uuid,
-            inv_data,
-        )
-
-        # Did NOT invalidate the cache
-        self.assertTrue(self.client._provider_tree.exists(uuid))
-
-    @mock.patch.object(report.LOG, 'info')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_get_inventory')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                'put')
-    def test_update_inventory_unknown_response(self, mock_put, mock_get,
-                                               mock_info):
-        # Ensure _update_inventory() returns a list of Inventories objects
-        # after creating or updating the existing values
-        uuid = uuids.compute_node
-        compute_node = self.compute_node
-        # Make sure the resource provider exists for preventing to call the API
-        self.client._provider_tree.new_root(
-            compute_node.hypervisor_hostname,
-            compute_node.uuid,
-            generation=42,
-        )
-
-        mock_get.return_value = {
-            'resource_provider_generation': 42,
-            'inventories': {},
-        }
-        mock_put.return_value.status_code = 234
-        mock_put.return_value.headers = {'x-openstack-request-id':
-                                         uuids.request_id}
-
-        inv_data = report._compute_node_to_inventory_dict(compute_node)
-        result = self.client._update_inventory_attempt(
-            self.context, compute_node.uuid, inv_data
-        )
-        self.assertFalse(result)
-
-        # No cache invalidation
-        self.assertTrue(self.client._provider_tree.exists(uuid))
-
-    @mock.patch.object(report.LOG, 'warning')
-    @mock.patch.object(report.LOG, 'debug')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_get_inventory')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                'put')
-    def test_update_inventory_failed(self, mock_put, mock_get,
-                                     mock_debug, mock_warn):
-        # Ensure _update_inventory() returns a list of Inventories objects
-        # after creating or updating the existing values
-        uuid = uuids.compute_node
-        compute_node = self.compute_node
-        # Make sure the resource provider exists for preventing to call the API
-        self.client._provider_tree.new_root(
-            compute_node.hypervisor_hostname,
-            compute_node.uuid,
-            generation=42,
-        )
-
-        mock_get.return_value = {
-            'resource_provider_generation': 42,
-            'inventories': {},
-        }
-        mock_put.return_value = fake_requests.FakeResponse(
-            400, headers={'x-openstack-request-id': uuids.request_id})
-
-        inv_data = report._compute_node_to_inventory_dict(compute_node)
-        result = self.client._update_inventory_attempt(
-            self.context, compute_node.uuid, inv_data
-        )
-        self.assertFalse(result)
-
-        # No cache invalidation
-        self.assertTrue(self.client._provider_tree.exists(uuid))
-        # Logged the request id in the log messages
-        self.assertEqual(uuids.request_id,
-                         mock_debug.call_args[0][1]['placement_req_id'])
-        self.assertEqual(uuids.request_id,
-                         mock_warn.call_args[0][1]['placement_req_id'])
-
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_ensure_resource_provider')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_update_inventory_attempt')
-    @mock.patch('time.sleep')
-    def test_update_inventory_fails_and_then_succeeds(self, mock_sleep,
-                                                      mock_update,
-                                                      mock_ensure):
-        # Ensure _update_inventory() fails if we have a conflict when updating
-        # but retries correctly.
-        cn = self.compute_node
-        mock_update.side_effect = (False, True)
-
-        self.client._provider_tree.new_root(
-            cn.hypervisor_hostname,
-            cn.uuid,
-            generation=42,
-        )
-        result = self.client._update_inventory(
-            self.context, cn.uuid, mock.sentinel.inv_data
-        )
-        self.assertTrue(result)
-
-        # Only slept once
-        mock_sleep.assert_called_once_with(1)
-
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_ensure_resource_provider')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_update_inventory_attempt')
-    @mock.patch('time.sleep')
-    def test_update_inventory_never_succeeds(self, mock_sleep,
-                                             mock_update,
-                                             mock_ensure):
-        # but retries correctly.
-        cn = self.compute_node
-        mock_update.side_effect = (False, False, False)
-
-        self.client._provider_tree.new_root(
-            cn.hypervisor_hostname,
-            cn.uuid,
-            generation=42,
-        )
-        result = self.client._update_inventory(
-            self.context, cn.uuid, mock.sentinel.inv_data
-        )
-        self.assertFalse(result)
-
-        # Slept three times
-        mock_sleep.assert_has_calls([mock.call(1), mock.call(1), mock.call(1)])
-
-        # Three attempts to update
-        mock_update.assert_has_calls([
-            mock.call(self.context, cn.uuid, mock.sentinel.inv_data),
-            mock.call(self.context, cn.uuid, mock.sentinel.inv_data),
-            mock.call(self.context, cn.uuid, mock.sentinel.inv_data),
-        ])
-
-        # Slept three times
-        mock_sleep.assert_has_calls([mock.call(1), mock.call(1), mock.call(1)])
-
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_update_inventory')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_ensure_resource_classes')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_ensure_resource_provider')
-    def test_set_inventory_for_provider_no_custom(self, mock_erp, mock_erc,
-                                                  mock_upd):
-        """Tests that inventory records of all standard resource classes are
-        passed to the report client's _update_inventory() method.
-        """
-        inv_data = {
-            'VCPU': {
-                'total': 24,
-                'reserved': 0,
-                'min_unit': 1,
-                'max_unit': 24,
-                'step_size': 1,
-                'allocation_ratio': 1.0,
-            },
-            'MEMORY_MB': {
-                'total': 1024,
-                'reserved': 0,
-                'min_unit': 1,
-                'max_unit': 1024,
-                'step_size': 1,
-                'allocation_ratio': 1.0,
-            },
-            'DISK_GB': {
-                'total': 100,
-                'reserved': 0,
-                'min_unit': 1,
-                'max_unit': 100,
-                'step_size': 1,
-                'allocation_ratio': 1.0,
-            },
-        }
-        self.client.set_inventory_for_provider(
-            self.context,
-            mock.sentinel.rp_uuid,
-            mock.sentinel.rp_name,
-            inv_data,
-        )
-        mock_erp.assert_called_once_with(
-            self.context,
-            mock.sentinel.rp_uuid,
-            mock.sentinel.rp_name,
-            parent_provider_uuid=None,
-        )
-        # No custom resource classes to ensure...
-        mock_erc.assert_called_once_with(self.context,
-                                         set(['VCPU', 'MEMORY_MB', 'DISK_GB']))
-        mock_upd.assert_called_once_with(
-            self.context,
-            mock.sentinel.rp_uuid,
-            inv_data,
-        )
-
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_update_inventory')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_ensure_resource_classes')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_ensure_resource_provider')
-    def test_set_inventory_for_provider_no_inv(self, mock_erp, mock_erc,
-                                               mock_upd):
-        """Tests that passing empty set of inventory records triggers a delete
-        of inventory for the provider.
-        """
-        inv_data = {}
-        self.client.set_inventory_for_provider(
-            self.context,
-            mock.sentinel.rp_uuid,
-            mock.sentinel.rp_name,
-            inv_data,
-        )
-        mock_erp.assert_called_once_with(
-            self.context,
-            mock.sentinel.rp_uuid,
-            mock.sentinel.rp_name,
-            parent_provider_uuid=None,
-        )
-        mock_erc.assert_called_once_with(self.context, set())
-        mock_upd.assert_called_once_with(
-            self.context, mock.sentinel.rp_uuid, {})
-
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_update_inventory')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_ensure_resource_classes')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_ensure_resource_provider')
-    def test_set_inventory_for_provider_with_custom(self, mock_erp, mock_erc,
-                                                    mock_upd):
-        """Tests that inventory records that include a custom resource class
-        are passed to the report client's _update_inventory() method and that
-        the custom resource class is auto-created.
-        """
-        inv_data = {
-            'VCPU': {
-                'total': 24,
-                'reserved': 0,
-                'min_unit': 1,
-                'max_unit': 24,
-                'step_size': 1,
-                'allocation_ratio': 1.0,
-            },
-            'MEMORY_MB': {
-                'total': 1024,
-                'reserved': 0,
-                'min_unit': 1,
-                'max_unit': 1024,
-                'step_size': 1,
-                'allocation_ratio': 1.0,
-            },
-            'DISK_GB': {
-                'total': 100,
-                'reserved': 0,
-                'min_unit': 1,
-                'max_unit': 100,
-                'step_size': 1,
-                'allocation_ratio': 1.0,
-            },
-            'CUSTOM_IRON_SILVER': {
-                'total': 1,
-                'reserved': 0,
-                'min_unit': 1,
-                'max_unit': 1,
-                'step_size': 1,
-                'allocation_ratio': 1.0,
-            }
-
-        }
-        self.client.set_inventory_for_provider(
-            self.context,
-            mock.sentinel.rp_uuid,
-            mock.sentinel.rp_name,
-            inv_data,
-        )
-        mock_erp.assert_called_once_with(
-            self.context,
-            mock.sentinel.rp_uuid,
-            mock.sentinel.rp_name,
-            parent_provider_uuid=None,
-        )
-        mock_erc.assert_called_once_with(
-            self.context,
-            set(['VCPU', 'MEMORY_MB', 'DISK_GB', 'CUSTOM_IRON_SILVER']))
-        mock_upd.assert_called_once_with(
-            self.context,
-            mock.sentinel.rp_uuid,
-            inv_data,
-        )
-
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_ensure_resource_classes', new=mock.Mock())
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                '_ensure_resource_provider')
-    def test_set_inventory_for_provider_with_parent(self, mock_erp):
-        """Ensure parent UUID is sent through."""
-        self.client.set_inventory_for_provider(
-            self.context, uuids.child, 'junior', {},
-            parent_provider_uuid=uuids.parent)
-        mock_erp.assert_called_once_with(
-            self.context, uuids.child, 'junior',
-            parent_provider_uuid=uuids.parent)
+            # Even if no time passes, clearing the counter triggers refresh
+            mock_future.return_value = now
+            del self.client._association_refresh_time[uuid]
+            self.client._refresh_associations(self.context, uuid)
+            self.assert_getters_were_called(uuid)
 
 
 class TestAllocations(SchedulerReportClientTestCase):
@@ -3160,7 +3117,7 @@ class TestAllocations(SchedulerReportClientTestCase):
         mock_vbi.return_value = False
         specs = {
             'resources:CUSTOM_DAN': '123',
-            'resources:%s' % fields.ResourceClass.VCPU: '4',
+            'resources:%s' % orc.VCPU: '4',
             'resources:NOTATHING': '456',
             'resources:NOTEVENANUMBER': 'catfood',
             'resources:': '7',
@@ -3220,113 +3177,6 @@ class TestAllocations(SchedulerReportClientTestCase):
             'VCPU': 2,
         }
         self.assertEqual(expected, result)
-
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                'put')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                'get')
-    @mock.patch('nova.scheduler.client.report.'
-                '_instance_to_allocations_dict')
-    def test_update_instance_allocation_new(self, mock_a, mock_get,
-                                            mock_put):
-        cn = objects.ComputeNode(uuid=uuids.cn)
-        inst = objects.Instance(uuid=uuids.inst, project_id=uuids.project,
-                                user_id=uuids.user)
-        mock_get.return_value.json.return_value = {'allocations': {}}
-        expected = {
-            'allocations': [
-                {'resource_provider': {'uuid': cn.uuid},
-                 'resources': mock_a.return_value}],
-            'project_id': inst.project_id,
-            'user_id': inst.user_id,
-        }
-        self.client.update_instance_allocation(self.context, cn, inst, 1)
-        mock_put.assert_called_once_with(
-            '/allocations/%s' % inst.uuid,
-            expected, version='1.8',
-            global_request_id=self.context.global_id)
-        self.assertTrue(mock_get.called)
-
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                'put')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                'get')
-    @mock.patch('nova.scheduler.client.report.'
-                '_instance_to_allocations_dict')
-    def test_update_instance_allocation_existing(self, mock_a, mock_get,
-                                                 mock_put):
-        cn = objects.ComputeNode(uuid=uuids.cn)
-        inst = objects.Instance(uuid=uuids.inst)
-        mock_get.return_value.json.return_value = {'allocations': {
-            cn.uuid: {
-                'generation': 2,
-                'resources': {
-                    'DISK_GB': 123,
-                    'MEMORY_MB': 456,
-                }
-            }}
-        }
-        mock_a.return_value = {
-            'DISK_GB': 123,
-            'MEMORY_MB': 456,
-        }
-        self.client.update_instance_allocation(self.context, cn, inst, 1)
-        self.assertFalse(mock_put.called)
-        mock_get.assert_called_once_with(
-            '/allocations/%s' % inst.uuid, version='1.28',
-            global_request_id=self.context.global_id)
-
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                'get')
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                'put')
-    @mock.patch('nova.scheduler.client.report.'
-                '_instance_to_allocations_dict')
-    @mock.patch.object(report.LOG, 'warning')
-    def test_update_instance_allocation_new_failed(self, mock_warn, mock_a,
-                                                   mock_put, mock_get):
-        cn = objects.ComputeNode(uuid=uuids.cn)
-        inst = objects.Instance(uuid=uuids.inst, project_id=uuids.project,
-                                user_id=uuids.user)
-        mock_put.return_value = fake_requests.FakeResponse(400)
-        self.client.update_instance_allocation(self.context, cn, inst, 1)
-        self.assertTrue(mock_warn.called)
-
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                'delete')
-    def test_update_instance_allocation_delete(self, mock_delete):
-        cn = objects.ComputeNode(uuid=uuids.cn)
-        inst = objects.Instance(uuid=uuids.inst)
-        self.client.update_instance_allocation(self.context, cn, inst, -1)
-        mock_delete.assert_called_once_with(
-            '/allocations/%s' % inst.uuid,
-            global_request_id=self.context.global_id)
-
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                'delete')
-    @mock.patch.object(report.LOG, 'warning')
-    def test_update_instance_allocation_delete_failed(self, mock_warn,
-                                                      mock_delete):
-        cn = objects.ComputeNode(uuid=uuids.cn)
-        inst = objects.Instance(uuid=uuids.inst)
-        mock_delete.return_value = fake_requests.FakeResponse(400)
-        self.client.update_instance_allocation(self.context, cn, inst, -1)
-        self.assertTrue(mock_warn.called)
-
-    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                'delete')
-    @mock.patch('nova.scheduler.client.report.LOG')
-    def test_delete_allocation_for_instance_ignore_404(self, mock_log,
-                                                       mock_delete):
-        """Tests that we don't log a warning on a 404 response when trying to
-        delete an allocation record.
-        """
-        mock_delete.return_value = fake_requests.FakeResponse(404)
-        self.client.delete_allocation_for_instance(self.context, uuids.rp_uuid)
-        # make sure we didn't screw up the logic or the mock
-        mock_log.info.assert_not_called()
-        # make sure warning wasn't called for the 404
-        mock_log.warning.assert_not_called()
 
     @mock.patch("nova.scheduler.client.report.SchedulerReportClient."
                 "delete")
@@ -3405,6 +3255,475 @@ class TestAllocations(SchedulerReportClientTestCase):
         # With a 409, only the error should be called
         self.assertEqual(0, mock_log.info.call_count)
         self.assertEqual(1, mock_log.error.call_count)
+
+    @mock.patch("nova.scheduler.client.report.SchedulerReportClient.get")
+    def test_get_allocations_for_resource_provider(self, mock_get):
+        mock_get.return_value = fake_requests.FakeResponse(
+            200, content=jsonutils.dumps(
+                {'allocations': 'fake', 'resource_provider_generation': 42}))
+        ret = self.client.get_allocations_for_resource_provider(
+            self.context, 'rpuuid')
+        self.assertEqual('fake', ret.allocations)
+        mock_get.assert_called_once_with(
+            '/resource_providers/rpuuid/allocations',
+            global_request_id=self.context.global_id)
+
+    @mock.patch("nova.scheduler.client.report.SchedulerReportClient.get")
+    def test_get_allocations_for_resource_provider_fail(self, mock_get):
+        mock_get.return_value = fake_requests.FakeResponse(400, content="ouch")
+        self.assertRaises(exception.ResourceProviderAllocationRetrievalFailed,
+                          self.client.get_allocations_for_resource_provider,
+                          self.context, 'rpuuid')
+        mock_get.assert_called_once_with(
+            '/resource_providers/rpuuid/allocations',
+            global_request_id=self.context.global_id)
+
+    @mock.patch("nova.scheduler.client.report.SchedulerReportClient.get")
+    def test_get_allocs_for_consumer(self, mock_get):
+        mock_get.return_value = fake_requests.FakeResponse(
+            200, content=jsonutils.dumps({'foo': 'bar'}))
+        ret = self.client.get_allocs_for_consumer(self.context, 'consumer')
+        self.assertEqual({'foo': 'bar'}, ret)
+        mock_get.assert_called_once_with(
+            '/allocations/consumer', version='1.28',
+            global_request_id=self.context.global_id)
+
+    @mock.patch("nova.scheduler.client.report.SchedulerReportClient.get")
+    def test_get_allocs_for_consumer_fail(self, mock_get):
+        mock_get.return_value = fake_requests.FakeResponse(400, content='err')
+        self.assertRaises(exception.ConsumerAllocationRetrievalFailed,
+                          self.client.get_allocs_for_consumer,
+                          self.context, 'consumer')
+        mock_get.assert_called_once_with(
+            '/allocations/consumer', version='1.28',
+            global_request_id=self.context.global_id)
+
+    @mock.patch("nova.scheduler.client.report.SchedulerReportClient.get")
+    def test_get_allocs_for_consumer_safe_connect_fail(self, mock_get):
+        mock_get.side_effect = ks_exc.EndpointNotFound()
+        self.assertRaises(ks_exc.ClientException,
+                          self.client.get_allocs_for_consumer,
+                          self.context, 'consumer')
+        mock_get.assert_called_once_with(
+            '/allocations/consumer', version='1.28',
+            global_request_id=self.context.global_id)
+
+    def _test_remove_res_from_alloc(
+            self, current_allocations, resources_to_remove,
+            updated_allocations):
+
+        with test.nested(
+                mock.patch(
+                    "nova.scheduler.client.report.SchedulerReportClient.get"),
+                mock.patch(
+                    "nova.scheduler.client.report.SchedulerReportClient.put")
+        ) as (mock_get, mock_put):
+            mock_get.return_value = fake_requests.FakeResponse(
+                200, content=jsonutils.dumps(current_allocations))
+
+            self.client.remove_resources_from_instance_allocation(
+                self.context, uuids.consumer_uuid, resources_to_remove)
+
+            mock_get.assert_called_once_with(
+                '/allocations/%s' % uuids.consumer_uuid, version='1.28',
+                global_request_id=self.context.global_id)
+            mock_put.assert_called_once_with(
+                '/allocations/%s' % uuids.consumer_uuid, updated_allocations,
+                version='1.28', global_request_id=self.context.global_id)
+
+    def test_remove_res_from_alloc(self):
+        current_allocations = {
+            "allocations": {
+                uuids.rp1: {
+                    "generation": 13,
+                    "resources": {
+                        'VCPU': 10,
+                        'MEMORY_MB': 4096,
+                    },
+                },
+                uuids.rp2: {
+                    "generation": 42,
+                    "resources": {
+                        'NET_BW_EGR_KILOBIT_PER_SEC': 200,
+                        'NET_BW_IGR_KILOBIT_PER_SEC': 300,
+                    },
+                },
+            },
+            "consumer_generation": 2,
+            "project_id": uuids.project_id,
+            "user_id": uuids.user_id,
+        }
+        resources_to_remove = {
+            uuids.rp1: {
+                'VCPU': 1
+            },
+            uuids.rp2: {
+                'NET_BW_EGR_KILOBIT_PER_SEC': 100,
+                'NET_BW_IGR_KILOBIT_PER_SEC': 200,
+            }
+        }
+        updated_allocations = {
+            "allocations": {
+                uuids.rp1: {
+                    "generation": 13,
+                    "resources": {
+                        'VCPU': 9,
+                        'MEMORY_MB': 4096,
+                    },
+                },
+                uuids.rp2: {
+                    "generation": 42,
+                    "resources": {
+                        'NET_BW_EGR_KILOBIT_PER_SEC': 100,
+                        'NET_BW_IGR_KILOBIT_PER_SEC': 100,
+                    },
+                },
+            },
+            "consumer_generation": 2,
+            "project_id": uuids.project_id,
+            "user_id": uuids.user_id,
+        }
+
+        self._test_remove_res_from_alloc(
+            current_allocations, resources_to_remove, updated_allocations)
+
+    def test_remove_res_from_alloc_remove_rc_when_value_dropped_to_zero(self):
+        current_allocations = {
+            "allocations": {
+                uuids.rp1: {
+                    "generation": 42,
+                    "resources": {
+                        'NET_BW_EGR_KILOBIT_PER_SEC': 200,
+                        'NET_BW_IGR_KILOBIT_PER_SEC': 300,
+                    },
+                },
+            },
+            "consumer_generation": 2,
+            "project_id": uuids.project_id,
+            "user_id": uuids.user_id,
+        }
+        # this will remove all of NET_BW_EGR_KILOBIT_PER_SEC resources from
+        # the allocation so the whole resource class will be removed
+        resources_to_remove = {
+            uuids.rp1: {
+                'NET_BW_EGR_KILOBIT_PER_SEC': 200,
+                'NET_BW_IGR_KILOBIT_PER_SEC': 200,
+            }
+        }
+        updated_allocations = {
+            "allocations": {
+                uuids.rp1: {
+                    "generation": 42,
+                    "resources": {
+                        'NET_BW_IGR_KILOBIT_PER_SEC': 100,
+                    },
+                },
+            },
+            "consumer_generation": 2,
+            "project_id": uuids.project_id,
+            "user_id": uuids.user_id,
+        }
+
+        self._test_remove_res_from_alloc(
+            current_allocations, resources_to_remove, updated_allocations)
+
+    def test_remove_res_from_alloc_remove_rp_when_all_rc_removed(self):
+        current_allocations = {
+            "allocations": {
+                uuids.rp1: {
+                    "generation": 42,
+                    "resources": {
+                        'NET_BW_EGR_KILOBIT_PER_SEC': 200,
+                        'NET_BW_IGR_KILOBIT_PER_SEC': 300,
+                    },
+                },
+            },
+            "consumer_generation": 2,
+            "project_id": uuids.project_id,
+            "user_id": uuids.user_id,
+        }
+        resources_to_remove = {
+            uuids.rp1: {
+                'NET_BW_EGR_KILOBIT_PER_SEC': 200,
+                'NET_BW_IGR_KILOBIT_PER_SEC': 300,
+            }
+        }
+        updated_allocations = {
+            "allocations": {},
+            "consumer_generation": 2,
+            "project_id": uuids.project_id,
+            "user_id": uuids.user_id,
+        }
+
+        self._test_remove_res_from_alloc(
+            current_allocations, resources_to_remove, updated_allocations)
+
+    @mock.patch("nova.scheduler.client.report.SchedulerReportClient.get")
+    def test_remove_res_from_alloc_failed_to_get_alloc(
+            self, mock_get):
+        mock_get.side_effect = ks_exc.EndpointNotFound()
+        resources_to_remove = {
+            uuids.rp1: {
+                'NET_BW_EGR_KILOBIT_PER_SEC': 200,
+                'NET_BW_IGR_KILOBIT_PER_SEC': 200,
+            }
+        }
+
+        self.assertRaises(
+            ks_exc.ClientException,
+            self.client.remove_resources_from_instance_allocation,
+            self.context, uuids.consumer_uuid, resources_to_remove)
+
+    def test_remove_res_from_alloc_empty_alloc(self):
+        resources_to_remove = {
+            uuids.rp1: {
+                'NET_BW_EGR_KILOBIT_PER_SEC': 200,
+                'NET_BW_IGR_KILOBIT_PER_SEC': 200,
+            }
+        }
+        current_allocations = {
+            "allocations": {},
+            "consumer_generation": 0,
+            "project_id": uuids.project_id,
+            "user_id": uuids.user_id,
+        }
+        ex = self.assertRaises(
+            exception.AllocationUpdateFailed,
+            self._test_remove_res_from_alloc, current_allocations,
+            resources_to_remove, None)
+        self.assertIn('The allocation is empty', six.text_type(ex))
+
+    @mock.patch("nova.scheduler.client.report.SchedulerReportClient.put")
+    @mock.patch("nova.scheduler.client.report.SchedulerReportClient.get")
+    def test_remove_res_from_alloc_no_resource_to_remove(
+            self, mock_get, mock_put):
+        self.client.remove_resources_from_instance_allocation(
+            self.context, uuids.consumer_uuid, {})
+
+        mock_get.assert_not_called()
+        mock_put.assert_not_called()
+
+    def test_remove_res_from_alloc_missing_rc(self):
+        current_allocations = {
+            "allocations": {
+                uuids.rp1: {
+                    "generation": 42,
+                    "resources": {
+                        'NET_BW_EGR_KILOBIT_PER_SEC': 200,
+                    },
+                },
+            },
+            "consumer_generation": 2,
+            "project_id": uuids.project_id,
+            "user_id": uuids.user_id,
+        }
+        resources_to_remove = {
+            uuids.rp1: {
+                'VCPU': 1,
+            }
+        }
+
+        ex = self.assertRaises(
+            exception.AllocationUpdateFailed, self._test_remove_res_from_alloc,
+            current_allocations, resources_to_remove, None)
+        self.assertIn(
+            "Key 'VCPU' is missing from the allocation",
+            six.text_type(ex))
+
+    def test_remove_res_from_alloc_missing_rp(self):
+        current_allocations = {
+            "allocations": {
+                uuids.rp1: {
+                    "generation": 42,
+                    "resources": {
+                        'NET_BW_EGR_KILOBIT_PER_SEC': 200,
+                    },
+                },
+            },
+            "consumer_generation": 2,
+            "project_id": uuids.project_id,
+            "user_id": uuids.user_id,
+        }
+        resources_to_remove = {
+            uuids.other_rp: {
+                'NET_BW_EGR_KILOBIT_PER_SEC': 200,
+            }
+        }
+
+        ex = self.assertRaises(
+            exception.AllocationUpdateFailed, self._test_remove_res_from_alloc,
+            current_allocations, resources_to_remove, None)
+        self.assertIn(
+            "Key '%s' is missing from the allocation" % uuids.other_rp,
+            six.text_type(ex))
+
+    def test_remove_res_from_alloc_not_enough_resource_to_remove(self):
+        current_allocations = {
+            "allocations": {
+                uuids.rp1: {
+                    "generation": 42,
+                    "resources": {
+                        'NET_BW_EGR_KILOBIT_PER_SEC': 200,
+                    },
+                },
+            },
+            "consumer_generation": 2,
+            "project_id": uuids.project_id,
+            "user_id": uuids.user_id,
+        }
+        resources_to_remove = {
+            uuids.rp1: {
+                'NET_BW_EGR_KILOBIT_PER_SEC': 400,
+            }
+        }
+
+        ex = self.assertRaises(
+            exception.AllocationUpdateFailed, self._test_remove_res_from_alloc,
+            current_allocations, resources_to_remove, None)
+        self.assertIn(
+            'There are not enough allocated resources left on %s resource '
+            'provider to remove 400 amount of NET_BW_EGR_KILOBIT_PER_SEC '
+            'resources' %
+            uuids.rp1,
+            six.text_type(ex))
+
+    @mock.patch("nova.scheduler.client.report.SchedulerReportClient.put")
+    @mock.patch("nova.scheduler.client.report.SchedulerReportClient.get")
+    def test_remove_res_from_alloc_retry_succeed(
+            self, mock_get, mock_put):
+        current_allocations = {
+            "allocations": {
+                uuids.rp1: {
+                    "generation": 42,
+                    "resources": {
+                        'NET_BW_EGR_KILOBIT_PER_SEC': 200,
+                    },
+                },
+            },
+            "consumer_generation": 2,
+            "project_id": uuids.project_id,
+            "user_id": uuids.user_id,
+        }
+        current_allocations_2 = copy.deepcopy(current_allocations)
+        current_allocations_2['consumer_generation'] = 3
+        resources_to_remove = {
+            uuids.rp1: {
+                'NET_BW_EGR_KILOBIT_PER_SEC': 200,
+            }
+        }
+        updated_allocations = {
+            "allocations": {},
+            "consumer_generation": 2,
+            "project_id": uuids.project_id,
+            "user_id": uuids.user_id,
+        }
+        updated_allocations_2 = copy.deepcopy(updated_allocations)
+        updated_allocations_2['consumer_generation'] = 3
+        mock_get.side_effect = [
+            fake_requests.FakeResponse(
+                200, content=jsonutils.dumps(current_allocations)),
+            fake_requests.FakeResponse(
+                200, content=jsonutils.dumps(current_allocations_2))
+        ]
+
+        mock_put.side_effect = [
+            fake_requests.FakeResponse(
+                status_code=409,
+                content=jsonutils.dumps(
+                    {'errors': [{'code': 'placement.concurrent_update',
+                                 'detail': ''}]})),
+            fake_requests.FakeResponse(
+                status_code=204)
+        ]
+
+        self.client.remove_resources_from_instance_allocation(
+            self.context, uuids.consumer_uuid, resources_to_remove)
+
+        self.assertEqual(
+            [
+                mock.call(
+                    '/allocations/%s' % uuids.consumer_uuid, version='1.28',
+                    global_request_id=self.context.global_id),
+                mock.call(
+                    '/allocations/%s' % uuids.consumer_uuid, version='1.28',
+                    global_request_id=self.context.global_id)
+            ],
+            mock_get.mock_calls)
+
+        self.assertEqual(
+            [
+                mock.call(
+                    '/allocations/%s' % uuids.consumer_uuid,
+                    updated_allocations, version='1.28',
+                    global_request_id=self.context.global_id),
+                mock.call(
+                    '/allocations/%s' % uuids.consumer_uuid,
+                    updated_allocations_2, version='1.28',
+                    global_request_id=self.context.global_id),
+            ],
+            mock_put.mock_calls)
+
+    @mock.patch("nova.scheduler.client.report.SchedulerReportClient.put")
+    @mock.patch("nova.scheduler.client.report.SchedulerReportClient.get")
+    def test_remove_res_from_alloc_run_out_of_retries(
+            self, mock_get, mock_put):
+        current_allocations = {
+            "allocations": {
+                uuids.rp1: {
+                    "generation": 42,
+                    "resources": {
+                        'NET_BW_EGR_KILOBIT_PER_SEC': 200,
+                    },
+                },
+            },
+            "consumer_generation": 2,
+            "project_id": uuids.project_id,
+            "user_id": uuids.user_id,
+        }
+        resources_to_remove = {
+            uuids.rp1: {
+                'NET_BW_EGR_KILOBIT_PER_SEC': 200,
+            }
+        }
+        updated_allocations = {
+            "allocations": {},
+            "consumer_generation": 2,
+            "project_id": uuids.project_id,
+            "user_id": uuids.user_id,
+        }
+
+        get_rsp = fake_requests.FakeResponse(
+            200, content=jsonutils.dumps(current_allocations))
+
+        mock_get.side_effect = [get_rsp] * 4
+
+        put_rsp = fake_requests.FakeResponse(
+            status_code=409,
+            content=jsonutils.dumps(
+                    {'errors': [{'code': 'placement.concurrent_update',
+                                 'detail': ''}]}))
+
+        mock_put.side_effect = [put_rsp] * 4
+
+        ex = self.assertRaises(
+            exception.AllocationUpdateFailed,
+            self.client.remove_resources_from_instance_allocation,
+            self.context, uuids.consumer_uuid, resources_to_remove)
+        self.assertIn(
+            'due to multiple successive generation conflicts',
+            six.text_type(ex))
+
+        get_call = mock.call(
+            '/allocations/%s' % uuids.consumer_uuid, version='1.28',
+            global_request_id=self.context.global_id)
+
+        mock_get.assert_has_calls([get_call] * 4)
+
+        put_call = mock.call(
+            '/allocations/%s' % uuids.consumer_uuid, updated_allocations,
+            version='1.28', global_request_id=self.context.global_id)
+
+        mock_put.assert_has_calls([put_call] * 4)
 
 
 class TestResourceClass(SchedulerReportClientTestCase):

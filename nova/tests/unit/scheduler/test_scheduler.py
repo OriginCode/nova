@@ -19,11 +19,10 @@ Tests For Scheduler
 
 import mock
 import oslo_messaging as messaging
+from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova import context
 from nova import objects
-from nova.scheduler import caching_scheduler
-from nova.scheduler import chance
 from nova.scheduler import filter_scheduler
 from nova.scheduler import host_manager
 from nova.scheduler import manager
@@ -31,7 +30,6 @@ from nova import servicegroup
 from nova import test
 from nova.tests.unit import fake_server_actions
 from nova.tests.unit.scheduler import fakes
-from nova.tests import uuidsentinel as uuids
 
 
 class SchedulerManagerInitTestCase(test.NoDBTestCase):
@@ -45,24 +43,6 @@ class SchedulerManagerInitTestCase(test.NoDBTestCase):
                                                 mock_init_inst):
         driver = self.manager_cls().driver
         self.assertIsInstance(driver, filter_scheduler.FilterScheduler)
-
-    @mock.patch.object(host_manager.HostManager, '_init_instance_info')
-    @mock.patch.object(host_manager.HostManager, '_init_aggregates')
-    def test_init_using_chance_schedulerdriver(self,
-                                               mock_init_agg,
-                                               mock_init_inst):
-        self.flags(driver='chance_scheduler', group='scheduler')
-        driver = self.manager_cls().driver
-        self.assertIsInstance(driver, chance.ChanceScheduler)
-
-    @mock.patch.object(host_manager.HostManager, '_init_instance_info')
-    @mock.patch.object(host_manager.HostManager, '_init_aggregates')
-    def test_init_using_caching_schedulerdriver(self,
-                                                mock_init_agg,
-                                                mock_init_inst):
-        self.flags(driver='caching_scheduler', group='scheduler')
-        driver = self.manager_cls().driver
-        self.assertIsInstance(driver, caching_scheduler.CachingScheduler)
 
     @mock.patch.object(host_manager.HostManager, '_init_instance_info')
     @mock.patch.object(host_manager.HostManager, '_init_aggregates')

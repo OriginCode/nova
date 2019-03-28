@@ -95,7 +95,7 @@ Upgrade
     make a successful request to the endpoint. The command also checks to
     see that there are compute node resource providers checking in with the
     Placement service. More information on the Placement service can be found
-    at :nova-doc:`Placement API <user/placement.html>`.
+    at :placement-doc:`Placement API <>`.
 
   **16.0.0 (Pike)**
 
@@ -120,6 +120,18 @@ Upgrade
   * Checks are added for the **nova-consoleauth** service to warn and provide
     additional instructions to set **[workarounds]enable_consoleauth = True**
     while performing a live/rolling upgrade.
+
+  **19.0.0 (Stein)**
+
+  * Checks for the Placement API are modified to require version 1.30.
+  * Checks are added for the **nova-consoleauth** service to warn and provide
+    additional instructions to set **[workarounds]enable_consoleauth = True**
+    while performing a live/rolling upgrade.
+  * The "Resource Providers" upgrade check was removed since the placement
+    service code is being extracted from nova and the related tables are no
+    longer used in the ``nova_api`` database.
+  * The "API Service Version" upgrade check was removed since the corresponding
+    code for that check was removed in Stein.
 
 See Also
 ========

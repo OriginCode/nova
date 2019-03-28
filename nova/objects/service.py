@@ -31,7 +31,7 @@ LOG = logging.getLogger(__name__)
 
 
 # NOTE(danms): This is the global service version counter
-SERVICE_VERSION = 35
+SERVICE_VERSION = 37
 
 
 # NOTE(danms): This is our SERVICE_VERSION history. The idea is that any
@@ -146,6 +146,11 @@ SERVICE_VERSION_HISTORY = (
     # Version 35: Indicates that nova-compute supports live migration with
     # ports bound early on the destination host using VIFMigrateData.
     {'compute_rpc': '5.0'},
+    # Version 36: Indicates that nova-compute supports specifying volume
+    # type when booting a volume-backed server.
+    {'compute_rpc': '5.0'},
+    # Version 37: prep_resize takes a RequestSpec object
+    {'compute_rpc': '5.1'},
 )
 
 
@@ -237,7 +242,7 @@ class Service(base.NovaPersistentObject, base.NovaObject,
     def _do_compute_node(self, context, primitive, version_manifest):
         try:
             target_version = version_manifest['ComputeNode']
-            # NOTE(sbauza): Some drivers (VMware, Ironic) can have multiple
+            # NOTE(sbauza): Ironic deployments can have multiple
             # nodes for the same service, but for keeping same behaviour,
             # returning only the first elem of the list
             compute = objects.ComputeNodeList.get_all_by_host(
@@ -302,7 +307,7 @@ class Service(base.NovaPersistentObject, base.NovaObject,
             # NOTE(sbauza); Previous behaviour was raising a ServiceNotFound,
             # we keep it for backwards compatibility
             raise exception.ServiceNotFound(service_id=self.id)
-        # NOTE(sbauza): Some drivers (VMware, Ironic) can have multiple nodes
+        # NOTE(sbauza): Ironic deployments can have multiple nodes
         # for the same service, but for keeping same behaviour, returning only
         # the first elem of the list
         self.compute_node = compute_nodes[0]
@@ -516,7 +521,7 @@ def get_minimum_version_all_cells(context, binaries, require_all=False):
                         'service version', cell_uuid)
             if require_all:
                 raise exception.CellTimeout()
-        elif result is nova_context.raised_exception_sentinel:
+        elif isinstance(result, Exception):
             LOG.warning('Failed to get minimum service version for cell %s',
                         cell_uuid)
             if require_all:

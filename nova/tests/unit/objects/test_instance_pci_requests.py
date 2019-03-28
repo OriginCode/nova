@@ -12,12 +12,12 @@
 
 import mock
 from oslo_serialization import jsonutils
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_versionedobjects import base as ovo_base
 
 from nova import objects
 from nova.objects import fields
 from nova.tests.unit.objects import test_objects
-from nova.tests import uuidsentinel as uuids
 
 
 FAKE_UUID = '79a53d6b-0893-4838-a971-15f4f382e7c2'
@@ -32,13 +32,16 @@ fake_pci_requests = [
                'device_id': '1502'}],
      'alias_name': 'alias_1',
      'is_new': False,
+     'numa_policy': 'preferred',
      'request_id': FAKE_REQUEST_UUID},
     {'count': 2,
      'spec': [{'vendor_id': '6502',
                'device_id': '07B5'}],
      'alias_name': 'alias_2',
      'is_new': True,
-     'request_id': FAKE_REQUEST_UUID},
+     'numa_policy': 'preferred',
+     'request_id': FAKE_REQUEST_UUID,
+     'requester_id': uuids.requester_id},
  ]
 
 fake_legacy_pci_requests = [
@@ -70,6 +73,8 @@ class _TestInstancePCIRequests(object):
                              request.count)
             self.assertEqual(fake_pci_requests[index]['spec'],
                              [dict(x.items()) for x in request.spec])
+            self.assertEqual(fake_pci_requests[index]['numa_policy'],
+                             request.numa_policy)
 
     @mock.patch('nova.objects.InstancePCIRequests.get_by_instance_uuid')
     def test_get_by_instance_current(self, mock_get):
@@ -117,6 +122,9 @@ class _TestInstancePCIRequests(object):
         self.assertEqual(FAKE_UUID, req.instance_uuid)
         self.assertEqual(2, len(req.requests))
         self.assertEqual('alias_1', req.requests[0].alias_name)
+        self.assertEqual('preferred', req.requests[0].numa_policy)
+        self.assertIsNone(None, req.requests[0].requester_id)
+        self.assertEqual(uuids.requester_id, req.requests[1].requester_id)
 
     def test_from_request_spec_instance_props(self):
         requests = objects.InstancePCIRequests(
@@ -158,6 +166,20 @@ class _TestInstancePCIRequests(object):
                                               version_manifest=versions)
 
         self.assertNotIn('request_id', primitive['nova_object.data'])
+
+    def test_obj_make_compatible_pre_1_3(self):
+        topo_obj = objects.InstancePCIRequest(
+            count=1,
+            spec=[{'vendor_id': '8086', 'device_id': '1502'}],
+            request_id=uuids.pci_request_id,
+            requester_id=uuids.requester_id,
+            numa_policy=fields.PCINUMAAffinityPolicy.PREFERRED)
+        versions = ovo_base.obj_tree_get_versions('InstancePCIRequest')
+        primitive = topo_obj.obj_to_primitive(target_version='1.2',
+                                              version_manifest=versions)
+
+        self.assertNotIn('requester_id', primitive['nova_object.data'])
+        self.assertIn('numa_policy', primitive['nova_object.data'])
 
 
 class TestInstancePCIRequests(test_objects._LocalTest,

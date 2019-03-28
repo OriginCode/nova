@@ -52,6 +52,11 @@ class _FakeImageService(object):
                  'container_format': 'raw',
                  'disk_format': 'raw',
                  'size': '25165824',
+                 'min_ram': 0,
+                 'min_disk': 0,
+                 'protected': False,
+                 'visibility': 'public',
+                 'tags': ['tag1', 'tag2'],
                  'properties': {
                     'kernel_id': 'nokernel',
                     'ramdisk_id': 'nokernel',
@@ -68,6 +73,11 @@ class _FakeImageService(object):
                  'container_format': 'ami',
                  'disk_format': 'ami',
                  'size': '58145823',
+                 'min_ram': 0,
+                 'min_disk': 0,
+                 'protected': False,
+                 'visibility': 'public',
+                 'tags': [],
                  'properties': {'kernel_id': 'nokernel',
                                 'ramdisk_id': 'nokernel'}}
 
@@ -82,8 +92,15 @@ class _FakeImageService(object):
                  'container_format': 'bare',
                  'disk_format': 'raw',
                  'size': '83594576',
-                 'properties': {'kernel_id': 'nokernel',
-                                'ramdisk_id': 'nokernel'}}
+                 'min_ram': 0,
+                 'min_disk': 0,
+                 'protected': False,
+                 'visibility': 'public',
+                 'tags': ['tag3', 'tag4'],
+                 'properties': {
+                     'kernel_id': 'nokernel',
+                     'ramdisk_id': 'nokernel',
+                     'architecture': obj_fields.Architecture.X86_64}}
 
         image4 = {'id': 'cedef40a-ed67-4d10-800e-17455edce175',
                  'name': 'fakeimage123456',
@@ -96,6 +113,11 @@ class _FakeImageService(object):
                  'container_format': 'ami',
                  'disk_format': 'ami',
                  'size': '84035174',
+                 'min_ram': 0,
+                 'min_disk': 0,
+                 'protected': False,
+                 'visibility': 'public',
+                 'tags': [],
                  'properties': {'kernel_id': 'nokernel',
                                 'ramdisk_id': 'nokernel'}}
 
@@ -110,6 +132,11 @@ class _FakeImageService(object):
                  'container_format': 'ami',
                  'disk_format': 'ami',
                  'size': '26360814',
+                 'min_ram': 0,
+                 'min_disk': 0,
+                 'protected': False,
+                 'visibility': 'public',
+                 'tags': [],
                  'properties': {'kernel_id':
                                     '155d900f-4e14-4e4c-a73d-069cbf4541e6',
                                 'ramdisk_id': None}}
@@ -125,6 +152,11 @@ class _FakeImageService(object):
                  'container_format': 'ova',
                  'disk_format': 'vhd',
                  'size': '49163826',
+                 'min_ram': 0,
+                 'min_disk': 0,
+                 'protected': False,
+                 'visibility': 'public',
+                 'tags': [],
                  'properties': {
                     'kernel_id': 'nokernel',
                     'ramdisk_id': 'nokernel',
@@ -142,6 +174,11 @@ class _FakeImageService(object):
                  'container_format': 'ova',
                  'disk_format': 'vhd',
                  'size': '74185822',
+                 'min_ram': 0,
+                 'min_disk': 0,
+                 'protected': False,
+                 'visibility': 'public',
+                 'tags': [],
                  'properties': {
                     'kernel_id': 'nokernel',
                     'ramdisk_id': 'nokernel',
@@ -167,10 +204,10 @@ class _FakeImageService(object):
                  trusted_certs=None):
         self.show(context, image_id)
         if data:
-            data.write(self._imagedata.get(image_id, ''))
+            data.write(self._imagedata.get(image_id, b''))
         elif dst_path:
             with open(dst_path, 'wb') as data:
-                data.write(self._imagedata.get(image_id, ''))
+                data.write(self._imagedata.get(image_id, b''))
 
     def show(self, context, image_id, include_locations=False,
              show_deleted=True):
@@ -209,6 +246,12 @@ class _FakeImageService(object):
         # is mostly a lie on a newly created image.
         if 'status' not in metadata:
             image_meta['status'] = 'active'
+        # The owner of the image is by default the request context project_id.
+        if context and 'owner' not in image_meta.get('properties', {}):
+            # Note that normally "owner" is a top-level field in an image
+            # resource in glance but we have to fake this out for the images
+            # proxy API by throwing it into the generic "properties" dict.
+            image_meta.get('properties', {})['owner'] = context.project_id
         self.images[image_id] = image_meta
         if data:
             self._imagedata[image_id] = data.read()

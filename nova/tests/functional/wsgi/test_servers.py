@@ -19,6 +19,7 @@ from nova.policies import servers as servers_policies
 from nova import test
 from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional.api import client as api_client
+from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import integrated_helpers
 from nova.tests.unit.image import fake as fake_image
 from nova.tests.unit import policy_fixture
@@ -48,7 +49,7 @@ class ServersPreSchedulingTestCase(test.TestCase,
         self.useFixture(policy_fixture.RealPolicyFixture())
         self.useFixture(nova_fixtures.NoopConductorFixture())
         self.useFixture(nova_fixtures.NeutronFixture(self))
-        self.useFixture(nova_fixtures.PlacementFixture())
+        self.useFixture(func_fixtures.PlacementFixture())
         api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
             api_version='v2.1'))
 
@@ -248,8 +249,9 @@ class ServersPreSchedulingTestCase(test.TestCase,
         self.assertEqual(0, len(list_resp))
 
     @mock.patch('nova.objects.service.get_minimum_version_all_cells',
-                return_value=compute_api.BFV_RESERVE_MIN_COMPUTE_VERSION)
-    def test_bfv_delete_build_request_pre_scheduling_ocata(self, mock_get):
+                return_value=
+                compute_api.CINDER_V3_ATTACH_MIN_COMPUTE_VERSION - 1)
+    def test_bfv_delete_build_request_pre_scheduling_old_flow(self, mock_get):
         cinder = self.useFixture(nova_fixtures.CinderFixture(self))
 
         volume_id = nova_fixtures.CinderFixture.IMAGE_BACKED_VOL
@@ -407,7 +409,7 @@ class EnforceVolumeBackedForZeroDiskFlavorTestCase(
         # For this test, we want to start conductor and the scheduler but
         # we don't start compute so that scheduling fails; we don't really
         # care about successfully building an active server here.
-        self.useFixture(nova_fixtures.PlacementFixture())
+        self.useFixture(func_fixtures.PlacementFixture())
         self.useFixture(nova_fixtures.CinderFixture(self))
         self.start_service('conductor')
         self.start_service('scheduler')

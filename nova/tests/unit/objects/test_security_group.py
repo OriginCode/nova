@@ -13,13 +13,13 @@
 #    under the License.
 
 import mock
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_versionedobjects import fixture as ovo_fixture
 
 from nova.db import api as db
 from nova.objects import instance
 from nova.objects import security_group
 from nova.tests.unit.objects import test_objects
-from nova.tests import uuidsentinel as uuids
 
 
 fake_secgroup = {
@@ -116,8 +116,10 @@ class _TestSecurityGroupObject(object):
             self.context, uuid=uuids.neutron_id)
         self.assertEqual(uuids.neutron_id, secgroup.uuid)
         # Test backport.
+        primitive = secgroup.obj_to_primitive(target_version='1.2')
+        self.assertIn('uuid', primitive['nova_object.data'])
         primitive = secgroup.obj_to_primitive(target_version='1.1')
-        self.assertNotIn('uuid', primitive)
+        self.assertNotIn('uuid', primitive['nova_object.data'])
         # Make sure the uuid is still set before we save().
         self.assertIn('uuid', secgroup)
         secgroup.save()

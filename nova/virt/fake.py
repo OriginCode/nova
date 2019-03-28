@@ -28,6 +28,8 @@ import contextlib
 import copy
 import time
 
+import fixtures
+import os_resource_classes as orc
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import versionutils
@@ -121,6 +123,8 @@ class Resources(object):
 
 
 class FakeDriver(driver.ComputeDriver):
+    # These must match the traits in
+    # nova.tests.functional.integrated_helpers.ProviderUsageBaseTestCase
     capabilities = {
         "has_imagecache": True,
         "supports_evacuate": True,
@@ -190,6 +194,16 @@ class FakeDriver(driver.ComputeDriver):
     def spawn(self, context, instance, image_meta, injected_files,
               admin_password, allocations, network_info=None,
               block_device_info=None):
+
+        if network_info:
+            for vif in network_info:
+                # simulate a real driver triggering the async network
+                # allocation as it might cause an error
+                vif.fixed_ips()
+                # store the vif as attached so we can allow detaching it later
+                # with a detach_interface() call.
+                self._interfaces[vif['id']] = vif
+
         uuid = instance.uuid
         state = power_state.RUNNING
         flavor = instance.flavor
@@ -326,7 +340,7 @@ class FakeDriver(driver.ComputeDriver):
             self._mounts[instance_name] = {}
         self._mounts[instance_name][mountpoint] = new_connection_info
 
-    def extend_volume(self, connection_info, instance):
+    def extend_volume(self, connection_info, instance, requested_size):
         """Extend the disk attached to the instance."""
         pass
 
@@ -343,7 +357,7 @@ class FakeDriver(driver.ComputeDriver):
             raise exception.InterfaceDetachFailed(
                     instance_uuid=instance.uuid)
 
-    def get_info(self, instance):
+    def get_info(self, instance, use_cache=True):
         if instance.uuid not in self.instances:
             raise exception.InstanceNotFound(instance_id=instance.uuid)
         i = self.instances[instance.uuid]
@@ -409,6 +423,15 @@ class FakeDriver(driver.ComputeDriver):
            a given host.
         """
         volusage = []
+        if compute_host_bdms:
+            volusage = [{'volume': compute_host_bdms[0][
+                                       'instance_bdms'][0]['volume_id'],
+                         'instance': compute_host_bdms[0]['instance'],
+                         'rd_bytes': 0,
+                         'rd_req': 0,
+                         'wr_bytes': 0,
+                         'wr_req': 0}]
+
         return volusage
 
     def get_host_cpu_stats(self):
@@ -490,18 +513,20 @@ class FakeDriver(driver.ComputeDriver):
         host_status['cpu_info'] = jsonutils.dumps(cpu_info)
         return host_status
 
-    def update_provider_tree(self, provider_tree, nodename):
-        # TODO(mriedem): The allocation_ratio config usage will change with
-        # blueprint initial-allocation-ratios. For now, the allocation ratio
-        # config values all default to 0.0 and the ComputeNode provides a
-        # facade for giving the real defaults, so we have to mimic that here.
+    def update_provider_tree(self, provider_tree, nodename, allocations=None):
+        # NOTE(yikun): If the inv record does not exists, the allocation_ratio
+        # will use the CONF.xxx_allocation_ratio value if xxx_allocation_ratio
+        # is set, and fallback to use the initial_xxx_allocation_ratio
+        # otherwise.
+        inv = provider_tree.data(nodename).inventory
+        ratios = self._get_allocation_ratios(inv)
         inventory = {
             'VCPU': {
                 'total': self.vcpus,
                 'min_unit': 1,
                 'max_unit': self.vcpus,
                 'step_size': 1,
-                'allocation_ratio': CONF.cpu_allocation_ratio or 16.0,
+                'allocation_ratio': ratios[orc.VCPU],
                 'reserved': CONF.reserved_host_cpus,
             },
             'MEMORY_MB': {
@@ -509,7 +534,7 @@ class FakeDriver(driver.ComputeDriver):
                 'min_unit': 1,
                 'max_unit': self.memory_mb,
                 'step_size': 1,
-                'allocation_ratio': CONF.ram_allocation_ratio or 1.5,
+                'allocation_ratio': ratios[orc.MEMORY_MB],
                 'reserved': CONF.reserved_host_memory_mb,
             },
             'DISK_GB': {
@@ -517,7 +542,7 @@ class FakeDriver(driver.ComputeDriver):
                 'min_unit': 1,
                 'max_unit': self.local_gb,
                 'step_size': 1,
-                'allocation_ratio': CONF.disk_allocation_ratio or 1.0,
+                'allocation_ratio': ratios[orc.DISK_GB],
                 'reserved': self._get_reserved_host_disk_gb_from_config(),
             },
         }
@@ -670,6 +695,38 @@ class MediumFakeDriver(FakeDriver):
     local_gb = 1028
 
 
+class MediumFakeDriverWithNestedCustomResources(MediumFakeDriver):
+    # A MediumFakeDriver variant that also reports CUSTOM_MAGIC resources on
+    # a nested resource provider
+    vcpus = 10
+    memory_mb = 8192
+    local_gb = 1028
+    child_resources = {
+            'CUSTOM_MAGIC': {
+                'total': 10,
+                'reserved': 0,
+                'min_unit': 1,
+                'max_unit': 10,
+                'step_size': 1,
+                'allocation_ratio': 1,
+            }
+    }
+
+    def update_provider_tree(self, provider_tree, nodename, allocations=None):
+        super(
+            MediumFakeDriverWithNestedCustomResources,
+            self).update_provider_tree(
+                provider_tree, nodename,
+                allocations=allocations)
+
+        if not provider_tree.exists(nodename + '-child'):
+            provider_tree.new_child(name=nodename + '-child',
+                                    parent=nodename)
+
+        provider_tree.update_inventory(nodename + '-child',
+                                       self.child_resources)
+
+
 class FakeRescheduleDriver(FakeDriver):
     """FakeDriver derivative that triggers a reschedule on the first spawn
     attempt. This is expected to only be used in tests that have more than
@@ -692,6 +749,11 @@ class FakeRescheduleDriver(FakeDriver):
             admin_password, allocations, network_info, block_device_info)
 
 
+class FakeRescheduleDriverWithNestedCustomResources(
+        FakeRescheduleDriver, MediumFakeDriverWithNestedCustomResources):
+    pass
+
+
 class FakeBuildAbortDriver(FakeDriver):
     """FakeDriver derivative that always fails on spawn() with a
     BuildAbortException so no reschedule is attempted.
@@ -701,6 +763,11 @@ class FakeBuildAbortDriver(FakeDriver):
               block_device_info=None):
         raise exception.BuildAbortException(
             instance_uuid=instance.uuid, reason='FakeBuildAbortDriver')
+
+
+class FakeBuildAbortDriverWithNestedCustomResources(
+    FakeBuildAbortDriver, MediumFakeDriverWithNestedCustomResources):
+    pass
 
 
 class FakeUnshelveSpawnFailDriver(FakeDriver):
@@ -717,6 +784,11 @@ class FakeUnshelveSpawnFailDriver(FakeDriver):
         super(FakeUnshelveSpawnFailDriver, self).spawn(
             context, instance, image_meta, injected_files,
             admin_password, allocations, network_info, block_device_info)
+
+
+class FakeUnshelveSpawnFailDriverWithNestedCustomResources(
+    FakeUnshelveSpawnFailDriver, MediumFakeDriverWithNestedCustomResources):
+    pass
 
 
 class FakeLiveMigrateDriver(FakeDriver):
@@ -763,3 +835,145 @@ class FakeLiveMigrateDriver(FakeDriver):
                             migrate_data=None):
         if instance.uuid in self.instances:
             del self.instances[instance.uuid]
+
+
+class FakeLiveMigrateDriverWithNestedCustomResources(
+        FakeLiveMigrateDriver, MediumFakeDriverWithNestedCustomResources):
+    pass
+
+
+class FakeDriverWithPciResources(SmallFakeDriver):
+
+    # NOTE(gibi): Always use this fixture along with the
+    # FakeDriverWithPciResources to make the necessary configuration for the
+    # driver.
+    class FakeDriverWithPciResourcesConfigFixture(fixtures.Fixture):
+        def setUp(self):
+            super(FakeDriverWithPciResources.
+                  FakeDriverWithPciResourcesConfigFixture, self).setUp()
+            # Set passthrough_whitelist before the compute node starts to match
+            # with the PCI devices reported by this fake driver.
+
+            # NOTE(gibi): 0000:01:00 is tagged to physnet1 and therefore not a
+            # match based on physnet to our sriov port
+            # 'port_with_sriov_resource_request' as the network of that port
+            # points to physnet2 with the attribute
+            # 'provider:physical_network'. Nova pci handling already enforces
+            # this rule.
+            #
+            # 0000:02:00 and 0000:03:00 are both tagged to physnet2 and
+            # therefore a good match for our sriov port based on physnet.
+            # Having two PFs on the same physnet will allow us to test the
+            # placement allocation - physical allocation matching based on the
+            # bandwidth allocation in the future.
+            CONF.set_override('passthrough_whitelist', override=[
+                jsonutils.dumps(
+                    {
+                        "address": {
+                            "domain": "0000",
+                            "bus": "01",
+                            "slot": "00",
+                            "function": ".*"},
+                        "physical_network": "physnet1",
+                    }
+                ),
+                jsonutils.dumps(
+                    {
+                        "address": {
+                            "domain": "0000",
+                            "bus": "02",
+                            "slot": "00",
+                            "function": ".*"},
+                        "physical_network": "physnet2",
+                    }
+                ),
+                jsonutils.dumps(
+                    {
+                        "address": {
+                            "domain": "0000",
+                            "bus": "03",
+                            "slot": "00",
+                            "function": ".*"},
+                        "physical_network": "physnet2",
+                    }
+                ),
+            ],
+                             group='pci')
+
+    def get_available_resource(self, nodename):
+        host_status = super(
+            FakeDriverWithPciResources, self).get_available_resource(nodename)
+        # 01:00 - PF - ens1
+        #  |---- 01:00.1 - VF
+        #
+        # 02:00 - PF - ens2
+        #  |---- 02:00.1 - VF
+        #
+        # 03:00 - PF - ens3
+        #  |---- 03:00.1 - VF
+        host_status['pci_passthrough_devices'] = jsonutils.dumps([
+            {
+                'address': '0000:01:00.0',
+                'product_id': 'fake-product_id',
+                'vendor_id': 'fake-vendor_id',
+                'status': 'available',
+                'dev_type': 'type-PF',
+                'parent_addr': None,
+                'numa_node': 0,
+                'label': 'fake-label',
+            },
+            {
+                'address': '0000:01:00.1',
+                'product_id': 'fake-product_id',
+                'vendor_id': 'fake-vendor_id',
+                'status': 'available',
+                'dev_type': 'type-VF',
+                'parent_addr': '0000:01:00',
+                'numa_node': 0,
+                'label': 'fake-label',
+                "parent_ifname": "ens1",
+            },
+            {
+                'address': '0000:02:00.0',
+                'product_id': 'fake-product_id',
+                'vendor_id': 'fake-vendor_id',
+                'status': 'available',
+                'dev_type': 'type-PF',
+                'parent_addr': None,
+                'numa_node': 0,
+                'label': 'fake-label',
+            },
+            {
+                'address': '0000:02:00.1',
+                'product_id': 'fake-product_id',
+                'vendor_id': 'fake-vendor_id',
+                'status': 'available',
+                'dev_type': 'type-VF',
+                'parent_addr': '0000:02:00',
+                'numa_node': 0,
+                'label': 'fake-label',
+                "parent_ifname": "ens2",
+            },
+            {
+                'address': '0000:03:00.0',
+                'product_id': 'fake-product_id',
+                'vendor_id': 'fake-vendor_id',
+                'status': 'available',
+                'dev_type': 'type-PF',
+                'parent_addr': None,
+                'numa_node': 0,
+                'label': 'fake-label',
+            },
+            {
+                'address': '0000:03:00.1',
+                'product_id': 'fake-product_id',
+                'vendor_id': 'fake-vendor_id',
+                'status': 'available',
+                'dev_type': 'type-VF',
+                'parent_addr': '0000:03:00',
+                'numa_node': 0,
+                'label': 'fake-label',
+                "parent_ifname": "ens3",
+            },
+        ])
+        return host_status

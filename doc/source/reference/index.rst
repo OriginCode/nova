@@ -13,6 +13,8 @@ The following is a dive into some of the internals in nova.
 
 * :doc:`/reference/rpc`: How nova uses AMQP as an RPC transport
 * :doc:`/reference/scheduling`: The workflow through the scheduling process
+* :doc:`/reference/scheduler-hints-vs-flavor-extra-specs`: The similarities
+  and differences between flavor extra specs and scheduler hints.
 * :doc:`/reference/live-migration`: The live migration flow
 * :doc:`/reference/services`: Module descriptions for some of the key modules
   used in starting / running services
@@ -24,6 +26,8 @@ The following is a dive into some of the internals in nova.
   nova, and considerations when adding notifications.
 * :doc:`/reference/update-provider-tree`: A detailed explanation of the
   ``ComputeDriver.update_provider_tree`` method.
+* :doc:`/reference/upgrade-checks`: A guide to writing automated upgrade
+  checks.
 
 Debugging
 =========
@@ -42,7 +46,7 @@ these documents will move into the "Internals" section.
 If you want to get involved in shaping the future of nova's architecture,
 these are a great place to start reading up on the current plans.
 
-* :doc:`/user/cells`: Comparison of Cells v1 and v2, and how v2 is evolving
+* :doc:`/user/cells`: How cells v2 is evolving
 * :doc:`/reference/policy-enforcement`: How we want policy checks on API actions
   to work in the future
 * :doc:`/reference/stable-api`: What stable api means to nova

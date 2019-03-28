@@ -92,7 +92,7 @@ class ExtraSpecs(object):
     def __init__(self, cpu_limits=None, hw_version=None,
                  storage_policy=None, cores_per_socket=None,
                  memory_limits=None, disk_io_limits=None,
-                 vif_limits=None, firmware=None):
+                 vif_limits=None, firmware=None, hw_video_ram=None):
         """ExtraSpecs object holds extra_specs for the instance."""
         self.cpu_limits = cpu_limits or Limits()
         self.memory_limits = memory_limits or Limits()
@@ -102,6 +102,7 @@ class ExtraSpecs(object):
         self.storage_policy = storage_policy
         self.cores_per_socket = cores_per_socket
         self.firmware = firmware
+        self.hw_video_ram = hw_video_ram
 
 
 def vm_refs_cache_reset():
@@ -257,6 +258,11 @@ def get_vm_create_spec(client_factory, instance, data_store_name,
     if serial_port_spec:
         devices.append(serial_port_spec)
 
+    virtual_device_config_spec = create_video_card_spec(client_factory,
+                                                        extra_specs)
+    if virtual_device_config_spec:
+        devices.append(virtual_device_config_spec)
+
     config_spec.deviceChange = devices
 
     # add vm-uuid and iface-id.x values for Neutron
@@ -296,6 +302,18 @@ def get_vm_create_spec(client_factory, instance, data_store_name,
     config_spec.managedBy = managed_by
 
     return config_spec
+
+
+def create_video_card_spec(client_factory, extra_specs):
+    if extra_specs.hw_video_ram:
+        video_card = client_factory.create('ns0:VirtualMachineVideoCard')
+        video_card.videoRamSizeInKB = extra_specs.hw_video_ram
+        video_card.key = -1
+        virtual_device_config_spec = client_factory.create(
+            'ns0:VirtualDeviceConfigSpec')
+        virtual_device_config_spec.operation = "add"
+        virtual_device_config_spec.device = video_card
+        return virtual_device_config_spec
 
 
 def create_serial_port_spec(client_factory):
@@ -517,6 +535,44 @@ def get_network_detach_config_spec(client_factory, device, port_index):
                                                       'free',
                                                       port_index)]
     return config_spec
+
+
+def update_vif_spec(client_factory, vif_info, device):
+    """Updates the backing for the VIF spec."""
+    network_spec = client_factory.create('ns0:VirtualDeviceConfigSpec')
+    network_spec.operation = 'edit'
+    network_ref = vif_info['network_ref']
+    network_name = vif_info['network_name']
+    if network_ref and network_ref['type'] == 'OpaqueNetwork':
+        backing = client_factory.create(
+                'ns0:VirtualEthernetCardOpaqueNetworkBackingInfo')
+        backing.opaqueNetworkId = network_ref['network-id']
+        backing.opaqueNetworkType = network_ref['network-type']
+        # Configure externalId
+        if network_ref['use-external-id']:
+            if hasattr(device, 'externalId'):
+                device.externalId = vif_info['iface_id']
+            else:
+                dp = client_factory.create('ns0:DynamicProperty')
+                dp.name = "__externalId__"
+                dp.val = vif_info['iface_id']
+                device.dynamicProperty = [dp]
+    elif (network_ref and
+            network_ref['type'] == "DistributedVirtualPortgroup"):
+        backing = client_factory.create(
+                'ns0:VirtualEthernetCardDistributedVirtualPortBackingInfo')
+        portgroup = client_factory.create(
+                    'ns0:DistributedVirtualSwitchPortConnection')
+        portgroup.switchUuid = network_ref['dvsw']
+        portgroup.portgroupKey = network_ref['dvpg']
+        backing.port = portgroup
+    else:
+        backing = client_factory.create(
+                  'ns0:VirtualEthernetCardNetworkBackingInfo')
+        backing.deviceName = network_name
+    device.backing = backing
+    network_spec.device = device
+    return network_spec
 
 
 def get_storage_profile_spec(session, storage_policy):
@@ -938,20 +994,24 @@ def clone_vm_spec(client_factory, location,
 
 
 def relocate_vm_spec(client_factory, res_pool=None, datastore=None, host=None,
-                     disk_move_type="moveAllDiskBackingsAndAllowSharing"):
+                     disk_move_type="moveAllDiskBackingsAndAllowSharing",
+                     devices=None):
     rel_spec = client_factory.create('ns0:VirtualMachineRelocateSpec')
     rel_spec.datastore = datastore
     rel_spec.host = host
     rel_spec.pool = res_pool
     rel_spec.diskMoveType = disk_move_type
+    if devices is not None:
+        rel_spec.deviceChange = devices
     return rel_spec
 
 
 def relocate_vm(session, vm_ref, res_pool=None, datastore=None, host=None,
-                disk_move_type="moveAllDiskBackingsAndAllowSharing"):
+                disk_move_type="moveAllDiskBackingsAndAllowSharing",
+                devices=None):
     client_factory = session.vim.client.factory
     rel_spec = relocate_vm_spec(client_factory, res_pool, datastore, host,
-                                disk_move_type)
+                                disk_move_type, devices)
     relocate_task = session._call_method(session.vim, "RelocateVM_Task",
                                          vm_ref, spec=rel_spec)
     session._wait_for_task(relocate_task)

@@ -819,6 +819,7 @@ class NotificationAction(BaseNovaEnum):
     RESIZE_CONFIRM = 'resize_confirm'
     RESIZE_PREP = 'resize_prep'
     RESIZE_REVERT = 'resize_revert'
+    SELECT_DESTINATIONS = 'select_destinations'
     SHELVE_OFFLOAD = 'shelve_offload'
     SOFT_DELETE = 'soft_delete'
     TRIGGER_CRASH_DUMP = 'trigger_crash_dump'
@@ -831,6 +832,11 @@ class NotificationAction(BaseNovaEnum):
     LOCK = 'lock'
     UNLOCK = 'unlock'
     UPDATE_PROP = 'update_prop'
+    CONNECT = 'connect'
+    USAGE = 'usage'
+    BUILD_INSTANCES = 'build_instances'
+    MIGRATE_SERVER = 'migrate_server'
+    REBUILD_SERVER = 'rebuild_server'
 
     ALL = (UPDATE, EXCEPTION, DELETE, PAUSE, UNPAUSE, RESIZE, VOLUME_SWAP,
            SUSPEND, POWER_ON, REBOOT, SHUTDOWN, SNAPSHOT, INTERFACE_ATTACH,
@@ -842,7 +848,9 @@ class NotificationAction(BaseNovaEnum):
            RESIZE_CONFIRM, RESIZE_PREP, RESIZE_REVERT, SHELVE_OFFLOAD,
            SOFT_DELETE, TRIGGER_CRASH_DUMP, UNRESCUE, UNSHELVE, ADD_HOST,
            REMOVE_HOST, ADD_MEMBER, UPDATE_METADATA, LOCK, UNLOCK,
-           REBUILD_SCHEDULED, UPDATE_PROP, LIVE_MIGRATION_FORCE_COMPLETE)
+           REBUILD_SCHEDULED, UPDATE_PROP, LIVE_MIGRATION_FORCE_COMPLETE,
+           CONNECT, USAGE, BUILD_INSTANCES, MIGRATE_SERVER, REBUILD_SERVER,
+           SELECT_DESTINATIONS)
 
 
 # TODO(rlrossit): These should be changed over to be a StateMachine enum from
@@ -1237,3 +1245,13 @@ class InstanceTaskStateField(BaseEnumField):
 
 class InstancePowerStateField(BaseEnumField):
     AUTO_TYPE = InstancePowerState()
+
+
+class ListOfListsOfStringsField(fields.AutoTypedField):
+    AUTO_TYPE = List(List(fields.String()))
+
+
+# TODO(mriedem): Replace this with the version from oslo.versiondobjects
+# when https://review.openstack.org/#/c/634700/ is released.
+class ListOfUUIDField(AutoTypedField):
+    AUTO_TYPE = List(fields.UUID())

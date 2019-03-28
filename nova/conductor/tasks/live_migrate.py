@@ -14,6 +14,7 @@ from oslo_log import log as logging
 import oslo_messaging as messaging
 import six
 
+from nova import availability_zones
 from nova.compute import power_state
 from nova.compute import utils as compute_utils
 from nova.conductor.tasks import base
@@ -23,17 +24,11 @@ from nova import exception
 from nova.i18n import _
 from nova import network
 from nova import objects
+from nova.objects import fields as obj_fields
 from nova.scheduler import utils as scheduler_utils
-from nova import utils
 
 LOG = logging.getLogger(__name__)
 CONF = nova.conf.CONF
-
-
-def should_do_migration_allocation(context):
-    minver = objects.Service.get_minimum_version_multi(context,
-                                                       ['nova-compute'])
-    return minver >= 25
 
 
 def supports_extended_port_binding(context, host):
@@ -52,7 +47,8 @@ def supports_extended_port_binding(context, host):
 class LiveMigrationTask(base.TaskBase):
     def __init__(self, context, instance, destination,
                  block_migration, disk_over_commit, migration, compute_rpcapi,
-                 servicegroup_api, scheduler_client, request_spec=None):
+                 servicegroup_api, query_client, report_client,
+                 request_spec=None):
         super(LiveMigrationTask, self).__init__(context, instance)
         self.destination = destination
         self.block_migration = block_migration
@@ -63,7 +59,8 @@ class LiveMigrationTask(base.TaskBase):
 
         self.compute_rpcapi = compute_rpcapi
         self.servicegroup_api = servicegroup_api
-        self.scheduler_client = scheduler_client
+        self.query_client = query_client
+        self.report_client = report_client
         self.request_spec = request_spec
         self._source_cn = None
         self._held_allocations = None
@@ -71,17 +68,17 @@ class LiveMigrationTask(base.TaskBase):
 
     def _execute(self):
         self._check_instance_is_active()
+        self._check_instance_has_no_numa()
         self._check_host_is_up(self.source)
 
-        if should_do_migration_allocation(self.context):
-            self._source_cn, self._held_allocations = (
-                # NOTE(danms): This may raise various exceptions, which will
-                # propagate to the API and cause a 500. This is what we
-                # want, as it would indicate internal data structure corruption
-                # (such as missing migrations, compute nodes, etc).
-                migrate.replace_allocation_with_migration(self.context,
-                                                          self.instance,
-                                                          self.migration))
+        self._source_cn, self._held_allocations = (
+            # NOTE(danms): This may raise various exceptions, which will
+            # propagate to the API and cause a 500. This is what we
+            # want, as it would indicate internal data structure corruption
+            # (such as missing migrations, compute nodes, etc).
+            migrate.replace_allocation_with_migration(self.context,
+                                                      self.instance,
+                                                      self.migration))
 
         if not self.destination:
             # Either no host was specified in the API request and the user
@@ -106,14 +103,25 @@ class LiveMigrationTask(base.TaskBase):
             # scheduler filters, which honors the 'force' flag in the API.
             # This raises NoValidHost which will be handled in
             # ComputeTaskManager.
+            # NOTE(gibi): consumer_generation = None as we expect that the
+            # source host allocation is held by the migration therefore the
+            # instance is a new, empty consumer for the dest allocation. If
+            # this assumption fails then placement will return consumer
+            # generation conflict and this call raise a AllocationUpdateFailed
+            # exception. We let that propagate here to abort the migration.
             scheduler_utils.claim_resources_on_destination(
-                self.context, self.scheduler_client.reportclient,
+                self.context, self.report_client,
                 self.instance, source_node, dest_node,
-                source_node_allocations=self._held_allocations)
+                source_allocations=self._held_allocations,
+                consumer_generation=None)
 
             # dest_node is a ComputeNode object, so we need to get the actual
             # node name off it to set in the Migration object below.
             dest_node = dest_node.hypervisor_hostname
+
+        self.instance.availability_zone = (
+            availability_zones.get_host_availability_zone(
+                self.context, self.destination))
 
         self.migration.source_node = self.instance.node
         self.migration.dest_node = dest_node
@@ -140,8 +148,7 @@ class LiveMigrationTask(base.TaskBase):
             migrate.revert_allocation_for_migration(self.context,
                                                     self._source_cn,
                                                     self.instance,
-                                                    self.migration,
-                                                    self._held_allocations)
+                                                    self.migration)
 
     def _check_instance_is_active(self):
         if self.instance.power_state not in (power_state.RUNNING,
@@ -149,8 +156,35 @@ class LiveMigrationTask(base.TaskBase):
             raise exception.InstanceInvalidState(
                     instance_uuid=self.instance.uuid,
                     attr='power_state',
-                    state=self.instance.power_state,
+                    state=power_state.STATE_MAP[self.instance.power_state],
                     method='live migrate')
+
+    def _check_instance_has_no_numa(self):
+        """Prevent live migrations of instances with NUMA topologies."""
+        if not self.instance.numa_topology:
+            return
+
+        # Only KVM (libvirt) supports NUMA topologies with CPU pinning;
+        # HyperV's vNUMA feature doesn't allow specific pinning
+        hypervisor_type = objects.ComputeNode.get_by_host_and_nodename(
+            self.context, self.source, self.instance.node).hypervisor_type
+
+        # KVM is not a hypervisor, so when using a virt_type of "kvm" the
+        # hypervisor_type will still be "QEMU".
+        if hypervisor_type.lower() != obj_fields.HVType.QEMU:
+            return
+
+        msg = ('Instance has an associated NUMA topology. '
+               'Instance NUMA topologies, including related attributes '
+               'such as CPU pinning, huge page and emulator thread '
+               'pinning information, are not currently recalculated on '
+               'live migration. See bug #1289064 for more information.'
+               )
+
+        if CONF.workarounds.enable_numa_live_migration:
+            LOG.warning(msg, instance=self.instance)
+        else:
+            raise exception.MigrationPreCheckError(reason=msg)
 
     def _check_host_is_up(self, host):
         service = objects.Service.get_by_compute_host(self.context, host)
@@ -190,8 +224,6 @@ class LiveMigrationTask(base.TaskBase):
         # TODO(mriedem): This method can be removed when the forced host
         # scenario is calling select_destinations() in the scheduler because
         # Placement will be used to filter allocation candidates by MEMORY_MB.
-        # We likely can't remove it until the CachingScheduler is gone though
-        # since the CachingScheduler does not use Placement.
         compute = self._get_compute_info(self.destination)
         free_ram_mb = compute.free_ram_mb
         total_ram_mb = compute.memory_mb
@@ -317,25 +349,14 @@ class LiveMigrationTask(base.TaskBase):
             This is generally at least seeded with the source host.
         :returns: nova.objects.RequestSpec object
         """
-        if not self.request_spec:
-            # NOTE(sbauza): We were unable to find an original RequestSpec
-            # object - probably because the instance is old.
-            # We need to mock that the old way
-            image = utils.get_image_from_system_metadata(
-                self.instance.system_metadata)
-            filter_properties = {'ignore_hosts': attempted_hosts}
-            request_spec = objects.RequestSpec.from_components(
-                self.context, self.instance.uuid, image,
-                self.instance.flavor, self.instance.numa_topology,
-                self.instance.pci_requests,
-                filter_properties, None, self.instance.availability_zone
-            )
-        else:
-            request_spec = self.request_spec
-            # NOTE(sbauza): Force_hosts/nodes needs to be reset
-            # if we want to make sure that the next destination
-            # is not forced to be the original host
-            request_spec.reset_forced_destinations()
+        request_spec = self.request_spec
+        # NOTE(sbauza): Force_hosts/nodes needs to be reset
+        # if we want to make sure that the next destination
+        # is not forced to be the original host
+        request_spec.reset_forced_destinations()
+
+        # TODO(gibi): We need to make sure that the requested_resources field
+        # is re calculated based on neutron ports.
         scheduler_utils.setup_instance_group(self.context, request_spec)
 
         # We currently only support live migrating to hosts in the same
@@ -370,7 +391,7 @@ class LiveMigrationTask(base.TaskBase):
             self._check_not_over_max_retries(attempted_hosts)
             request_spec.ignore_hosts = attempted_hosts
             try:
-                selection_lists = self.scheduler_client.select_destinations(
+                selection_lists = self.query_client.select_destinations(
                         self.context, request_spec, [self.instance.uuid],
                         return_objects=True, return_alternates=False)
                 # We only need the first item in the first list, as there is
@@ -419,19 +440,12 @@ class LiveMigrationTask(base.TaskBase):
                      instance=self.instance)
             return
 
-        # Calculate the resource class amounts to subtract from the allocations
-        # on the node based on the instance flavor.
-        resources = scheduler_utils.resources_from_flavor(
-            self.instance, self.instance.flavor)
-
         # Now remove the allocations for our instance against that node.
         # Note that this does not remove allocations against any other node
         # or shared resource provider, it's just undoing what the scheduler
         # allocated for the given (destination) node.
-        self.scheduler_client.reportclient.\
-            remove_provider_from_instance_allocation(
-                self.context, self.instance.uuid, compute_node.uuid,
-                self.instance.user_id, self.instance.project_id, resources)
+        self.report_client.remove_provider_tree_from_instance_allocation(
+            self.context, self.instance.uuid, compute_node.uuid)
 
     def _check_not_over_max_retries(self, attempted_hosts):
         if CONF.migrate_max_retries == -1:

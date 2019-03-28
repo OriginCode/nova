@@ -22,6 +22,8 @@ Driver base-classes:
 
 import sys
 
+import os_resource_classes as orc
+import os_traits
 from oslo_log import log as logging
 from oslo_utils import importutils
 import six
@@ -90,6 +92,27 @@ def block_device_info_get_mapping(block_device_info):
     return block_device_mapping
 
 
+# NOTE(aspiers): When adding new capabilities, ensure they are
+# mirrored in ComputeDriver.capabilities, and that the corresponding
+# values should always be standard traits in os_traits.  If something
+# isn't a standard trait, it doesn't need to be a compute node
+# capability trait; and if it needs to be a compute node capability
+# trait, it needs to be (made) standard, and must be prefixed with
+# "COMPUTE_".
+CAPABILITY_TRAITS_MAP = {
+    # Added in os-traits 0.7.0.
+    "supports_attach_interface": os_traits.COMPUTE_NET_ATTACH_INTERFACE,
+    "supports_device_tagging": os_traits.COMPUTE_DEVICE_TAGGING,
+    "supports_tagged_attach_interface":
+        os_traits.COMPUTE_NET_ATTACH_INTERFACE_WITH_TAG,
+    "supports_tagged_attach_volume": os_traits.COMPUTE_VOLUME_ATTACH_WITH_TAG,
+    "supports_extend_volume": os_traits.COMPUTE_VOLUME_EXTEND,
+    "supports_multiattach": os_traits.COMPUTE_VOLUME_MULTI_ATTACH,
+    # Added in os-traits 0.8.0.
+    "supports_trusted_certs": os_traits.COMPUTE_TRUSTED_CERTS
+}
+
+
 class ComputeDriver(object):
     """Base class for compute drivers.
 
@@ -121,6 +144,9 @@ class ComputeDriver(object):
 
     """
 
+    # NOTE(mriedem): When adding new capabilities, consider whether they
+    # should also be added to CAPABILITY_TRAITS_MAP; if so, any new traits
+    # must also be added to the os-traits library.
     capabilities = {
         "has_imagecache": False,
         "supports_evacuate": False,
@@ -133,8 +159,6 @@ class ComputeDriver(object):
         "supports_multiattach": False,
         "supports_trusted_certs": False,
     }
-
-    requires_allocation_refresh = False
 
     # Indicates if this driver will rebalance nodes among compute service
     # hosts. This is really here for ironic and should not be used by any
@@ -158,10 +182,15 @@ class ComputeDriver(object):
         """
         pass
 
-    def get_info(self, instance):
+    def get_info(self, instance, use_cache=True):
         """Get the current status of an instance.
 
         :param instance: nova.objects.instance.Instance object
+        :param use_cache: boolean to indicate if the driver should be allowed
+                          to use cached data to return instance status.
+                          This only applies to drivers which cache instance
+                          state information. For drivers that do not use a
+                          cache, this parameter can be ignored.
         :returns: An InstanceInfo object
         """
         # TODO(Vek): Need to pass context in for access to auth_token
@@ -492,7 +521,11 @@ class ComputeDriver(object):
 
     def attach_volume(self, context, connection_info, instance, mountpoint,
                       disk_bus=None, device_type=None, encryption=None):
-        """Attach the disk to the instance at mountpoint using info."""
+        """Attach the disk to the instance at mountpoint using info.
+
+        :raises TooManyDiskDevices: if the maxmimum allowed devices to attach
+                                    to a single instance is exceeded.
+        """
         raise NotImplementedError()
 
     def detach_volume(self, context, connection_info, instance, mountpoint,
@@ -524,13 +557,15 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
-    def extend_volume(self, connection_info, instance):
+    def extend_volume(self, connection_info, instance, requested_size):
         """Extend the disk attached to the instance.
 
         :param dict connection_info:
             The connection for the extended volume.
         :param nova.objects.instance.Instance instance:
             The instance whose volume gets extended.
+        :param int requested_size
+            The requested new size of the volume in bytes
 
         :return: None
         """
@@ -864,7 +899,42 @@ class ComputeDriver(object):
         import nova.compute.utils as compute_utils  # avoid circular import
         return compute_utils.convert_mb_to_ceil_gb(CONF.reserved_host_disk_mb)
 
-    def update_provider_tree(self, provider_tree, nodename):
+    @staticmethod
+    def _get_allocation_ratios(inventory):
+        """Get the cpu/ram/disk allocation ratios for the given inventory.
+
+        This utility method is used to get the inventory allocation ratio
+        for VCPU, MEMORY_MB and DISK_GB resource classes based on the following
+        precedence:
+
+        * Use ``[DEFAULT]/*_allocation_ratio`` if set - this overrides
+          everything including externally set allocation ratios on the
+          inventory via the placement API
+        * Use ``[DEFAULT]/initial_*_allocation_ratio`` if a value does not
+          exist for a given resource class in the ``inventory`` dict
+        * Use what is already in the ``inventory`` dict for the allocation
+          ratio if the above conditions are false
+
+        :param inventory: dict, keyed by resource class, of inventory
+                          information.
+        :returns: Return a dict, keyed by resource class, of allocation ratio
+        """
+        keys = {'cpu': orc.VCPU,
+                'ram': orc.MEMORY_MB,
+                'disk': orc.DISK_GB}
+        result = {}
+        for res, rc in keys.items():
+            attr = '%s_allocation_ratio' % res
+            conf_ratio = getattr(CONF, attr)
+            if conf_ratio:
+                result[rc] = conf_ratio
+            elif rc not in inventory:
+                result[rc] = getattr(CONF, 'initial_%s' % attr)
+            else:
+                result[rc] = inventory[rc]['allocation_ratio']
+        return result
+
+    def update_provider_tree(self, provider_tree, nodename, allocations=None):
         """Update a ProviderTree object with current resource provider and
         inventory information.
 
@@ -882,8 +952,8 @@ class ComputeDriver(object):
         depending on the driver and resource class. If not provided, allocation
         ratio defaults to 1.0 and reserved defaults to 0 in placement.
 
-        :note: Renaming a provider (by deleting it from provider_tree and
-        re-adding it with a different name) is not supported at this time.
+        :note: Renaming the root provider (by deleting it from provider_tree
+        and re-adding it with a different name) is not supported at this time.
 
         See the developer reference documentation for more details:
 
@@ -913,6 +983,39 @@ class ComputeDriver(object):
             the compute node provider in the ProviderTree. Drivers managing
             more than one node (e.g. ironic) may also use it as a cue to
             indicate which node is being processed by the caller.
+        :param allocations:
+            Dict of allocation data of the form:
+              { $CONSUMER_UUID: {
+                    # The shape of each "allocations" dict below is identical
+                    # to the return from GET /allocations/{consumer_uuid}
+                    "allocations": {
+                        $RP_UUID: {
+                            "generation": $RP_GEN,
+                            "resources": {
+                                $RESOURCE_CLASS: $AMOUNT,
+                                ...
+                            },
+                        },
+                        ...
+                    },
+                    "project_id": $PROJ_ID,
+                    "user_id": $USER_ID,
+                    "consumer_generation": $CONSUMER_GEN,
+                },
+                ...
+              }
+            If None, and the method determines that any inventory needs to be
+            moved (from one provider to another and/or to a different resource
+            class), the ReshapeNeeded exception must be raised. Otherwise, this
+            dict must be edited in place to indicate the desired final state of
+            allocations. Drivers should *only* edit allocation records for
+            providers whose inventories are being affected by the reshape
+            operation.
+        :raises ReshapeNeeded: If allocations is None and any inventory needs
+            to be moved from one provider to another and/or to a different
+            resource class.
+        :raises: ReshapeFailed if the requested tree reshape fails for
+            whatever reason.
         """
         raise NotImplementedError()
 
@@ -921,6 +1024,23 @@ class ComputeDriver(object):
         the supplied node.
         """
         raise NotImplementedError()
+
+    def capabilities_as_traits(self):
+        """Returns this driver's capabilities dict where the keys are traits
+
+        Traits can only be standard compute capabilities traits from
+        the os-traits library.
+
+        :returns: dict, keyed by trait, of this driver's capabilities where the
+            values are booleans indicating if the driver supports the trait
+
+        """
+        traits = {}
+        for capability, supported in self.capabilities.items():
+            if capability in CAPABILITY_TRAITS_MAP:
+                traits[CAPABILITY_TRAITS_MAP[capability]] = supported
+
+        return traits
 
     def get_available_resource(self, nodename):
         """Retrieve resource information.
@@ -946,6 +1066,8 @@ class ComputeDriver(object):
         :param disk_info: instance disk information
         :param migrate_data: a LiveMigrateData object
         :returns: migrate_data modified by the driver
+        :raises TooManyDiskDevices: if the maxmimum allowed devices to attach
+                                    to a single instance is exceeded.
         """
         raise NotImplementedError()
 
@@ -1638,12 +1760,18 @@ class ComputeDriver(object):
             The metadata of the image of the instance.
         :param nova.objects.BlockDeviceMapping root_bdm:
             The description of the root device.
+        :raises TooManyDiskDevices: if the maxmimum allowed devices to attach
+                                    to a single instance is exceeded.
         """
         raise NotImplementedError()
 
     def default_device_names_for_instance(self, instance, root_device_name,
                                           *block_device_lists):
-        """Default the missing device names in the block device mapping."""
+        """Default the missing device names in the block device mapping.
+
+        :raises TooManyDiskDevices: if the maxmimum allowed devices to attach
+                                    to a single instance is exceeded.
+        """
         raise NotImplementedError()
 
     def get_device_name_for_instance(self, instance,
@@ -1660,6 +1788,8 @@ class ComputeDriver(object):
                                  implementation if not set.
 
         :returns: The chosen device name.
+        :raises TooManyDiskDevices: if the maxmimum allowed devices to attach
+                                    to a single instance is exceeded.
         """
         raise NotImplementedError()
 
@@ -1747,7 +1877,7 @@ def load_compute_driver(virtapi, compute_driver=None):
         LOG.exception(_("Unable to load the virtualization driver"))
         sys.exit(1)
     except ValueError:
-        LOG.exception("Compute driver '%s' from 'nova.virt' is not of type"
+        LOG.exception("Compute driver '%s' from 'nova.virt' is not of type "
                       "'%s'", compute_driver, str(ComputeDriver))
         sys.exit(1)
 

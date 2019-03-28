@@ -8,12 +8,13 @@ Use OpenStack Compute to host and manage cloud computing systems.  OpenStack
 Compute is a major part of an Infrastructure-as-a-Service (IaaS) system. The
 main modules are implemented in Python.
 
-OpenStack Compute interacts with OpenStack Identity for authentication;
-OpenStack Image service for disk and server images; and OpenStack Dashboard for
-the user and administrative interface. Image access is limited by projects, and
-by users; quotas are limited per project (the number of instances, for
-example). OpenStack Compute can scale horizontally on standard hardware, and
-download images to launch instances.
+OpenStack Compute interacts with OpenStack Identity for authentication,
+OpenStack Placement for resource inventory tracking and selection, OpenStack
+Image service for disk and server images, and OpenStack Dashboard for the user
+and administrative interface. Image access is limited by projects, and by
+users; quotas are limited per project (the number of instances, for example).
+OpenStack Compute can scale horizontally on standard hardware, and download
+images to launch instances.
 
 OpenStack Compute consists of the following areas and their components:
 
@@ -42,10 +43,6 @@ OpenStack Compute consists of the following areas and their components:
   queue and performs a series of system commands such as launching a KVM
   instance and updating its state in the database.
 
-``nova-placement-api`` service
-  Tracks the inventory and usage of each provider. For details, see
-  :doc:`/user/placement`.
-
 ``nova-scheduler`` service
   Takes a virtual machine instance request from the queue and determines on
   which compute server host it runs.
@@ -68,7 +65,8 @@ OpenStack Compute consists of the following areas and their components:
   .. deprecated:: 18.0.0
 
     ``nova-consoleauth`` is deprecated since 18.0.0 (Rocky) and will be removed
-    in an upcoming release.
+    in an upcoming release. See
+    :oslo.config:option:`workarounds.enable_consoleauth` for details.
 
 ``nova-novncproxy`` daemon
   Provides a proxy for accessing running instances through a VNC connection.
@@ -81,6 +79,11 @@ OpenStack Compute consists of the following areas and their components:
 ``nova-xvpvncproxy`` daemon
   Provides a proxy for accessing running instances through a VNC connection.
   Supports an OpenStack-specific Java client.
+
+  .. deprecated:: 19.0.0
+
+     :program:`nova-xvpvnxproxy` is deprecated since 19.0.0 (Stein) and will be
+     removed in an upcoming release.
 
 The queue
   A central hub for passing messages between daemons. Usually implemented with

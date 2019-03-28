@@ -26,6 +26,7 @@ from nova.api import validation
 from nova import compute
 from nova import exception
 from nova.i18n import _
+from nova import network
 from nova.policies import migrate_server as ms_policies
 
 LOG = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ class MigrateServerController(wsgi.Controller):
     def __init__(self, *args, **kwargs):
         super(MigrateServerController, self).__init__(*args, **kwargs)
         self.compute_api = compute.API()
+        self.network_api = network.API()
 
     @wsgi.response(202)
     @wsgi.expected_errors((400, 403, 404, 409))
@@ -51,13 +53,27 @@ class MigrateServerController(wsgi.Controller):
             host_name = body['migrate'].get('host')
 
         instance = common.get_instance(self.compute_api, context, id)
+
+        # We could potentially move this check to conductor and avoid the
+        # extra API call to neutron when we support move operations with ports
+        # having resource requests.
+        if (common.instance_has_port_with_resource_request(
+                    context, instance.uuid, self.network_api) and not
+                common.supports_port_resource_request_during_move(req)):
+            msg = _("The migrate action on a server with ports having "
+                    "resource requests, like a port with a QoS minimum "
+                    "bandwidth policy, is not supported with this "
+                    "microversion")
+            raise exc.HTTPBadRequest(explanation=msg)
+
         try:
             self.compute_api.resize(req.environ['nova.context'], instance,
                                     host_name=host_name)
         except (exception.TooManyInstances, exception.QuotaError) as e:
             raise exc.HTTPForbidden(explanation=e.format_message())
         except (exception.InstanceIsLocked,
-                exception.CannotMigrateWithTargetHost) as e:
+                exception.CannotMigrateWithTargetHost,
+                exception.AllocationMoveFailed) as e:
             raise exc.HTTPConflict(explanation=e.format_message())
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
@@ -73,7 +89,8 @@ class MigrateServerController(wsgi.Controller):
     @wsgi.action('os-migrateLive')
     @validation.schema(migrate_server.migrate_live, "2.0", "2.24")
     @validation.schema(migrate_server.migrate_live_v2_25, "2.25", "2.29")
-    @validation.schema(migrate_server.migrate_live_v2_30, "2.30")
+    @validation.schema(migrate_server.migrate_live_v2_30, "2.30", "2.67")
+    @validation.schema(migrate_server.migrate_live_v2_68, "2.68")
     def _migrate_live(self, req, id, body):
         """Permit admins to (live) migrate a server to a new host."""
         context = req.environ["nova.context"]
@@ -100,7 +117,24 @@ class MigrateServerController(wsgi.Controller):
             disk_over_commit = strutils.bool_from_string(disk_over_commit,
                                                          strict=True)
 
-        instance = common.get_instance(self.compute_api, context, id)
+        # NOTE(stephenfin): we need 'numa_topology' because of the
+        # 'LiveMigrationTask._check_instance_has_no_numa' check in the
+        # conductor
+        instance = common.get_instance(self.compute_api, context, id,
+                                       expected_attrs=['numa_topology'])
+
+        # We could potentially move this check to conductor and avoid the
+        # extra API call to neutron when we support move operations with ports
+        # having resource requests.
+        if (common.instance_has_port_with_resource_request(
+                    context, instance.uuid, self.network_api) and not
+                common.supports_port_resource_request_during_move(req)):
+            msg = _("The os-migrateLive action on a server with ports having "
+                    "resource requests, like a port with a QoS minimum "
+                    "bandwidth policy, is not supported with this "
+                    "microversion")
+            raise exc.HTTPBadRequest(explanation=msg)
+
         try:
             self.compute_api.live_migrate(context, instance, block_migration,
                                           disk_over_commit, host, force,

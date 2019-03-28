@@ -22,6 +22,7 @@ import datetime
 
 import mock
 from oslo_serialization import jsonutils
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import versionutils
 import six
 
@@ -39,7 +40,6 @@ from nova import test
 from nova.tests import fixtures
 from nova.tests.unit import fake_instance
 from nova.tests.unit.scheduler import fakes
-from nova.tests import uuidsentinel as uuids
 
 
 class FakeFilterClass1(filters.BaseHostFilter):
@@ -1039,7 +1039,7 @@ class HostManagerTestCase(test.NoDBTestCase):
             uuids.cell1: ([mock.MagicMock(host='a'), mock.MagicMock(host='b')],
                           [mock.sentinel.c1n1, mock.sentinel.c1n2]),
             uuids.cell2: nova_context.did_not_respond_sentinel,
-            uuids.cell3: nova_context.raised_exception_sentinel,
+            uuids.cell3: exception.ComputeHostNotFound(host='c'),
         }
         context = nova_context.RequestContext('fake', 'fake')
         cns, srv = self.host_manager._get_computes_for_cells(context, [])
@@ -1057,12 +1057,6 @@ class HostManagerChangedNodesTestCase(test.NoDBTestCase):
     def setUp(self, mock_init_agg, mock_init_inst):
         super(HostManagerChangedNodesTestCase, self).setUp()
         self.host_manager = host_manager.HostManager()
-        self.fake_hosts = [
-              host_manager.HostState('host1', 'node1', uuids.cell),
-              host_manager.HostState('host2', 'node2', uuids.cell),
-              host_manager.HostState('host3', 'node3', uuids.cell),
-              host_manager.HostState('host4', 'node4', uuids.cell)
-            ]
 
     @mock.patch('nova.objects.ServiceList.get_by_binary')
     @mock.patch('nova.objects.ComputeNodeList.get_all')

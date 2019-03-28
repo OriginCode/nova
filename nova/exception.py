@@ -23,6 +23,7 @@ SHOULD include dedicated exception logging.
 """
 
 from oslo_log import log as logging
+import six
 
 import webob.exc
 from webob import util as woutil
@@ -77,15 +78,16 @@ class NovaException(Exception):
             except AttributeError:
                 pass
 
-        if not message:
-            try:
+        try:
+            if not message:
                 message = self.msg_fmt % kwargs
-
-            except Exception:
-                # NOTE(melwitt): This is done in a separate method so it can be
-                # monkey-patched during testing to make it a hard failure.
-                self._log_exception()
-                message = self.msg_fmt
+            else:
+                message = six.text_type(message)
+        except Exception:
+            # NOTE(melwitt): This is done in a separate method so it can be
+            # monkey-patched during testing to make it a hard failure.
+            self._log_exception()
+            message = self.msg_fmt
 
         self.message = message
         super(NovaException, self).__init__(message)
@@ -242,6 +244,12 @@ class InvalidBDMVolumeNotBootable(InvalidBDM):
     msg_fmt = _("Block Device %(id)s is not bootable.")
 
 
+class TooManyDiskDevices(InvalidBDM):
+    msg_fmt = _('The maximum allowed number of disk devices (%(maximum)d) to '
+                'attach to a single instance has been exceeded.')
+    code = 403
+
+
 class InvalidAttribute(Invalid):
     msg_fmt = _("Attribute not supported: %(attr)s")
 
@@ -281,6 +289,14 @@ class MultiattachSupportNotYetAvailable(NovaException):
 class MultiattachNotSupportedOldMicroversion(Invalid):
     msg_fmt = _('Multiattach volumes are only supported starting with '
                 'compute API version 2.60.')
+
+
+class VolumeTypeSupportNotYetAvailable(NovaException):
+    # This exception indicates the deployment is not yet new enough to support
+    # volume type, so a 409 HTTPConflict response is generally used
+    # for handling this in the API.
+    msg_fmt = _("Volume type support is not yet available.")
+    code = 409
 
 
 class MultiattachToShelvedNotSupported(Invalid):
@@ -629,6 +645,10 @@ class VolumeAttachmentNotFound(NotFound):
 
 class VolumeNotFound(NotFound):
     msg_fmt = _("Volume %(volume_id)s could not be found.")
+
+
+class VolumeTypeNotFound(NotFound):
+    msg_fmt = _("Volume type %(id_or_name)s could not be found.")
 
 
 class UndefinedRootBDM(NovaException):
@@ -1784,6 +1804,11 @@ class PciConfigInvalidWhitelist(Invalid):
     msg_fmt = _("Invalid PCI devices Whitelist config: %(reason)s")
 
 
+class PciRequestFromVIFNotFound(NotFound):
+    msg_fmt = _("Failed to locate PCI request associated with the given VIF "
+                "PCI address: %(pci_slot)s on compute node: %(node_id)s")
+
+
 # Cannot be templated, msg needs to be constructed when raised.
 class InternalError(NovaException):
     """Generic hypervisor errors.
@@ -2129,6 +2154,22 @@ class AttachInterfaceNotSupported(Invalid):
                 "instance %(instance_uuid)s.")
 
 
+class AttachInterfaceWithQoSPolicyNotSupported(AttachInterfaceNotSupported):
+    msg_fmt = _("Attaching interfaces with QoS policy is not supported for "
+                "instance %(instance_uuid)s.")
+
+
+class NetworksWithQoSPolicyNotSupported(Invalid):
+    msg_fmt = _("Using networks with QoS policy is not supported for "
+                "instance %(instance_uuid)s. (Network ID is %(network_id)s)")
+
+
+class CreateWithPortResourceRequestOldVersion(Invalid):
+    msg_fmt = _("Creating servers with ports having resource requests, like a "
+                "port with a QoS minimum bandwidth policy, is not supported "
+                "until microversion 2.72.")
+
+
 class InvalidReservedMemoryPagesOption(Invalid):
     msg_fmt = _("The format of the option 'reserved_huge_pages' is invalid. "
                 "(found '%(conf)s') Please refer to the nova "
@@ -2213,10 +2254,7 @@ class InvalidInventory(Invalid):
 # An exception with this name is used on both sides of the placement/
 # nova interaction.
 class InventoryInUse(InvalidInventory):
-    # NOTE(mriedem): This message cannot change without impacting the
-    # nova.scheduler.client.report._RE_INV_IN_USE regex.
-    msg_fmt = _("Inventory for '%(resource_classes)s' on "
-                "resource provider '%(resource_provider)s' in use.")
+    pass
 
 
 class UnsupportedPointerModelRequested(Invalid):
@@ -2241,6 +2279,16 @@ class NeutronAdminCredentialConfigurationInvalid(Invalid):
 
 class InvalidEmulatorThreadsPolicy(Invalid):
     msg_fmt = _("CPU emulator threads option requested is invalid, "
+                "given: '%(requested)s', available: '%(available)s'.")
+
+
+class InvalidCPUAllocationPolicy(Invalid):
+    msg_fmt = _("CPU policy requested from '%(source)s' is invalid, "
+                "given: '%(requested)s', available: '%(available)s'.")
+
+
+class InvalidCPUThreadAllocationPolicy(Invalid):
+    msg_fmt = _("CPU thread policy requested from '%(source)s' is invalid, "
                 "given: '%(requested)s', available: '%(available)s'.")
 
 
@@ -2277,6 +2325,11 @@ class CannotMigrateToSameHost(NovaException):
 
 class VirtDriverNotReady(NovaException):
     msg_fmt = _("Virt driver is not ready.")
+
+
+class InvalidPeerList(NovaException):
+    msg_fmt = _("Configured nova-compute peer list for the ironic virt "
+                "driver is invalid on host %(host)s")
 
 
 class InstanceDiskMappingFailed(NovaException):
@@ -2318,7 +2371,18 @@ class AllocationCreateFailed(NovaException):
 
 
 class AllocationUpdateFailed(NovaException):
-    msg_fmt = _('Failed to update allocations for instance %(instance)s. '
+    msg_fmt = _('Failed to update allocations for consumer %(consumer_uuid)s. '
+                'Error: %(error)s')
+
+
+class AllocationMoveFailed(NovaException):
+    msg_fmt = _('Failed to move allocations from consumer %(source_consumer)s '
+                'to consumer %(target_consumer)s. '
+                'Error: %(error)s')
+
+
+class AllocationDeleteFailed(NovaException):
+    msg_fmt = _('Failed to delete allocations for consumer %(consumer_uuid)s. '
                 'Error: %(error)s')
 
 
@@ -2370,3 +2434,27 @@ class ZVMConnectorError(ZVMDriverException):
         self.rc = results.get('rc')
         self.rs = results.get('rs')
         self.errmsg = results.get('errmsg')
+
+
+class NoResourceClass(NovaException):
+    msg_fmt = _("Resource class not found for Ironic node %(node)s.")
+
+
+class ResourceProviderAllocationRetrievalFailed(NovaException):
+    msg_fmt = _("Failed to retrieve allocations for resource provider "
+                "%(rp_uuid)s: %(error)s")
+
+
+class ConsumerAllocationRetrievalFailed(NovaException):
+    msg_fmt = _("Failed to retrieve allocations for consumer "
+                "%(consumer_uuid)s: %(error)s")
+
+
+class ReshapeFailed(NovaException):
+    msg_fmt = _("Resource provider inventory and allocation data migration "
+                "failed: %(error)s")
+
+
+class ReshapeNeeded(NovaException):
+    msg_fmt = _("Virt driver indicates that provider inventories need to be "
+                "moved.")

@@ -203,7 +203,7 @@ def stub_out_nw_api(test, cls=None, private=None, publics=None):
 
         def create_resource_requests(self, context, requested_networks,
                                      pci_requests):
-            pass
+            return None, []
 
     if cls is None:
         cls = Fake
@@ -364,7 +364,7 @@ def fake_instance_get(**kwargs):
 
 
 def fake_compute_get(**kwargs):
-    def _return_server_obj(context, uuid, expected_attrs=None):
+    def _return_server_obj(context, *a, **kw):
         return stub_instance_obj(context, **kwargs)
     return _return_server_obj
 
@@ -418,7 +418,8 @@ def fake_instance_get_all_by_filters(num_servers=5, **kwargs):
 def fake_compute_get_all(num_servers=5, **kwargs):
     def _return_servers_objs(context, search_opts=None, limit=None,
                              marker=None, expected_attrs=None, sort_keys=None,
-                             sort_dirs=None):
+                             sort_dirs=None, cell_down_support=False,
+                             all_tenants=False):
         db_insts = fake_instance_get_all_by_filters()(None,
                                                       limit=limit,
                                                       marker=marker)

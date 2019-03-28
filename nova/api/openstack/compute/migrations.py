@@ -20,6 +20,7 @@ from nova.api.openstack import wsgi
 from nova.api import validation
 from nova import compute
 from nova import exception
+from nova.i18n import _
 from nova.objects import base as obj_base
 from nova.policies import migrations as migrations_policies
 
@@ -75,7 +76,7 @@ class MigrationsController(wsgi.Controller):
 
     def _index(self, req, add_link=False, next_link=False, add_uuid=False,
                sort_dirs=None, sort_keys=None, limit=None, marker=None,
-               allow_changes_since=False):
+               allow_changes_since=False, allow_changes_before=False):
         context = req.environ['nova.context']
         context.can(migrations_policies.POLICY_ROOT % 'index')
         search_opts = {}
@@ -91,6 +92,23 @@ class MigrationsController(wsgi.Controller):
                 # 2.59 and filter by the updated_at field if we don't remove
                 # it from search_opts.
                 del search_opts['changes-since']
+
+        if 'changes-before' in search_opts:
+            if allow_changes_before:
+                search_opts['changes-before'] = timeutils.parse_isotime(
+                    search_opts['changes-before'])
+                changes_since = search_opts.get('changes-since')
+                if (changes_since and search_opts['changes-before'] <
+                        search_opts['changes-since']):
+                    msg = _('The value of changes-since must be less than '
+                            'or equal to changes-before.')
+                    raise exc.HTTPBadRequest(explanation=msg)
+            else:
+                # Before microversion 2.59 the schema allowed
+                # additionalProperties=True, so a user could pass
+                # changes-before before 2.59 and filter by the updated_at
+                # field if we don't remove it from search_opts.
+                del search_opts['changes-before']
 
         if sort_keys:
             try:
@@ -129,10 +147,10 @@ class MigrationsController(wsgi.Controller):
         """Return all migrations using the query parameters as filters."""
         return self._index(req, add_link=True)
 
-    @wsgi.Controller.api_version("2.59")  # noqa
+    @wsgi.Controller.api_version("2.59", "2.65")  # noqa
     @wsgi.expected_errors(400)
     @validation.query_schema(schema_migrations.list_query_params_v259,
-                             "2.59")
+                             "2.59", "2.65")
     def index(self, req):
         """Return all migrations using the query parameters as filters."""
         limit, marker = common.get_limit_and_marker(req)
@@ -141,3 +159,17 @@ class MigrationsController(wsgi.Controller):
                            sort_dirs=['desc', 'desc'],
                            limit=limit, marker=marker,
                            allow_changes_since=True)
+
+    @wsgi.Controller.api_version("2.66")  # noqa
+    @wsgi.expected_errors(400)
+    @validation.query_schema(schema_migrations.list_query_params_v266,
+                             "2.66")
+    def index(self, req):
+        """Return all migrations using the query parameters as filters."""
+        limit, marker = common.get_limit_and_marker(req)
+        return self._index(req, add_link=True, next_link=True, add_uuid=True,
+                           sort_keys=['created_at', 'id'],
+                           sort_dirs=['desc', 'desc'],
+                           limit=limit, marker=marker,
+                           allow_changes_since=True,
+                           allow_changes_before=True)

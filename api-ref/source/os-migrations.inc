@@ -17,6 +17,9 @@ Policy defaults enable only users with the administrative role to perform
 this operation. Cloud providers can change these permissions through the
 ``policy.json`` file.
 
+Starting from microversion 2.59, the response is sorted by ``created_at``
+and ``id`` in descending order.
+
 Normal response codes: 200
 
 Error response codes: badRequest(400), unauthorized(401), forbidden(403)
@@ -35,12 +38,14 @@ Request
   - limit: migration_limit
   - marker: migration_marker
   - changes-since: changes_since_migration
+  - changes-before: changes_before_migration
 
 Response
 --------
 
 .. rest_parameters:: parameters.yaml
 
+  - migrations: migrations
   - created_at: created
   - dest_compute: migrate_dest_compute
   - dest_host: migrate_dest_host

@@ -83,7 +83,7 @@ same time.
    * Several nova services rely on the external placement service being at the
      latest level. Therefore, you must upgrade placement before any nova
      services. See the
-     :ref:`placement upgrade notes <placement-upgrade-notes>` for more
+     :placement-doc:`placement upgrade notes <#upgrade-notes>` for more
      details on upgrading the placement service.
 
    * For maximum safety (no failed API operations), gracefully shutdown all
@@ -188,6 +188,7 @@ code has been upgraded.
   to list and iterate over cell mapping records, which require a
   functioning API database schema.
 
+.. _data-migrations:
 
 Data Migrations
 '''''''''''''''''
@@ -277,10 +278,6 @@ RPC version pinning
     https://wiki.openstack.org/wiki/RpcMajorVersionUpdates
 
     .. note::
-
-      This does not apply to cells v1 deployments since cells v1 does not
-      support rolling upgrades. It is assumed that cells v1 deployments are
-      upgraded in lockstep so n-1 cells compatibility does not work.
 
       The procedure for rolling upgrades with multiple cells v2 cells is not
       yet determined.

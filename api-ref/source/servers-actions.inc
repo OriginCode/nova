@@ -10,11 +10,9 @@ in the request body.
 
 You can associate a fixed or floating IP address with a server,
 or disassociate a fixed or floating IP address from a server.
-You can attach a volume to a server.
 
 You can create an image from a server, create a backup of a server,
-evacuate a server from a failed host to a new host, and force-delete a
-server before deferred cleanup.
+and force-delete a server before deferred cleanup.
 You can lock, pause, reboot, rebuild, rescue, resize, resume, confirm
 the resize of, revert a pending resize for, shelve, shelf-offload,
 unshelve, start, stop, unlock, unpause, and unrescue a server. You can
@@ -285,9 +283,28 @@ image in the image back end that OpenStack Image service manages.
 The server must exist.
 
 You can only create a new image from the server when its status is ``ACTIVE``,
-``SHUTOFF``, ``PAUSED``, or ``SUSPENDED``.
+``SHUTOFF``, ``SUSPENDED`` or ``PAUSED``
+(``PAUSED`` is only supported for image-backed servers).
 
-The connection to the Image service is valid.
+The project must have sufficient volume snapshot quota in the block storage
+service when the server has attached volumes.
+If the project does not have sufficient volume snapshot quota,
+the API returns a 403 error.
+
+**Asynchronous Postconditions**
+
+A snapshot image will be created in the Image service.
+
+In the image-backed server case, volume snapshots of attached volumes will not
+be created.
+In the volume-backed server case,
+volume snapshots will be created for all volumes attached to the server and
+then those will be represented with a ``block_device_mapping`` image property
+in the resulting snapshot image in the Image service.
+If that snapshot image is used later to create a new server,
+it will result in a volume-backed server where the root volume is created
+from the snapshot of the original root volume. The volumes created from
+the snapshots of the original other volumes will be attached to the server.
 
 **Troubleshooting**
 
@@ -349,9 +366,30 @@ Locks a server.
 
 Specify the ``lock`` action in the request body.
 
+Most actions by non-admin users are not allowed to the server
+after this operation is successful and the server is locked.
+See the "Lock, Unlock" item in `Server actions
+<https://developer.openstack.org/api-guide/compute/server_concepts.html#server-actions>`_
+for the restricted actions.
+But administrators can perform actions on the server
+even though the server is locked.
+
+The `unlock action
+<https://developer.openstack.org/api-ref/compute/#unlock-server-unlock-action>`_
+will unlock a server in locked state so additional actions can
+be performed on the server by non-admin users.
+
+You can know whether a server is locked or not
+by the `List Servers Detailed API
+<https://developer.openstack.org/api-ref/compute/#list-servers-detailed>`_
+or
+the `Show Server Details API
+<https://developer.openstack.org/api-ref/compute/#show-server-details>`_.
+
 Policy defaults enable only users with the administrative role or
 the owner of the server to perform this operation. Cloud providers
 can change these permissions through the ``policy.json`` file.
+Administrators can overwrite owner's lock.
 
 Normal response codes: 202
 
@@ -575,6 +613,7 @@ Response
   - key_name: key_name_rebuild_resp
   - user_data: user_data_rebuild_resp
   - trusted_image_certificates: server_trusted_image_certificates_resp
+  - server_groups: server_groups_2_71
 
 **Example Rebuild Server (rebuild Action) (v2.63)**
 

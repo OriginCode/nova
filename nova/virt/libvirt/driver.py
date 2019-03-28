@@ -29,6 +29,7 @@ import binascii
 import collections
 from collections import deque
 import contextlib
+import copy
 import errno
 import functools
 import glob
@@ -52,6 +53,7 @@ from os_brick import encryptors
 from os_brick.encryptors import luks as luks_encryptor
 from os_brick import exception as brick_exception
 from os_brick.initiator import connector
+import os_resource_classes as orc
 from oslo_concurrency import processutils
 from oslo_log import log as logging
 from oslo_serialization import base64
@@ -87,13 +89,11 @@ from nova.network import model as network_model
 from nova import objects
 from nova.objects import diagnostics as diagnostics_obj
 from nova.objects import fields
-from nova.objects import migrate_data as migrate_data_obj
 from nova.pci import manager as pci_manager
 from nova.pci import utils as pci_utils
 import nova.privsep.libvirt
 import nova.privsep.path
 import nova.privsep.utils
-from nova import rc_fields
 from nova import utils
 from nova import version
 from nova.virt import block_device as driver_block_device
@@ -220,32 +220,19 @@ patch_tpool_proxy()
 # versions. Over time, this will become a common min version
 # for all architectures/hypervisors, as this value rises to
 # meet them.
-MIN_LIBVIRT_VERSION = (1, 3, 1)
-MIN_QEMU_VERSION = (2, 5, 0)
+MIN_LIBVIRT_VERSION = (3, 0, 0)
+MIN_QEMU_VERSION = (2, 8, 0)
 # TODO(berrange): Re-evaluate this at start of each release cycle
 # to decide if we want to plan a future min version bump.
 # MIN_LIBVIRT_VERSION can be updated to match this after
 # NEXT_MIN_LIBVIRT_VERSION  has been at a higher value for
 # one cycle
-NEXT_MIN_LIBVIRT_VERSION = (3, 0, 0)
-NEXT_MIN_QEMU_VERSION = (2, 8, 0)
+NEXT_MIN_LIBVIRT_VERSION = (4, 0, 0)
+NEXT_MIN_QEMU_VERSION = (2, 11, 0)
 
 
 # Virtuozzo driver support
 MIN_VIRTUOZZO_VERSION = (7, 0, 0)
-
-# Ability to set the user guest password with parallels
-MIN_LIBVIRT_PARALLELS_SET_ADMIN_PASSWD = (2, 0, 0)
-
-# libvirt < 1.3 reported virt_functions capability
-# only when VFs are enabled.
-# libvirt 1.3 fix f391889f4e942e22b9ef8ecca492de05106ce41e
-MIN_LIBVIRT_PF_WITH_NO_VFS_CAP_VERSION = (1, 3, 0)
-
-# Use the "logd" backend for handling stdout/stderr from QEMU processes.
-MIN_LIBVIRT_VIRTLOGD = (1, 3, 3)
-MIN_QEMU_VIRTLOGD = (2, 7, 0)
-
 
 # aarch64 architecture with KVM
 # 'chardev' support got sorted out in 3.6.0
@@ -279,7 +266,7 @@ PERF_EVENTS_CPU_FLAG_MAPPING = {'cmt': 'cmt',
 # Mediated devices support
 MIN_LIBVIRT_MDEV_SUPPORT = (3, 4, 0)
 
-# libvirt>=3.10 is required for volume multiattach if qemu<2.10.
+# libvirt>=3.10 is required for volume multiattach unless qemu<2.10.
 # See https://bugzilla.redhat.com/show_bug.cgi?id=1378242
 # for details.
 MIN_LIBVIRT_MULTIATTACH = (3, 10, 0)
@@ -293,26 +280,32 @@ MIN_QEMU_FILE_BACKED_VERSION = (2, 6, 0)
 MIN_LIBVIRT_FILE_BACKED_DISCARD_VERSION = (4, 4, 0)
 MIN_QEMU_FILE_BACKED_DISCARD_VERSION = (2, 10, 0)
 
+MIN_LIBVIRT_NATIVE_TLS_VERSION = (4, 4, 0)
+MIN_QEMU_NATIVE_TLS_VERSION = (2, 11, 0)
+
 VGPU_RESOURCE_SEMAPHORE = "vgpu_resources"
 
 
 class LibvirtDriver(driver.ComputeDriver):
-    capabilities = {
-        "has_imagecache": True,
-        "supports_evacuate": True,
-        "supports_migrate_to_same_host": False,
-        "supports_attach_interface": True,
-        "supports_device_tagging": True,
-        "supports_tagged_attach_interface": True,
-        "supports_tagged_attach_volume": True,
-        "supports_extend_volume": True,
-        # Multiattach support is conditional on qemu and libvirt versions
-        # determined in init_host.
-        "supports_multiattach": False,
-        "supports_trusted_certs": True,
-    }
-
     def __init__(self, virtapi, read_only=False):
+        # NOTE(aspiers) Some of these are dynamic, so putting
+        # capabilities on the instance rather than on the class.
+        # This prevents the risk of one test setting a capability
+        # which bleeds over into other tests.
+        self.capabilities = {
+            "has_imagecache": True,
+            "supports_evacuate": True,
+            "supports_migrate_to_same_host": False,
+            "supports_attach_interface": True,
+            "supports_device_tagging": True,
+            "supports_tagged_attach_interface": True,
+            "supports_tagged_attach_volume": True,
+            "supports_extend_volume": True,
+            # Multiattach support is conditional on qemu and libvirt versions
+            # determined in init_host.
+            "supports_multiattach": False,
+            "supports_trusted_certs": True,
+        }
         super(LibvirtDriver, self).__init__(virtapi)
 
         global libvirt
@@ -368,6 +361,9 @@ class LibvirtDriver(driver.ComputeDriver):
         self._volume_api = cinder.API()
         self._image_api = image.API()
 
+        # The default choice for the sysinfo_serial config option is "unique"
+        # which does not have a special function since the value is just the
+        # instance.uuid.
         sysinfo_serial_funcs = {
             'none': lambda: None,
             'hardware': self._get_host_sysinfo_serial_hardware,
@@ -388,6 +384,12 @@ class LibvirtDriver(driver.ComputeDriver):
         # beginning to ensure any syntax error will be reported and
         # avoid any re-calculation when computing resources.
         self._reserved_hugepages = hardware.numa_get_reserved_huge_pages()
+
+        # Copy of the compute service ProviderTree object that is updated
+        # every time update_provider_tree() is called.
+        # NOTE(sbauza): We only want a read-only cache, this attribute is not
+        # intended to be updatable directly
+        self.provider_tree = None
 
     def _get_volume_drivers(self):
         driver_registry = dict()
@@ -548,6 +550,20 @@ class LibvirtDriver(driver.ComputeDriver):
                  'libvirt_ver': libvirt_utils.version_to_string(
                      MIN_LIBVIRT_OTHER_ARCH.get(kvm_arch))})
 
+        # Allowing both "tunnelling via libvirtd" (which will be
+        # deprecated once the MIN_{LIBVIRT,QEMU}_VERSION is sufficiently
+        # new enough) and "native TLS" options at the same time is
+        # nonsensical.
+        if (CONF.libvirt.live_migration_tunnelled and
+            CONF.libvirt.live_migration_with_native_tls):
+                msg = _("Setting both 'live_migration_tunnelled' and "
+                        "'live_migration_with_native_tls' at the same "
+                        "time is invalid. If you have the relevant "
+                        "libvirt and QEMU versions, and TLS configured "
+                        "in your environment, pick "
+                        "'live_migration_with_native_tls'.")
+                raise exception.Invalid(msg)
+
         # TODO(sbauza): Remove this code once mediated devices are persisted
         # across reboots.
         if self._host.has_min_version(MIN_LIBVIRT_MDEV_SUPPORT):
@@ -567,6 +583,10 @@ class LibvirtDriver(driver.ComputeDriver):
         """Recreate assigned mdevs that could have disappeared if we reboot
         the host.
         """
+        # FIXME(sbauza): We blindly recreate mediated devices without checking
+        # which ResourceProvider was allocated for the instance so it would use
+        # another pGPU.
+        # TODO(sbauza): Pass all instances' allocations here.
         mdevs = self._get_all_assigned_mediated_devices()
         requested_types = self._get_supported_vgpu_types()
         for (mdev_uuid, instance_uuid) in six.iteritems(mdevs):
@@ -643,17 +663,37 @@ class LibvirtDriver(driver.ComputeDriver):
 
         return (live_migration_flags, block_migration_flags)
 
+    # TODO(kchamart) Once the MIN_LIBVIRT_VERSION and MIN_QEMU_VERSION
+    # reach 4.4.0 and 2.11.0, which provide "native TLS" support by
+    # default, deprecate and remove the support for "tunnelled live
+    # migration" (and related config attribute), because:
+    #
+    #  (a) it cannot handle live migration of disks in a non-shared
+    #      storage setup (a.k.a. "block migration");
+    #
+    #  (b) has a huge performance overhead and latency, because it burns
+    #      more CPU and memory bandwidth due to increased number of data
+    #      copies on both source and destination hosts.
+    #
+    # Both the above limitations are addressed by the QEMU-native TLS
+    # support (`live_migration_with_native_tls`).
     def _handle_live_migration_tunnelled(self, migration_flags):
         if CONF.libvirt.live_migration_tunnelled:
             migration_flags |= libvirt.VIR_MIGRATE_TUNNELLED
         return migration_flags
 
+    def _is_native_tls_available(self):
+        return self._host.has_min_version(MIN_LIBVIRT_NATIVE_TLS_VERSION,
+                                          MIN_QEMU_NATIVE_TLS_VERSION)
+
+    def _handle_native_tls(self, migration_flags):
+        if (CONF.libvirt.live_migration_with_native_tls and
+                self._is_native_tls_available()):
+            migration_flags |= libvirt.VIR_MIGRATE_TLS
+        return migration_flags
+
     def _is_post_copy_available(self):
         return self._host.has_min_version(lv_ver=MIN_LIBVIRT_POSTCOPY_VERSION)
-
-    def _is_virtlogd_available(self):
-        return self._host.has_min_version(MIN_LIBVIRT_VIRTLOGD,
-                                          MIN_QEMU_VIRTLOGD)
 
     def _is_native_luks_available(self):
         return self._host.has_min_version(MIN_LIBVIRT_LUKS_VERSION,
@@ -685,6 +725,11 @@ class LibvirtDriver(driver.ComputeDriver):
         live_migration_flags = self._handle_live_migration_tunnelled(
             live_migration_flags)
         block_migration_flags = self._handle_live_migration_tunnelled(
+            block_migration_flags)
+
+        live_migration_flags = self._handle_native_tls(
+            live_migration_flags)
+        block_migration_flags = self._handle_native_tls(
             block_migration_flags)
 
         live_migration_flags = self._handle_live_migration_post_copy(
@@ -1069,7 +1114,16 @@ class LibvirtDriver(driver.ComputeDriver):
         is_shared_block_storage = False
         if migrate_data and 'is_shared_block_storage' in migrate_data:
             is_shared_block_storage = migrate_data.is_shared_block_storage
-        if destroy_disks or is_shared_block_storage:
+        # NOTE(lyarwood): The following workaround allows operators to ensure
+        # that non-shared instance directories are removed after an evacuation
+        # or revert resize when using the shared RBD imagebackend. This
+        # workaround is not required when cleaning up migrations that provide
+        # migrate_data to this method as the existing is_shared_block_storage
+        # conditional will cause the instance directory to be removed.
+        if ((destroy_disks or is_shared_block_storage) or
+            (CONF.workarounds.ensure_libvirt_rbd_instance_dir_cleanup and
+             CONF.libvirt.images_type == 'rbd')):
+
             attempts = int(instance.system_metadata.get('clean_attempts',
                                                         '0'))
             success = self.delete_instance_files(instance)
@@ -1271,9 +1325,10 @@ class LibvirtDriver(driver.ComputeDriver):
                      driver_block_device.get_volume_id(connection_info),
                      instance=instance)
 
-    def _extend_volume(self, connection_info, instance):
+    def _extend_volume(self, connection_info, instance, requested_size):
         vol_driver = self._get_volume_driver(connection_info)
-        return vol_driver.extend_volume(connection_info, instance)
+        return vol_driver.extend_volume(connection_info, instance,
+                                        requested_size)
 
     def _use_native_luks(self, encryption=None):
         """Is LUKS the required provider and native QEMU LUKS available
@@ -1623,9 +1678,10 @@ class LibvirtDriver(driver.ComputeDriver):
         self._disconnect_volume(context, connection_info, instance,
                                 encryption=encryption)
 
-    def extend_volume(self, connection_info, instance):
+    def extend_volume(self, connection_info, instance, requested_size):
         try:
-            new_size = self._extend_volume(connection_info, instance)
+            new_size = self._extend_volume(connection_info, instance,
+                                           requested_size)
         except NotImplementedError:
             raise exception.ExtendVolumeNotSupported()
 
@@ -1636,7 +1692,22 @@ class LibvirtDriver(driver.ComputeDriver):
             state = guest.get_power_state(self._host)
             active_state = state in (power_state.RUNNING, power_state.PAUSED)
             if active_state:
-                disk_path = connection_info['data']['device_path']
+                if 'device_path' in connection_info['data']:
+                    disk_path = connection_info['data']['device_path']
+                else:
+                    # Some drivers (eg. net) don't put the device_path
+                    # into the connection_info. Match disks by their serial
+                    # number instead
+                    volume_id = driver_block_device.get_volume_id(
+                        connection_info)
+                    disk = next(iter([
+                        d for d in guest.get_all_disks()
+                        if d.serial == volume_id
+                    ]), None)
+                    if not disk:
+                        raise exception.VolumeNotFound(volume_id=volume_id)
+                    disk_path = disk.target_dev
+
                 LOG.debug('resizing block device %(dev)s to %(size)u kb',
                           {'dev': disk_path, 'size': new_size})
                 dev = guest.get_block_device(disk_path)
@@ -1778,8 +1849,7 @@ class LibvirtDriver(driver.ComputeDriver):
 
     def _create_snapshot_metadata(self, image_meta, instance,
                                   img_fmt, snp_name):
-        metadata = {'is_public': False,
-                    'status': 'active',
+        metadata = {'status': 'active',
                     'name': snp_name,
                     'properties': {
                                    'kernel_id': instance.kernel_id,
@@ -1972,10 +2042,12 @@ class LibvirtDriver(driver.ComputeDriver):
                 update_task_state(task_state=task_states.IMAGE_UPLOADING,
                         expected_state=task_states.IMAGE_PENDING_UPLOAD)
                 with libvirt_utils.file_open(out_path, 'rb') as image_file:
-                    self._image_api.update(context,
-                                           image_id,
-                                           metadata,
-                                           image_file)
+                    # execute operation with disk concurrency semaphore
+                    with compute_utils.disk_ops_semaphore:
+                        self._image_api.update(context,
+                                               image_id,
+                                               metadata,
+                                               image_file)
         except Exception:
             with excutils.save_and_reraise_exception():
                 LOG.exception(_("Failed to snapshot image"))
@@ -2014,14 +2086,10 @@ class LibvirtDriver(driver.ComputeDriver):
 
     def _can_set_admin_password(self, image_meta):
 
-        if CONF.libvirt.virt_type == 'parallels':
-            if not self._host.has_min_version(
-                   MIN_LIBVIRT_PARALLELS_SET_ADMIN_PASSWD):
-                raise exception.SetAdminPasswdNotSupported()
-        elif CONF.libvirt.virt_type in ('kvm', 'qemu'):
+        if CONF.libvirt.virt_type in ('kvm', 'qemu'):
             if not image_meta.properties.get('hw_qemu_guest_agent', False):
                 raise exception.QemuGuestAgentNotEnabled()
-        else:
+        elif not CONF.libvirt.virt_type == 'parallels':
             raise exception.SetAdminPasswdNotSupported()
 
     # TODO(melwitt): Combine this with the similar xenapi code at some point.
@@ -2430,8 +2498,10 @@ class LibvirtDriver(driver.ComputeDriver):
             qemu_img_extra_arg = ['-F', b_file_fmt]
 
         qemu_img_extra_arg.append(active_disk_object.source_path)
-        utils.execute("qemu-img", "rebase", "-b", backing_file,
-                      *qemu_img_extra_arg)
+        # execute operation with disk concurrency semaphore
+        with compute_utils.disk_ops_semaphore:
+            processutils.execute("qemu-img", "rebase", "-b", backing_file,
+                                 *qemu_img_extra_arg)
 
     def _volume_snapshot_delete(self, context, instance, volume_id,
                                 snapshot_id, delete_info=None):
@@ -3120,52 +3190,48 @@ class LibvirtDriver(driver.ComputeDriver):
         xml = guest.get_xml_desc()
         tree = etree.fromstring(xml)
 
-        # If the guest has a console logging to a file prefer to use that
-        file_consoles = tree.findall("./devices/console[@type='file']")
-        if file_consoles:
-            for file_console in file_consoles:
-                source_node = file_console.find('./source')
-                if source_node is None:
-                    continue
-                path = source_node.get("path")
-                if not path:
-                    continue
-
-                if not os.path.exists(path):
-                    LOG.info('Instance is configured with a file console, '
-                             'but the backing file is not (yet?) present',
-                             instance=instance)
-                    return ""
-
-                return self._get_console_output_file(instance, path)
-
-        # Try 'pty' types
-        pty_consoles = tree.findall("./devices/console[@type='pty']")
-        if pty_consoles:
-            for pty_console in pty_consoles:
-                source_node = pty_console.find('./source')
-                if source_node is None:
-                    continue
-                pty = source_node.get("path")
-                if not pty:
-                    continue
+        # check for different types of consoles
+        path_sources = [
+            ('file', "./devices/console[@type='file']/source[@path]", 'path'),
+            ('tcp', "./devices/console[@type='tcp']/log[@file]", 'file'),
+            ('pty', "./devices/console[@type='pty']/source[@path]", 'path')]
+        console_type = ""
+        console_path = ""
+        for c_type, epath, attrib in path_sources:
+            node = tree.find(epath)
+            if (node is not None) and node.get(attrib):
+                console_type = c_type
+                console_path = node.get(attrib)
                 break
-            else:
-                raise exception.ConsoleNotAvailable()
-        else:
+
+        # instance has no console at all
+        if not console_path:
             raise exception.ConsoleNotAvailable()
 
-        console_log = self._get_console_log_path(instance)
-        data = nova.privsep.libvirt.readpty(pty)
+        # instance has a console, but file doesn't exist (yet?)
+        if not os.path.exists(console_path):
+            LOG.info('console logfile for instance does not exist',
+                      instance=instance)
+            return ""
 
-        # NOTE(markus_z): The virt_types kvm and qemu are the only ones
-        # which create a dedicated file device for the console logging.
-        # Other virt_types like xen, lxc, uml, parallels depend on the
-        # flush of that pty device into the "console.log" file to ensure
-        # that a series of "get_console_output" calls return the complete
-        # content even after rebooting a guest.
-        nova.privsep.path.writefile(console_log, 'a+', data)
-        return self._get_console_output_file(instance, console_log)
+        # pty consoles need special handling
+        if console_type == 'pty':
+            console_log = self._get_console_log_path(instance)
+            data = nova.privsep.libvirt.readpty(console_path)
+
+            # NOTE(markus_z): The virt_types kvm and qemu are the only ones
+            # which create a dedicated file device for the console logging.
+            # Other virt_types like xen, lxc, uml, parallels depend on the
+            # flush of that pty device into the "console.log" file to ensure
+            # that a series of "get_console_output" calls return the complete
+            # content even after rebooting a guest.
+            nova.privsep.path.writefile(console_log, 'a+', data)
+
+            # set console path to logfile, not to pty device
+            console_path = console_log
+
+        # return logfile content
+        return self._get_console_output_file(instance, console_path)
 
     def get_host_ip_addr(self):
         ips = compute_utils.get_machine_ips()
@@ -3897,10 +3963,7 @@ class LibvirtDriver(driver.ComputeDriver):
         if 'unit' in disk_mapping and disk_info['bus'] == 'scsi':
             disk_unit = disk_mapping['unit']
             disk_mapping['unit'] += 1  # Increments for the next disk added
-        conf = disk.libvirt_info(disk_info['bus'],
-                                 disk_info['dev'],
-                                 disk_info['type'],
-                                 self.disk_cachemode,
+        conf = disk.libvirt_info(disk_info, self.disk_cachemode,
                                  inst_type['extra_specs'],
                                  self._host.get_version(),
                                  disk_unit=disk_unit)
@@ -4107,7 +4170,10 @@ class LibvirtDriver(driver.ComputeDriver):
         sysinfo.system_product = version.product_string()
         sysinfo.system_version = version.version_string_with_package()
 
-        sysinfo.system_serial = self._sysinfo_serial_func()
+        if CONF.libvirt.sysinfo_serial == 'unique':
+            sysinfo.system_serial = instance.uuid
+        else:
+            sysinfo.system_serial = self._sysinfo_serial_func()
         sysinfo.system_uuid = instance.uuid
 
         sysinfo.system_family = "Virtual Machine"
@@ -4161,28 +4227,22 @@ class LibvirtDriver(driver.ComputeDriver):
 
         return meta
 
-    def _machine_type_mappings(self):
-        mappings = {}
-        for mapping in CONF.libvirt.hw_machine_type:
-            host_arch, _, machine_type = mapping.partition('=')
-            mappings[host_arch] = machine_type
-        return mappings
-
     def _get_machine_type(self, image_meta, caps):
-        # The underlying machine type can be set as an image attribute,
-        # or otherwise based on some architecture specific defaults
-
+        # The guest machine type can be set as an image metadata
+        # property, or otherwise based on architecture-specific
+        # defaults.
         mach_type = None
 
         if image_meta.properties.get('hw_machine_type') is not None:
             mach_type = image_meta.properties.hw_machine_type
         else:
-            # For ARM systems we will default to vexpress-a15 for armv7
-            # and virt for aarch64
-            if caps.host.cpu.arch == fields.Architecture.ARMV7:
-                mach_type = "vexpress-a15"
-
-            if caps.host.cpu.arch == fields.Architecture.AARCH64:
+            # NOTE(kchamart): For ARMv7 and AArch64, use the 'virt'
+            # board as the default machine type.  It is the recommended
+            # board, which is designed to be used with virtual machines.
+            # The 'virt' board is more flexible, supports PCI, 'virtio',
+            # has decent RAM limits, etc.
+            if caps.host.cpu.arch in (fields.Architecture.ARMV7,
+                                      fields.Architecture.AARCH64):
                 mach_type = "virt"
 
             if caps.host.cpu.arch in (fields.Architecture.S390,
@@ -4190,9 +4250,10 @@ class LibvirtDriver(driver.ComputeDriver):
                 mach_type = 's390-ccw-virtio'
 
             # If set in the config, use that as the default.
-            if CONF.libvirt.hw_machine_type:
-                mappings = self._machine_type_mappings()
-                mach_type = mappings.get(caps.host.cpu.arch)
+            mach_type = (
+                libvirt_utils.get_default_machine_type(caps.host.cpu.arch)
+                or mach_type
+            )
 
         return mach_type
 
@@ -4576,6 +4637,7 @@ class LibvirtDriver(driver.ComputeDriver):
         clk.add_timer(tmpit)
         clk.add_timer(tmrtc)
 
+        hpet = image_meta.properties.get('hw_time_hpet', False)
         guestarch = libvirt_utils.get_arch(image_meta)
         if guestarch in (fields.Architecture.I686,
                          fields.Architecture.X86_64):
@@ -4583,8 +4645,12 @@ class LibvirtDriver(driver.ComputeDriver):
             # qemu -no-hpet is not supported on non-x86 targets.
             tmhpet = vconfig.LibvirtConfigGuestTimer()
             tmhpet.name = "hpet"
-            tmhpet.present = False
+            tmhpet.present = hpet
             clk.add_timer(tmhpet)
+        else:
+            if hpet:
+                LOG.warning('HPET is not turned on for non-x86 guests in image'
+                            ' %s.', image_meta.id)
 
         # Provide Windows guests with the paravirtualized hyperv timer source.
         # This is the windows equiv of kvm-clock, allowing Windows
@@ -4898,18 +4964,15 @@ class LibvirtDriver(driver.ComputeDriver):
         # NOTE(markus_z): Beware! Below are so many conditionals that it is
         # easy to lose track. Use this chart to figure out your case:
         #
-        # case | is serial | has       | is qemu | resulting
-        #      | enabled?  | virtlogd? | or kvm? | devices
-        # --------------------------------------------------
-        #    1 |        no |        no |     no  | pty*
-        #    2 |        no |        no |     yes | file + pty
-        #    3 |        no |       yes |      no | see case 1
-        #    4 |        no |       yes |     yes | pty with logd
-        #    5 |       yes |        no |      no | see case 1
-        #    6 |       yes |        no |     yes | tcp + pty
-        #    7 |       yes |       yes |      no | see case 1
-        #    8 |       yes |       yes |     yes | tcp with logd
-        #    * exception: virt_type "parallels" doesn't create a device
+        # case | is serial | is qemu | resulting
+        #      | enabled?  | or kvm? | devices
+        # -------------------------------------------
+        #    1 |        no |     no  | pty*
+        #    2 |        no |     yes | pty with logd
+        #    3 |       yes |      no | see case 1
+        #    4 |       yes |     yes | tcp with logd
+        #
+        #    * exception: `virt_type=parallels` doesn't create a device
         if virt_type == 'parallels':
             pass
         elif virt_type not in ("qemu", "kvm"):
@@ -4941,8 +5004,8 @@ class LibvirtDriver(driver.ComputeDriver):
                 self._create_serial_consoles(guest_cfg, num_ports,
                                              char_dev_cls, log_path)
         else:
-            self._create_file_device(guest_cfg, instance, char_dev_cls)
-        self._create_pty_device(guest_cfg, char_dev_cls, log_path=log_path)
+            self._create_pty_device(guest_cfg, char_dev_cls,
+                                    log_path=log_path)
 
     def _create_consoles_s390x(self, guest_cfg, instance, flavor, image_meta):
         char_dev_cls = vconfig.LibvirtConfigGuestConsole
@@ -4954,56 +5017,21 @@ class LibvirtDriver(driver.ComputeDriver):
                 self._create_serial_consoles(guest_cfg, num_ports,
                                              char_dev_cls, log_path)
         else:
-            self._create_file_device(guest_cfg, instance, char_dev_cls,
-                                     "sclplm")
-        self._create_pty_device(guest_cfg, char_dev_cls, "sclp", log_path)
+            self._create_pty_device(guest_cfg, char_dev_cls,
+                                    "sclp", log_path)
 
     def _create_pty_device(self, guest_cfg, char_dev_cls, target_type=None,
                            log_path=None):
-        def _create_base_dev():
-            consolepty = char_dev_cls()
-            consolepty.target_type = target_type
-            consolepty.type = "pty"
-            return consolepty
 
-        def _create_logd_dev():
-            consolepty = _create_base_dev()
-            log = vconfig.LibvirtConfigGuestCharDeviceLog()
-            log.file = log_path
-            consolepty.log = log
-            return consolepty
+        consolepty = char_dev_cls()
+        consolepty.target_type = target_type
+        consolepty.type = "pty"
 
-        if CONF.serial_console.enabled:
-            if self._is_virtlogd_available():
-                return
-            else:
-                # NOTE(markus_z): You may wonder why this is necessary and
-                # so do I. I'm certain that this is *not* needed in any
-                # real use case. It is, however, useful if you want to
-                # pypass the Nova API and use "virsh console <guest>" on
-                # an hypervisor, as this CLI command doesn't work with TCP
-                # devices (like the serial console is).
-                #     https://bugzilla.redhat.com/show_bug.cgi?id=781467
-                # Pypassing the Nova API however is a thing we don't want.
-                # Future changes should remove this and fix the unit tests
-                # which ask for the existence.
-                guest_cfg.add_device(_create_base_dev())
-        else:
-            if self._is_virtlogd_available():
-                guest_cfg.add_device(_create_logd_dev())
-            else:
-                guest_cfg.add_device(_create_base_dev())
+        log = vconfig.LibvirtConfigGuestCharDeviceLog()
+        log.file = log_path
+        consolepty.log = log
 
-    def _create_file_device(self, guest_cfg, instance, char_dev_cls,
-                            target_type=None):
-        if self._is_virtlogd_available():
-            return
-
-        consolelog = char_dev_cls()
-        consolelog.target_type = target_type
-        consolelog.type = "file"
-        consolelog.source_path = self._get_console_log_path(instance)
-        guest_cfg.add_device(consolelog)
+        guest_cfg.add_device(consolepty)
 
     def _serial_ports_already_defined(self, instance):
         try:
@@ -5030,7 +5058,7 @@ class LibvirtDriver(driver.ComputeDriver):
             console.listen_port = listen_port
             # NOTE: only the first serial console gets the boot messages,
             # that's why we attach the logd subdevice only to that.
-            if port == 0 and self._is_virtlogd_available():
+            if port == 0:
                 log = vconfig.LibvirtConfigGuestCharDeviceLog()
                 log.file = log_path
                 console.log = log
@@ -5117,6 +5145,45 @@ class LibvirtDriver(driver.ComputeDriver):
         for x in range(0, CONF.libvirt.num_pcie_ports):
             pcierootport = vconfig.LibvirtConfigGuestPCIeRootPortController()
             guest.add_device(pcierootport)
+
+    def _guest_needs_pcie(self, guest, caps):
+        """Check for prerequisites for adding PCIe root port
+        controllers
+        """
+
+        # TODO(kchamart) In the third 'if' conditional below, for 'x86'
+        # arch, we're assuming: when 'os_mach_type' is 'None', you'll
+        # have "pc" machine type.  That assumption, although it is
+        # correct for the "forseeable future", it will be invalid when
+        # libvirt / QEMU changes the default machine types.
+        #
+        # From libvirt 4.7.0 onwards (September 2018), it will ensure
+        # that *if* 'pc' is available, it will be used as the default --
+        # to not break existing applications.  (Refer:
+        # https://libvirt.org/git/?p=libvirt.git;a=commit;h=26cfb1a3
+        # --"qemu: ensure default machine types don't change if QEMU
+        # changes").
+        #
+        # But even if libvirt (>=v4.7.0) handled the default case,
+        # relying on such assumptions is not robust.  Instead we should
+        # get the default machine type for a given architecture reliably
+        # -- by Nova setting it explicitly (we already do it for Arm /
+        # AArch64 & s390x).  A part of this bug is being tracked here:
+        # https://bugs.launchpad.net/nova/+bug/1780138).
+
+        # Add PCIe root port controllers for PCI Express machines
+        # but only if their amount is configured
+
+        if not CONF.libvirt.num_pcie_ports:
+            return False
+        if (caps.host.cpu.arch == fields.Architecture.AARCH64
+                and guest.os_mach_type.startswith('virt')):
+            return True
+        if (caps.host.cpu.arch == fields.Architecture.X86_64
+                and guest.os_mach_type is not None
+                and 'q35' in guest.os_mach_type):
+            return True
+        return False
 
     def _guest_add_usb_host_keyboard(self, guest):
         """Add USB Host controller and keyboard for graphical console use.
@@ -5246,14 +5313,7 @@ class LibvirtDriver(driver.ComputeDriver):
         if virt_type in ('qemu', 'kvm'):
             self._set_qemu_guest_agent(guest, flavor, instance, image_meta)
 
-        # Add PCIe root port controllers for PCI Express machines
-        # but only if their amount is configured
-        if (CONF.libvirt.num_pcie_ports and
-                ((caps.host.cpu.arch == fields.Architecture.AARCH64 and
-                guest.os_mach_type.startswith('virt')) or
-                (caps.host.cpu.arch == fields.Architecture.X86_64 and
-                guest.os_mach_type is not None and
-                'q35' in guest.os_mach_type))):
+        if self._guest_needs_pcie(guest, caps):
             self._guest_add_pcie_root_ports(guest)
 
         self._guest_add_pci_devices(guest, instance)
@@ -5434,7 +5494,7 @@ class LibvirtDriver(driver.ComputeDriver):
                   {'xml': xml}, instance=instance)
         return xml
 
-    def get_info(self, instance):
+    def get_info(self, instance, use_cache=True):
         """Retrieve information from libvirt for a specific instance.
 
         If a libvirt error is encountered during lookup, we might raise a
@@ -5442,6 +5502,7 @@ class LibvirtDriver(driver.ComputeDriver):
         libvirt error is.
 
         :param instance: nova.objects.instance.Instance object
+        :param use_cache: unused in this driver
         :returns: An InstanceInfo object
         """
         guest = self._host.get_guest(instance)
@@ -5660,7 +5721,7 @@ class LibvirtDriver(driver.ComputeDriver):
             total_pcpus = self._host.get_cpu_count()
         except libvirt.libvirtError:
             LOG.warning("Cannot get the number of cpu, because this "
-                        "function is not implemented for this platform. ")
+                        "function is not implemented for this platform.")
             return 0
 
         if not CONF.vcpu_pin_set:
@@ -5768,26 +5829,91 @@ class LibvirtDriver(driver.ComputeDriver):
         requested_types = CONF.devices.enabled_vgpu_types[:1]
         return requested_types
 
-    def _get_vgpu_total(self):
-        """Returns the number of total available vGPUs for any GPU type that is
-        enabled with the enabled_vgpu_types CONF option.
+    def _count_mediated_devices(self, enabled_vgpu_types):
+        """Counts the sysfs objects (handles) that represent a mediated device
+        and filtered by $enabled_vgpu_types.
+
+        Those handles can be in use by a libvirt guest or not.
+
+        :param enabled_vgpu_types: list of enabled VGPU types on this host
+        :returns: dict, keyed by parent GPU libvirt PCI device ID, of number of
+        mdev device handles for that GPU
         """
-        requested_types = self._get_supported_vgpu_types()
+
+        counts_per_parent = collections.defaultdict(int)
+        mediated_devices = self._get_mediated_devices(types=enabled_vgpu_types)
+        for mdev in mediated_devices:
+            counts_per_parent[mdev['parent']] += 1
+        return counts_per_parent
+
+    def _count_mdev_capable_devices(self, enabled_vgpu_types):
+        """Counts the mdev-capable devices on this host filtered by
+        $enabled_vgpu_types.
+
+        :param enabled_vgpu_types: list of enabled VGPU types on this host
+        :returns: dict, keyed by device name, to an integer count of available
+            instances of each type per device
+        """
+        mdev_capable_devices = self._get_mdev_capable_devices(
+            types=enabled_vgpu_types)
+        counts_per_dev = collections.defaultdict(int)
+        for dev in mdev_capable_devices:
+            # dev_id is the libvirt name for the PCI device,
+            # eg. pci_0000_84_00_0 which matches a PCI address of 0000:84:00.0
+            dev_name = dev['dev_id']
+            for _type in dev['types']:
+                available = dev['types'][_type]['availableInstances']
+                # TODO(sbauza): Once we support multiple types, check which
+                # PCI devices are set for this type
+                # NOTE(sbauza): Even if we support multiple types, Nova will
+                # only use one per physical GPU.
+                counts_per_dev[dev_name] += available
+        return counts_per_dev
+
+    def _get_gpu_inventories(self):
+        """Returns the inventories for each physical GPU for a specific type
+        supported by the enabled_vgpu_types CONF option.
+
+        :returns: dict, keyed by libvirt PCI name, of dicts like:
+                {'pci_0000_84_00_0':
+                    {'total': $TOTAL,
+                     'min_unit': 1,
+                     'max_unit': $TOTAL,
+                     'step_size': 1,
+                     'reserved': 0,
+                     'allocation_ratio': 1.0,
+                    }
+                }
+        """
+
         # Bail out early if operator doesn't care about providing vGPUs
-        if not requested_types:
-            return 0
+        enabled_vgpu_types = self._get_supported_vgpu_types()
+        if not enabled_vgpu_types:
+            return {}
+        inventories = {}
+        count_per_parent = self._count_mediated_devices(enabled_vgpu_types)
+        for dev_name, count in count_per_parent.items():
+            inventories[dev_name] = {'total': count}
         # Filter how many available mdevs we can create for all the supported
         # types.
-        mdev_capable_devices = self._get_mdev_capable_devices(requested_types)
-        vgpus = 0
-        for dev in mdev_capable_devices:
-            for _type in dev['types']:
-                vgpus += dev['types'][_type]['availableInstances']
-        # Count the already created (but possibly not assigned to a guest)
-        # mdevs for all the supported types
-        mediated_devices = self._get_mediated_devices(requested_types)
-        vgpus += len(mediated_devices)
-        return vgpus
+        count_per_dev = self._count_mdev_capable_devices(enabled_vgpu_types)
+        # Combine the counts into the dict that we return to the caller.
+        for dev_name, count in count_per_dev.items():
+            inv_per_parent = inventories.setdefault(
+                dev_name, {'total': 0})
+            inv_per_parent['total'] += count
+            inv_per_parent.update({
+                'min_unit': 1,
+                'step_size': 1,
+                'reserved': 0,
+                # NOTE(sbauza): There is no sense to have a ratio but 1.0
+                # since we can't overallocate vGPU resources
+                'allocation_ratio': 1.0,
+                # FIXME(sbauza): Some vendors could support only one
+                'max_unit': inv_per_parent['total'],
+            })
+
+        return inventories
 
     def _get_instance_capabilities(self):
         """Get hypervisor instance capabilities
@@ -5807,11 +5933,17 @@ class LibvirtDriver(driver.ComputeDriver):
             for dt in g.domtype:
                 if dt != CONF.libvirt.virt_type:
                     continue
-                instance_cap = (
-                    fields.Architecture.canonicalize(g.arch),
-                    fields.HVType.canonicalize(dt),
-                    fields.VMMode.canonicalize(g.ostype))
-                instance_caps.append(instance_cap)
+                try:
+                    instance_cap = (
+                        fields.Architecture.canonicalize(g.arch),
+                        fields.HVType.canonicalize(dt),
+                        fields.VMMode.canonicalize(g.ostype))
+                    instance_caps.append(instance_cap)
+                except exception.InvalidArchitectureName:
+                    # NOTE(danms): Libvirt is exposing a guest arch that nova
+                    # does not even know about. Avoid aborting here and
+                    # continue to process the rest.
+                    pass
 
         return instance_caps
 
@@ -5884,18 +6016,10 @@ class LibvirtDriver(driver.ComputeDriver):
                     return {
                         'dev_type': fields.PciDeviceType.SRIOV_VF,
                         'parent_addr': phys_address,
+                        'parent_ifname':
+                            pci_utils.get_ifname_by_pci_address(
+                                pci_address, pf_interface=True),
                     }
-
-            # Note(moshele): libvirt < 1.3 reported virt_functions capability
-            # only when VFs are enabled. The check below is a workaround
-            # to get the correct report regardless of whether or not any
-            # VFs are enabled for the device.
-            if not self._host.has_min_version(
-                MIN_LIBVIRT_PF_WITH_NO_VFS_CAP_VERSION):
-                is_physical_function = pci_utils.is_physical_function(
-                    *pci_utils.get_pci_address_fields(pci_address))
-                if is_physical_function:
-                    return {'dev_type': fields.PciDeviceType.SRIOV_PF}
 
             return {'dev_type': fields.PciDeviceType.STANDARD}
 
@@ -5993,6 +6117,7 @@ class LibvirtDriver(driver.ComputeDriver):
         device = {
             "dev_id": cfgdev.name,
             "types": {},
+            "vendor_id": cfgdev.pci_capability.vendor_id,
         }
         for mdev_cap in cfgdev.pci_capability.mdev_capability:
             for cap in mdev_cap.mdev_types:
@@ -6032,7 +6157,9 @@ class LibvirtDriver(driver.ComputeDriver):
         device = {
             "dev_id": cfgdev.name,
             # name is like mdev_00ead764_fdc0_46b6_8db9_2963f5c815b4
-            "uuid": str(uuid.UUID(cfgdev.name[5:].replace('_', '-'))),
+            "uuid": libvirt_utils.mdev_name2uuid(cfgdev.name),
+            # the physical GPU PCI device
+            "parent": cfgdev.parent,
             "type": cfgdev.mdev_information.type,
             "iommu_group": cfgdev.mdev_information.iommu_group,
         }
@@ -6064,6 +6191,8 @@ class LibvirtDriver(driver.ComputeDriver):
 
         :returns: A dictionary of keys being mediated device UUIDs and their
                   respective values the instance UUID of the guest using it.
+                  Returns an empty dict if an instance is provided but not
+                  found in the hypervisor.
         """
         allocated_mdevs = {}
         if instance:
@@ -6100,7 +6229,7 @@ class LibvirtDriver(driver.ComputeDriver):
         if not allocations:
             # If no allocations, there is no vGPU request.
             return {}
-        RC_VGPU = rc_fields.ResourceClass.VGPU
+        RC_VGPU = orc.VGPU
         vgpu_allocations = {}
         for rp in allocations:
             res = allocations[rp]['resources']
@@ -6108,26 +6237,34 @@ class LibvirtDriver(driver.ComputeDriver):
                 vgpu_allocations[rp] = {'resources': {RC_VGPU: res[RC_VGPU]}}
         return vgpu_allocations
 
-    def _get_existing_mdevs_not_assigned(self, requested_types=None):
+    def _get_existing_mdevs_not_assigned(self, requested_types=None,
+                                         parent=None):
         """Returns the already created mediated devices that are not assigned
         to a guest yet.
 
         :param requested_types: Filter out the result for only mediated devices
                                 having those types.
+        :param parent: Filter out result for only mdevs from the parent device.
         """
         allocated_mdevs = self._get_all_assigned_mediated_devices()
         mdevs = self._get_mediated_devices(requested_types)
-        available_mdevs = set([mdev["uuid"]
-                               for mdev in mdevs]) - set(allocated_mdevs)
+        available_mdevs = set()
+        for mdev in mdevs:
+            if parent is None or mdev['parent'] == parent:
+                available_mdevs.add(mdev["uuid"])
+
+        available_mdevs -= set(allocated_mdevs)
         return available_mdevs
 
-    def _create_new_mediated_device(self, requested_types, uuid=None):
+    def _create_new_mediated_device(self, requested_types, uuid=None,
+                                    parent=None):
         """Find a physical device that can support a new mediated device and
         create it.
 
         :param requested_types: Filter only capable devices supporting those
                                 types.
         :param uuid: The possible mdev UUID we want to create again
+        :param parent: Only create a mdev for this device
 
         :returns: the newly created mdev UUID or None if not possible
         """
@@ -6142,6 +6279,11 @@ class LibvirtDriver(driver.ComputeDriver):
             if device['types'][asked_type]['availableInstances'] > 0:
                 # That physical GPU has enough room for a new mdev
                 dev_name = device['dev_id']
+                # the parent attribute can be None
+                if parent is not None and dev_name != parent:
+                    # The device is not the one that was called, not creating
+                    # the mdev
+                    continue
                 # We need the PCI address, not the libvirt name
                 # The libvirt name is like 'pci_0000_84_00_0'
                 pci_addr = "{}:{}:{}.{}".format(*dev_name[4:].split('_'))
@@ -6178,13 +6320,49 @@ class LibvirtDriver(driver.ComputeDriver):
             LOG.warning('More than one allocation was passed over to libvirt '
                         'while at the moment libvirt only supports one. Only '
                         'the first allocation will be looked up.')
-        alloc = six.next(six.itervalues(vgpu_allocations))
-        vgpus_asked = alloc['resources'][rc_fields.ResourceClass.VGPU]
+        rp_uuid, alloc = six.next(six.iteritems(vgpu_allocations))
+        vgpus_asked = alloc['resources'][orc.VGPU]
+
+        # Find if we allocated against a specific pGPU (and then the allocation
+        # is made against a child RP) or any pGPU (in case the VGPU inventory
+        # is still on the root RP)
+        try:
+            allocated_rp = self.provider_tree.data(rp_uuid)
+        except ValueError:
+            # The provider doesn't exist, return a better understandable
+            # exception
+            raise exception.ComputeResourcesUnavailable(
+                reason='vGPU resource is not available')
+        # TODO(sbauza): Remove this conditional in Train once all VGPU
+        # inventories are related to a child RP
+        if allocated_rp.parent_uuid is None:
+            # We are on a root RP
+            parent_device = None
+        else:
+            rp_name = allocated_rp.name
+            # There can be multiple roots, we need to find the root name
+            # to guess the physical device name
+            roots = self.provider_tree.roots
+            for root in roots:
+                if rp_name.startswith(root.name + '_'):
+                    # The RP name convention is :
+                    #    root_name + '_' + parent_device
+                    parent_device = rp_name[len(root.name) + 1:]
+                    break
+            else:
+                LOG.warning("pGPU device name %(name)s can't be guessed from "
+                            "the ProviderTree "
+                            "roots %(roots)s", {'name': rp_name,
+                                                 'roots': roots})
+                # We f... have no idea what was the parent device
+                # If we can't find devices having available VGPUs, just raise
+                raise exception.ComputeResourcesUnavailable(
+                    reason='vGPU resource is not available')
 
         requested_types = self._get_supported_vgpu_types()
         # Which mediated devices are created but not assigned to a guest ?
         mdevs_available = self._get_existing_mdevs_not_assigned(
-            requested_types)
+            requested_types, parent_device)
 
         chosen_mdevs = []
         for c in six.moves.range(vgpus_asked):
@@ -6193,7 +6371,8 @@ class LibvirtDriver(driver.ComputeDriver):
                 # Take the first available mdev
                 chosen_mdev = mdevs_available.pop()
             else:
-                chosen_mdev = self._create_new_mediated_device(requested_types)
+                chosen_mdev = self._create_new_mediated_device(
+                    requested_types, parent=parent_device)
             if not chosen_mdev:
                 # If we can't find devices having available VGPUs, just raise
                 raise exception.ComputeResourcesUnavailable(
@@ -6377,12 +6556,8 @@ class LibvirtDriver(driver.ComputeDriver):
         """Note that this function takes an instance name."""
         try:
             guest = self._host.get_guest(instance)
-
-            # TODO(sahid): We are converting all calls from a
-            # virDomain object to use nova.virt.libvirt.Guest.
-            # We should be able to remove domain at the end.
-            domain = guest._domain
-            return domain.blockStats(disk_id)
+            dev = guest.get_block_device(disk_id)
+            return dev.blockStats()
         except libvirt.libvirtError as e:
             errcode = e.get_error_code()
             LOG.info('Getting block stats failed, device might have '
@@ -6410,7 +6585,7 @@ class LibvirtDriver(driver.ComputeDriver):
     def refresh_instance_security_rules(self, instance):
         self.firewall_driver.refresh_instance_security_rules(instance)
 
-    def update_provider_tree(self, provider_tree, nodename):
+    def update_provider_tree(self, provider_tree, nodename, allocations=None):
         """Update a ProviderTree object with current resource provider,
         inventory information and CPU traits.
 
@@ -6421,47 +6596,67 @@ class LibvirtDriver(driver.ComputeDriver):
             trait) associated via aggregate with any of those providers (but
             not *their* tree- or aggregate-associated providers), as currently
             known by placement.
-
         :param nodename:
             String name of the compute node (i.e.
             ComputeNode.hypervisor_hostname) for which the caller is requesting
             updated provider information.
+        :param allocations:
+            Dict of allocation data of the form:
+              { $CONSUMER_UUID: {
+                    # The shape of each "allocations" dict below is identical
+                    # to the return from GET /allocations/{consumer_uuid}
+                    "allocations": {
+                        $RP_UUID: {
+                            "generation": $RP_GEN,
+                            "resources": {
+                                $RESOURCE_CLASS: $AMOUNT,
+                                ...
+                            },
+                        },
+                        ...
+                    },
+                    "project_id": $PROJ_ID,
+                    "user_id": $USER_ID,
+                    "consumer_generation": $CONSUMER_GEN,
+                },
+                ...
+              }
+            If None, and the method determines that any inventory needs to be
+            moved (from one provider to another and/or to a different resource
+            class), the ReshapeNeeded exception must be raised. Otherwise, this
+            dict must be edited in place to indicate the desired final state of
+            allocations.
+        :raises ReshapeNeeded: If allocations is None and any inventory needs
+            to be moved from one provider to another and/or to a different
+            resource class.
+        :raises: ReshapeFailed if the requested tree reshape fails for
+            whatever reason.
         """
         disk_gb = int(self._get_local_gb_info()['total'])
         memory_mb = int(self._host.get_memory_mb_total())
         vcpus = self._get_vcpu_total()
 
-        # NOTE(sbauza): For the moment, the libvirt driver only supports
-        # providing the total number of virtual GPUs for a single GPU type. If
-        # you have multiple physical GPUs, each of them providing multiple GPU
-        # types, libvirt will return the total sum of virtual GPUs
-        # corresponding to the single type passed in enabled_vgpu_types
-        # configuration option. Eg. if you have 2 pGPUs supporting 'nvidia-35',
-        # each of them having 16 available instances, the total here will be
-        # 32.
-        # If one of the 2 pGPUs doesn't support 'nvidia-35', it won't be used.
-        # TODO(sbauza): Use traits to make a better world.
-        vgpus = self._get_vgpu_total()
-
-        # TODO(mriedem): The allocation_ratio config usage will change with
-        # blueprint initial-allocation-ratios. For now, the allocation ratio
-        # config values all default to 0.0 and the ComputeNode provides a
-        # facade for giving the real defaults, so we have to mimic that here.
+        # NOTE(yikun): If the inv record does not exists, the allocation_ratio
+        # will use the CONF.xxx_allocation_ratio value if xxx_allocation_ratio
+        # is set, and fallback to use the initial_xxx_allocation_ratio
+        # otherwise.
+        inv = provider_tree.data(nodename).inventory
+        ratios = self._get_allocation_ratios(inv)
         result = {
-            rc_fields.ResourceClass.VCPU: {
+            orc.VCPU: {
                 'total': vcpus,
                 'min_unit': 1,
                 'max_unit': vcpus,
                 'step_size': 1,
-                'allocation_ratio': CONF.cpu_allocation_ratio or 16.0,
+                'allocation_ratio': ratios[orc.VCPU],
                 'reserved': CONF.reserved_host_cpus,
             },
-            rc_fields.ResourceClass.MEMORY_MB: {
+            orc.MEMORY_MB: {
                 'total': memory_mb,
                 'min_unit': 1,
                 'max_unit': memory_mb,
                 'step_size': 1,
-                'allocation_ratio': CONF.ram_allocation_ratio or 1.5,
+                'allocation_ratio': ratios[orc.MEMORY_MB],
                 'reserved': CONF.reserved_host_memory_mb,
             },
         }
@@ -6471,25 +6666,28 @@ class LibvirtDriver(driver.ComputeDriver):
         # the compute node provider.
         # TODO(efried): Reinstate non-reporting of shared resource by the
         # compute RP once the issues from bug #1784020 have been resolved.
-        if provider_tree.has_sharing_provider(rc_fields.ResourceClass.DISK_GB):
+        if provider_tree.has_sharing_provider(orc.DISK_GB):
             LOG.debug('Ignoring sharing provider - see bug #1784020')
-        result[rc_fields.ResourceClass.DISK_GB] = {
+        result[orc.DISK_GB] = {
             'total': disk_gb,
             'min_unit': 1,
             'max_unit': disk_gb,
             'step_size': 1,
-            'allocation_ratio': CONF.disk_allocation_ratio or 1.0,
+            'allocation_ratio': ratios[orc.DISK_GB],
             'reserved': self._get_reserved_host_disk_gb_from_config(),
         }
 
-        if vgpus > 0:
-            # Only provide VGPU resource classes if the driver supports it.
-            result[rc_fields.ResourceClass.VGPU] = {
-                'total': vgpus,
-                'min_unit': 1,
-                'max_unit': vgpus,
-                'step_size': 1,
-                }
+        # NOTE(sbauza): For the moment, the libvirt driver only supports
+        # providing the total number of virtual GPUs for a single GPU type. If
+        # you have multiple physical GPUs, each of them providing multiple GPU
+        # types, only one type will be used for each of the physical GPUs.
+        # If one of the pGPUs doesn't support this type, it won't be used.
+        # TODO(sbauza): Use traits to make a better world.
+        inventories_dict = self._get_gpu_inventories()
+        if inventories_dict:
+            self._update_provider_tree_for_vgpu(
+                inventories_dict, provider_tree, nodename,
+                allocations=allocations)
 
         provider_tree.update_inventory(nodename, result)
 
@@ -6502,6 +6700,355 @@ class LibvirtDriver(driver.ComputeDriver):
             traits_to_remove = set(traits) - set(traits_to_add)
             provider_tree.add_traits(nodename, *traits_to_add)
             provider_tree.remove_traits(nodename, *traits_to_remove)
+
+        # Now that we updated the ProviderTree, we want to store it locally
+        # so that spawn() or other methods can access it thru a getter
+        self.provider_tree = copy.deepcopy(provider_tree)
+
+    @staticmethod
+    def _is_reshape_needed_vgpu_on_root(provider_tree, nodename):
+        """Determine if root RP has VGPU inventories.
+
+        Check to see if the root compute node provider in the tree for
+        this host already has VGPU inventory because if it does, we either
+        need to signal for a reshape (if _update_provider_tree_for_vgpu()
+        has no allocations) or move the allocations within the ProviderTree if
+        passed.
+
+        :param provider_tree: The ProviderTree object for this host.
+        :param nodename: The ComputeNode.hypervisor_hostname, also known as
+            the name of the root node provider in the tree for this host.
+        :returns: boolean, whether we have VGPU root inventory.
+        """
+        root_node = provider_tree.data(nodename)
+        return orc.VGPU in root_node.inventory
+
+    @staticmethod
+    def _ensure_pgpu_providers(inventories_dict, provider_tree, nodename):
+        """Ensures GPU inventory providers exist in the tree for $nodename.
+
+        GPU providers are named $nodename_$gpu-device-id, e.g.
+        ``somehost.foo.bar.com_pci_0000_84_00_0``.
+
+        :param inventories_dict: Dictionary of inventories for VGPU class
+            directly provided by _get_gpu_inventories() and which looks like:
+                {'pci_0000_84_00_0':
+                    {'total': $TOTAL,
+                     'min_unit': 1,
+                     'max_unit': $MAX_UNIT, # defaults to $TOTAL
+                     'step_size': 1,
+                     'reserved': 0,
+                     'allocation_ratio': 1.0,
+                    }
+                }
+        :param provider_tree: The ProviderTree to update.
+        :param nodename: The ComputeNode.hypervisor_hostname, also known as
+            the name of the root node provider in the tree for this host.
+        :returns: dict, keyed by GPU device ID, to ProviderData object
+            representing that resource provider in the tree
+        """
+        # Create the VGPU child providers if they do not already exist.
+        # TODO(mriedem): For the moment, _get_supported_vgpu_types() only
+        # returns one single type but that will be changed once we support
+        # multiple types.
+        # Note that we can't support multiple vgpu types until a reshape has
+        # been performed on the vgpu resources provided by the root provider,
+        # if any.
+
+        # Dict of PGPU RPs keyed by their libvirt PCI name
+        pgpu_rps = {}
+        for pgpu_dev_id, inventory in inventories_dict.items():
+            # For each physical GPU, we make sure to have a child provider
+            pgpu_rp_name = '%s_%s' % (nodename, pgpu_dev_id)
+            if not provider_tree.exists(pgpu_rp_name):
+                # This is the first time creating the child provider so add
+                # it to the tree under the root node provider.
+                provider_tree.new_child(pgpu_rp_name, nodename)
+            # We want to idempotently return the resource providers with VGPUs
+            pgpu_rp = provider_tree.data(pgpu_rp_name)
+            pgpu_rps[pgpu_dev_id] = pgpu_rp
+
+            # The VGPU inventory goes on a child provider of the given root
+            # node, identified by $nodename.
+            pgpu_inventory = {orc.VGPU: inventory}
+            provider_tree.update_inventory(pgpu_rp_name, pgpu_inventory)
+        return pgpu_rps
+
+    @staticmethod
+    def _assert_is_root_provider(
+            rp_uuid, root_node, consumer_uuid, alloc_data):
+        """Asserts during a reshape that rp_uuid is for the root node provider.
+
+        When reshaping, inventory and allocations should be on the root node
+        provider and then moved to child providers.
+
+        :param rp_uuid: UUID of the provider that holds inventory/allocations.
+        :param root_node: ProviderData object representing the root node in a
+            provider tree.
+        :param consumer_uuid: UUID of the consumer (instance) holding resource
+            allocations against the given rp_uuid provider.
+        :param alloc_data: dict of allocation data for the consumer.
+        :raises: ReshapeFailed if rp_uuid is not the root node indicating a
+            reshape was needed but the inventory/allocation structure is not
+            expected.
+        """
+        if rp_uuid != root_node.uuid:
+            # Something is wrong - VGPU inventory should
+            # only be on the root node provider if we are
+            # reshaping the tree.
+            msg = (_('Unexpected VGPU resource allocation '
+                     'on provider %(rp_uuid)s for consumer '
+                     '%(consumer_uuid)s: %(alloc_data)s. '
+                     'Expected VGPU allocation to be on root '
+                     'compute node provider %(root_uuid)s.')
+                   % {'rp_uuid': rp_uuid,
+                      'consumer_uuid': consumer_uuid,
+                      'alloc_data': alloc_data,
+                      'root_uuid': root_node.uuid})
+            raise exception.ReshapeFailed(error=msg)
+
+    def _get_assigned_mdevs_for_reshape(
+            self, instance_uuid, rp_uuid, alloc_data):
+        """Gets the mediated devices assigned to the instance during a reshape.
+
+        :param instance_uuid: UUID of the instance consuming VGPU resources
+            on this host.
+        :param rp_uuid: UUID of the resource provider with VGPU inventory being
+            consumed by the instance.
+        :param alloc_data: dict of allocation data for the instance consumer.
+        :return: list of mediated device UUIDs assigned to the instance
+        :raises: ReshapeFailed if the instance is not found in the hypervisor
+            or no mediated devices were found to be assigned to the instance
+            indicating VGPU allocations are out of sync with the hypervisor
+        """
+        # FIXME(sbauza): We don't really need an Instance
+        # object, but given some libvirt.host logs needs
+        # to have an instance name, just provide a fake one
+        Instance = collections.namedtuple('Instance', ['uuid', 'name'])
+        instance = Instance(uuid=instance_uuid, name=instance_uuid)
+        mdevs = self._get_all_assigned_mediated_devices(instance)
+        # _get_all_assigned_mediated_devices returns {} if the instance is
+        # not found in the hypervisor
+        if not mdevs:
+            # If we found a VGPU allocation against a consumer
+            # which is not an instance, the only left case for
+            # Nova would be a migration but we don't support
+            # this at the moment.
+            msg = (_('Unexpected VGPU resource allocation on provider '
+                     '%(rp_uuid)s for consumer %(consumer_uuid)s: '
+                     '%(alloc_data)s. The allocation is made against a '
+                     'non-existing instance or there are no devices assigned.')
+                   % {'rp_uuid': rp_uuid, 'consumer_uuid': instance_uuid,
+                      'alloc_data': alloc_data})
+            raise exception.ReshapeFailed(error=msg)
+        return mdevs
+
+    def _count_vgpus_per_pgpu(self, mdev_uuids):
+        """Count the number of VGPUs per physical GPU mediated device.
+
+        :param mdev_uuids: List of physical GPU mediated device UUIDs.
+        :return: dict, keyed by PGPU device ID, to count of VGPUs on that
+            device
+        """
+        vgpu_count_per_pgpu = collections.defaultdict(int)
+        for mdev_uuid in mdev_uuids:
+            # libvirt name is like mdev_00ead764_fdc0_46b6_8db9_2963f5c815b4
+            dev_name = libvirt_utils.mdev_uuid2name(mdev_uuid)
+            # Count how many vGPUs are in use for this instance
+            dev_info = self._get_mediated_device_information(dev_name)
+            pgpu_dev_id = dev_info['parent']
+            vgpu_count_per_pgpu[pgpu_dev_id] += 1
+        return vgpu_count_per_pgpu
+
+    @staticmethod
+    def _check_vgpu_allocations_match_real_use(
+            vgpu_count_per_pgpu, expected_usage, rp_uuid, consumer_uuid,
+            alloc_data):
+        """Checks that the number of GPU devices assigned to the consumer
+        matches what is expected from the allocations in the placement service
+        and logs a warning if there is a mismatch.
+
+        :param vgpu_count_per_pgpu: dict, keyed by PGPU device ID, to count of
+            VGPUs on that device where each device is assigned to the consumer
+            (guest instance on this hypervisor)
+        :param expected_usage: The expected usage from placement for the
+            given resource provider and consumer
+        :param rp_uuid: UUID of the resource provider with VGPU inventory being
+            consumed by the instance
+        :param consumer_uuid: UUID of the consumer (instance) holding resource
+            allocations against the given rp_uuid provider
+        :param alloc_data: dict of allocation data for the instance consumer
+        """
+        actual_usage = sum(vgpu_count_per_pgpu.values())
+        if actual_usage != expected_usage:
+            # Don't make it blocking, just make sure you actually correctly
+            # allocate the existing resources
+            LOG.warning(
+                'Unexpected VGPU resource allocation on provider %(rp_uuid)s '
+                'for consumer %(consumer_uuid)s: %(alloc_data)s. Allocations '
+                '(%(expected_usage)s) differ from actual use '
+                '(%(actual_usage)s).',
+                {'rp_uuid': rp_uuid, 'consumer_uuid': consumer_uuid,
+                 'alloc_data': alloc_data, 'expected_usage': expected_usage,
+                 'actual_usage': actual_usage})
+
+    def _reshape_vgpu_allocations(
+            self, rp_uuid, root_node, consumer_uuid, alloc_data, resources,
+            pgpu_rps):
+        """Update existing VGPU allocations by moving them from the root node
+        provider to the child provider for the given VGPU provider.
+
+        :param rp_uuid: UUID of the VGPU resource provider with allocations
+            from consumer_uuid (should be the root node provider before
+            reshaping occurs)
+        :param root_node: ProviderData object for the root compute node
+            resource provider in the provider tree
+        :param consumer_uuid: UUID of the consumer (instance) with VGPU
+            allocations against the resource provider represented by rp_uuid
+        :param alloc_data: dict of allocation information for consumer_uuid
+        :param resources: dict, keyed by resource class, of resources allocated
+            to consumer_uuid from rp_uuid
+        :param pgpu_rps: dict, keyed by GPU device ID, to ProviderData object
+            representing that resource provider in the tree
+        :raises: ReshapeFailed if the reshape fails for whatever reason
+        """
+        # We've found VGPU allocations on a provider. It should be the root
+        # node provider.
+        self._assert_is_root_provider(
+            rp_uuid, root_node, consumer_uuid, alloc_data)
+
+        # Find which physical GPU corresponds to this allocation.
+        mdev_uuids = self._get_assigned_mdevs_for_reshape(
+            consumer_uuid, rp_uuid, alloc_data)
+
+        vgpu_count_per_pgpu = self._count_vgpus_per_pgpu(mdev_uuids)
+
+        # We need to make sure we found all the mediated devices that
+        # correspond to an allocation.
+        self._check_vgpu_allocations_match_real_use(
+            vgpu_count_per_pgpu, resources[orc.VGPU],
+            rp_uuid, consumer_uuid, alloc_data)
+
+        # Add the VGPU allocation for each VGPU provider.
+        allocs = alloc_data['allocations']
+        for pgpu_dev_id, pgpu_rp in pgpu_rps.items():
+            vgpu_count = vgpu_count_per_pgpu[pgpu_dev_id]
+            if vgpu_count:
+                allocs[pgpu_rp.uuid] = {
+                    'resources': {
+                        orc.VGPU: vgpu_count
+                    }
+                }
+        # And remove the VGPU allocation from the root node provider.
+        del resources[orc.VGPU]
+
+    def _reshape_gpu_resources(
+            self, allocations, root_node, pgpu_rps):
+        """Reshapes the provider tree moving VGPU inventory from root to child
+
+        :param allocations:
+            Dict of allocation data of the form:
+              { $CONSUMER_UUID: {
+                    # The shape of each "allocations" dict below is identical
+                    # to the return from GET /allocations/{consumer_uuid}
+                    "allocations": {
+                        $RP_UUID: {
+                            "generation": $RP_GEN,
+                            "resources": {
+                                $RESOURCE_CLASS: $AMOUNT,
+                                ...
+                            },
+                        },
+                        ...
+                    },
+                    "project_id": $PROJ_ID,
+                    "user_id": $USER_ID,
+                    "consumer_generation": $CONSUMER_GEN,
+                },
+                ...
+              }
+        :params root_node: The root node in the provider tree
+        :params pgpu_rps: dict, keyed by GPU device ID, to ProviderData object
+            representing that resource provider in the tree
+        """
+        LOG.info('Reshaping tree; moving VGPU allocations from root '
+                 'provider %s to child providers %s.', root_node.uuid,
+                 pgpu_rps.values())
+        # For each consumer in the allocations dict, look for VGPU
+        # allocations and move them to the VGPU provider.
+        for consumer_uuid, alloc_data in allocations.items():
+            # Copy and iterate over the current set of providers to avoid
+            # modifying keys while iterating.
+            allocs = alloc_data['allocations']
+            for rp_uuid in list(allocs):
+                resources = allocs[rp_uuid]['resources']
+                if orc.VGPU in resources:
+                    self._reshape_vgpu_allocations(
+                        rp_uuid, root_node, consumer_uuid, alloc_data,
+                        resources, pgpu_rps)
+
+    def _update_provider_tree_for_vgpu(self, inventories_dict, provider_tree,
+                                       nodename, allocations=None):
+        """Updates the provider tree for VGPU inventory.
+
+        Before Stein, VGPU inventory and allocations were on the root compute
+        node provider in the tree. Starting in Stein, the VGPU inventory is
+        on a child provider in the tree. As a result, this method will
+        "reshape" the tree if necessary on first start of this compute service
+        in Stein.
+
+        :param inventories_dict: Dictionary of inventories for VGPU class
+            directly provided by _get_gpu_inventories() and which looks like:
+                {'pci_0000_84_00_0':
+                    {'total': $TOTAL,
+                     'min_unit': 1,
+                     'max_unit': $MAX_UNIT, # defaults to $TOTAL
+                     'step_size': 1,
+                     'reserved': 0,
+                     'allocation_ratio': 1.0,
+                    }
+                }
+        :param provider_tree: The ProviderTree to update.
+        :param nodename: The ComputeNode.hypervisor_hostname, also known as
+            the name of the root node provider in the tree for this host.
+        :param allocations: If not None, indicates a reshape was requested and
+            should be performed.
+        :raises: nova.exception.ReshapeNeeded if ``allocations`` is None and
+            the method determines a reshape of the tree is needed, i.e. VGPU
+            inventory and allocations must be migrated from the root node
+            provider to a child provider of VGPU resources in the tree.
+        :raises: nova.exception.ReshapeFailed if the requested tree reshape
+            fails for whatever reason.
+        """
+        # Check to see if the root compute node provider in the tree for
+        # this host already has VGPU inventory because if it does, and
+        # we're not currently reshaping (allocations is None), we need
+        # to indicate that a reshape is needed to move the VGPU inventory
+        # onto a child provider in the tree.
+
+        # Ensure GPU providers are in the ProviderTree for the given inventory.
+        pgpu_rps = self._ensure_pgpu_providers(
+            inventories_dict, provider_tree, nodename)
+
+        if self._is_reshape_needed_vgpu_on_root(provider_tree, nodename):
+            if allocations is None:
+                # We have old VGPU inventory on root RP, but we haven't yet
+                # allocations. That means we need to ask for a reshape.
+                LOG.info('Requesting provider tree reshape in order to move '
+                         'VGPU inventory from the root compute node provider '
+                         '%s to a child provider.', nodename)
+                raise exception.ReshapeNeeded()
+            # We have allocations, that means we already asked for a reshape
+            # and the Placement API returned us them. We now need to move
+            # those from the root RP to the needed children RPs.
+            root_node = provider_tree.data(nodename)
+            # Reshape VGPU provider inventory and allocations, moving them
+            # from the root node provider to the child providers.
+            self._reshape_gpu_resources(allocations, root_node, pgpu_rps)
+            # Only delete the root inventory once the reshape is done
+            if orc.VGPU in root_node.inventory:
+                del root_node.inventory[orc.VGPU]
+                provider_tree.update_inventory(nodename, root_node.inventory)
 
     def get_available_resource(self, nodename):
         """Retrieve resource information.
@@ -6691,11 +7238,6 @@ class LibvirtDriver(driver.ComputeDriver):
         :param block_device_info: result of _get_instance_block_device_info
         :returns: a LibvirtLiveMigrateData object
         """
-        if not isinstance(dest_check_data, migrate_data_obj.LiveMigrateData):
-            md_obj = objects.LibvirtLiveMigrateData()
-            md_obj.from_legacy_dict(dest_check_data)
-            dest_check_data = md_obj
-
         # Checking shared storage connectivity
         # if block migration, instances_path should not be on shared storage.
         source = CONF.host
@@ -7019,7 +7561,7 @@ class LibvirtDriver(driver.ComputeDriver):
         if CONF.serial_console.enabled:
 
             msg = _('Your destination node does not support'
-                    ' retrieving listen addresses.  In order'
+                    ' retrieving listen addresses. In order'
                     ' for live migration to work properly you'
                     ' must disable serial console.')
             raise exception.MigrationError(reason=msg)
@@ -7286,9 +7828,6 @@ class LibvirtDriver(driver.ComputeDriver):
 
         n = 0
         start = time.time()
-        progress_time = start
-        progress_watermark = None
-        previous_data_remaining = -1
         is_post_copy_enabled = self._is_post_copy_enabled(migration_flags)
         while True:
             info = guest.get_job_info()
@@ -7323,36 +7862,30 @@ class LibvirtDriver(driver.ComputeDriver):
                 now = time.time()
                 elapsed = now - start
 
-                if ((progress_watermark is None) or
-                    (progress_watermark == 0) or
-                    (progress_watermark > info.data_remaining)):
-                    progress_watermark = info.data_remaining
-                    progress_time = now
-
-                progress_timeout = CONF.libvirt.live_migration_progress_timeout
                 completion_timeout = int(
                     CONF.libvirt.live_migration_completion_timeout * data_gb)
-                if libvirt_migrate.should_abort(instance, now, progress_time,
-                                                progress_timeout, elapsed,
-                                                completion_timeout,
-                                                migration.status):
-                    try:
-                        guest.abort_job()
-                    except libvirt.libvirtError as e:
-                        LOG.warning("Failed to abort migration %s",
-                                encodeutils.exception_to_unicode(e),
-                                instance=instance)
-                        self._clear_empty_migration(instance)
-                        raise
-
-                if (is_post_copy_enabled and
-                    libvirt_migrate.should_switch_to_postcopy(
-                    info.memory_iteration, info.data_remaining,
-                    previous_data_remaining, migration.status)):
-                    libvirt_migrate.trigger_postcopy_switch(guest,
-                                                            instance,
-                                                            migration)
-                previous_data_remaining = info.data_remaining
+                # NOTE(yikun): Check the completion timeout to determine
+                # should trigger the timeout action, and there are two choices
+                # ``abort`` (default) or ``force_complete``. If the action is
+                # set to ``force_complete``, the post-copy will be triggered
+                # if available else the VM will be suspended, otherwise the
+                # live migrate operation will be aborted.
+                if libvirt_migrate.should_trigger_timeout_action(
+                        instance, elapsed, completion_timeout,
+                        migration.status):
+                    timeout_act = CONF.libvirt.live_migration_timeout_action
+                    if timeout_act == 'force_complete':
+                        self.live_migration_force_complete(instance)
+                    else:
+                        # timeout action is 'abort'
+                        try:
+                            guest.abort_job()
+                        except libvirt.libvirtError as e:
+                            LOG.warning("Failed to abort migration %s",
+                                    encodeutils.exception_to_unicode(e),
+                                    instance=instance)
+                            self._clear_empty_migration(instance)
+                            raise
 
                 curdowntime = libvirt_migrate.update_downtime(
                     guest, instance, curdowntime,
@@ -7396,13 +7929,6 @@ class LibvirtDriver(driver.ComputeDriver):
                         "processed_memory": info.memory_processed,
                         "remaining_memory": info.memory_remaining,
                         "total_memory": info.memory_total}, instance=instance)
-                    if info.data_remaining > progress_watermark:
-                        lg("Data remaining %(remaining)d bytes, "
-                           "low watermark %(watermark)d bytes "
-                           "%(last)d seconds ago",
-                           {"remaining": info.data_remaining,
-                            "watermark": progress_watermark,
-                            "last": (now - progress_time)}, instance=instance)
 
                 n = n + 1
             elif info.type == libvirt.VIR_DOMAIN_JOB_COMPLETED:
@@ -7869,40 +8395,12 @@ class LibvirtDriver(driver.ComputeDriver):
         # Disconnect from volume server
         block_device_mapping = driver.block_device_info_get_mapping(
                 block_device_info)
-        volume_api = self._volume_api
         for vol in block_device_mapping:
-            volume_id = vol['connection_info']['serial']
-            if vol['attachment_id'] is None:
-                # Cinder v2 api flow: Retrieve connection info from Cinder's
-                # initialize_connection API. The info returned will be
-                # accurate for the source server.
-                connector = self.get_volume_connector(instance)
-                connection_info = volume_api.initialize_connection(
-                    context, volume_id, connector)
-            else:
-                # cinder v3.44 api flow: Retrieve the connection_info for
-                # the old attachment from cinder.
-                old_attachment_id = \
-                    migrate_data.old_vol_attachment_ids[volume_id]
-                old_attachment = volume_api.attachment_get(
-                    context, old_attachment_id)
-                connection_info = old_attachment['connection_info']
-
-            # TODO(leeantho) The following multipath_id logic is temporary
-            # and will be removed in the future once os-brick is updated
-            # to handle multipath for drivers in a more efficient way.
-            # For now this logic is needed to ensure the connection info
-            # data is correct.
-
-            # Pull out multipath_id from the bdm information. The
-            # multipath_id can be placed into the connection info
-            # because it is based off of the volume and will be the
-            # same on the source and destination hosts.
-            if 'multipath_id' in vol['connection_info']['data']:
-                multipath_id = vol['connection_info']['data']['multipath_id']
-                connection_info['data']['multipath_id'] = multipath_id
-
-            self._disconnect_volume(context, connection_info, instance)
+            # NOTE(mdbooth): The block_device_info we were passed was
+            # initialized with BDMs from the source host before they were
+            # updated to point to the destination. We can safely use this to
+            # disconnect the source without re-fetching.
+            self._disconnect_volume(context, vol['connection_info'], instance)
 
     def post_live_migration_at_source(self, context, instance, network_info):
         """Unplug VIFs from networks at source.
@@ -8185,7 +8683,7 @@ class LibvirtDriver(driver.ComputeDriver):
 
     def get_host_uptime(self):
         """Returns the result of calling "uptime"."""
-        out, err = utils.execute('env', 'LANG=C', 'uptime')
+        out, err = processutils.execute('env', 'LANG=C', 'uptime')
         return out
 
     def manage_image_cache(self, context, all_instances):
@@ -8352,8 +8850,7 @@ class LibvirtDriver(driver.ComputeDriver):
     def _disk_raw_to_qcow2(path):
         """Converts a raw disk to qcow2."""
         path_qcow = path + '_qcow'
-        utils.execute('qemu-img', 'convert', '-f', 'raw',
-                      '-O', 'qcow2', path, path_qcow)
+        images.convert_image(path, path_qcow, 'raw', 'qcow2')
         os.rename(path_qcow, path)
 
     def finish_migration(self, context, migration, instance, disk_info,
@@ -8913,7 +9410,7 @@ class LibvirtDriver(driver.ComputeDriver):
         #                 will assign them
         for bdm in block_device_mapping:
             if bdm.device_name is not None:
-                LOG.warning(
+                LOG.info(
                     "Ignoring supplied device name: %(device_name)s. "
                     "Libvirt can't honour user-supplied dev names",
                     {'device_name': bdm.device_name}, instance=instance)
@@ -8935,7 +9432,7 @@ class LibvirtDriver(driver.ComputeDriver):
 
         suggested_dev_name = block_device_obj.device_name
         if suggested_dev_name is not None:
-            LOG.warning(
+            LOG.info(
                 'Ignoring supplied device name: %(suggested_dev)s',
                 {'suggested_dev': suggested_dev_name}, instance=instance)
 
@@ -8994,7 +9491,7 @@ class LibvirtDriver(driver.ComputeDriver):
                     vconfig.LibvirtConfigCPUFeature(name=f.name))
 
         xml_str = caps.host.cpu.to_xml()
-        LOG.info("Libvirt baseline CPU %s", xml_str)
+        LOG.debug("Libvirt baseline CPU %s", xml_str)
         # TODO(lei-zh): baselineCPU is not supported on all platforms.
         # There is some work going on in the libvirt community to replace the
         # baseline call. Consider using the new apis when they are ready. See

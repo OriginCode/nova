@@ -18,6 +18,7 @@ Unit Tests for nova.compute.rpcapi
 
 import mock
 from oslo_serialization import jsonutils
+from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova.compute import rpcapi as compute_rpcapi
 from nova import context
@@ -29,7 +30,6 @@ from nova import test
 from nova.tests.unit import fake_block_device
 from nova.tests.unit import fake_flavor
 from nova.tests.unit import fake_instance
-from nova.tests import uuidsentinel as uuids
 
 
 class ComputeRpcAPITestCase(test.NoDBTestCase):
@@ -66,16 +66,16 @@ class ComputeRpcAPITestCase(test.NoDBTestCase):
         self.patcher1.stop()
         self.patcher2.stop()
 
-    @mock.patch('nova.objects.Service.get_minimum_version')
+    @mock.patch('nova.objects.service.get_minimum_version_all_cells')
     def test_auto_pin(self, mock_get_min):
         mock_get_min.return_value = 1
         self.flags(compute='auto', group='upgrade_levels')
         compute_rpcapi.LAST_VERSION = None
         rpcapi = compute_rpcapi.ComputeAPI()
         self.assertEqual('4.4', rpcapi.router.version_cap)
-        mock_get_min.assert_called_once_with(mock.ANY, 'nova-compute')
+        mock_get_min.assert_called_once_with(mock.ANY, ['nova-compute'])
 
-    @mock.patch('nova.objects.Service.get_minimum_version')
+    @mock.patch('nova.objects.service.get_minimum_version_all_cells')
     def test_auto_pin_fails_if_too_old(self, mock_get_min):
         mock_get_min.return_value = 1955
         self.flags(compute='auto', group='upgrade_levels')
@@ -83,7 +83,7 @@ class ComputeRpcAPITestCase(test.NoDBTestCase):
         self.assertRaises(exception.ServiceTooOld,
                           compute_rpcapi.ComputeAPI)
 
-    @mock.patch('nova.objects.Service.get_minimum_version')
+    @mock.patch('nova.objects.service.get_minimum_version_all_cells')
     def test_auto_pin_with_service_version_zero(self, mock_get_min):
         mock_get_min.return_value = 0
         self.flags(compute='auto', group='upgrade_levels')
@@ -92,17 +92,17 @@ class ComputeRpcAPITestCase(test.NoDBTestCase):
         history = service_obj.SERVICE_VERSION_HISTORY
         current_version = history[service_obj.SERVICE_VERSION]['compute_rpc']
         self.assertEqual(current_version, rpcapi.router.version_cap)
-        mock_get_min.assert_called_once_with(mock.ANY, 'nova-compute')
+        mock_get_min.assert_called_once_with(mock.ANY, ['nova-compute'])
         self.assertIsNone(compute_rpcapi.LAST_VERSION)
 
-    @mock.patch('nova.objects.Service.get_minimum_version')
+    @mock.patch('nova.objects.service.get_minimum_version_all_cells')
     def test_auto_pin_caches(self, mock_get_min):
         mock_get_min.return_value = 1
         self.flags(compute='auto', group='upgrade_levels')
         compute_rpcapi.LAST_VERSION = None
         compute_rpcapi.ComputeAPI()
         compute_rpcapi.ComputeAPI()
-        mock_get_min.assert_called_once_with(mock.ANY, 'nova-compute')
+        mock_get_min.assert_called_once_with(mock.ANY, ['nova-compute'])
         self.assertEqual('4.4', compute_rpcapi.LAST_VERSION)
 
     def _test_compute_api(self, method, rpc_method,
@@ -144,8 +144,6 @@ class ComputeRpcAPITestCase(test.NoDBTestCase):
                 kwargs['cast'] = False
             else:
                 kwargs['do_cast'] = False
-        elif method == 'prep_resize' and 'migration' not in expected_args:
-            del expected_kwargs['migration']
         if 'host' in kwargs:
             host = kwargs['host']
         elif 'instances' in kwargs:
@@ -342,9 +340,11 @@ class ComputeRpcAPITestCase(test.NoDBTestCase):
                 migration_id='1', version='5.0')
 
     def test_post_live_migration_at_destination(self):
+        self.flags(long_rpc_timeout=1234)
         self._test_compute_api('post_live_migration_at_destination', 'call',
                 instance=self.fake_instance_obj,
-                block_migration='block_migration', host='host', version='5.0')
+                block_migration='block_migration', host='host', version='5.0',
+                timeout=1234, call_monitor_timeout=60)
 
     def test_pause_instance(self):
         self._test_compute_api('pause_instance', 'cast',
@@ -383,8 +383,7 @@ class ComputeRpcAPITestCase(test.NoDBTestCase):
                                timeout=1234)
 
     def test_prep_resize(self):
-        expected_args = {'migration': 'migration'}
-        self._test_compute_api('prep_resize', 'cast', expected_args,
+        self._test_compute_api('prep_resize', 'cast',
                 instance=self.fake_instance_obj,
                 instance_type=self.fake_flavor_obj,
                 image='fake_image', host='host',
@@ -392,7 +391,7 @@ class ComputeRpcAPITestCase(test.NoDBTestCase):
                 filter_properties={'fakeprop': 'fakeval'},
                 migration='migration',
                 node='node', clean_shutdown=True, host_list=None,
-                version='5.0')
+                version='5.1')
 
     def test_reboot_instance(self):
         self.maxDiff = None
@@ -589,7 +588,10 @@ class ComputeRpcAPITestCase(test.NoDBTestCase):
 
     @mock.patch('nova.compute.rpcapi.LOG')
     @mock.patch('nova.objects.Service.get_minimum_version')
-    def test_version_cap_no_computes_log_once(self, mock_minver, mock_log):
+    @mock.patch('nova.objects.service.get_minimum_version_all_cells')
+    def test_version_cap_no_computes_log_once(self, mock_allcells, mock_minver,
+                                              mock_log):
+        self.flags(connection=None, group='api_database')
         self.flags(compute='auto', group='upgrade_levels')
         mock_minver.return_value = 0
         compute_rpcapi.NO_COMPUTES_WARNING = False
@@ -597,3 +599,18 @@ class ComputeRpcAPITestCase(test.NoDBTestCase):
         compute_rpcapi.ComputeAPI()
         compute_rpcapi.ComputeAPI()
         self.assertEqual(1, mock_log.debug.call_count)
+        mock_allcells.assert_not_called()
+        mock_minver.assert_has_calls([
+            mock.call(mock.ANY, 'nova-compute'),
+            mock.call(mock.ANY, 'nova-compute')])
+
+    @mock.patch('nova.objects.Service.get_minimum_version')
+    @mock.patch('nova.objects.service.get_minimum_version_all_cells')
+    def test_version_cap_all_cells(self, mock_allcells, mock_minver):
+        self.flags(connection='sqlite:///', group='api_database')
+        self.flags(compute='auto', group='upgrade_levels')
+        compute_rpcapi.LAST_VERSION = None
+        mock_allcells.return_value = 0
+        compute_rpcapi.ComputeAPI()
+        mock_allcells.assert_called_once_with(mock.ANY, ['nova-compute'])
+        mock_minver.assert_not_called()

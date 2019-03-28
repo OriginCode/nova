@@ -169,10 +169,19 @@ whitelist will be silently ignored.
   - ``status``
   - ``tags`` (New in version 2.26)
   - ``tags-any`` (New in version 2.26)
+  - ``changes-before`` (New in version 2.66)
 
 
 - For admin user, whitelist includes all filter keys mentioned in
   :ref:`list-server-request` Section.
+
+.. note:: Starting with microversion 2.69 if server details cannot be loaded
+   due to a transient condition in the deployment like infrastructure failure,
+   the response body for those unavailable servers will be missing keys. See
+   `handling down cells
+   <https://developer.openstack.org/api-guide/compute/down_cells.html>`__
+   section of the Compute API guide for more information on the keys that
+   would be returned in the partial constructs.
 
 Normal response codes: 200
 
@@ -230,6 +239,7 @@ Request
   - not-tags-any: not_tags_any_query
   - tags: tags_query
   - tags-any: tags_any_query
+  - changes-before: changes_before_server
 
 Response
 --------
@@ -245,6 +255,15 @@ Response
 **Example List Servers**
 
 .. literalinclude:: ../../doc/api_samples/servers/servers-list-resp.json
+   :language: javascript
+
+**Example List Servers (2.69)**
+
+This is a sample response for the servers from the non-responsive part of the
+deployment. The responses for the available server records will be normal
+without any missing keys.
+
+.. literalinclude:: ../../doc/api_samples/servers/v2.69/servers-list-resp.json
    :language: javascript
 
 
@@ -271,7 +290,7 @@ When you create a server, the response shows only the server ID, its
 links, and the admin password. You can get additional attributes
 through subsequent ``GET`` requests on the server.
 
-Include the ``block-device-mapping-v2`` parameter in the create
+Include the ``block_device_mapping_v2`` parameter in the create
 request body to boot a server from a volume.
 
 Include the ``key_name`` parameter in the create request body to add a
@@ -361,6 +380,7 @@ Request
   - block_device_mapping_v2.uuid: block_device_uuid
   - block_device_mapping_v2.volume_size: volume_size
   - block_device_mapping_v2.tag: device_tag_bdm
+  - block_device_mapping_v2.volume_type: device_volume_type
   - config_drive: config_drive
   - imageRef: imageRef
   - key_name: key_name
@@ -492,11 +512,15 @@ OS-EXT-STS:power_state, and OS-EXT-STS:task_state attributes.
 The server usage information appears in the OS-SRV-USG:launched_at and
 OS-SRV-USG:terminated_at attributes.
 
-To hide addresses information for instances in a certain state, set
-the osapi_hide_server_address_states configuration option. Set this
-option to a valid VM state in the nova.conf configuration file.
-
 HostId is unique per account and is not globally unique.
+
+.. note:: Starting with microversion 2.69 if server details cannot be loaded
+   due to a transient condition in the deployment like infrastructure failure,
+   the response body for those unavailable servers will be missing keys. See
+   `handling down cells
+   <https://developer.openstack.org/api-guide/compute/down_cells.html>`__
+   section of the Compute API guide for more information on the keys that
+   would be returned in the partial constructs.
 
 Normal response codes: 200
 
@@ -552,6 +576,7 @@ Request
   - not-tags-any: not_tags_any_query
   - tags: tags_query
   - tags-any: tags_any_query
+  - changes-before: changes_before_server
 
 Response
 --------
@@ -627,6 +652,15 @@ Response
 .. literalinclude:: /../../doc/api_samples/servers/v2.63/servers-details-resp.json
    :language: javascript
 
+**Example List Servers Detailed (2.69)**
+
+This is a sample response for the servers from the non-responsive part of the
+deployment. The responses for the available server records will be normal
+without any missing keys.
+
+.. literalinclude:: ../../doc/api_samples/servers/v2.69/servers-details-resp.json
+   :language: javascript
+
 
 Show Server Details
 ===================
@@ -641,13 +675,19 @@ The extended status information appears in the ``OS-EXT-STS:vm_state``, ``OS-EXT
 
 The server usage information appears in the ``OS-SRV-USG:launched_at`` and ``OS-SRV-USG:terminated_at`` attributes.
 
-To hide ``addresses`` information for instances in a certain state, set the ``osapi_hide_server_address_states`` configuration option. Set this option to a valid VM state in the ``nova.conf`` configuration file.
-
 HostId is unique per account and is not globally unique.
 
 **Preconditions**
 
 The server must exist.
+
+.. note:: Starting with microversion 2.69 if the server detail cannot be loaded
+   due to a transient condition in the deployment like infrastructure failure,
+   the response body for the unavailable server will be missing keys. See
+   `handling down cells
+   <http://developer.openstack.org/api-guide/compute/down_cells.html>`__
+   section of the Compute API guide for more information on the keys that
+   would be returned in the partial constructs.
 
 Normal response codes: 200
 
@@ -728,10 +768,20 @@ Response
   - description: server_description_resp
   - tags: tags
   - trusted_image_certificates: server_trusted_image_certificates_resp
+  - server_groups: server_groups_2_71
 
 **Example Show Server Details (2.63)**
 
 .. literalinclude:: ../../doc/api_samples/servers/v2.63/server-get-resp.json
+   :language: javascript
+
+**Example Show Server Details (2.69)**
+
+This is a sample response for a server from the non-responsive part of the
+deployment. The responses for available server records will be normal
+without any missing keys.
+
+.. literalinclude:: ../../doc/api_samples/servers/v2.69/server-get-resp.json
    :language: javascript
 
 Update Server
@@ -810,6 +860,7 @@ Response
   - description: server_description_resp
   - tags: tags
   - trusted_image_certificates: server_trusted_image_certificates_resp
+  - server_groups: server_groups_2_71
 
 **Example Update Server (2.63)**
 

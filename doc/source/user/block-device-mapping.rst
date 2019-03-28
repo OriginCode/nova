@@ -48,6 +48,12 @@ When we talk about block device mapping, we usually refer to one of two things
    virt driver code). We will refer to this format as 'Driver BDMs' from now
    on.
 
+.. note::
+
+   The maximum limit on the number of disk devices allowed to attach to
+   a single server is configurable with the option
+   :oslo.config:option:`compute.max_disk_devices_to_attach`.
+
 
 Data format and its history
 ----------------------------
@@ -127,7 +133,7 @@ fields (in addition to the ones that were already there):
   * `snapshot`
   * `blank`
 
-* dest_type  - this can have one of the following values:
+* destination_type  - this can have one of the following values:
 
   * `local`
   * `volume`
@@ -161,10 +167,18 @@ fields (in addition to the ones that were already there):
   usage is to set it to 0 for the boot device and leave it as None for any
   other devices.
 
-Valid source / dest combinations
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+* volume_type - Added in microversion 2.67 to the servers create API to
+  support specifying volume type when booting instances. When we snapshot a
+  volume-backed server, the block_device_mapping_v2 image metadata will
+  include the volume_type from the BDM record so if the user then creates
+  another server from that snapshot, the volume that nova creates from that
+  snapshot will use the same volume_type. If a user wishes to change that
+  volume type in the image metadata, they can do so via the image API.
 
-Combination of the ``source_type`` and ``dest_type`` will define the
+Valid source / destination combinations
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Combination of the ``source_type`` and ``destination_type`` will define the
 kind of block device the entry is referring to. The following
 combinations are supported:
 

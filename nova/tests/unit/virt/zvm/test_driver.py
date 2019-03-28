@@ -15,6 +15,7 @@
 import copy
 import mock
 import os
+from oslo_utils.fixture import uuidsentinel
 import six
 
 from nova import conf
@@ -24,7 +25,6 @@ from nova.network import model as network_model
 from nova import objects
 from nova import test
 from nova.tests.unit import fake_instance
-from nova.tests import uuidsentinel
 from nova.virt import fake
 from nova.virt.zvm import driver as zvmdriver
 
@@ -340,7 +340,6 @@ class TestZVMDriver(test.NoDBTestCase):
                           "dest_url": "file:///path/to/target"}, '']
         call.side_effect = call_resp
         new_image_meta = {
-            'is_public': False,
             'status': 'active',
             'properties': {
                  'image_location': 'snapshot',

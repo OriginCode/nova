@@ -22,6 +22,7 @@ import fixtures
 import mock
 from oslo_db import exception as db_exc
 from oslo_serialization import jsonutils
+from oslo_utils.fixture import uuidsentinel
 from oslo_utils import uuidutils
 from six.moves import StringIO
 
@@ -38,7 +39,7 @@ from nova.tests import fixtures as nova_fixtures
 from nova.tests.unit.db import fakes as db_fakes
 from nova.tests.unit import fake_requests
 from nova.tests.unit.objects import test_network
-from nova.tests import uuidsentinel
+
 
 CONF = conf.CONF
 
@@ -1197,7 +1198,7 @@ class CellV2CommandsTestCase(test.NoDBTestCase):
             uuid = uuidutils.generate_uuid()
             instance_uuids.append(uuid)
             objects.Instance(ctxt, project_id=ctxt.project_id,
-                             uuid=uuid).create()
+                             user_id=ctxt.user_id, uuid=uuid).create()
 
         self.commands.map_instances(cell_uuid)
 
@@ -1205,6 +1206,8 @@ class CellV2CommandsTestCase(test.NoDBTestCase):
             inst_mapping = objects.InstanceMapping.get_by_instance_uuid(ctxt,
                     uuid)
             self.assertEqual(ctxt.project_id, inst_mapping.project_id)
+            # Verify that map_instances populates user_id.
+            self.assertEqual(ctxt.user_id, inst_mapping.user_id)
             self.assertEqual(cell_mapping.uuid, inst_mapping.cell_mapping.uuid)
         mock_target_cell.assert_called_once_with(
             test.MatchType(context.RequestContext),
@@ -1224,10 +1227,10 @@ class CellV2CommandsTestCase(test.NoDBTestCase):
             uuid = uuidutils.generate_uuid()
             instance_uuids.append(uuid)
             objects.Instance(ctxt, project_id=ctxt.project_id,
-                             uuid=uuid).create()
+                             user_id=ctxt.user_id, uuid=uuid).create()
 
         objects.InstanceMapping(ctxt, project_id=ctxt.project_id,
-                instance_uuid=instance_uuids[0],
+                user_id=ctxt.user_id, instance_uuid=instance_uuids[0],
                 cell_mapping=cell_mapping).create()
 
         self.commands.map_instances(cell_uuid)
@@ -1259,7 +1262,7 @@ class CellV2CommandsTestCase(test.NoDBTestCase):
             uuid = uuidutils.generate_uuid()
             instance_uuids.append(uuid)
             objects.Instance(ctxt, project_id=ctxt.project_id,
-                             uuid=uuid).create()
+                             user_id=ctxt.user_id, uuid=uuid).create()
 
         ret = self.commands.map_instances(cell_uuid)
         self.assertEqual(0, ret)
@@ -1291,7 +1294,7 @@ class CellV2CommandsTestCase(test.NoDBTestCase):
             uuid = uuidutils.generate_uuid()
             instance_uuids.append(uuid)
             objects.Instance(ctxt, project_id=ctxt.project_id,
-                             uuid=uuid).create()
+                             user_id=ctxt.user_id, uuid=uuid).create()
 
         ret = self.commands.map_instances(cell_uuid, max_count=3)
         self.assertEqual(1, ret)
@@ -1328,7 +1331,7 @@ class CellV2CommandsTestCase(test.NoDBTestCase):
             uuid = uuidutils.generate_uuid()
             instance_uuids.append(uuid)
             objects.Instance(ctxt, project_id=ctxt.project_id,
-                             uuid=uuid).create()
+                             user_id=ctxt.user_id, uuid=uuid).create()
 
         ret = self.commands.map_instances(cell_uuid, max_count=3)
         self.assertEqual(1, ret)
@@ -1370,7 +1373,7 @@ class CellV2CommandsTestCase(test.NoDBTestCase):
             uuid = uuidutils.generate_uuid()
             instance_uuids.append(uuid)
             objects.Instance(ctxt, project_id=ctxt.project_id,
-                             uuid=uuid).create()
+                             user_id=ctxt.user_id, uuid=uuid).create()
 
         # Maps first three instances.
         ret = self.commands.map_instances(cell_uuid, max_count=3)
@@ -1846,6 +1849,31 @@ class CellV2CommandsTestCase(test.NoDBTestCase):
         self.assertEqual(kwargs['transport_url'], cell2.transport_url)
         self.assertIs(cell2.disabled, False)
 
+    def test_create_cell_use_params_with_template(self):
+        ctxt = context.get_context()
+        self.flags(transport_url='rabbit://host:1234')
+        kwargs = dict(
+            name='fake-name',
+            transport_url='{scheme}://other-{hostname}:{port}',
+            database_connection='fake-db-connection')
+        status = self.commands.create_cell(verbose=True, **kwargs)
+        self.assertEqual(0, status)
+        cell2_uuid = self.output.getvalue().strip()
+        self.commands.create_cell(**kwargs)
+
+        # Make sure it ended up as a template in the database
+        db_cm = objects.CellMapping._get_by_uuid_from_db(ctxt, cell2_uuid)
+        self.assertEqual('{scheme}://other-{hostname}:{port}',
+                         db_cm.transport_url)
+
+        # Make sure it gets translated if we load by object
+        cell2 = objects.CellMapping.get_by_uuid(ctxt, cell2_uuid)
+        self.assertEqual(kwargs['name'], cell2.name)
+        self.assertEqual(kwargs['database_connection'],
+                         cell2.database_connection)
+        self.assertEqual('rabbit://other-host:1234', cell2.transport_url)
+        self.assertIs(cell2.disabled, False)
+
     def test_create_cell_use_config_values(self):
         settings = dict(
             transport_url='http://fake-conf-transport-url',
@@ -1901,7 +1929,7 @@ class CellV2CommandsTestCase(test.NoDBTestCase):
         self.assertEqual(kwargs['name'], cell1.name)
         self.assertIs(cell1.disabled, True)
 
-    def test_list_cells_no_cells_verbose_false(self):
+    def test_list_cells_verbose_false(self):
         ctxt = context.RequestContext()
         cell_mapping0 = objects.CellMapping(
             context=ctxt, uuid=uuidsentinel.map0,
@@ -1945,19 +1973,26 @@ class CellV2CommandsTestCase(test.NoDBTestCase):
             database_connection='fake:///dbdal', transport_url='fake:///mqdal',
             name='dallas')
         cell_mapping2.create()
+        no_name = objects.CellMapping(
+            context=ctxt, uuid=uuidsentinel.none,
+            database_connection='fake:///dbnone',
+            transport_url='fake:///mqnone')
+        no_name.create()
         self.assertEqual(0, self.commands.list_cells(verbose=True))
         output = self.output.getvalue().strip()
         self.assertEqual('''\
-+--------+--------------------------------------+---------------+---------------------+----------+
-|  Name  |                 UUID                 | Transport URL | Database Connection | Disabled |
-+--------+--------------------------------------+---------------+---------------------+----------+
-| cell0  | %(uuid_map0)s |    none:///   |     fake:///db0     |  False   |
-| dallas | %(uuid_map2)s | fake:///mqdal |    fake:///dbdal    |  False   |
-| london | %(uuid_map1)s | fake:///mqlon |    fake:///dblon    |   True   |
-+--------+--------------------------------------+---------------+---------------------+----------+''' %  # noqa
++--------+--------------------------------------+----------------+---------------------+----------+
+|  Name  |                 UUID                 | Transport URL  | Database Connection | Disabled |
++--------+--------------------------------------+----------------+---------------------+----------+
+|        | %(uuid_none)s | fake:///mqnone |    fake:///dbnone   |  False   |
+| cell0  | %(uuid_map0)s |    none:///    |     fake:///db0     |  False   |
+| dallas | %(uuid_map2)s | fake:///mqdal  |    fake:///dbdal    |  False   |
+| london | %(uuid_map1)s | fake:///mqlon  |    fake:///dblon    |   True   |
++--------+--------------------------------------+----------------+---------------------+----------+''' %  # noqa
                 {"uuid_map0": uuidsentinel.map0,
                  "uuid_map1": uuidsentinel.map1,
-                 "uuid_map2": uuidsentinel.map2},
+                 "uuid_map2": uuidsentinel.map2,
+                 "uuid_none": uuidsentinel.none},
                 output)
 
     def test_delete_cell_not_found(self):
@@ -2528,7 +2563,7 @@ class TestNovaManagePlacement(test.NoDBTestCase):
                         uuid=uuidsentinel.instance, host='fake', node='fake',
                         task_state=None)]))
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                'get_allocations_for_consumer', return_value={})
+                'get_allocs_for_consumer', return_value={})
     @mock.patch('nova.objects.ComputeNode.get_by_host_and_nodename',
                 side_effect=exception.ComputeHostNotFound(host='fake'))
     def test_heal_allocations_compute_host_not_found(
@@ -2549,7 +2584,7 @@ class TestNovaManagePlacement(test.NoDBTestCase):
                         task_state=None, flavor=objects.Flavor(),
                         project_id='fake-project', user_id='fake-user')]))
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                'get_allocations_for_consumer', return_value={})
+                'get_allocs_for_consumer', return_value={})
     @mock.patch('nova.objects.ComputeNode.get_by_host_and_nodename',
                 return_value=objects.ComputeNode(uuid=uuidsentinel.node))
     @mock.patch('nova.scheduler.utils.resources_from_flavor',
@@ -2569,7 +2604,91 @@ class TestNovaManagePlacement(test.NoDBTestCase):
         mock_put_allocations.assert_called_once_with(
             test.MatchType(context.RequestContext), uuidsentinel.node,
             uuidsentinel.instance, mock.sentinel.resources, 'fake-project',
-            'fake-user')
+            'fake-user', consumer_generation=None)
+
+    @mock.patch('nova.objects.CellMappingList.get_all',
+                return_value=objects.CellMappingList(objects=[
+                    objects.CellMapping(name='cell1',
+                                        uuid=uuidsentinel.cell1)]))
+    @mock.patch('nova.objects.InstanceList.get_by_filters',
+                return_value=objects.InstanceList(objects=[
+                    objects.Instance(
+                        uuid=uuidsentinel.instance, host='fake', node='fake',
+                        task_state=None, flavor=objects.Flavor(),
+                        project_id='fake-project', user_id='fake-user')]))
+    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
+                'get_allocs_for_consumer', return_value={})
+    @mock.patch('nova.objects.ComputeNode.get_by_host_and_nodename',
+                return_value=objects.ComputeNode(uuid=uuidsentinel.node))
+    @mock.patch('nova.scheduler.utils.resources_from_flavor',
+                return_value=mock.sentinel.resources)
+    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
+                'put_allocations',
+                side_effect=exception.AllocationUpdateFailed(
+                    consumer_uuid=uuidsentinel.instance,
+                    error="consumer generation conflict"))
+    def test_heal_allocations_put_allocations_fails_with_consumer_conflict(
+            self, mock_put_allocations, mock_res_from_flavor,
+            mock_get_compute_node, mock_get_allocs, mock_get_instances,
+            mock_get_all_cells):
+        self.assertEqual(3, self.cli.heal_allocations())
+        self.assertIn('Failed to update allocations for consumer',
+                      self.output.getvalue())
+        instance = mock_get_instances.return_value[0]
+        mock_res_from_flavor.assert_called_once_with(
+            instance, instance.flavor)
+        mock_put_allocations.assert_called_once_with(
+            test.MatchType(context.RequestContext), uuidsentinel.node,
+            uuidsentinel.instance, mock.sentinel.resources, 'fake-project',
+            'fake-user', consumer_generation=None)
+
+    @mock.patch('nova.objects.CellMappingList.get_all',
+                new=mock.Mock(return_value=objects.CellMappingList(objects=[
+                    objects.CellMapping(name='cell1',
+                                        uuid=uuidsentinel.cell1)])))
+    @mock.patch('nova.objects.InstanceList.get_by_filters',
+                new=mock.Mock(return_value=objects.InstanceList(objects=[
+                    objects.Instance(
+                        uuid=uuidsentinel.instance, host='fake', node='fake',
+                        task_state=None, flavor=objects.Flavor(),
+                        project_id='fake-project', user_id='fake-user')])))
+    def test_heal_allocations_get_allocs_placement_fails(self):
+        self.assertEqual(3, self.cli.heal_allocations())
+        output = self.output.getvalue()
+        self.assertIn('Allocation retrieval failed', output)
+        # Having not mocked get_allocs_for_consumer, we get MissingAuthPlugin.
+        self.assertIn('An auth plugin is required', output)
+
+    @mock.patch('nova.objects.CellMappingList.get_all',
+                new=mock.Mock(return_value=objects.CellMappingList(objects=[
+                    objects.CellMapping(name='cell1',
+                                        uuid=uuidsentinel.cell1)])))
+    @mock.patch('nova.objects.InstanceList.get_by_filters',
+                side_effect=[
+                    objects.InstanceList(objects=[objects.Instance(
+                        uuid=uuidsentinel.instance, host='fake', node='fake',
+                        task_state=None, flavor=objects.Flavor(),
+                        project_id='fake-project', user_id='fake-user')]),
+                    objects.InstanceList(objects=[])])
+    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
+                'get_allocs_for_consumer',
+                new=mock.Mock(
+                    side_effect=exception.ConsumerAllocationRetrievalFailed(
+                        consumer_uuid='CONSUMER', error='ERROR')))
+    @mock.patch('nova.objects.ComputeNode.get_by_host_and_nodename',
+                new=mock.Mock(
+                    return_value=objects.ComputeNode(uuid=uuidsentinel.node)))
+    @mock.patch('nova.scheduler.utils.resources_from_flavor',
+                new=mock.Mock(return_value=mock.sentinel.resources))
+    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
+                'put_allocations', return_value=True)
+    def test_heal_allocations_get_allocs_retrieval_fails(self, mock_put,
+                                                         mock_getinst):
+        # This "succeeds"
+        self.assertEqual(0, self.cli.heal_allocations())
+        # We're really just verifying that we got to the end
+        mock_put.assert_called_once()
+        self.assertEqual(2, mock_getinst.call_count)
 
     @mock.patch('nova.objects.CellMappingList.get_all',
                 return_value=objects.CellMappingList(objects=[
@@ -2585,7 +2704,7 @@ class TestNovaManagePlacement(test.NoDBTestCase):
                             project_id='fake-project', user_id='fake-user')]),
                     objects.InstanceList()))
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                'get_allocations_for_consumer')
+                'get_allocs_for_consumer')
     @mock.patch('nova.objects.ComputeNode.get_by_host_and_nodename',
                 new_callable=mock.NonCallableMock)  # assert not called
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.put',
@@ -2618,8 +2737,7 @@ class TestNovaManagePlacement(test.NoDBTestCase):
         self.assertEqual(0, self.cli.heal_allocations(verbose=True))
         self.assertIn('Processed 1 instances.', self.output.getvalue())
         mock_get_allocs.assert_called_once_with(
-            test.MatchType(context.RequestContext), uuidsentinel.instance,
-            include_generation=True)
+            test.MatchType(context.RequestContext), uuidsentinel.instance)
         expected_put_data = mock_get_allocs.return_value
         expected_put_data['project_id'] = 'fake-project'
         expected_put_data['user_id'] = 'fake-user'
@@ -2638,7 +2756,7 @@ class TestNovaManagePlacement(test.NoDBTestCase):
                         task_state=None, project_id='fake-project',
                         user_id='fake-user')]))
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                'get_allocations_for_consumer')
+                'get_allocs_for_consumer')
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.put',
                 return_value=fake_requests.FakeResponse(
                     409, content='Inventory and/or allocations changed while '
@@ -2670,8 +2788,7 @@ class TestNovaManagePlacement(test.NoDBTestCase):
         self.assertIn(
             'Inventory and/or allocations changed', self.output.getvalue())
         mock_get_allocs.assert_called_once_with(
-            test.MatchType(context.RequestContext), uuidsentinel.instance,
-            include_generation=True)
+            test.MatchType(context.RequestContext), uuidsentinel.instance)
         expected_put_data = mock_get_allocs.return_value
         expected_put_data['project_id'] = 'fake-project'
         expected_put_data['user_id'] = 'fake-user'

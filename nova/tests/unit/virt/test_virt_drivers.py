@@ -20,6 +20,7 @@ import traceback
 import fixtures
 import mock
 import netaddr
+import os_resource_classes as orc
 import os_vif
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
@@ -28,6 +29,7 @@ from oslo_utils import timeutils
 import six
 
 from nova.compute import manager
+from nova import conf
 from nova.console import type as ctype
 from nova import context
 from nova import exception
@@ -46,6 +48,7 @@ from nova.virt import libvirt
 from nova.virt.libvirt import imagebackend
 
 LOG = logging.getLogger(__name__)
+CONF = conf.CONF
 
 
 def catch_notimplementederror(f):
@@ -808,6 +811,47 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
         instance = objects.Instance(self.ctxt, host='somehost')
         self.assertEqual(instance.host,
             self.connection.network_binding_host_id(self.ctxt, instance))
+
+    def test_get_allocation_ratio(self):
+        inv = {}
+        self.flags(cpu_allocation_ratio=16.1)
+        self.flags(ram_allocation_ratio=1.6)
+        self.flags(disk_allocation_ratio=1.1)
+        expeced_ratios = {
+            orc.VCPU: CONF.cpu_allocation_ratio,
+            orc.MEMORY_MB: CONF.ram_allocation_ratio,
+            orc.DISK_GB: CONF.disk_allocation_ratio
+        }
+        # If conf is set, return conf
+        self.assertEqual(expeced_ratios,
+                         self.connection._get_allocation_ratios(inv))
+
+        self.flags(cpu_allocation_ratio=None)
+        self.flags(ram_allocation_ratio=None)
+        self.flags(disk_allocation_ratio=None)
+        self.flags(initial_cpu_allocation_ratio=15.9)
+        self.flags(initial_ram_allocation_ratio=1.4)
+        self.flags(initial_disk_allocation_ratio=0.9)
+        expeced_ratios = {
+            orc.VCPU: CONF.initial_cpu_allocation_ratio,
+            orc.MEMORY_MB: CONF.initial_ram_allocation_ratio,
+            orc.DISK_GB: CONF.initial_disk_allocation_ratio
+        }
+        # if conf is unset and inv doesn't exists, return init conf
+        self.assertEqual(expeced_ratios,
+                         self.connection._get_allocation_ratios(inv))
+
+        inv = {orc.VCPU: {'allocation_ratio': 3.0},
+               orc.MEMORY_MB: {'allocation_ratio': 3.1},
+               orc.DISK_GB: {'allocation_ratio': 3.2}}
+        expeced_ratios = {
+            orc.VCPU: inv[orc.VCPU]['allocation_ratio'],
+            orc.MEMORY_MB: inv[orc.MEMORY_MB]['allocation_ratio'],
+            orc.DISK_GB: inv[orc.DISK_GB]['allocation_ratio']
+        }
+        # if conf is unset and inv exists, return inv
+        self.assertEqual(expeced_ratios,
+                         self.connection._get_allocation_ratios(inv))
 
 
 class AbstractDriverTestCase(_VirtDriverTestCase, test.TestCase):

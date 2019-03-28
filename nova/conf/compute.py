@@ -198,7 +198,10 @@ Related options:
 """),
     cfg.StrOpt('preallocate_images',
         default='none',
-        choices=('none', 'space'),
+        choices=[
+            ('none', 'No storage provisioning is done up front'),
+            ('space', 'Storage is fully allocated at instance start')
+        ],
         help="""
 The image preallocation mode to use.
 
@@ -207,11 +210,6 @@ when the instance is initially provisioned. This ensures immediate feedback is
 given if enough space isn't available. In addition, it should significantly
 improve performance on writes to new blocks and may even improve I/O
 performance to prewritten blocks due to reduced fragmentation.
-
-Possible values:
-
-* "none"  => no storage provisioning is done up front
-* "space" => storage is fully allocated at instance start
 """),
     cfg.BoolOpt('use_cow_images',
         default=True,
@@ -282,7 +280,12 @@ Unused unresized base images younger than this will not be removed.
 """),
     cfg.StrOpt('pointer_model',
         default='usbtablet',
-        choices=[None, 'ps2mouse', 'usbtablet'],
+        choices=[
+            ('ps2mouse', 'Uses relative movement. Mouse connected by PS2'),
+            ('usbtablet', 'Uses absolute movement. Tablet connect by USB'),
+            (None, 'Uses default behavior provided by drivers (mouse on PS2 '
+             'for libvirt x86)'),
+        ],
         help="""
 Generic property to specify the pointer type.
 
@@ -291,13 +294,6 @@ example to provide a graphic tablet for absolute cursor movement.
 
 If set, the 'hw_pointer_model' image property takes precedence over
 this configuration option.
-
-Possible values:
-
-* None: Uses default behavior provided by drivers (mouse on PS2 for
-        libvirt x86)
-* ps2mouse: Uses relative movement. Mouse connected by PS2
-* usbtablet: Uses absolute movement. Tablet connect by USB
 
 Related options:
 
@@ -385,7 +381,7 @@ Possible values:
 
 allocation_ratio_opts = [
     cfg.FloatOpt('cpu_allocation_ratio',
-        default=0.0,
+        default=None,
         min=0.0,
         help="""
 This option helps you specify virtual CPU to physical CPU allocation ratio.
@@ -399,21 +395,23 @@ This configuration specifies ratio for CoreFilter which can be set
 per compute node. For AggregateCoreFilter, it will fall back to this
 configuration value if no per-aggregate setting is found.
 
-NOTE: This can be set per-compute, or if set to 0.0, the value
-set on the scheduler node(s) or compute node(s) will be used
-and defaulted to 16.0. Once set to a non-default value, it is not possible
-to "unset" the config to get back to the default behavior. If you want
-to reset back to the default, explicitly specify 16.0.
-
-NOTE: As of the 16.0.0 Pike release, this configuration option is ignored
-for the ironic.IronicDriver compute driver and is hardcoded to 1.0.
+NOTE: If this option is set to something *other than* ``None`` or ``0.0``, the
+allocation ratio will be overwritten by the value of this option, otherwise,
+the allocation ratio will not change. Once set to a non-default value, it is
+not possible to "unset" the config to get back to the default behavior. If you
+want to reset back to the initial value, explicitly specify it to the value of
+``initial_cpu_allocation_ratio``.
 
 Possible values:
 
 * Any valid positive integer or float value
+
+Related options:
+
+* ``initial_cpu_allocation_ratio``
 """),
     cfg.FloatOpt('ram_allocation_ratio',
-        default=0.0,
+        default=None,
         min=0.0,
         help="""
 This option helps you specify virtual RAM to physical RAM
@@ -428,21 +426,23 @@ This configuration specifies ratio for RamFilter which can be set
 per compute node. For AggregateRamFilter, it will fall back to this
 configuration value if no per-aggregate setting found.
 
-NOTE: This can be set per-compute, or if set to 0.0, the value
-set on the scheduler node(s) or compute node(s) will be used and
-defaulted to 1.5. Once set to a non-default value, it is not possible
-to "unset" the config to get back to the default behavior. If you want
-to reset back to the default, explicitly specify 1.5.
-
-NOTE: As of the 16.0.0 Pike release, this configuration option is ignored
-for the ironic.IronicDriver compute driver and is hardcoded to 1.0.
+NOTE: If this option is set to something *other than* ``None`` or ``0.0``, the
+allocation ratio will be overwritten by the value of this option, otherwise,
+the allocation ratio will not change. Once set to a non-default value, it is
+not possible to "unset" the config to get back to the default behavior. If you
+want to reset back to the initial value, explicitly specify it to the value of
+``initial_ram_allocation_ratio``.
 
 Possible values:
 
 * Any valid positive integer or float value
+
+Related options:
+
+* ``initial_ram_allocation_ratio``
 """),
     cfg.FloatOpt('disk_allocation_ratio',
-        default=0.0,
+        default=None,
         min=0.0,
         help="""
 This option helps you specify virtual disk to physical disk
@@ -461,18 +461,71 @@ images. It can be set to a value between 0.0 and 1.0 in order
 to preserve a percentage of the disk for uses other than
 instances.
 
-NOTE: This can be set per-compute, or if set to 0.0, the value
-set on the scheduler node(s) or compute node(s) will be used and
-defaulted to 1.0. Once set to a non-default value, it is not possible
-to "unset" the config to get back to the default behavior. If you want
-to reset back to the default, explicitly specify 1.0.
-
-NOTE: As of the 16.0.0 Pike release, this configuration option is ignored
-for the ironic.IronicDriver compute driver and is hardcoded to 1.0.
+NOTE: If this option is set to something *other than* ``None`` or ``0.0``, the
+allocation ratio will be overwritten by the value of this option, otherwise,
+the allocation ratio will not change. Once set to a non-default value, it is
+not possible to "unset" the config to get back to the default behavior. If you
+want to reset back to the initial value, explicitly specify it to the value of
+``initial_disk_allocation_ratio``.
 
 Possible values:
 
 * Any valid positive integer or float value
+
+Related options:
+
+* ``initial_disk_allocation_ratio``
+"""),
+    cfg.FloatOpt('initial_cpu_allocation_ratio',
+                 default=16.0,
+                 min=0.0,
+                 help="""
+This option helps you specify initial virtual CPU to physical CPU allocation
+ratio.
+
+This is only used when initially creating the ``computes_nodes`` table record
+for a given nova-compute service.
+
+See https://docs.openstack.org/nova/latest/admin/configuration/schedulers.html
+for more details and usage scenarios.
+
+Related options:
+
+* ``cpu_allocation_ratio``
+"""),
+    cfg.FloatOpt('initial_ram_allocation_ratio',
+                 default=1.5,
+                 min=0.0,
+                 help="""
+This option helps you specify initial virtual RAM to physical RAM allocation
+ratio.
+
+This is only used when initially creating the ``computes_nodes`` table record
+for a given nova-compute service.
+
+See https://docs.openstack.org/nova/latest/admin/configuration/schedulers.html
+for more details and usage scenarios.
+
+Related options:
+
+* ``ram_allocation_ratio``
+"""),
+    cfg.FloatOpt('initial_disk_allocation_ratio',
+                 default=1.0,
+                 min=0.0,
+                 help="""
+This option helps you specify initial virtual disk to physical disk allocation
+ratio.
+
+This is only used when initially creating the ``computes_nodes`` table record
+for a given nova-compute service.
+
+See https://docs.openstack.org/nova/latest/admin/configuration/schedulers.html
+for more details and usage scenarios.
+
+Related options:
+
+* ``disk_allocation_ratio``
 """)
 ]
 
@@ -498,12 +551,6 @@ Possible values:
 * None (default)
 * Any string representing network name.
 """),
-    cfg.BoolOpt('defer_iptables_apply',
-        default=False,
-        help="""
-Whether to batch up the application of IPTables rules during a host restart
-and apply all at the end of the init phase.
-"""),
     cfg.StrOpt('instances_path',
         default=paths.state_path_def('instances'),
         sample_default="$state_path/instances",
@@ -516,6 +563,10 @@ Possible values:
 * $state_path/instances where state_path is a config option that specifies
   the top-level directory for maintaining nova's state. (default) or
   Any string representing directory path.
+
+Related options:
+
+* ``[workarounds]/ensure_libvirt_rbd_instance_dir_cleanup``
 """),
     cfg.BoolOpt('instance_usage_audit',
         default=False,
@@ -654,18 +705,26 @@ Related options:
 """),
     cfg.IntOpt('resource_provider_association_refresh',
         default=300,
-        min=1,
+        min=0,
+        mutable=True,
+        # TODO(efried): Provide more/better explanation of what this option is
+        # all about. Reference bug(s). Unless we're just going to remove it.
         help="""
 Interval for updating nova-compute-side cache of the compute node resource
-provider's aggregates and traits info.
+provider's inventories, aggregates, and traits.
 
 This option specifies the number of seconds between attempts to update a
-provider's aggregates and traits information in the local cache of the compute
+provider's inventories, aggregates and traits in the local cache of the compute
 node.
+
+A value of zero disables cache refresh completely.
+
+The cache can be cleared manually at any time by sending SIGHUP to the compute
+process, causing it to be repopulated the next time the data is accessed.
 
 Possible values:
 
-* Any positive integer in seconds.
+* Any positive integer in seconds, or zero to disable refresh.
 """),
    cfg.StrOpt('cpu_shared_set',
         help="""
@@ -673,14 +732,14 @@ Defines which physical CPUs (pCPUs) will be used for best-effort guest vCPU
 resources.
 
 Currently only used by libvirt driver to place guest emulator threads when
-hw:emulator_threads_policy:share.
+the flavor extra spec is set to ``hw:emulator_threads_policy=share``.
 
-::
+For example::
+
     cpu_shared_set = "4-12,^8,15"
 """),
     cfg.BoolOpt('live_migration_wait_for_vif_plug',
-        # TODO(mriedem): Change to default=True starting in Stein.
-        default=False,
+        default=True,
         help="""
 Determine if the source compute host should wait for a ``network-vif-plugged``
 event from the (neutron) networking service before starting the actual transfer
@@ -698,12 +757,9 @@ event may be triggered and then received on the source compute host and the
 source compute can wait for that event to ensure networking is set up on the
 destination host before starting the guest transfer in the hypervisor.
 
-By default, this is False for two reasons:
+.. note::
 
-1. Backward compatibility: deployments should test this out and ensure it works
-   for them before enabling it.
-
-2. The compute service cannot reliably determine which types of virtual
+   The compute service cannot reliably determine which types of virtual
    interfaces (``port.binding:vif_type``) will send ``network-vif-plugged``
    events without an accompanying port ``binding:host_id`` change.
    Open vSwitch and linuxbridge should be OK, but OpenDaylight is at least
@@ -714,8 +770,7 @@ Possible values:
 
 * True: wait for ``network-vif-plugged`` events before starting guest transfer
 * False: do not wait for ``network-vif-plugged`` events before starting guest
-  transfer (this is how things have always worked before this option
-  was introduced)
+  transfer (this is the legacy behavior)
 
 Related options:
 
@@ -727,6 +782,59 @@ Related options:
   True, this controls the amount of time to wait before timing out and either
   failing if ``vif_plugging_is_fatal`` is True, or simply continuing with the
   live migration
+"""),
+    cfg.IntOpt('max_concurrent_disk_ops',
+        default=0,
+        min=0,
+        help="""
+Number of concurrent disk-IO-intensive operations (glance image downloads,
+image format conversions, etc.) that we will do in parallel.  If this is set
+too high then response time suffers.
+The default value of 0 means no limit.
+ """),
+    cfg.IntOpt('max_disk_devices_to_attach',
+        default=-1,
+        min=-1,
+        help="""
+Maximum number of disk devices allowed to attach to a single server. Note
+that the number of disks supported by an server depends on the bus used. For
+example, the ``ide`` disk bus is limited to 4 attached devices. The configured
+maximum is enforced during server create, rebuild, evacuate, unshelve, live
+migrate, and attach volume.
+
+Usually, disk bus is determined automatically from the device type or disk
+device, and the virtualization type. However, disk bus
+can also be specified via a block device mapping or an image property.
+See the ``disk_bus`` field in :doc:`/user/block-device-mapping` for more
+information about specifying disk bus in a block device mapping, and
+see https://docs.openstack.org/glance/latest/admin/useful-image-properties.html
+for more information about the ``hw_disk_bus`` image property.
+
+Operators changing the ``[compute]/max_disk_devices_to_attach`` on a compute
+service that is hosting servers should be aware that it could cause rebuilds to
+fail, if the maximum is decreased lower than the number of devices already
+attached to servers. For example, if server A has 26 devices attached and an
+operators changes ``[compute]/max_disk_devices_to_attach`` to 20, a request to
+rebuild server A will fail and go into ERROR state because 26 devices are
+already attached and exceed the new configured maximum of 20.
+
+Operators setting ``[compute]/max_disk_devices_to_attach`` should also be aware
+that during a cold migration, the configured maximum is only enforced in-place
+and the destination is not checked before the move. This means if an operator
+has set a maximum of 26 on compute host A and a maximum of 20 on compute host
+B, a cold migration of a server with 26 attached devices from compute host A to
+compute host B will succeed. Then, once the server is on compute host B, a
+subsequent request to rebuild the server will fail and go into ERROR state
+because 26 devices are already attached and exceed the configured maximum of 20
+on compute host B.
+
+The configured maximum is not enforced on shelved offloaded servers, as they
+have no compute host.
+
+Possible values:
+
+* -1 means unlimited
+* Any integer >= 0 represents the maximum allowed
 """),
 ]
 
@@ -776,7 +884,7 @@ Possible values:
 
 Related options:
 
-* If ``handle_virt_lifecycle_events`` in workarounds_group is
+* If ``handle_virt_lifecycle_events`` in the ``workarounds`` group is
   false and this option is negative, then instances that get out
   of sync between the hypervisor and the Nova database will have
   to be synchronized manually.
@@ -1033,7 +1141,7 @@ Possible values:
 """),
     cfg.IntOpt("shutdown_timeout",
         default=60,
-        min=1,
+        min=0,
         help="""
 Total time to wait in seconds for an instance to perform a clean
 shutdown.
@@ -1042,7 +1150,8 @@ It determines the overall period (in seconds) a VM is allowed to
 perform a clean shutdown. While performing stop, rescue and shelve,
 rebuild operations, configuring this option gives the VM a chance
 to perform a controlled shutdown before the instance is powered off.
-The default timeout is 60 seconds.
+The default timeout is 60 seconds. A value of 0 (zero) means the guest
+will be powered off immediately with no opportunity for guest OS clean-up.
 
 The timeout value can be overridden on a per image basis by means
 of os_shutdown_timeout that is an image metadata setting allowing
@@ -1051,32 +1160,30 @@ need to shut down cleanly.
 
 Possible values:
 
-* Any positive integer in seconds (default value is 60).
+* A positive integer or 0 (default value is 60).
 """)
 ]
 
 running_deleted_opts = [
     cfg.StrOpt("running_deleted_instance_action",
         default="reap",
-        choices=('noop', 'log', 'shutdown', 'reap'),
+        choices=[
+            ('reap', 'Powers down the instances and deletes them'),
+            ('log', 'Logs warning message about deletion of the resource'),
+            ('shutdown', 'Powers down instances and marks them as '
+             'non-bootable which can be later used for debugging/analysis'),
+            ('noop', 'Takes no action'),
+        ],
         help="""
 The compute service periodically checks for instances that have been
 deleted in the database but remain running on the compute node. The
 above option enables action to be taken when such instances are
 identified.
 
-Possible values:
-
-* reap: Powers down the instances and deletes them(default)
-* log: Logs warning message about deletion of the resource
-* shutdown: Powers down instances and marks them as non-
-  bootable which can be later used for debugging/analysis
-* noop: Takes no action
-
 Related options:
 
-* running_deleted_instance_poll_interval
-* running_deleted_instance_timeout
+* ``running_deleted_instance_poll_interval``
+* ``running_deleted_instance_timeout``
 """),
     cfg.IntOpt("running_deleted_instance_poll_interval",
         default=1800,
@@ -1112,9 +1219,9 @@ Related options:
 ]
 
 instance_cleaning_opts = [
-    # TODO(macsz): add min=1 flag in P development cycle
     cfg.IntOpt('maximum_instance_delete_attempts',
         default=5,
+        min=1,
         help="""
 The number of times to attempt to reap an instance's files.
 
@@ -1124,8 +1231,6 @@ that can be made.
 Possible values:
 
 * Any positive integer defines how many attempts are made.
-* Any value <=0 means no delete attempts occur, but you should use
-  ``instance_delete_interval`` to disable the delete attempts.
 
 Related options:
 
@@ -1136,7 +1241,14 @@ Related options:
 db_opts = [
     cfg.StrOpt('osapi_compute_unique_server_name_scope',
         default='',
-        choices=['', 'project', 'global'],
+        choices=[
+            ('', 'An empty value means that no uniqueness check is done and '
+             'duplicate names are possible'),
+            ('project', 'The instance name check is done only for instances '
+             'within the same project'),
+            ('global', 'The instance name check is done for all instances '
+             'regardless of the project'),
+        ],
         help="""
 Sets the scope of the check for unique instance names.
 
@@ -1146,15 +1258,6 @@ duplicate name will result in an ''InstanceExists'' error. The uniqueness is
 case-insensitive. Setting this option can increase the usability for end
 users as they don't have to distinguish among instances with the same name
 by their IDs.
-
-Possible values:
-
-* '': An empty value means that no uniqueness check is done and duplicate
-  names are possible.
-* "project": The instance name check is done only for instances within the
-  same project.
-* "global": The instance name check is done for all instances regardless of
-  the project.
 """),
     cfg.BoolOpt('enable_new_services',
         default=True,

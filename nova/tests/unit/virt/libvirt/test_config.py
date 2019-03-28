@@ -13,18 +13,16 @@
 #    under the License.
 
 from lxml import etree
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import units
 
 from nova.objects import fields as obj_fields
 from nova import test
-from nova.tests.unit import matchers
-from nova.tests import uuidsentinel as uuids
 from nova.virt.libvirt import config
 
 
 class LibvirtConfigBaseTest(test.NoDBTestCase):
-    def assertXmlEqual(self, expectedXmlstr, actualXmlstr):
-        self.assertThat(actualXmlstr, matchers.XMLMatches(expectedXmlstr))
+    pass
 
 
 class LibvirtConfigTest(LibvirtConfigBaseTest):
@@ -115,11 +113,19 @@ class LibvirtConfigCapsTest(LibvirtConfigBaseTest):
           </host>
           <guest>
             <os_type>hvm</os_type>
-            <arch name='x86_64'/>
+            <arch name='x86_64'>
+              <emulator>/usr/bin/qemu-system-x86_64</emulator>
+              <domain type="qemu" />
+              <domain type="kvm">
+                <emulator>/usr/bin/qemu-kvm</emulator>
+              </domain>
+            </arch>
           </guest>
           <guest>
             <os_type>hvm</os_type>
-            <arch name='i686'/>
+            <arch name='i686'>
+              <emulator>/usr/bin/qemu-system-i386</emulator>
+            </arch>
           </guest>
         </capabilities>"""
 
@@ -128,6 +134,17 @@ class LibvirtConfigCapsTest(LibvirtConfigBaseTest):
 
         self.assertIsInstance(obj.host, config.LibvirtConfigCapsHost)
         self.assertEqual(obj.host.uuid, "c7a5fdbd-edaf-9455-926a-d65c16db1809")
+        self.assertEqual(2, len(obj.guests))
+        for guest in obj.guests:
+            self.assertIsInstance(guest, config.LibvirtConfigCapsGuest)
+            self.assertEqual('hvm', guest.ostype)
+
+        self.assertEqual('x86_64', obj.guests[0].arch)
+        self.assertEqual('i686', obj.guests[1].arch)
+        self.assertEqual('/usr/bin/qemu-system-x86_64', obj.guests[0].emulator)
+        self.assertNotIn('qemu', obj.guests[0].domemulator)
+        self.assertEqual('/usr/bin/qemu-kvm', obj.guests[0].domemulator['kvm'])
+        self.assertEqual('/usr/bin/qemu-system-i386', obj.guests[1].emulator)
 
         xmlout = obj.to_xml()
 
@@ -1599,20 +1616,6 @@ class LibvirtConfigGuestConsoleTest(LibvirtConfigBaseTest):
         self.assertXmlEqual(xml, """
             <console type="pty">
                 <target type="sclp"/>
-            </console>
-            """)
-
-    def test_config_type_file_with_target_type(self):
-        obj = config.LibvirtConfigGuestConsole()
-        obj.type = "file"
-        obj.target_type = "sclplm"
-        obj.source_path = "/var/lib/nova/instances/uuid/console.log"
-
-        xml = obj.to_xml()
-        self.assertXmlEqual(xml, """
-            <console type="file">
-                <source path="/var/lib/nova/instances/uuid/console.log"/>
-                <target type="sclplm"/>
             </console>
             """)
 

@@ -23,6 +23,21 @@
         chdir: '{{ ansible_user_dir }}/workspace'
       environment: '{{ zuul | zuul_legacy_vars }}'
 
+    - name: Configure devstack
+      shell:
+        # Force config drive.
+        cmd: |
+          set -e
+          set -x
+          cat << 'EOF' >>"/tmp/dg-local.conf"
+          [[local|localrc]]
+          FORCE_CONFIG_DRIVE=True
+
+          EOF
+        executable: /bin/bash
+        chdir: '{{ ansible_user_dir }}/workspace'
+      environment: '{{ zuul | zuul_legacy_vars }}'
+
     - shell:
         cmd: |
           set -e
@@ -34,6 +49,7 @@
           export DEVSTACK_GATE_TOPOLOGY="multinode"
           function post_test_hook {
               /opt/stack/new/nova/nova/tests/live_migration/hooks/run_tests.sh
+              $BASE/new/nova/gate/test_evacuate.sh
           }
           export -f post_test_hook
           cp devstack-gate/devstack-vm-gate-wrap.sh ./safe-devstack-vm-gate-wrap.sh

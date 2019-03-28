@@ -21,6 +21,14 @@ Lists all running Compute services.
 
 Provides details why any services were disabled.
 
+.. note:: Starting with microversion 2.69 if service details cannot be loaded
+   due to a transient condition in the deployment like infrastructure failure,
+   the response body for those unavailable compute services in the down cells
+   will be missing keys. See `handling down cells
+   <https://developer.openstack.org/api-guide/compute/down_cells.html>`__
+   section of the Compute API guide for more information on the keys that
+   would be returned in the partial constructs.
+
 Normal response codes: 200
 
 Error response codes: unauthorized(401), forbidden(403)
@@ -53,6 +61,15 @@ Response
 **Example List Compute Services**
 
 .. literalinclude:: ../../doc/api_samples/os-services/v2.11/services-list-get-resp.json
+   :language: javascript
+
+**Example List Compute Services (2.69)**
+
+This is a sample response for the services from the non-responsive part of the
+deployment. The responses for the available service records will be normal
+without any missing keys.
+
+.. literalinclude:: ../../doc/api_samples/os-services/v2.69/services-list-get-resp.json
    :language: javascript
 
 Disable Scheduling For A Compute Service
@@ -195,7 +212,16 @@ Update Forced Down
 
 .. rest_method:: PUT /os-services/force-down
 
-Set or unset ``forced_down`` flag for the service.
+Set or unset ``forced_down`` flag for the service. ``forced_down`` is a manual
+override to tell nova that the service in question has been fenced manually by
+the operations team (either hard powered off, or network unplugged). That
+signals that it is safe to proceed with ``evacuate`` or other operations that
+nova has safety checks to prevent for hosts that are up.
+
+.. warning::
+
+   Setting a service forced down without completely fencing it will likely
+   result in the corruption of VMs on that host.
 
 Action ``force-down`` available as of microversion 2.11.
 

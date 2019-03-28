@@ -11,19 +11,20 @@
 #    under the License.
 
 import mock
+from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova.compute import rpcapi as compute_rpcapi
 from nova.conductor.tasks import migrate
 from nova import context
 from nova import exception
 from nova import objects
-from nova.scheduler import client as scheduler_client
+from nova.scheduler.client import query
+from nova.scheduler.client import report
 from nova.scheduler import utils as scheduler_utils
 from nova import test
 from nova.tests.unit.conductor.test_conductor import FakeContext
 from nova.tests.unit import fake_flavor
 from nova.tests.unit import fake_instance
-from nova.tests import uuidsentinel as uuids
 
 
 class MigrationTaskTestCase(test.NoDBTestCase):
@@ -64,37 +65,9 @@ class MigrationTaskTestCase(test.NoDBTestCase):
                                      self.request_spec,
                                      self.clean_shutdown,
                                      compute_rpcapi.ComputeAPI(),
-                                     scheduler_client.SchedulerClient(),
+                                     query.SchedulerQueryClient(),
+                                     report.SchedulerReportClient(),
                                      host_list=None)
-
-    @mock.patch('nova.objects.Service.get_minimum_version_multi')
-    @mock.patch('nova.availability_zones.get_host_availability_zone')
-    @mock.patch.object(scheduler_utils, 'setup_instance_group')
-    @mock.patch.object(scheduler_client.SchedulerClient, 'select_destinations')
-    @mock.patch.object(compute_rpcapi.ComputeAPI, 'prep_resize')
-    def test_execute_legacy_no_pre_create_migration(self, prep_resize_mock,
-                                                    sel_dest_mock, sig_mock,
-                                                    az_mock, gmv_mock):
-        sel_dest_mock.return_value = self.host_lists
-        az_mock.return_value = 'myaz'
-        task = self._generate_task()
-        legacy_request_spec = self.request_spec.to_legacy_request_spec_dict()
-        gmv_mock.return_value = 22
-        task.execute()
-
-        sig_mock.assert_called_once_with(self.context, self.request_spec)
-        task.scheduler_client.select_destinations.assert_called_once_with(
-            self.context, self.request_spec, [self.instance.uuid],
-            return_objects=True, return_alternates=True)
-        selection = self.host_lists[0][0]
-        prep_resize_mock.assert_called_once_with(
-            self.context, self.instance, legacy_request_spec['image'],
-            self.flavor, selection.service_host, None,
-            request_spec=legacy_request_spec,
-            filter_properties=self.filter_properties, node=selection.nodename,
-            clean_shutdown=self.clean_shutdown, host_list=[])
-        az_mock.assert_called_once_with(self.context, 'host1')
-        self.assertIsNone(task._migration)
 
     @mock.patch.object(objects.MigrationList, 'get_by_filters')
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient')
@@ -104,7 +77,7 @@ class MigrationTaskTestCase(test.NoDBTestCase):
     @mock.patch('nova.objects.Service.get_minimum_version_multi')
     @mock.patch('nova.availability_zones.get_host_availability_zone')
     @mock.patch.object(scheduler_utils, 'setup_instance_group')
-    @mock.patch.object(scheduler_client.SchedulerClient, 'select_destinations')
+    @mock.patch.object(query.SchedulerQueryClient, 'select_destinations')
     @mock.patch.object(compute_rpcapi.ComputeAPI, 'prep_resize')
     def _test_execute(self, prep_resize_mock, sel_dest_mock, sig_mock, az_mock,
                       gmv_mock, cm_mock, sm_mock, cn_mock, rc_mock, gbf_mock,
@@ -123,7 +96,6 @@ class MigrationTaskTestCase(test.NoDBTestCase):
                 self.request_spec.requested_destination)
 
         task = self._generate_task()
-        legacy_request_spec = self.request_spec.to_legacy_request_spec_dict()
         gmv_mock.return_value = 23
 
         # We just need this hook point to set a uuid on the
@@ -144,14 +116,14 @@ class MigrationTaskTestCase(test.NoDBTestCase):
         self.heal_reqspec_is_bfv_mock.assert_called_once_with(
             self.context, self.request_spec, self.instance)
         sig_mock.assert_called_once_with(self.context, self.request_spec)
-        task.scheduler_client.select_destinations.assert_called_once_with(
+        task.query_client.select_destinations.assert_called_once_with(
             self.context, self.request_spec, [self.instance.uuid],
             return_objects=True, return_alternates=True)
         selection = self.host_lists[0][0]
         prep_resize_mock.assert_called_once_with(
-            self.context, self.instance, legacy_request_spec['image'],
+            self.context, self.instance, self.request_spec.image,
             self.flavor, selection.service_host, task._migration,
-            request_spec=legacy_request_spec,
+            request_spec=self.request_spec,
             filter_properties=self.filter_properties, node=selection.nodename,
             clean_shutdown=self.clean_shutdown, host_list=[])
         az_mock.assert_called_once_with(self.context, 'host1')
@@ -197,7 +169,7 @@ class MigrationTaskTestCase(test.NoDBTestCase):
     @mock.patch('nova.objects.Service.get_minimum_version_multi')
     @mock.patch('nova.availability_zones.get_host_availability_zone')
     @mock.patch.object(scheduler_utils, 'setup_instance_group')
-    @mock.patch.object(scheduler_client.SchedulerClient, 'select_destinations')
+    @mock.patch.object(query.SchedulerQueryClient, 'select_destinations')
     @mock.patch.object(compute_rpcapi.ComputeAPI, 'prep_resize')
     def test_execute_rollback(self, prep_resize_mock, sel_dest_mock, sig_mock,
                               az_mock, gmv_mock, cm_mock, sm_mock, cn_mock,
@@ -227,8 +199,7 @@ class MigrationTaskTestCase(test.NoDBTestCase):
         task._migration.save.assert_called_once_with()
         self.assertEqual('error', task._migration.status)
         mock_ra.assert_called_once_with(task.context, task._source_cn,
-                                        task.instance, task._migration,
-                                        task._held_allocations)
+                                        task.instance, task._migration)
 
 
 class MigrationTaskAllocationUtils(test.NoDBTestCase):
@@ -246,11 +217,11 @@ class MigrationTaskAllocationUtils(test.NoDBTestCase):
                                         instance.host, instance.node)
 
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                'get_allocations_for_consumer_by_provider')
+                'get_allocs_for_consumer')
     @mock.patch('nova.objects.ComputeNode.get_by_host_and_nodename')
     def test_replace_allocation_with_migration_no_allocs(self, mock_cn,
                                                          mock_ga):
-        mock_ga.return_value = None
+        mock_ga.return_value = {'allocations': {}}
         migration = objects.Migration(uuid=uuids.migration)
         instance = objects.Instance(uuid=uuids.instance,
                                     host='host', node='node')
@@ -262,7 +233,7 @@ class MigrationTaskAllocationUtils(test.NoDBTestCase):
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
                 'put_allocations')
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
-                'get_allocations_for_consumer_by_provider')
+                'get_allocs_for_consumer')
     @mock.patch('nova.objects.ComputeNode.get_by_host_and_nodename')
     def test_replace_allocation_with_migration_allocs_fail(self, mock_cn,
                                                            mock_ga, mock_pa):

@@ -11,6 +11,8 @@
 #    under the License.
 
 import mock
+import os_resource_classes as orc
+from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova.compute import power_state
 from nova.compute import resource_tracker
@@ -20,17 +22,16 @@ from nova.compute import vm_states
 from nova import conf
 from nova import context
 from nova import objects
-from nova import rc_fields as fields
-from nova.tests import fixtures as nova_fixtures
+from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import integrated_helpers
 from nova.tests.functional import test_report_client as test_base
-from nova.tests import uuidsentinel as uuids
 from nova.virt import driver as virt_driver
 
+
 CONF = conf.CONF
-VCPU = fields.ResourceClass.VCPU
-MEMORY_MB = fields.ResourceClass.MEMORY_MB
-DISK_GB = fields.ResourceClass.DISK_GB
+VCPU = orc.VCPU
+MEMORY_MB = orc.MEMORY_MB
+DISK_GB = orc.DISK_GB
 COMPUTE_HOST = 'compute-host'
 
 
@@ -135,7 +136,6 @@ class IronicResourceTrackerTest(test_base.SchedulerReportClientTestBase):
         interceptor.
         """
         self.report_client = client
-        self.rt.scheduler_client.reportclient = client
         self.rt.reportclient = client
 
     def setUp(self):
@@ -187,221 +187,6 @@ class IronicResourceTrackerTest(test_base.SchedulerReportClientTestBase):
             instances[instance.uuid] = instance
         return instances
 
-    def placement_get_inventory(self, rp_uuid):
-        url = '/resource_providers/%s/inventories' % rp_uuid
-        resp = self.report_client.get(url)
-        if 200 <= resp.status_code < 300:
-            return resp.json()['inventories']
-        else:
-            return resp.status_code
-
-    def placement_get_allocations(self, consumer_uuid):
-        url = '/allocations/%s' % consumer_uuid
-        resp = self.report_client.get(url)
-        if 200 <= resp.status_code < 300:
-            return resp.json()['allocations']
-        else:
-            return resp.status_code
-
-    def placement_get_custom_rcs(self):
-        url = '/resource_classes'
-        resp = self.report_client.get(url)
-        if 200 <= resp.status_code < 300:
-            all_rcs = resp.json()['resource_classes']
-            return [rc['name'] for rc in all_rcs
-                    if rc['name'] not in fields.ResourceClass.STANDARD]
-
-    @mock.patch('nova.compute.utils.is_volume_backed_instance',
-                new=mock.Mock(return_value=False))
-    @mock.patch('nova.objects.compute_node.ComputeNode.save', new=mock.Mock())
-    def test_ironic_ocata_to_pike(self):
-        """Check that when going from an Ocata installation with Ironic having
-        node's resource class attributes set, that we properly "auto-heal" the
-        inventory and allocation records in the placement API to account for
-        both the old-style VCPU/MEMORY_MB/DISK_GB resources as well as the new
-        custom resource class from Ironic's node.resource_class attribute.
-        """
-        with self._interceptor():
-            # Before the resource tracker is "initialized", we shouldn't have
-            # any compute nodes in the RT's cache...
-            self.assertEqual(0, len(self.rt.compute_nodes))
-
-            # There should not be any records in the placement API since we
-            # haven't yet run update_available_resource() in the RT.
-            for cn in self.COMPUTE_NODE_FIXTURES.values():
-                self.assertEqual(404, self.placement_get_inventory(cn.uuid))
-
-            for inst in self.INSTANCE_FIXTURES.keys():
-                self.assertEqual({}, self.placement_get_allocations(inst))
-
-            # Nor should there be any custom resource classes in the placement
-            # API, since we haven't had an Ironic node's resource class set yet
-            self.assertEqual(0, len(self.placement_get_custom_rcs()))
-
-            # Now "initialize" the resource tracker as if the compute host is a
-            # Ocata host, with Ironic virt driver, but the admin has not yet
-            # added a resource_class attribute to the Ironic baremetal nodes in
-            # her system.
-            # NOTE(jaypipes): This is what nova.compute.manager.ComputeManager
-            # does when "initializing" the service...
-            for cn in self.COMPUTE_NODE_FIXTURES.values():
-                nodename = cn.hypervisor_hostname
-                self.driver_mock.get_available_resource.return_value = {
-                    'hypervisor_hostname': nodename,
-                    'hypervisor_type': 'ironic',
-                    'hypervisor_version': 0,
-                    'vcpus': cn.vcpus,
-                    'vcpus_used': cn.vcpus_used,
-                    'memory_mb': cn.memory_mb,
-                    'memory_mb_used': cn.memory_mb_used,
-                    'local_gb': cn.local_gb,
-                    'local_gb_used': cn.local_gb_used,
-                    'numa_topology': None,
-                    'resource_class': None,  # Act like admin hasn't set yet...
-                }
-                self.driver_mock.get_inventory.return_value = {
-                    VCPU: {
-                        'total': cn.vcpus,
-                        'reserved': 0,
-                        'min_unit': 1,
-                        'max_unit': cn.vcpus,
-                        'step_size': 1,
-                        'allocation_ratio': 1.0,
-                    },
-                    MEMORY_MB: {
-                        'total': cn.memory_mb,
-                        'reserved': 0,
-                        'min_unit': 1,
-                        'max_unit': cn.memory_mb,
-                        'step_size': 1,
-                        'allocation_ratio': 1.0,
-                    },
-                    DISK_GB: {
-                        'total': cn.local_gb,
-                        'reserved': 0,
-                        'min_unit': 1,
-                        'max_unit': cn.local_gb,
-                        'step_size': 1,
-                        'allocation_ratio': 1.0,
-                    },
-                }
-                self.rt.update_available_resource(self.ctx, nodename)
-
-            self.assertEqual(3, len(self.rt.compute_nodes))
-            # A canary just to make sure the assertion below about the custom
-            # resource class being added wasn't already added somehow...
-            crcs = self.placement_get_custom_rcs()
-            self.assertNotIn('CUSTOM_SMALL_IRON', crcs)
-
-            # Verify that the placement API has the "old-style" resources in
-            # inventory and allocations
-            for cn in self.COMPUTE_NODE_FIXTURES.values():
-                inv = self.placement_get_inventory(cn.uuid)
-                self.assertEqual(3, len(inv))
-
-            # Now "spawn" an instance to the first compute node by calling the
-            # RT's instance_claim().
-            cn1_obj = self.COMPUTE_NODE_FIXTURES[uuids.cn1]
-            cn1_nodename = cn1_obj.hypervisor_hostname
-            inst = self.instances[uuids.instance1]
-            # Since we're pike, the scheduler would have created our
-            # allocation for us. So, we can use our old update routine
-            # here to mimic that before we go do the compute RT claim,
-            # and then the checks below.
-            self.rt.reportclient.update_instance_allocation(self.ctx,
-                                                            cn1_obj,
-                                                            inst,
-                                                            1)
-            with self.rt.instance_claim(self.ctx, inst, cn1_nodename):
-                pass
-
-            allocs = self.placement_get_allocations(inst.uuid)
-            self.assertEqual(1, len(allocs))
-            self.assertIn(uuids.cn1, allocs)
-
-            resources = allocs[uuids.cn1]['resources']
-            self.assertEqual(3, len(resources))
-            for rc in (VCPU, MEMORY_MB, DISK_GB):
-                self.assertIn(rc, resources)
-
-            # Now we emulate the operator setting ONE of the Ironic node's
-            # resource class attribute to the value of a custom resource class
-            # and re-run update_available_resource(). We will expect to see the
-            # inventory and allocations reset for the first compute node that
-            # had an instance on it. The new inventory and allocation records
-            # will be for VCPU, MEMORY_MB, DISK_GB, and also a new record for
-            # the custom resource class of the Ironic node.
-            self.driver_mock.get_available_resource.return_value = {
-                'hypervisor_hostname': cn1_obj.hypervisor_hostname,
-                'hypervisor_type': 'ironic',
-                'hypervisor_version': 0,
-                'vcpus': cn1_obj.vcpus,
-                'vcpus_used': cn1_obj.vcpus_used,
-                'memory_mb': cn1_obj.memory_mb,
-                'memory_mb_used': cn1_obj.memory_mb_used,
-                'local_gb': cn1_obj.local_gb,
-                'local_gb_used': cn1_obj.local_gb_used,
-                'numa_topology': None,
-                'resource_class': 'small-iron',
-            }
-            self.driver_mock.get_inventory.return_value = {
-                VCPU: {
-                    'total': cn1_obj.vcpus,
-                    'reserved': 0,
-                    'min_unit': 1,
-                    'max_unit': cn1_obj.vcpus,
-                    'step_size': 1,
-                    'allocation_ratio': 1.0,
-                },
-                MEMORY_MB: {
-                    'total': cn1_obj.memory_mb,
-                    'reserved': 0,
-                    'min_unit': 1,
-                    'max_unit': cn1_obj.memory_mb,
-                    'step_size': 1,
-                    'allocation_ratio': 1.0,
-                },
-                DISK_GB: {
-                    'total': cn1_obj.local_gb,
-                    'reserved': 0,
-                    'min_unit': 1,
-                    'max_unit': cn1_obj.local_gb,
-                    'step_size': 1,
-                    'allocation_ratio': 1.0,
-                },
-                'CUSTOM_SMALL_IRON': {
-                    'total': 1,
-                    'reserved': 0,
-                    'min_unit': 1,
-                    'max_unit': 1,
-                    'step_size': 1,
-                    'allocation_ratio': 1.0,
-                },
-            }
-            self.rt.update_available_resource(self.ctx, cn1_nodename)
-
-            # Verify the auto-creation of the custom resource class, normalized
-            # to what the placement API expects
-            self.assertIn('CUSTOM_SMALL_IRON', self.placement_get_custom_rcs())
-
-            allocs = self.placement_get_allocations(inst.uuid)
-            self.assertEqual(1, len(allocs))
-            self.assertIn(uuids.cn1, allocs)
-
-            resources = allocs[uuids.cn1]['resources']
-            self.assertEqual(3, len(resources))
-            for rc in (VCPU, MEMORY_MB, DISK_GB):
-                self.assertIn(rc, resources)
-
-            # TODO(jaypipes): Check allocations include the CUSTOM_SMALL_IRON
-            # resource class. At the moment, we do not add an allocation record
-            # for the Ironic custom resource class. Once the flavor is updated
-            # to store a resources:$CUSTOM_RESOURCE_CLASS=1 extra_spec key and
-            # the scheduler is constructing the request_spec to actually
-            # request a single amount of that custom resource class, we will
-            # modify the allocation/claim to consume only the custom resource
-            # class and not the VCPU, MEMORY_MB and DISK_GB.
-
     @mock.patch('nova.compute.utils.is_volume_backed_instance',
                 new=mock.Mock(return_value=False))
     @mock.patch('nova.objects.compute_node.ComputeNode.save', new=mock.Mock())
@@ -414,7 +199,7 @@ class IronicResourceTrackerTest(test_base.SchedulerReportClientTestBase):
         usage for an instance, the nodes still have their unique stats and
         nothing is leaked from node to node.
         """
-        self.useFixture(nova_fixtures.PlacementFixture())
+        self.useFixture(func_fixtures.PlacementFixture())
         # Before the resource tracker is "initialized", we shouldn't have
         # any compute nodes or stats in the RT's cache...
         self.assertEqual(0, len(self.rt.compute_nodes))
@@ -576,3 +361,107 @@ class TestUpdateComputeNodeReservedAndAllocationRatio(
 
         # The reserved host values should also come from config.
         self._assert_reserved_inventory(inventories)
+
+    def test_allocation_ratio_create_with_initial_allocation_ratio(self):
+        # The xxx_allocation_ratio is set to None by default, and we use
+        # 16.1/1.6/1.1 since disk_allocation_ratio defaults to 16.0/1.5/1.0.
+        self.flags(initial_cpu_allocation_ratio=16.1)
+        self.flags(initial_ram_allocation_ratio=1.6)
+        self.flags(initial_disk_allocation_ratio=1.1)
+        # Start a compute service which should create a corresponding resource
+        # provider in the placement service.
+        self._start_compute('fake-host')
+        # Assert the compute node resource provider exists in placement with
+        # the default reserved and allocation ratio values from config.
+        rp_uuid = self._get_provider_uuid_by_host('fake-host')
+        inventories = self._get_provider_inventory(rp_uuid)
+        ctxt = context.get_admin_context()
+        # Note that the CellDatabases fixture usage means we don't need to
+        # target the context to cell1 even though the compute_nodes table is
+        # in the cell1 database.
+        cn = objects.ComputeNode.get_by_uuid(ctxt, rp_uuid)
+        ratios = {
+            'VCPU': cn.cpu_allocation_ratio,
+            'MEMORY_MB': cn.ram_allocation_ratio,
+            'DISK_GB': cn.disk_allocation_ratio
+        }
+        initial_ratio_conf = {
+            'VCPU': CONF.initial_cpu_allocation_ratio,
+            'MEMORY_MB': CONF.initial_ram_allocation_ratio,
+            'DISK_GB': CONF.initial_disk_allocation_ratio
+        }
+        for rc, ratio in ratios.items():
+            self.assertIn(rc, inventories)
+            self.assertIn('allocation_ratio', inventories[rc])
+            # Check the allocation_ratio values come from the new
+            # CONF.initial_xxx_allocation_ratio
+            self.assertEqual(initial_ratio_conf[rc], ratio,
+                             'Unexpected allocation ratio for %s' % rc)
+            # Check the initial allocation ratio is updated to inventories
+            self.assertEqual(ratio, inventories[rc]['allocation_ratio'],
+                             'Unexpected allocation ratio for %s' % rc)
+
+    def test_allocation_ratio_overwritten_from_config(self):
+        # NOTE(yikun): This test case includes below step:
+        # 1. Overwrite the allocation_ratio via the placement API directly -
+        #    run the RT.update_available_resource periodic and assert the
+        #    allocation ratios are not overwritten from config.
+        #
+        # 2. Set the CONF.*_allocation_ratio, run the periodic, and assert
+        #    that the config overwrites what was set via the placement API.
+        compute_service = self._start_compute('fake-host')
+        rp_uuid = self._get_provider_uuid_by_host('fake-host')
+        ctxt = context.get_admin_context()
+
+        rt = compute_service.manager.rt
+
+        inv = self.placement_api.get(
+            '/resource_providers/%s/inventories' % rp_uuid).body
+        ratios = {'VCPU': 16.1, 'MEMORY_MB': 1.6, 'DISK_GB': 1.1}
+
+        for rc, ratio in ratios.items():
+            inv['inventories'][rc]['allocation_ratio'] = ratio
+
+        # Overwrite the allocation_ratio via the placement API directly
+        self._update_inventory(rp_uuid, inv)
+        inv = self._get_provider_inventory(rp_uuid)
+        # Check inventories is updated to ratios
+        for rc, ratio in ratios.items():
+            self.assertIn(rc, inv)
+            self.assertIn('allocation_ratio', inv[rc])
+            self.assertEqual(ratio, inv[rc]['allocation_ratio'],
+                             'Unexpected allocation ratio for %s' % rc)
+
+        # Make sure xxx_allocation_ratio is None by default
+        self.assertIsNone(CONF.cpu_allocation_ratio)
+        self.assertIsNone(CONF.ram_allocation_ratio)
+        self.assertIsNone(CONF.disk_allocation_ratio)
+        # run the RT.update_available_resource periodic
+        rt.update_available_resource(ctxt, 'fake-host')
+        # assert the allocation ratios are not overwritten from config
+        inv = self._get_provider_inventory(rp_uuid)
+        for rc, ratio in ratios.items():
+            self.assertIn(rc, inv)
+            self.assertIn('allocation_ratio', inv[rc])
+            self.assertEqual(ratio, inv[rc]['allocation_ratio'],
+                             'Unexpected allocation ratio for %s' % rc)
+
+        # set the CONF.*_allocation_ratio
+        self.flags(cpu_allocation_ratio=15.9)
+        self.flags(ram_allocation_ratio=1.4)
+        self.flags(disk_allocation_ratio=0.9)
+
+        # run the RT.update_available_resource periodic
+        rt.update_available_resource(ctxt, 'fake-host')
+        inv = self._get_provider_inventory(rp_uuid)
+        ratios = {
+            'VCPU': CONF.cpu_allocation_ratio,
+            'MEMORY_MB': CONF.ram_allocation_ratio,
+            'DISK_GB': CONF.disk_allocation_ratio
+        }
+        # assert that the config overwrites what was set via the placement API.
+        for rc, ratio in ratios.items():
+            self.assertIn(rc, inv)
+            self.assertIn('allocation_ratio', inv[rc])
+            self.assertEqual(ratio, inv[rc]['allocation_ratio'],
+                             'Unexpected allocation ratio for %s' % rc)

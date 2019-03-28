@@ -17,11 +17,13 @@
 """Tests For miscellaneous util methods used with compute."""
 
 import copy
+import datetime
 import string
 import traceback
 
 import mock
 from oslo_serialization import jsonutils
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import uuidutils
 import six
 
@@ -31,6 +33,7 @@ from nova.compute import power_state
 from nova.compute import task_states
 from nova.compute import utils as compute_utils
 from nova.compute import vm_states
+import nova.conf
 from nova import context
 from nova import exception
 from nova.image import glance
@@ -48,10 +51,11 @@ from nova.tests.unit import fake_network
 from nova.tests.unit import fake_notifier
 from nova.tests.unit import fake_server_actions
 from nova.tests.unit.objects import test_flavor
-from nova.tests import uuidsentinel as uuids
 
 
 FAKE_IMAGE_REF = uuids.image_ref
+
+CONF = nova.conf.CONF
 
 
 def create_instance(context, user_id='fake', project_id='fake', params=None):
@@ -879,6 +883,44 @@ class UsageInfoTestCase(test.TestCase):
             glance.generate_glance_url(self.context), uuids.fake_image_ref)
         self.assertEqual(payload['image_ref_url'], image_ref_url)
 
+    def test_notify_about_volume_usage(self):
+        # Ensure 'volume.usage' notification generates appropriate usage data.
+        vol_usage = objects.VolumeUsage(
+            id=1, volume_id=uuids.volume, instance_uuid=uuids.instance,
+            project_id=self.project_id, user_id=self.user_id,
+            availability_zone='AZ1',
+            tot_last_refreshed=datetime.datetime(second=1, minute=1, hour=1,
+                                                 day=5, month=7, year=2018),
+            tot_reads=100, tot_read_bytes=100,
+            tot_writes=100, tot_write_bytes=100,
+            curr_last_refreshed=datetime.datetime(second=1, minute=1, hour=2,
+                                                  day=5, month=7, year=2018),
+            curr_reads=100, curr_read_bytes=100,
+            curr_writes=100, curr_write_bytes=100)
+
+        compute_utils.notify_about_volume_usage(self.context, vol_usage,
+                                                'fake-compute')
+
+        self.assertEqual(1, len(fake_notifier.VERSIONED_NOTIFICATIONS))
+        notification = fake_notifier.VERSIONED_NOTIFICATIONS[0]
+
+        self.assertEqual('INFO', notification['priority'])
+        self.assertEqual('volume.usage', notification['event_type'])
+        self.assertEqual('nova-compute:fake-compute',
+                         notification['publisher_id'])
+
+        payload = notification['payload']['nova_object.data']
+        self.assertEqual(uuids.volume, payload['volume_id'])
+        self.assertEqual(uuids.instance, payload['instance_uuid'])
+        self.assertEqual(self.project_id, payload['project_id'])
+        self.assertEqual(self.user_id, payload['user_id'])
+        self.assertEqual('AZ1', payload['availability_zone'])
+        self.assertEqual('2018-07-05T02:01:01Z', payload['last_refreshed'])
+        self.assertEqual(200, payload['read_bytes'])
+        self.assertEqual(200, payload['reads'])
+        self.assertEqual(200, payload['write_bytes'])
+        self.assertEqual(200, payload['writes'])
+
     def test_notify_about_instance_usage(self):
         instance = create_instance(self.context)
         # Set some system metadata
@@ -1098,10 +1140,12 @@ class ComputeUtilsTestCase(test.NoDBTestCase):
             self.assertEqual([], addresses)
         mock_ifaddresses.assert_called_once_with(iface)
 
+    @mock.patch('nova.compute.utils.notify_about_instance_action')
     @mock.patch('nova.compute.utils.notify_about_instance_usage')
     @mock.patch('nova.objects.Instance.destroy')
     def test_notify_about_instance_delete(self, mock_instance_destroy,
-                                          mock_notify_usage):
+                                          mock_notify_usage,
+                                          mock_notify_action):
         instance = fake_instance.fake_instance_obj(
             self.context, expected_attrs=('system_metadata',))
         with compute_utils.notify_about_instance_delete(
@@ -1114,6 +1158,14 @@ class ComputeUtilsTestCase(test.NoDBTestCase):
                       'delete.end')
         ]
         mock_notify_usage.assert_has_calls(expected_notify_calls)
+        mock_notify_action.assert_has_calls([
+            mock.call(self.context, instance,
+                      host='fake-mini', source='nova-api',
+                      action='delete', phase='start'),
+            mock.call(self.context, instance,
+                      host='fake-mini', source='nova-api',
+                      action='delete', phase='end'),
+        ])
 
     def test_get_stashed_volume_connector_none(self):
         inst = fake_instance.fake_instance_obj(self.context)
@@ -1402,3 +1454,65 @@ class IsVolumeBackedInstanceTestCase(test.TestCase):
         self.assertFalse(
             compute_utils.is_volume_backed_instance(ctxt, instance, None))
         mock_bdms.assert_called_with(ctxt, instance.uuid)
+
+
+class TestComputeNodeToInventoryDict(test.NoDBTestCase):
+    def test_compute_node_inventory(self):
+        uuid = uuids.compute_node
+        name = 'computehost'
+        compute_node = objects.ComputeNode(uuid=uuid,
+                                           hypervisor_hostname=name,
+                                           vcpus=2,
+                                           cpu_allocation_ratio=16.0,
+                                           memory_mb=1024,
+                                           ram_allocation_ratio=1.5,
+                                           local_gb=10,
+                                           disk_allocation_ratio=1.0)
+
+        self.flags(reserved_host_memory_mb=1000)
+        self.flags(reserved_host_disk_mb=200)
+        self.flags(reserved_host_cpus=1)
+
+        result = compute_utils.compute_node_to_inventory_dict(compute_node)
+
+        expected = {
+            'VCPU': {
+                'total': compute_node.vcpus,
+                'reserved': CONF.reserved_host_cpus,
+                'min_unit': 1,
+                'max_unit': compute_node.vcpus,
+                'step_size': 1,
+                'allocation_ratio': compute_node.cpu_allocation_ratio,
+            },
+            'MEMORY_MB': {
+                'total': compute_node.memory_mb,
+                'reserved': CONF.reserved_host_memory_mb,
+                'min_unit': 1,
+                'max_unit': compute_node.memory_mb,
+                'step_size': 1,
+                'allocation_ratio': compute_node.ram_allocation_ratio,
+            },
+            'DISK_GB': {
+                'total': compute_node.local_gb,
+                'reserved': 1,  # this is ceil(1000/1024)
+                'min_unit': 1,
+                'max_unit': compute_node.local_gb,
+                'step_size': 1,
+                'allocation_ratio': compute_node.disk_allocation_ratio,
+            },
+        }
+        self.assertEqual(expected, result)
+
+    def test_compute_node_inventory_empty(self):
+        uuid = uuids.compute_node
+        name = 'computehost'
+        compute_node = objects.ComputeNode(uuid=uuid,
+                                           hypervisor_hostname=name,
+                                           vcpus=0,
+                                           cpu_allocation_ratio=16.0,
+                                           memory_mb=0,
+                                           ram_allocation_ratio=1.5,
+                                           local_gb=0,
+                                           disk_allocation_ratio=1.0)
+        result = compute_utils.compute_node_to_inventory_dict(compute_node)
+        self.assertEqual({}, result)

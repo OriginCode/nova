@@ -24,6 +24,7 @@ from oslo_config import cfg
 from oslo_db import exception as db_exc
 from oslo_log import log as logging
 import oslo_messaging as messaging
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import importutils
 from oslo_utils import netutils
 import six
@@ -53,8 +54,8 @@ from nova.tests.unit.objects import test_floating_ip
 from nova.tests.unit.objects import test_network
 from nova.tests.unit.objects import test_service
 from nova.tests.unit import utils as test_utils
-from nova.tests import uuidsentinel as uuids
 from nova import utils
+
 
 CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
@@ -882,7 +883,8 @@ class FlatDHCPNetworkTestCase(test.TestCase):
     @mock.patch('nova.objects.fixed_ip.FixedIP.get_by_id')
     @mock.patch('nova.objects.floating_ip.FloatingIPList.get_by_host')
     @mock.patch('nova.network.linux_net.iptables_manager._apply')
-    def test_init_host_iptables_defer_apply(self, iptable_apply,
+    @mock.patch('nova.privsep.linux_net.bind_ip')
+    def test_init_host_iptables_defer_apply(self, bind_ip, iptable_apply,
                                             floating_get_by_host,
                                             fixed_get_by_id):
         def get_by_id(context, fixed_ip_id, **kwargs):
@@ -934,7 +936,16 @@ class VlanNetworkTestCase(test.TestCase):
         self.assertEqual(objects.QuotasNoOp,
                          self.network.quotas_cls)
 
-    def test_vpn_allocate_fixed_ip(self):
+    @mock.patch('nova.privsep.linux_net.add_bridge', return_value=('', ''))
+    @mock.patch('nova.privsep.linux_net.set_device_enabled')
+    @mock.patch('nova.privsep.linux_net.routes_show', return_value=('', ''))
+    @mock.patch('nova.privsep.linux_net.lookup_ip', return_value=('', ''))
+    @mock.patch('nova.privsep.linux_net.change_ip')
+    @mock.patch('nova.privsep.linux_net.address_command_deprecated')
+    def test_vpn_allocate_fixed_ip(self, mock_address_command,
+                                   mock_change_ip, mock_lookup_ip,
+                                   mock_routes_show, mock_enabled,
+                                   mock_add_bridge):
         self.mox.StubOutWithMock(db, 'fixed_ip_associate')
         self.mox.StubOutWithMock(db, 'fixed_ip_update')
         self.mox.StubOutWithMock(db,
@@ -967,7 +978,15 @@ class VlanNetworkTestCase(test.TestCase):
         self.network.allocate_fixed_ip(self.context, FAKEUUID, network,
                                        vpn=True)
 
-    def test_allocate_fixed_ip(self):
+    @mock.patch('nova.privsep.linux_net.add_bridge', return_value=('', ''))
+    @mock.patch('nova.privsep.linux_net.set_device_enabled')
+    @mock.patch('nova.privsep.linux_net.routes_show', return_value=('', ''))
+    @mock.patch('nova.privsep.linux_net.lookup_ip', return_value=('', ''))
+    @mock.patch('nova.privsep.linux_net.change_ip')
+    @mock.patch('nova.privsep.linux_net.address_command_deprecated')
+    def test_allocate_fixed_ip(self, mock_address_command, mock_change_ip,
+                               mock_lookup_ip, mock_routes_show, mock_enabled,
+                               mock_add_bridge):
         self.stubs.Set(self.network,
                 '_do_trigger_security_group_members_refresh_for_instance',
                 lambda *a, **kw: None)
@@ -1143,7 +1162,7 @@ class VlanNetworkTestCase(test.TestCase):
                           vlan=100, cidr='192.168.0.1/24', network_size=100)
 
     def test_vlan_start(self):
-        # VLAN 100 and 101 are used, so this network shoud be created in 102
+        # VLAN 100 and 101 are used, so this network should be created in 102
         networks = self.network.create_networks(
                           self.context_admin, label="fake", num_networks=1,
                           vlan_start=100, cidr='192.168.3.1/24',
@@ -1152,7 +1171,7 @@ class VlanNetworkTestCase(test.TestCase):
         self.assertEqual(102, networks[0]["vlan"])
 
     def test_vlan_start_multiple(self):
-        # VLAN 100 and 101 are used, so these networks shoud be created in 102
+        # VLAN 100 and 101 are used, so these networks should be created in 102
         # and 103
         networks = self.network.create_networks(
                           self.context_admin, label="fake", num_networks=2,
@@ -1684,7 +1703,16 @@ class VlanNetworkTestCase(test.TestCase):
                           ctxt,
                           mox.IgnoreArg())
 
-    def test_add_fixed_ip_instance_without_vpn_requested_networks(self):
+    @mock.patch('nova.privsep.linux_net.add_bridge', return_value=('', ''))
+    @mock.patch('nova.privsep.linux_net.set_device_enabled')
+    @mock.patch('nova.privsep.linux_net.routes_show',
+                return_value=('fake', 0))
+    @mock.patch('nova.privsep.linux_net.lookup_ip', return_value=('', ''))
+    @mock.patch('nova.privsep.linux_net.change_ip')
+    @mock.patch('nova.privsep.linux_net.address_command_deprecated')
+    def test_add_fixed_ip_instance_without_vpn_requested_networks(
+            self, mock_address_command, mock_change_ip, mock_lookup_ip,
+            mock_routes_show, mock_enabled, mock_add_bridge):
         self.stubs.Set(self.network,
                 '_do_trigger_security_group_members_refresh_for_instance',
                 lambda *a, **kw: None)
@@ -1725,8 +1753,11 @@ class VlanNetworkTestCase(test.TestCase):
 
     @mock.patch('nova.db.api.fixed_ip_get_by_address')
     @mock.patch('nova.db.api.network_get')
-    def test_ip_association_and_allocation_of_other_project(self, net_get,
-                                                            fixed_get):
+    @mock.patch('nova.privsep.linux_net.bind_ip')
+    @mock.patch('nova.privsep.linux_net.unbind_ip')
+    @mock.patch('nova.privsep.linux_net.clean_conntrack')
+    def test_ip_association_and_allocation_of_other_project(
+            self, clean_conntrack, unbind_ip, bind_ip, net_get, fixed_get):
         """Makes sure that we cannot deallocaate or disassociate
         a public IP of other project.
         """
@@ -1884,10 +1915,9 @@ class VlanNetworkTestCase(test.TestCase):
             mock.patch.object(network_rpcapi.NetworkAPI, 'release_dhcp',
                               release_dhcp),
             mock.patch.object(db, 'virtual_interface_get', vif_get),
-            mock.patch.object(
-                utils, 'execute',
-                side_effect=processutils.ProcessExecutionError()),
-        ) as (release_dhcp, _vif_get, _execute):
+            mock.patch('nova.privsep.linux_net.dhcp_release',
+                       side_effect=processutils.ProcessExecutionError()),
+        ) as (release_dhcp, _vif_get, privsep_dhcp_release):
             context1 = context.RequestContext('user', fakes.FAKE_PROJECT_ID)
 
             instance = db.instance_create(context1,
@@ -1911,17 +1941,15 @@ class VlanNetworkTestCase(test.TestCase):
                                                  {'allocated': False})
             mock_dev_exists.assert_called_once_with(networks[1]['bridge'])
             if mock_dev_exists.return_value:
-                _execute.assert_called_once_with('dhcp_release',
-                                                 networks[1]['bridge'],
-                                                 fix_addr.address,
-                                                 'DE:AD:BE:EF:00:00',
-                                                 run_as_root=True)
+                privsep_dhcp_release.assert_called_once_with(
+                    networks[1]['bridge'], fix_addr.address,
+                    'DE:AD:BE:EF:00:00')
 
-    @mock.patch('nova.network.linux_utils.device_exists', return_value=True)
+    @mock.patch('nova.privsep.linux_net.device_exists', return_value=True)
     def test_deallocate_fixed_with_dhcp(self, mock_dev_exists):
         self._deallocate_fixed_with_dhcp(mock_dev_exists)
 
-    @mock.patch('nova.network.linux_utils.device_exists', return_value=False)
+    @mock.patch('nova.privsep.linux_net.device_exists', return_value=False)
     def test_deallocate_fixed_without_dhcp(self, mock_dev_exists):
         self._deallocate_fixed_with_dhcp(mock_dev_exists)
 
@@ -2046,7 +2074,8 @@ class VlanNetworkTestCase(test.TestCase):
     @mock.patch('nova.objects.fixed_ip.FixedIP.get_by_id')
     @mock.patch('nova.objects.floating_ip.FloatingIPList.get_by_host')
     @mock.patch('nova.network.linux_net.iptables_manager._apply')
-    def test_init_host_iptables_defer_apply(self, iptable_apply,
+    @mock.patch('nova.privsep.linux_net.bind_ip')
+    def test_init_host_iptables_defer_apply(self, bind_ip, iptable_apply,
                                             floating_get_by_host,
                                             fixed_get_by_id):
         def get_by_id(context, fixed_ip_id, **kwargs):
@@ -2740,7 +2769,8 @@ class CommonNetworkTestCase(test.TestCase):
         for line in expected_lines:
             self.assertIn(line, new_lines)
 
-    def test_flatdhcpmanager_dynamic_fixed_range(self):
+    @mock.patch('nova.privsep.linux_net.bind_ip')
+    def test_flatdhcpmanager_dynamic_fixed_range(self, mock_bind_ip):
         """Test FlatDHCPManager NAT rules for fixed_range."""
         # Set the network manager
         self.network = network_manager.FlatDHCPManager(host=HOST)
@@ -2751,7 +2781,8 @@ class CommonNetworkTestCase(test.TestCase):
         #     Determine networks to NAT based on lookup
         self._test_init_host_dynamic_fixed_range(self.network)
 
-    def test_vlanmanager_dynamic_fixed_range(self):
+    @mock.patch('nova.privsep.linux_net.bind_ip')
+    def test_vlanmanager_dynamic_fixed_range(self, mock_bind_ip):
         """Test VlanManager NAT rules for fixed_range."""
         # Set the network manager
         self.network = network_manager.VlanManager(host=HOST)
@@ -2828,7 +2859,23 @@ class AllocateTestCase(test.TestCase):
         self.user_context = context.RequestContext('testuser',
                                                    fakes.FAKE_PROJECT_ID)
 
-    def test_allocate_for_instance(self):
+    @mock.patch('nova.privsep.linux_net.add_bridge', return_value=('', ''))
+    @mock.patch('nova.privsep.linux_net.set_device_mtu')
+    @mock.patch('nova.privsep.linux_net.set_device_enabled')
+    @mock.patch('nova.privsep.linux_net.set_device_macaddr')
+    @mock.patch('nova.privsep.linux_net.bind_ip')
+    @mock.patch('nova.privsep.linux_net.unbind_ip')
+    @mock.patch('nova.privsep.linux_net.routes_show', return_value=('', ''))
+    @mock.patch('nova.privsep.linux_net.lookup_ip', return_value=('', ''))
+    @mock.patch('nova.privsep.linux_net.change_ip')
+    @mock.patch('nova.privsep.linux_net.clean_conntrack')
+    @mock.patch('nova.privsep.linux_net.address_command_deprecated')
+    def test_allocate_for_instance(self, mock_clean_conntrack,
+                                   mock_address_command,
+                                   mock_change_ip, mock_lookup_ip,
+                                   mock_routes_show, mock_unbind, mock_bind,
+                                   mock_set_macaddr, mock_set_enabled,
+                                   mock_set_mtu, mock_add_bridge):
         address = "10.10.10.10"
         self.flags(auto_assign_floating_ip=True)
 
@@ -2892,7 +2939,20 @@ class AllocateTestCase(test.TestCase):
             project_id=self.context.project_id, macs=None,
             requested_networks=requested_networks)
 
-    def test_allocate_for_instance_with_mac(self):
+    @mock.patch('nova.privsep.linux_net.add_bridge', return_value=('', ''))
+    @mock.patch('nova.privsep.linux_net.set_device_mtu')
+    @mock.patch('nova.privsep.linux_net.set_device_enabled')
+    @mock.patch('nova.privsep.linux_net.set_device_macaddr')
+    @mock.patch('nova.privsep.linux_net.routes_show', return_value=('', ''))
+    @mock.patch('nova.privsep.linux_net.lookup_ip', return_value=('', ''))
+    @mock.patch('nova.privsep.linux_net.change_ip')
+    @mock.patch('nova.privsep.linux_net.address_command_deprecated')
+    def test_allocate_for_instance_with_mac(self, mock_address_command,
+                                            mock_change_ip,
+                                            mock_lookup_ip,
+                                            mock_routes_show,
+                                            mock_set_addr, mock_enabled,
+                                            mock_set_mtu, mock_add_bridge):
         available_macs = set(['ca:fe:de:ad:be:ef'])
         inst = db.instance_create(self.context, {'host': HOST,
                                                  'display_name': HOST,
@@ -3047,7 +3107,10 @@ class FloatingIPTestCase(test.TestCase):
         self.network.deallocate_for_instance(self.context,
                 instance_id=instance_ref['id'])
 
-    def test_deallocation_deleted_instance(self):
+    @mock.patch('nova.privsep.linux_net.unbind_ip')
+    @mock.patch('nova.privsep.linux_net.clean_conntrack')
+    def test_deallocation_deleted_instance(self, mock_clean_conntrack,
+                                           mock_unbind_ip):
         self.stubs.Set(self.network, '_teardown_network_on_host',
                        lambda *args, **kwargs: None)
         instance = objects.Instance(context=self.context)
@@ -3067,7 +3130,10 @@ class FloatingIPTestCase(test.TestCase):
                 'project_id': self.project_id})
         self.network.deallocate_for_instance(self.context, instance=instance)
 
-    def test_deallocation_duplicate_floating_ip(self):
+    @mock.patch('nova.privsep.linux_net.unbind_ip')
+    @mock.patch('nova.privsep.linux_net.clean_conntrack')
+    def test_deallocation_duplicate_floating_ip(self, mock_clean_conntrack,
+                                                mock_unbind_ip):
         self.stubs.Set(self.network, '_teardown_network_on_host',
                        lambda *args, **kwargs: None)
         instance = objects.Instance(context=self.context)
@@ -3092,8 +3158,9 @@ class FloatingIPTestCase(test.TestCase):
     @mock.patch('nova.db.api.fixed_ip_get')
     @mock.patch('nova.db.api.floating_ip_get_by_address')
     @mock.patch('nova.db.api.floating_ip_update')
-    def test_migrate_instance_start(self, floating_update, floating_get,
-                                    fixed_get):
+    @mock.patch('nova.privsep.linux_net.clean_conntrack')
+    def test_migrate_instance_start(self, clean_conntrack, floating_update,
+                                    floating_get, fixed_get):
         called = {'count': 0}
 
         def fake_floating_ip_get_by_address(context, address):
@@ -3124,8 +3191,8 @@ class FloatingIPTestCase(test.TestCase):
                                  fake_is_stale_floating_ip_address)
         self.stubs.Set(self.network.l3driver, 'remove_floating_ip',
                        fake_remove_floating_ip)
-        self.stubs.Set(self.network.driver, 'clean_conntrack',
-                       fake_clean_conntrack)
+        clean_conntrack.side_effect = fake_clean_conntrack
+
         self.mox.ReplayAll()
         addresses = ['172.24.4.23', '172.24.4.24', '172.24.4.25']
         self.network.migrate_instance_start(self.context,

@@ -13,13 +13,13 @@
 # under the License.
 
 import mock
+from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova.compute import api as compute_api
 from nova import exception
 from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional import integrated_helpers
 from nova.tests.unit import fake_notifier
-from nova.tests import uuidsentinel as uuids
 from nova.virt import fake
 
 
@@ -45,6 +45,7 @@ class LiveMigrationCinderFailure(integrated_helpers._IntegratedTestBase,
                                  integrated_helpers.InstanceHelperMixin):
     api_major_version = 'v2.1'
     microversion = 'latest'
+    USE_NEUTRON = True
 
     def setUp(self):
         super(LiveMigrationCinderFailure, self).setUp()

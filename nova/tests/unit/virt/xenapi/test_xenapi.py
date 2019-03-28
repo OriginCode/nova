@@ -30,6 +30,7 @@ from oslo_concurrency import lockutils
 from oslo_config import fixture as config_fixture
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import importutils
 from oslo_utils import uuidutils
 import testtools
@@ -64,7 +65,6 @@ from nova.tests.unit.objects import test_aggregate
 from nova.tests.unit.objects import test_diagnostics
 from nova.tests.unit import utils as test_utils
 from nova.tests.unit.virt.xenapi import stubs
-from nova.tests import uuidsentinel as uuids
 from nova.virt import fake
 from nova.virt.xenapi import agent
 from nova.virt.xenapi import driver as xenapi_conn
@@ -1135,7 +1135,16 @@ class XenAPIVMTestCase(stubs.XenAPITestBase,
                                                              mock.ANY)
 
     @mock.patch.object(vmops.VMOps, '_create_vifs')
-    def test_spawn_vlanmanager(self, mock_create_vifs):
+    @mock.patch('nova.privsep.linux_net.add_bridge', return_value=('', ''))
+    @mock.patch('nova.privsep.linux_net.set_device_mtu')
+    @mock.patch('nova.privsep.linux_net.set_device_enabled')
+    @mock.patch('nova.privsep.linux_net.set_device_macaddr')
+    @mock.patch('nova.privsep.linux_net.change_ip')
+    @mock.patch('nova.privsep.linux_net.address_command_deprecated')
+    def test_spawn_vlanmanager(self, mock_address_command_deprecated,
+                               mock_change_ip, mock_set_macaddr,
+                               mock_set_enabled, mock_set_mtu, mock_add_bridge,
+                               mock_create_vifs):
         self.flags(network_manager='nova.network.manager.VlanManager',
                    vlan_interface='fake0')
         # Reset network table
@@ -3581,18 +3590,17 @@ class XenAPILiveMigrateTestCase(stubs.XenAPITestBaseNoDB):
             fake_get_network_ref.return_value = 'fake_network_ref'
             expected = {'block_migration': True,
                         'is_volume_backed': False,
-                        'migrate_data': {
-                            'migrate_send_data': {'value':
-                                                  'fake_migrate_data'},
-                            'destination_sr_ref': 'asdf'}
-                        }
+                        'migrate_send_data': {'value': 'fake_migrate_data'},
+                        'destination_sr_ref': 'asdf',
+                        'vif_uuid_map': {'': 'fake_network_ref'}}
             result = self.conn.check_can_live_migrate_destination(
                 self.context,
                 fake_instance,
                 {}, {},
                 True, False)
             result.is_volume_backed = False
-            self.assertEqual(expected, result.to_legacy_dict())
+            self.assertEqual(expected,
+                             result.obj_to_primitive()['nova_object.data'])
 
     def test_check_live_migrate_destination_verifies_ip(self):
         stubs.stubout_session(self, stubs.FakeSessionForVMTests)
@@ -3684,8 +3692,7 @@ class XenAPILiveMigrateTestCase(stubs.XenAPITestBaseNoDB):
         result = self.conn.check_can_live_migrate_source(self.context,
                                                          {'host': 'host'},
                                                          dest_check_data)
-        self.assertEqual(dest_check_data.to_legacy_dict(),
-                         result.to_legacy_dict())
+        self.assertEqual(dest_check_data, result)
 
     @mock.patch.object(session.XenAPISession, 'is_xsm_sr_check_relaxed',
                        return_value=False)

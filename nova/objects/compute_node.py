@@ -16,6 +16,8 @@
 from oslo_serialization import jsonutils
 from oslo_utils import uuidutils
 from oslo_utils import versionutils
+from sqlalchemy import or_
+from sqlalchemy.sql import null
 
 import nova.conf
 from nova.db import api as db
@@ -125,8 +127,12 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject):
                 # Setting to -1 will, if value is later used result in a
                 # ServiceNotFound, so should be safe.
                 primitive['service_id'] = -1
+        if target_version < (1, 9) and 'pci_device_pools' in primitive:
+            del primitive['pci_device_pools']
         if target_version < (1, 7) and 'host' in primitive:
             del primitive['host']
+        if target_version < (1, 6) and 'supported_hv_specs' in primitive:
+            del primitive['supported_hv_specs']
         if target_version < (1, 5) and 'numa_topology' in primitive:
             del primitive['numa_topology']
         if target_version < (1, 4) and 'host_ip' in primitive:
@@ -173,6 +179,7 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject):
             'pci_device_pools',
             ])
         fields = set(compute.fields) - special_cases
+        online_updates = {}
         for key in fields:
             value = db_compute[key]
             # NOTE(sbauza): Since all compute nodes don't possibly run the
@@ -184,32 +191,30 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject):
             # the next release (Newton) where the opt default values will be
             # restored for both cpu (16.0), ram (1.5) and disk (1.0)
             # allocation ratios.
-            # TODO(sbauza): Remove that in the next major version bump where
-            # we break compatibility with old Liberty computes
-            if (key == 'cpu_allocation_ratio' or key == 'ram_allocation_ratio'
-                or key == 'disk_allocation_ratio'):
-                if value == 0.0:
-                    # Operator has not yet provided a new value for that ratio
-                    # on the compute node
-                    value = None
-                if value is None:
-                    # ResourceTracker is not updating the value (old node)
-                    # or the compute node is updated but the default value has
-                    # not been changed
-                    value = getattr(CONF, key)
-                    if value == 0.0 and key == 'cpu_allocation_ratio':
-                        # It's not specified either on the controller
-                        value = 16.0
-                    if value == 0.0 and key == 'ram_allocation_ratio':
-                        # It's not specified either on the controller
-                        value = 1.5
-                    if value == 0.0 and key == 'disk_allocation_ratio':
-                        # It's not specified either on the controller
-                        value = 1.0
+            # TODO(yikun): Remove this online migration code when all ratio
+            # values are NOT 0.0 or NULL
+            ratio_keys = ['cpu_allocation_ratio', 'ram_allocation_ratio',
+                          'disk_allocation_ratio']
+            if key in ratio_keys and value in (None, 0.0):
+                # ResourceTracker is not updating the value (old node)
+                # or the compute node is updated but the default value has
+                # not been changed
+                r = getattr(CONF, key)
+                # NOTE(yikun): If the allocation ratio record is not set, the
+                # allocation ratio will be changed to the
+                # CONF.x_allocation_ratio value if x_allocation_ratio is
+                # set, and fallback to use the CONF.initial_x_allocation_ratio
+                # otherwise.
+                init_x_ratio = getattr(CONF, 'initial_%s' % key)
+                value = r if r else init_x_ratio
+                online_updates[key] = value
             elif key == 'mapped':
                 value = 0 if value is None else value
 
             setattr(compute, key, value)
+
+        if online_updates:
+            db.compute_node_update(context, compute.id, online_updates)
 
         stats = db_compute['stats']
         if stats:
@@ -270,7 +275,7 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject):
     def get_first_node_by_host_for_old_compat(cls, context, host,
                                               use_slave=False):
         computes = ComputeNodeList.get_all_by_host(context, host, use_slave)
-        # FIXME(sbauza): Some hypervisors (VMware, Ironic) can return multiple
+        # FIXME(sbauza): Ironic deployments can return multiple
         # nodes per host, we should return all the nodes and modify the callers
         # instead.
         # Arbitrarily returning the first node.
@@ -470,3 +475,39 @@ class ComputeNodeList(base.ObjectListBase, base.NovaObject):
         db_computes = cls._db_compute_node_get_by_hv_type(context, hv_type)
         return base.obj_make_list(context, cls(context), objects.ComputeNode,
                                   db_computes)
+
+
+def _get_node_empty_ratio(context, max_count):
+    """Query the DB for non-deleted compute_nodes with 0.0/None alloc ratios
+
+    Results are limited by ``max_count``.
+    """
+    return context.session.query(models.ComputeNode).filter(or_(
+        models.ComputeNode.ram_allocation_ratio == '0.0',
+        models.ComputeNode.cpu_allocation_ratio == '0.0',
+        models.ComputeNode.disk_allocation_ratio == '0.0',
+        models.ComputeNode.ram_allocation_ratio == null(),
+        models.ComputeNode.cpu_allocation_ratio == null(),
+        models.ComputeNode.disk_allocation_ratio == null()
+    )).filter(models.ComputeNode.deleted == 0).limit(max_count).all()
+
+
+@sa_api.pick_context_manager_writer
+def migrate_empty_ratio(context, max_count):
+    cns = _get_node_empty_ratio(context, max_count)
+
+    # NOTE(yikun): If it's an existing record with 0.0 or None values,
+    # we need to migrate this record using 'xxx_allocation_ratio' config
+    # if it's set, and fallback to use the 'initial_xxx_allocation_ratio'
+    # otherwise.
+    for cn in cns:
+        for t in ['cpu', 'disk', 'ram']:
+            current_ratio = getattr(cn, '%s_allocation_ratio' % t)
+            if current_ratio in (0.0, None):
+                r = getattr(CONF, "%s_allocation_ratio" % t)
+                init_x_ratio = getattr(CONF, "initial_%s_allocation_ratio" % t)
+                conf_alloc_ratio = r if r else init_x_ratio
+                setattr(cn, '%s_allocation_ratio' % t, conf_alloc_ratio)
+        context.session.add(cn)
+    found = done = len(cns)
+    return found, done

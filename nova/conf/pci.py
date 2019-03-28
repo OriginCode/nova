@@ -31,9 +31,12 @@ An alias for a PCI passthrough device requirement.
 This allows users to specify the alias in the extra specs for a flavor, without
 needing to repeat all the PCI property requirements.
 
+This should be configured for the ``nova-api`` service and, assuming you wish
+to use move operations, for each ``nova-compute`` service.
+
 Possible Values:
 
-* A list of JSON values which describe the aliases. For example::
+* A dictionary of JSON values which describe the aliases. For example::
 
     alias = {
       "name": "QuickAssist",
@@ -62,6 +65,24 @@ Possible Values:
   ``numa_policy``
     Required NUMA affinity of device. Valid values are: ``legacy``,
     ``preferred`` and ``required``.
+
+* Supports multiple aliases by repeating the option (not by specifying
+  a list value)::
+
+    alias = {
+      "name": "QuickAssist-1",
+      "product_id": "0443",
+      "vendor_id": "8086",
+      "device_type": "type-PCI",
+      "numa_policy": "required"
+    }
+    alias = {
+      "name": "QuickAssist-2",
+      "product_id": "0444",
+      "vendor_id": "8086",
+      "device_type": "type-PCI",
+      "numa_policy": "required"
+    }
 """),
     cfg.MultiStrOpt('passthrough_whitelist',
         default=[],

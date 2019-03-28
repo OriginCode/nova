@@ -18,6 +18,7 @@ import mock
 import netaddr
 from oslo_db import exception as db_exc
 from oslo_serialization import jsonutils
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 
 from nova.cells import rpcapi as cells_rpcapi
@@ -46,7 +47,6 @@ from nova.tests.unit.objects import test_migration_context as test_mig_ctxt
 from nova.tests.unit.objects import test_objects
 from nova.tests.unit.objects import test_security_group
 from nova.tests.unit.objects import test_vcpu_model
-from nova.tests import uuidsentinel as uuids
 from nova import utils
 
 
@@ -241,6 +241,24 @@ class _TestInstanceObject(object):
                                     project_id=self.context.project_id)
         self.assertNotIn('system_metadata', instance)
         self.assertEqual(0, len(instance.system_metadata))
+
+    def test_lazy_load_flavor_on_deleted_instance(self):
+        # For something like a flavor, we should be reading from the DB
+        # with read_deleted='yes'
+        flavor = objects.Flavor(name='testflavor')
+        instance = objects.Instance(self.context, uuid=uuids.instance,
+                                    flavor=flavor,
+                                    user_id=self.context.user_id,
+                                    project_id=self.context.project_id)
+        instance.create()
+        instance.destroy()
+        # Re-create our local object to make sure it doesn't have sysmeta
+        # filled in by create()
+        instance = objects.Instance(self.context, uuid=uuids.instance,
+                                    user_id=self.context.user_id,
+                                    project_id=self.context.project_id)
+        self.assertNotIn('flavor', instance)
+        self.assertEqual('testflavor', instance.flavor.name)
 
     def test_lazy_load_tags(self):
         instance = objects.Instance(self.context, uuid=uuids.instance,
@@ -554,8 +572,9 @@ class _TestInstanceObject(object):
     @mock.patch('nova.db.api.instance_extra_update_by_uuid')
     def test_save_object_pci_requests(self, mock_instance_extra_update):
         expected_json = ('[{"count": 1, "alias_name": null, "is_new": false,'
-                         '"request_id": null, "spec": [{"vendor_id": "8086",'
-                         '"product_id": "1502"}]}]')
+                         '"request_id": null, "requester_id": null,'
+                         '"spec": [{"vendor_id": "8086", '
+                         '"product_id": "1502"}], "numa_policy": null}]')
 
         inst = objects.Instance()
         inst = objects.Instance._from_db_object(self.context, inst,

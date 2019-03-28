@@ -9,6 +9,7 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+from __future__ import absolute_import
 
 import mock
 
@@ -369,10 +370,6 @@ class TestNovaManagePlacementHealAllocations(
     NUMBER_OF_CELLS = 2
 
     def setUp(self):
-        # Since the CachingScheduler does not use Placement, we want to use
-        # the CachingScheduler to create instances and then we can heal their
-        # allocations via the CLI.
-        self.flags(driver='caching_scheduler', group='scheduler')
         super(TestNovaManagePlacementHealAllocations, self).setUp()
         self.cli = manage.PlacementCommands()
         # We need to start a compute in each non-cell0 cell.
@@ -387,14 +384,11 @@ class TestNovaManagePlacementHealAllocations(
         self.flavor = self.api.get_flavors()[0]
         self.output = StringIO()
         self.useFixture(fixtures.MonkeyPatch('sys.stdout', self.output))
-        # On startup, the CachingScheduler runs a periodic task to pull the
-        # initial set of compute nodes out of the database which it then puts
-        # into a cache (hence the name of the driver). This can race with
-        # actually starting the compute services so we need to restart the
-        # scheduler to refresh the cache.
-        self.scheduler_service.stop()
-        self.scheduler_service.manager.driver.all_host_states = None
-        self.scheduler_service.start()
+        # We need to mock the FilterScheduler to not use Placement so that
+        # allocations won't be created during scheduling and then we can heal
+        # them in the CLI.
+        self.scheduler_service.manager.driver.USES_ALLOCATION_CANDIDATES = \
+            False
 
     def _boot_and_assert_no_allocations(self, flavor, hostname):
         """Creates a server on the given host and asserts neither have usage
@@ -423,14 +417,14 @@ class TestNovaManagePlacementHealAllocations(
             self.assertEqual(
                 0, usage,
                 'Compute node resource provider %s should not have %s '
-                'usage when using the CachingScheduler.' %
+                'usage; something must be wrong in test setup.' %
                 (hostname, resource_class))
 
         # Check that the server has no allocations.
         allocations = self._get_allocations_by_server_uuid(server['id'])
         self.assertEqual({}, allocations,
-                         'Server should not have allocations when using '
-                         'the CachingScheduler.')
+                         'Server should not have allocations; something must '
+                         'be wrong in test setup.')
         return server, rp_uuid
 
     def _assert_healed(self, server, rp_uuid):
@@ -439,8 +433,7 @@ class TestNovaManagePlacementHealAllocations(
                       'Allocations not found for server %s and compute node '
                       'resource provider. %s\nOutput:%s' %
                       (server['id'], rp_uuid, self.output.getvalue()))
-        self.assertFlavorMatchesAllocation(
-            self.flavor, allocations[rp_uuid]['resources'])
+        self.assertFlavorMatchesAllocation(self.flavor, server['id'], rp_uuid)
 
     def test_heal_allocations_paging(self):
         """This test runs the following scenario:
@@ -604,7 +597,7 @@ class TestNovaManagePlacementHealAllocations(
         1.8 when consumer (project_id and user_id) were not required so the
         consumer information is using sentinel values from config.
 
-        Since the CachingScheduler used in this test class won't actually
+        Since the hacked scheduler used in this test class won't actually
         create allocations during scheduling, we have to create the allocations
         out-of-band and then run our heal routine to see they get updated with
         the instance project and user information.
@@ -639,8 +632,7 @@ class TestNovaManagePlacementHealAllocations(
                          allocations['user_id'])
         allocations = allocations['allocations']
         self.assertIn(rp_uuid, allocations)
-        self.assertFlavorMatchesAllocation(
-            self.flavor, allocations[rp_uuid]['resources'])
+        self.assertFlavorMatchesAllocation(self.flavor, server['id'], rp_uuid)
         # Now run heal_allocations which should update the consumer info.
         result = self.cli.heal_allocations(verbose=True)
         self.assertEqual(0, result, self.output.getvalue())
@@ -783,8 +775,8 @@ class TestDBArchiveDeletedRows(integrated_helpers._IntegratedTestBase):
         # Now archive.
         self.cli.archive_deleted_rows(verbose=True)
         # Assert only one instance_group_member record was deleted.
-        self.assertRegexpMatches(self.output.getvalue(),
-                                 ".*instance_group_member.*\| 1.*")
+        self.assertRegex(self.output.getvalue(),
+                         ".*instance_group_member.*\| 1.*")
         # And that we still have one remaining group member.
         self.assertEqual(
             1, len(self.api.get_server_group(group['id'])['members']))

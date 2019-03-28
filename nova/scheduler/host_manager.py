@@ -624,12 +624,13 @@ class HostManager(object):
                 return services, objects.ComputeNodeList.get_all_by_uuids(
                     cctxt, compute_uuids)
 
-        results = context_module.scatter_gather_cells(context, cells, 60,
+        timeout = context_module.CELL_TIMEOUT
+        results = context_module.scatter_gather_cells(context, cells, timeout,
                                                       targeted_operation)
         compute_nodes = collections.defaultdict(list)
         services = {}
         for cell_uuid, result in results.items():
-            if result is context_module.raised_exception_sentinel:
+            if isinstance(result, Exception):
                 LOG.warning('Failed to get computes for cell %s', cell_uuid)
             elif result is context_module.did_not_respond_sentinel:
                 LOG.warning('Timeout getting computes for cell %s', cell_uuid)

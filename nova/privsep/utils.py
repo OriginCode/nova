@@ -23,12 +23,23 @@
 import errno
 import mmap
 import os
+import random
+import sys
 
 from oslo_log import log as logging
 from oslo_utils import excutils
 
+import nova.privsep
+
+# NOTE(mriedem): Avoid importing nova.utils since that can cause a circular
+# import with the privsep code. In fact, avoid importing anything outside
+# of nova/privsep/ if possible.
 
 LOG = logging.getLogger(__name__)
+
+
+def generate_random_string():
+    return str(random.randint(0, sys.maxsize))
 
 
 def supports_direct_io(dirpath):
@@ -37,7 +48,10 @@ def supports_direct_io(dirpath):
         LOG.debug("This python runtime does not support direct I/O")
         return False
 
-    testfile = os.path.join(dirpath, ".directio.test")
+    # Use a random filename to avoid issues with $dirpath being on shared
+    # storage.
+    file_name = "%s.%s" % (".directio.test", generate_random_string())
+    testfile = os.path.join(dirpath, file_name)
 
     hasDirectIO = True
     fd = None
@@ -51,7 +65,7 @@ def supports_direct_io(dirpath):
         LOG.debug("Path '%(path)s' supports direct I/O",
                   {'path': dirpath})
     except OSError as e:
-        if e.errno == errno.EINVAL:
+        if e.errno in (errno.EINVAL, errno.ENOENT):
             LOG.debug("Path '%(path)s' does not support direct I/O: "
                       "'%(ex)s'", {'path': dirpath, 'ex': e})
             hasDirectIO = False
@@ -76,3 +90,8 @@ def supports_direct_io(dirpath):
             pass
 
     return hasDirectIO
+
+
+@nova.privsep.sys_admin_pctxt.entrypoint
+def kill(pid, signal):
+    os.kill(pid, signal)

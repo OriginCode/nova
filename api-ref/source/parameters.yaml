@@ -25,7 +25,6 @@ tag_location:
   in: header
   required: true
   type: string
-  min_version: 2.26
 x-compute-request-id_resp:
   description: |
     The local request ID, which is a unique ID generated automatically
@@ -324,7 +323,6 @@ tag:
   in: path
   required: true
   type: string
-  min_version: 2.26
 tenant_id:
   description: |
     The UUID of the tenant in a multi-tenancy cloud.
@@ -453,6 +451,70 @@ changes-since:
   in: query
   required: false
   type: string
+changes_before_instance_action:
+  description: |
+    Filters the response by a date and time stamp when the instance actions last changed.
+    Those instances that changed before or equal to the specified date and time stamp
+    are returned.
+
+    The date and time stamp format is `ISO 8601 <https://en.wikipedia.org/wiki/ISO_8601>`_:
+    ::
+
+       CCYY-MM-DDThh:mm:ss±hh:mm
+
+    The ``±hh:mm`` value, if included, returns the time zone as an offset from UTC.
+    For example, ``2015-08-27T09:49:58-05:00``.
+    If you omit the time zone, the UTC time zone is assumed.
+    When both ``changes-since`` and ``changes-before`` are specified,
+    the value of the ``changes-before`` must be later than or equal to
+    the value of the ``changes-since`` otherwise API will return 400.
+  in: query
+  required: false
+  type: string
+  min_version: 2.66
+changes_before_migration:
+  description: |
+    Filters the response by a date and time stamp when the migration last
+    changed. Those migrations that changed before or equal to the specified date and time
+    stamp are returned.
+
+    The date and time stamp format is `ISO 8601 <https://en.wikipedia.org/wiki/ISO_8601>`_:
+    ::
+
+       CCYY-MM-DDThh:mm:ss±hh:mm
+
+    The ``±hh:mm`` value, if included, returns the time zone as an offset from UTC.
+    For example, ``2015-08-27T09:49:58-05:00``.
+    If you omit the time zone, the UTC time zone is assumed.
+    When both ``changes-since`` and ``changes-before`` are specified,
+    the value of the ``changes-before`` must be later than or equal to
+    the value of the ``changes-since`` otherwise API will return 400.
+  in: query
+  required: false
+  type: string
+  min_version: 2.66
+changes_before_server:
+  description: |
+    Filters the response by a date and time stamp when the server last changed.
+    Those servers that changed before or equal to the specified date and time stamp
+    are returned. To help keep track of changes this may also return recently deleted
+    servers.
+
+    The date and time stamp format is `ISO 8601 <https://en.wikipedia.org/wiki/ISO_8601>`_:
+    ::
+
+       CCYY-MM-DDThh:mm:ss±hh:mm
+
+    The ``±hh:mm`` value, if included, returns the time zone as an offset from UTC.
+    For example, ``2015-08-27T09:49:58-05:00``.
+    If you omit the time zone, the UTC time zone is assumed.
+    When both ``changes-since`` and ``changes-before`` are specified,
+    the value of the ``changes-before`` must be later than or equal to
+    the value of the ``changes-since`` otherwise API will return 400.
+  in: query
+  required: false
+  type: string
+  min_version: 2.66
 changes_since_instance_action:
   description: |
     Filters the response by a date and time stamp when the instance action last
@@ -466,6 +528,9 @@ changes_since_instance_action:
     The ``±hh:mm`` value, if included, returns the time zone as an offset from UTC.
     For example, ``2015-08-27T09:49:58-05:00``.
     If you omit the time zone, the UTC time zone is assumed.
+    When both ``changes-since`` and ``changes-before`` are specified,
+    the value of the ``changes-since`` must be earlier than or equal to
+    the value of the ``changes-before`` otherwise API will return 400.
   in: query
   required: false
   type: string
@@ -483,6 +548,9 @@ changes_since_migration:
     The ``±hh:mm`` value, if included, returns the time zone as an offset from UTC.
     For example, ``2015-08-27T09:49:58-05:00``.
     If you omit the time zone, the UTC time zone is assumed.
+    When both ``changes-since`` and ``changes-before`` are specified,
+    the value of the ``changes-since`` must be earlier than or equal to
+    the value of the ``changes-before`` otherwise API will return 400.
   in: query
   required: false
   type: string
@@ -501,6 +569,9 @@ changes_since_server:
     The ``±hh:mm`` value, if included, returns the time zone as an offset from UTC.
     For example, ``2015-08-27T09:49:58-05:00``.
     If you omit the time zone, the UTC time zone is assumed.
+    When both ``changes-since`` and ``changes-before`` are specified,
+    the value of the ``changes-since`` must be earlier than or equal to
+    the value of the ``changes-before`` otherwise API will return 400.
   in: query
   required: false
   type: string
@@ -626,11 +697,17 @@ exclude:
 flavor_is_public_query:
   in: query
   required: false
-  type: boolean
+  type: string
   description: |
-    Filters the flavor list by only public flavors. By default ``non
-    admin`` users only see public flavors, and ``admin`` users can see
-    additional non public flavors.
+    This parameter is only applicable to users with the administrative role.
+    For all other non-admin users, the parameter is ignored and only public
+    flavors will be returned. Filters the flavor list based on whether the
+    flavor is public or private. If the value of this parameter is not
+    specified, it is treated as ``True``. If the value is specified, ``1``,
+    ``t``, ``true``, ``on``, ``y`` and ``yes`` are treated as ``True``. ``0``,
+    ``f``, ``false``, ``off``, ``n`` and ``no`` are treated as ``False``
+    (they are case-insensitive). If the value is ``None`` (case-insensitive)
+    both public and private flavors will be listed in a single request.
 flavor_query:
   description: |
     Filters the response by a flavor, as a UUID. A flavor is a combination of memory,
@@ -973,7 +1050,7 @@ minDisk:
   type: integer
 minRam:
   description: |
-    Filters the response by a minimum RAM, in MB. For example, ``512``.
+    Filters the response by a minimum RAM, in MiB. For example, ``512``.
   in: query
   required: false
   type: integer
@@ -1109,7 +1186,7 @@ server_status_query:
   description: |
     Filters the response by a server status, as a string. For example, ``ACTIVE``.
 
-    Up to microversion 2.37, an empty list is returnd if an invalid status is
+    Up to microversion 2.37, an empty list is returned if an invalid status is
     specified. Starting from microversion 2.38, a 400 error is returned
     in that case.
   in: query
@@ -1416,12 +1493,8 @@ address:
   type: string
 addresses:
   description: |
-    The addresses for the server.  Addresses information is hidden for any server
-    in a state set in the ``hide_server_address_states`` configuration option.
-    By default, servers in ``building`` state hide their addresses information.
-    See ``nova.conf`` `configuration options
-    <https://docs.openstack.org/nova/latest/configuration/config.html>`_
-    for more information.
+    The addresses for the server.  Servers with status ``BUILD`` hide their
+    addresses information.
   in: body
   required: true
   type: object
@@ -1531,12 +1604,26 @@ aggregate_az:
   in: body
   required: true
   type: string
-aggregate_az_optional:
+aggregate_az_optional_create:
   description: |
     The availability zone of the host aggregate. You should use a custom
     availability zone rather than the default returned by the
     os-availability-zone API. The availability zone must not include ':'
     in its name.
+  in: body
+  required: false
+  type: string
+aggregate_az_optional_update:
+  description: |
+    The availability zone of the host aggregate. You should use a custom
+    availability zone rather than the default returned by the
+    os-availability-zone API. The availability zone must not include ':'
+    in its name.
+
+    .. warning:: You should not change or unset the availability zone of an
+      aggregate when that aggregate has hosts which contain servers in it
+      since that may impact the ability for those servers to move to another
+      host.
   in: body
   required: false
   type: string
@@ -1552,9 +1639,26 @@ aggregate_id_body:
   in: body
   required: true
   type: integer
-aggregate_metadata:
+aggregate_metadata_request:
   description: |
-    Metadata key and value pairs associate with the aggregate.
+    Metadata key and value pairs associated with the aggregate.
+    The maximum size for each metadata key and value pair is 255 bytes.
+
+    New keys will be added to existing aggregate metadata. For existing
+    keys, if the value is ``null`` the entry is removed, otherwise the
+    value is updated. Note that the special ``availability_zone`` metadata
+    entry cannot be unset to ``null``.
+
+    .. warning:: You should not change the availability zone of an
+      aggregate when that aggregate has hosts which contain servers in it
+      since that may impact the ability for those servers to move to another
+      host.
+  in: body
+  required: true
+  type: object
+aggregate_metadata_response:
+  description: |
+    Metadata key and value pairs associated with the aggregate.
   in: body
   required: true
   type: object
@@ -2182,6 +2286,13 @@ device_tag_bdm_attachment:
   required: false
   type: string
   min_version: 2.49
+device_tag_bdm_attachment_resp:
+  description: |
+    The device tag applied to the volume block device or ``null``.
+  in: body
+  required: true
+  type: string
+  min_version: 2.70
 device_tag_nic:
   description: |
     A device role tag that can be applied to a network interface. The guest OS
@@ -2206,12 +2317,36 @@ device_tag_nic_attachment:
   required: false
   type: string
   min_version: 2.49
+device_tag_nic_attachment_resp:
+  description: |
+    The device tag applied to the virtual network interface or ``null``.
+  in: body
+  required: true
+  type: string
+  min_version: 2.70
 device_type:
   description: |
     The device type. For example, ``disk``, ``cdrom``.
   in: body
   required: false
   type: string
+device_volume_type:
+  description: |
+    The device ``volume_type``. This can be used to specify the type of volume
+    which the compute service will create and attach to the server.
+    If not specified, the block storage service will provide a default volume
+    type. See the `block storage volume types API <https://developer.openstack.org/api-ref/block-storage/v3/#volume-types-types>`_
+    for more details.
+    There are some restrictions on ``volume_type``:
+
+    - It can be a volume type ID or name.
+    - It is only supported with ``source_type`` of ``blank``, ``image`` or
+      ``snapshot``.
+    - It is only supported with ``destination_type`` of ``volume``.
+  in: body
+  required: false
+  type: string
+  min_version: 2.67
 # Optional input parameter in the body for PUT /os-services/{service_id} added
 # in microversion 2.53.
 disabled_reason_2_53_in:
@@ -2229,13 +2364,13 @@ disabled_reason_body:
   type: string
 disk_available_least:
   description: |
-    The actual free disk on this hypervisor(in GB).
+    The actual free disk on this hypervisor(in GiB).
   in: body
   required: true
   type: integer
 disk_available_least_total:
   description: |
-    The actual free disk on all hypervisors(in GB).
+    The actual free disk on all hypervisors(in GiB).
   in: body
   required: true
   type: integer
@@ -2692,7 +2827,6 @@ flavor_description_required:
   type: string
   in: body
   required: true
-  min_version: 2.55
   description: |
     A free form description of the flavor. Limited to 65535 characters
     in length. Only printable characters are allowed.
@@ -2703,6 +2837,12 @@ flavor_description_resp:
   required: true
   type: string
   min_version: 2.55
+flavor_description_resp_no_min:
+  description: |
+    The description of the flavor.
+  in: body
+  required: true
+  type: string
 flavor_disabled:
   in: body
   required: false
@@ -3048,6 +3188,7 @@ force_evacuate:
   required: false
   type: boolean
   min_version: 2.29
+  max_version: 2.67
 force_live_migrate:
   description: |
     Force a live-migration by not verifying the provided destination host by
@@ -3061,13 +3202,13 @@ force_live_migrate:
   required: false
   type: boolean
   min_version: 2.30
+  max_version: 2.67
 force_migration_complete:
   description: |
     The action to force an in-progress live migration to complete.
   in: body
   required: true
   type: none
-  min_version: 2.22
 force_snapshot:
   description: |
     Indicates whether to create a snapshot, even if the volume is attached.
@@ -3079,8 +3220,9 @@ force_snapshot:
 forced_down_2_11:
   description: |
     Whether or not this service was forced down manually by an
-    administrator. This value is useful to know that some 3rd party has
-    verified the service should be marked down.
+    administrator after the service was fenced. This value is useful
+    to know that some 3rd party has verified the service should be
+    marked down.
   in: body
   required: true
   type: boolean
@@ -3089,9 +3231,17 @@ forced_down_2_11:
 # PUT /os-services/{service_id} added in 2.53.
 forced_down_2_53_in:
   description: |
-    Whether or not this service was forced down manually by an
-    administrator. This value is useful to know that some 3rd party has
-    verified the service should be marked down.
+    ``forced_down`` is a manual override to tell nova that the service in
+    question has been fenced manually by the operations team (either hard
+    powered off, or network unplugged). That signals that it is safe to proceed
+    with ``evacuate`` or other operations that nova has safety checks to
+    prevent for hosts that are up.
+
+    .. warning::
+
+       Setting a service forced down without completely fencing it will likely
+       result in the corruption of VMs on that host.
+
   in: body
   required: false
   type: boolean
@@ -3100,8 +3250,9 @@ forced_down_2_53_in:
 forced_down_2_53_out:
   description: |
     Whether or not this service was forced down manually by an
-    administrator. This value is useful to know that some 3rd party has
-    verified the service should be marked down.
+    administrator after the service was fenced. This value is useful
+    to know that some 3rd party has verified the service should be
+    marked down.
   in: body
   required: true
   type: boolean
@@ -3113,13 +3264,13 @@ forceDelete:
   type: none
 free_ram_mb:
   description: |
-    The free RAM in this hypervisor(in MB).
+    The free RAM in this hypervisor(in MiB).
   in: body
   required: true
   type: integer
 free_ram_mb_total:
   description: |
-    The free RAM on all hypervisors(in MB).
+    The free RAM on all hypervisors(in MiB).
   in: body
   required: true
   type: integer
@@ -3179,7 +3330,7 @@ host_cpu:
   type: integer
 host_disk_gb:
   description: |
-    The disk size on the host (in GB).
+    The disk size on the host (in GiB).
   in: body
   required: true
   type: integer
@@ -3210,7 +3361,7 @@ host_maintenance_mode_in:
   type: string
 host_memory_mb:
   description: |
-    The memory size on the host (in MB).
+    The memory size on the host (in MiB).
   in: body
   required: true
   type: integer
@@ -3398,13 +3549,13 @@ hypervisor_diagnostics:
   min_version: 2.48
 hypervisor_free_disk_gb:
   description: |
-    The free disk remaining on this hypervisor(in GB).
+    The free disk remaining on this hypervisor(in GiB).
   in: body
   required: true
   type: integer
 hypervisor_free_disk_gb_total:
   description: |
-    The free disk remaining on all hypervisors(in GB).
+    The free disk remaining on all hypervisors(in GiB).
   in: body
   required: true
   type: integer
@@ -3958,6 +4109,11 @@ key_pairs_quota_details:
   description: |
     The object of detailed key pairs quota, including in_use, limit and
     reserved number of key pairs.
+
+    .. note:: ``in_use`` field value for keypair quota details is always
+      zero. In Nova, key_pairs are a user-level resource, not a project-
+      level resource, so for legacy reasons, the keypair in-use information
+      is not counted.
   in: body
   required: true
   type: object
@@ -4120,7 +4276,7 @@ links:
   type: array
 local_gb:
   description: |
-    The disk in this hypervisor(in GB).
+    The disk in this hypervisor(in GiB).
   in: body
   required: true
   type: integer
@@ -4140,19 +4296,19 @@ local_gb_simple_tenant_usage_optional:
   type: integer
 local_gb_total:
   description: |
-    The disk on all hypervisors(in GB).
+    The disk on all hypervisors(in GiB).
   in: body
   required: true
   type: integer
 local_gb_used:
   description: |
-    The disk used in this hypervisor(in GB).
+    The disk used in this hypervisor(in GiB).
   in: body
   required: true
   type: integer
 local_gb_used_total:
   description: |
-    The disk used on all hypervisors(in GB).
+    The disk used on all hypervisors(in GiB).
   in: body
   required: true
   type: integer
@@ -4210,47 +4366,47 @@ memory_details_diagnostics:
     The dictionary with information about VM memory usage.
     Following fields are presented in the dictionary:
 
-    - ``maximum`` - Amount of memory provisioned for the VM in MB (Integer)
+    - ``maximum`` - Amount of memory provisioned for the VM in MiB (Integer)
 
     - ``used`` - Amount of memory that is currently used by the guest operating
-      system and its applications in MB (Integer)
+      system and its applications in MiB (Integer)
   in: body
   required: true
   type: array
   min_version: 2.48
 memory_mb:
   description: |
-    The memory of this hypervisor(in MB).
+    The memory of this hypervisor(in MiB).
   in: body
   required: true
   type: integer
 memory_mb_simple_tenant_usage:
   description: |
-    The memory size of the server (in MB).
+    The memory size of the server (in MiB).
   in: body
   required: true
   type: integer
 memory_mb_simple_tenant_usage_optional:
   description: |
-    The memory size of the server (in MB).
+    The memory size of the server (in MiB).
   in: body
   required: false
   type: integer
 memory_mb_total:
   description: |
-    The memory of all hypervisors(in MB).
+    The memory of all hypervisors(in MiB).
   in: body
   required: true
   type: integer
 memory_mb_used:
   description: |
-    The memory used in this hypervisor(in MB).
+    The memory used in this hypervisor(in MiB).
   in: body
   required: true
   type: integer
 memory_mb_used_total:
   description: |
-    The memory used on all hypervisors(in MB).
+    The memory used on all hypervisors(in MiB).
   in: body
   required: true
   type: integer
@@ -4480,7 +4636,7 @@ minDisk_body:
   type: integer
 minRam_body:
   description: |
-    The minimum amount of RAM an image requires to function, in MB. For example, ``512``.
+    The minimum amount of RAM an image requires to function, in MiB. For example, ``512``.
   in: body
   required: true
   type: integer
@@ -4691,18 +4847,21 @@ os-availability-zone:availability_zone:
     want your instance to be built.  Typically, an admin user will use
     availability zones to arrange OpenStack compute hosts into logical
     groups.
+
     An availability zone provides a form of physical isolation and redundancy from
     other availability zones. For instance, if some racks in your data center are
     on a separate power source, you can put servers in those racks in their own availability
     zone. Availability zones can also help separate different classes of hardware.  By
     segregating resources into availability zones, you can ensure that your application
     resources are spread across disparate machines to achieve high availability in
-    the event of hardware or other failure.
+    the event of hardware or other failure. See
+    `Availability Zones (AZs) <https://docs.openstack.org/nova/latest/user/aggregates.html#availability-zones-azs>`_ for more information.
+
     You can list the available availability zones by calling the
-    os-availability-zone API, but you should avoid using the default
-    availability zone when booting the instance.  In general, the
-    default availability zone is named ``nova``. This AZ is only shown
-    when listing the availability zones as an admin.
+    :ref:`os-availability-zone` API, but you should avoid using the `default
+    availability zone <https://docs.openstack.org/nova/latest/configuration/config.html#DEFAULT.default_availability_zone>`_
+    when creating the server.  The default availability zone is named ``nova``.
+    This AZ is only shown when listing the availability zones as an admin.
   in: body
   required: false
   type: string
@@ -4993,7 +5152,7 @@ os:scheduler_hints_cidr:
 os:scheduler_hints_different_cell:
   description: |
     A list of cell routes or a cell route (string).
-    Schedule the server in a cell that is not specifiled.
+    Schedule the server in a cell that is not specified.
     It is available when ``DifferentCellFilter`` is available on cloud side
     that is cell v1 environment.
   in: body
@@ -5040,7 +5199,7 @@ os:scheduler_hints_same_host:
   type: array
 os:scheduler_hints_target_cell:
   description: |
-    A target cell name. Schedule the server in a host in the cell specifiled.
+    A target cell name. Schedule the server in a host in the cell specified.
     It is available when ``TargetCellFilter`` is available on cloud side
     that is cell v1 environment.
   in: body
@@ -5314,14 +5473,14 @@ quota_tenant_or_user_id_body:
   type: string
 ram: &ram
   description: |
-    The amount of allowed server RAM, in MB, for each tenant.
+    The amount of allowed server RAM, in MiB, for each tenant.
   in: body
   required: true
   type: integer
 ram_quota_class: &ram_quota_class
   <<: *ram
   description: |
-    The amount of allowed instance RAM, in MB, for the quota class.
+    The amount of allowed instance RAM, in MiB, for the quota class.
 ram_quota_class_optional:
   <<: *ram_quota_class
   required: false
@@ -5334,7 +5493,7 @@ ram_quota_details:
   type: object
 ram_quota_optional:
   description: |
-    The amount of allowed server RAM, in MB, for each tenant.
+    The amount of allowed server RAM, in MiB, for each tenant.
   in: body
   required: false
   type: integer
@@ -5672,7 +5831,7 @@ server_description_resp:
   min_version: 2.19
 server_group:
   description: |
-    The server group obejct.
+    The server group object.
   in: body
   required: true
   type: object
@@ -5710,6 +5869,14 @@ server_groups: &server_groups
   in: body
   required: true
   type: integer
+server_groups_2_71:
+  description: |
+    The UUIDs of the server groups to which the server belongs. Currently
+    this can contain at most one entry.
+  in: body
+  required: true
+  type: array
+  min_version: 2.71
 server_groups_list:
   description: |
     The list of existing server groups.
@@ -6215,6 +6382,12 @@ tags:
   required: true
   type: array
   min_version: 2.26
+tags_no_min:
+  description: |
+    A list of tags. The maximum count of tags in this list is 50.
+  in: body
+  required: true
+  type: array
 tenant_id_body:
   description: |
     The UUID of the tenant in a multi-tenancy cloud.
@@ -6297,7 +6470,7 @@ total_local_gb_usage:
   type: float
 total_memory_mb_usage:
   description: |
-    Multiplying the server memory size (in MB) by hours the server exists,
+    Multiplying the server memory size (in MiB) by hours the server exists,
     and then adding that all together for each server.
   in: body
   required: true
@@ -6639,9 +6812,20 @@ volume_id_resp:
   type: string
 volume_size:
   description: |
-    The size of the volume (in GB).
+    The size of the volume (in GiB).
     This is integer value from range 1 to 2147483647
     which can be requested as integer and string.
+    This parameter must be specified in the following cases:
+
+    - An image to volume case
+
+      * ``block_device_mapping_v2.source_type`` is ``image``
+      * ``block_device_mapping_v2.destination_type`` is ``volume``
+
+    - A blank to volume case
+
+      * ``block_device_mapping_v2.source_type`` is ``blank``
+      * ``block_device_mapping_v2.destination_type`` is ``volume``
   in: body
   required: false
   type: integer

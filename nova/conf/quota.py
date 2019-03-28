@@ -255,53 +255,19 @@ Possible values:
 * A positive integer or 0.
 * -1 to disable the quota.
 """),
-    # TODO(stephenfin): This should have a min parameter
-    cfg.IntOpt('reservation_expire',
-        default=86400,
-        deprecated_group='DEFAULT',
-        help="""
-The number of seconds until a reservation expires.
-
-This quota represents the time period for invalidating quota reservations.
-"""),
-    cfg.IntOpt('until_refresh',
-        min=0,
-        default=0,
-        deprecated_group='DEFAULT',
-        help="""
-The count of reservations until usage is refreshed.
-
-This defaults to 0 (off) to avoid additional load but it is useful to turn on
-to help keep quota usage up-to-date and reduce the impact of out of sync usage
-issues.
-"""),
-    cfg.IntOpt('max_age',
-        min=0,
-        default=0,
-        deprecated_group='DEFAULT',
-        help="""
-The number of seconds between subsequent usage refreshes.
-
-This defaults to 0 (off) to avoid additional load but it is useful to turn on
-to help keep quota usage up-to-date and reduce the impact of out of sync usage
-issues. Note that quotas are not updated on a periodic task, they will update
-on a new reservation if max_age has passed since the last reservation.
-"""),
     cfg.StrOpt('driver',
-               default='nova.quota.DbQuotaDriver',
-               choices=('nova.quota.DbQuotaDriver',
-                        'nova.quota.NoopQuotaDriver'),
-               help="""
+        default='nova.quota.DbQuotaDriver',
+        choices=[
+            ('nova.quota.DbQuotaDriver', 'Stores quota limit information '
+             'in the database and relies on the ``quota_*`` configuration '
+             'options for default quota limit values. Counts quota usage '
+             'on-demand.'),
+            ('nova.quota.NoopQuotaDriver', 'Ignores quota and treats all '
+             'resources as unlimited.'),
+        ],
+        help="""
 Provides abstraction for quota checks. Users can configure a specific
 driver to use for quota checks.
-
-Possible values:
-
-* nova.quota.DbQuotaDriver: Stores quota limit information
-  in the database and relies on the quota_* configuration options for default
-  quota limit values. Counts quota usage on-demand.
-* nova.quota.NoopQuotaDriver: Ignores quota and treats all resources as
-  unlimited.
 """),
     cfg.BoolOpt('recheck_quota',
         default=True,

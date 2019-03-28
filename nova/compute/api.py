@@ -76,7 +76,8 @@ from nova.policies import servers as servers_policies
 import nova.policy
 from nova import profiler
 from nova import rpc
-from nova.scheduler import client as scheduler_client
+from nova.scheduler.client import query
+from nova.scheduler.client import report
 from nova.scheduler import utils as scheduler_utils
 from nova import servicegroup
 from nova import utils
@@ -102,11 +103,11 @@ AGGREGATE_ACTION_UPDATE = 'Update'
 AGGREGATE_ACTION_UPDATE_META = 'UpdateMeta'
 AGGREGATE_ACTION_DELETE = 'Delete'
 AGGREGATE_ACTION_ADD = 'Add'
-BFV_RESERVE_MIN_COMPUTE_VERSION = 17
 CINDER_V3_ATTACH_MIN_COMPUTE_VERSION = 24
 MIN_COMPUTE_MULTIATTACH = 27
 MIN_COMPUTE_TRUSTED_CERTS = 31
 MIN_COMPUTE_ABORT_QUEUED_LIVE_MIGRATION = 34
+MIN_COMPUTE_VOLUME_TYPE = 36
 
 # FIXME(danms): Keep a global cache of the cells we find the
 # first time we look. This needs to be refreshed on a timer or
@@ -244,6 +245,17 @@ def load_cells():
         LOG.error('No cells are configured, unable to continue')
 
 
+def _get_image_meta_obj(image_meta_dict):
+    try:
+        image_meta = objects.ImageMeta.from_dict(image_meta_dict)
+    except ValueError as e:
+        # there must be invalid values in the image meta properties so
+        # consider this an invalid request
+        msg = _('Invalid image metadata. Error: %s') % six.text_type(e)
+        raise exception.InvalidRequest(msg)
+    return image_meta
+
+
 @profiler.trace_cls("compute_api")
 class API(base.Base):
     """API for interacting with the compute manager."""
@@ -253,13 +265,7 @@ class API(base.Base):
         self.image_api = image_api or image.API()
         self.network_api = network_api or network.API()
         self.volume_api = volume_api or cinder.API()
-        # NOTE(mriedem): This looks a bit weird but we get the reportclient
-        # via SchedulerClient since it lazy-loads SchedulerReportClient on
-        # the first usage which helps to avoid a bunch of lockutils spam in
-        # the nova-api logs every time the service is restarted (remember
-        # that pretty much all of the REST API controllers construct this
-        # API class).
-        self.placementclient = scheduler_client.SchedulerClient().reportclient
+        self._placementclient = None  # Lazy-load on first access.
         self.security_group_api = (security_group_api or
             openstack_driver.get_openstack_security_group_driver())
         self.consoleauth_rpcapi = consoleauth_rpcapi.ConsoleAuthAPI()
@@ -527,13 +533,58 @@ class API(base.Base):
         # reason, we rely on the DB to cast True to a String.
         return True if bool_val else ''
 
-    def _check_requested_image(self, context, image_id, image,
-                               instance_type, root_bdm):
+    def _validate_flavor_image(self, context, image_id, image,
+                               instance_type, root_bdm, validate_numa=True):
+        """Validate the flavor and image.
+
+        This is called from the API service to ensure that the flavor
+        extra-specs and image properties are self-consistent and compatible
+        with each other.
+
+        :param context: A context.RequestContext
+        :param image_id: UUID of the image
+        :param image: a dict representation of the image including properties,
+                      enforces the image status is active.
+        :param instance_type: Flavor object
+        :param root_bdm: BlockDeviceMapping for root disk.  Will be None for
+               the resize case.
+        :param validate_numa: Flag to indicate whether or not to validate
+               the NUMA-related metadata.
+        :raises: Many different possible exceptions.  See
+                 api.openstack.compute.servers.INVALID_FLAVOR_IMAGE_EXCEPTIONS
+                 for the full list.
+        """
+        if image and image['status'] != 'active':
+            raise exception.ImageNotActive(image_id=image_id)
+        self._validate_flavor_image_nostatus(context, image, instance_type,
+                                             root_bdm, validate_numa)
+
+    @staticmethod
+    def _validate_flavor_image_nostatus(context, image, instance_type,
+                                        root_bdm, validate_numa=True,
+                                        validate_pci=False):
+        """Validate the flavor and image.
+
+        This is called from the API service to ensure that the flavor
+        extra-specs and image properties are self-consistent and compatible
+        with each other.
+
+        :param context: A context.RequestContext
+        :param image: a dict representation of the image including properties,
+                      enforces the image status is active.
+        :param instance_type: Flavor object
+        :param root_bdm: BlockDeviceMapping for root disk.  Will be None for
+               the resize case.
+        :param validate_numa: Flag to indicate whether or not to validate
+               the NUMA-related metadata.
+        :param validate_pci: Flag to indicate whether or not to validate
+               the PCI-related metadata.
+        :raises: Many different possible exceptions.  See
+                 api.openstack.compute.servers.INVALID_FLAVOR_IMAGE_EXCEPTIONS
+                 for the full list.
+        """
         if not image:
             return
-
-        if image['status'] != 'active':
-            raise exception.ImageNotActive(image_id=image_id)
 
         image_properties = image.get('properties', {})
         config_drive_option = image_properties.get(
@@ -612,6 +663,19 @@ class API(base.Base):
                 if not context.can(
                         servers_policies.ZERO_DISK_FLAVOR, fatal=False):
                     raise exception.BootFromVolumeRequiredForZeroDiskFlavor()
+
+        image_meta = _get_image_meta_obj(image)
+
+        # Only validate values of flavor/image so the return results of
+        # following 'get' functions are not used.
+        hardware.get_number_of_serial_ports(instance_type, image_meta)
+        if hardware.is_realtime_enabled(instance_type):
+            hardware.vcpus_realtime_topology(instance_type, image_meta)
+        hardware.get_cpu_topology_constraints(instance_type, image_meta)
+        if validate_numa:
+            hardware.numa_get_constraints(instance_type, image_meta)
+        if validate_pci:
+            pci_request.get_pci_requests_from_flavor(instance_type)
 
     def _get_image_defined_bdms(self, instance_type, image_meta,
                                 root_device_name):
@@ -738,11 +802,13 @@ class API(base.Base):
 
     def _checks_for_create_and_rebuild(self, context, image_id, image,
                                        instance_type, metadata,
-                                       files_to_inject, root_bdm):
+                                       files_to_inject, root_bdm,
+                                       validate_numa=True):
         self._check_metadata_properties_quota(context, metadata)
         self._check_injected_file_quota(context, files_to_inject)
-        self._check_requested_image(context, image_id, image,
-                                    instance_type, root_bdm)
+        self._validate_flavor_image(context, image_id, image,
+                                    instance_type, root_bdm,
+                                    validate_numa=validate_numa)
 
     def _validate_and_build_base_options(self, context, instance_type,
                                          boot_meta, image_href, image_id,
@@ -753,7 +819,8 @@ class API(base.Base):
                                          metadata, access_ip_v4, access_ip_v6,
                                          requested_networks, config_drive,
                                          auto_disk_config, reservation_id,
-                                         max_count):
+                                         max_count,
+                                         supports_port_resource_request):
         """Verify all the input parameters regardless of the provisioning
         strategy being performed.
         """
@@ -794,13 +861,7 @@ class API(base.Base):
                 block_device.properties_root_device_name(
                     boot_meta.get('properties', {})))
 
-        try:
-            image_meta = objects.ImageMeta.from_dict(boot_meta)
-        except ValueError as e:
-            # there must be invalid values in the image meta properties so
-            # consider this an invalid request
-            msg = _('Invalid image metadata. Error: %s') % six.text_type(e)
-            raise exception.InvalidRequest(msg)
+        image_meta = _get_image_meta_obj(boot_meta)
         numa_topology = hardware.numa_get_constraints(
                 instance_type, image_meta)
 
@@ -814,8 +875,15 @@ class API(base.Base):
         # InstancePCIRequests object
         pci_request_info = pci_request.get_pci_requests_from_flavor(
             instance_type)
-        network_metadata = self.network_api.create_resource_requests(
+        result = self.network_api.create_resource_requests(
             context, requested_networks, pci_request_info)
+        network_metadata, port_resource_requests = result
+
+        # Creating servers with ports that have resource requests, like QoS
+        # minimum bandwidth rules, is only supported in a requested minimum
+        # microversion.
+        if port_resource_requests and not supports_port_resource_request:
+            raise exception.CreateWithPortResourceRequestOldVersion()
 
         base_options = {
             'reservation_id': reservation_id,
@@ -846,7 +914,8 @@ class API(base.Base):
             'progress': 0,
             'pci_requests': pci_request_info,
             'numa_topology': numa_topology,
-            'system_metadata': system_metadata}
+            'system_metadata': system_metadata,
+            'port_resource_requests': port_resource_requests}
 
         options_from_image = self._inherit_properties_from_image(
                 boot_meta, auto_disk_config)
@@ -862,7 +931,7 @@ class API(base.Base):
             max_count, base_options, boot_meta, security_groups,
             block_device_mapping, shutdown_terminate,
             instance_group, check_server_group_quota, filter_properties,
-            key_pair, tags, trusted_certs, supports_multiattach=False,
+            key_pair, tags, trusted_certs, supports_multiattach,
             network_metadata=None):
         # Check quotas
         num_instances = compute_utils.check_num_instances_quota(
@@ -870,6 +939,7 @@ class API(base.Base):
         security_groups = self.security_group_api.populate_security_groups(
                 security_groups)
         self.security_group_api.ensure_default(context)
+        port_resource_requests = base_options.pop('port_resource_requests')
         LOG.debug("Going to run %s instances...", num_instances)
         instances_to_build = []
         try:
@@ -883,7 +953,8 @@ class API(base.Base):
                         base_options['numa_topology'],
                         base_options['pci_requests'], filter_properties,
                         instance_group, base_options['availability_zone'],
-                        security_groups=security_groups)
+                        security_groups=security_groups,
+                        port_resource_requests=port_resource_requests)
 
                 if block_device_mapping:
                     # Record whether or not we are a BFV instance
@@ -941,6 +1012,7 @@ class API(base.Base):
                 inst_mapping = objects.InstanceMapping(context=context)
                 inst_mapping.instance_uuid = instance_uuid
                 inst_mapping.project_id = context.project_id
+                inst_mapping.user_id = context.user_id
                 inst_mapping.cell_mapping = None
                 inst_mapping.create()
 
@@ -1118,7 +1190,8 @@ class API(base.Base):
                block_device_mapping, auto_disk_config, filter_properties,
                reservation_id=None, legacy_bdm=True, shutdown_terminate=False,
                check_server_group_quota=False, tags=None,
-               supports_multiattach=False, trusted_certs=None):
+               supports_multiattach=False, trusted_certs=None,
+               supports_port_resource_request=False):
         """Verify all the input parameters regardless of the provisioning
         strategy being performed and schedule the instance(s) for
         creation.
@@ -1158,7 +1231,7 @@ class API(base.Base):
                     key_name, key_data, security_groups, availability_zone,
                     user_data, metadata, access_ip_v4, access_ip_v6,
                     requested_networks, config_drive, auto_disk_config,
-                    reservation_id, max_count)
+                    reservation_id, max_count, supports_port_resource_request)
 
         # max_net_count is the maximum number of instances requested by the
         # user adjusted for any network quota constraints, including
@@ -1178,9 +1251,11 @@ class API(base.Base):
 
         # We can't do this check earlier because we need bdms from all sources
         # to have been merged in order to get the root bdm.
+        # Set validate_numa=False since numa validation is already done by
+        # _validate_and_build_base_options().
         self._checks_for_create_and_rebuild(context, image_id, boot_meta,
                 instance_type, metadata, injected_files,
-                block_device_mapping.root_bdm())
+                block_device_mapping.root_bdm(), validate_numa=False)
 
         instance_group = self._get_requested_instance_group(context,
                                    filter_properties)
@@ -1360,6 +1435,36 @@ class API(base.Base):
 
             bdm.update_or_create()
 
+    @staticmethod
+    def _check_requested_volume_type(bdm, volume_type_id_or_name,
+                                     volume_types):
+        """If we are specifying a volume type, we need to get the
+        volume type details from Cinder and make sure the ``volume_type``
+        is available.
+        """
+
+        # NOTE(brinzhang): Verify that the specified volume type exists.
+        # And save the volume type name internally for consistency in the
+        # BlockDeviceMapping object.
+        for vol_type in volume_types:
+            if (volume_type_id_or_name == vol_type['id'] or
+                        volume_type_id_or_name == vol_type['name']):
+                bdm.volume_type = vol_type['name']
+                break
+        else:
+            raise exception.VolumeTypeNotFound(
+                id_or_name=volume_type_id_or_name)
+
+    @staticmethod
+    def _check_compute_supports_volume_type(context):
+        # NOTE(brinzhang): Checking the minimum nova-compute service
+        # version across the deployment. Just make sure the volume
+        # type can be supported when the bdm.volume_type is requested.
+        min_compute_version = objects.service.get_minimum_version_all_cells(
+            context, ['nova-compute'])
+        if min_compute_version < MIN_COMPUTE_VOLUME_TYPE:
+            raise exception.VolumeTypeSupportNotYetAvailable()
+
     def _validate_bdm(self, context, instance, instance_type,
                       block_device_mappings, supports_multiattach=False):
         # Make sure that the boot indexes make sense.
@@ -1380,7 +1485,32 @@ class API(base.Base):
                       instance=instance)
             raise exception.InvalidBDMBootSequence()
 
+        volume_types = None
+        volume_type_is_supported = False
         for bdm in block_device_mappings:
+            volume_type = bdm.volume_type
+            if volume_type:
+                if not volume_type_is_supported:
+                    # The following method raises
+                    # VolumeTypeSupportNotYetAvailable if the minimum
+                    # nova-compute service version across the deployment is
+                    # not new enough to support creating volumes with a
+                    # specific type.
+                    self._check_compute_supports_volume_type(context)
+                    # Set the flag to avoid calling
+                    # _check_compute_supports_volume_type more than once in
+                    # this for loop.
+                    volume_type_is_supported = True
+
+                if not volume_types:
+                    # In order to reduce the number of hit cinder APIs,
+                    # initialize our cache of volume types.
+                    volume_types = self.volume_api.get_all_volume_types(
+                        context)
+                # NOTE(brinzhang): Ensure the validity of volume_type.
+                self._check_requested_volume_type(bdm, volume_type,
+                                                  volume_types)
+
             # NOTE(vish): For now, just make sure the volumes are accessible.
             # Additionally, check that the volume can be attached to this
             # instance.
@@ -1400,28 +1530,10 @@ class API(base.Base):
                         "destination_type 'volume' need to have a non-zero "
                         "size specified"))
             elif volume_id is not None:
-                # The instance is being created and we don't know which
-                # cell it's going to land in, so check all cells.
-                min_compute_version = \
-                    objects.service.get_minimum_version_all_cells(
-                        context, ['nova-compute'])
                 try:
-                    # NOTE(ildikov): The boot from volume operation did not
-                    # reserve the volume before Pike and as the older computes
-                    # are running 'check_attach' which will fail if the volume
-                    # is in 'attaching' state; if the compute service version
-                    # is not high enough we will just perform the old check as
-                    # opposed to reserving the volume here.
                     volume = self.volume_api.get(context, volume_id)
-                    if (min_compute_version >=
-                        BFV_RESERVE_MIN_COMPUTE_VERSION):
-                        self._check_attach_and_reserve_volume(
-                            context, volume, instance, bdm,
-                            supports_multiattach)
-                    else:
-                        # NOTE(ildikov): This call is here only for backward
-                        # compatibility can be removed after Ocata EOL.
-                        self._check_attach(context, volume, instance)
+                    self._check_attach_and_reserve_volume(
+                        context, volume, instance, bdm, supports_multiattach)
                     bdm.volume_size = volume.get('size')
 
                     # NOTE(mnaser): If we end up reserving the volume, it will
@@ -1477,20 +1589,6 @@ class API(base.Base):
                              if bdm.destination_type == 'local'])
             if num_local > max_local:
                 raise exception.InvalidBDMLocalsLimit()
-
-    def _check_attach(self, context, volume, instance):
-        # TODO(ildikov): This check_attach code is kept only for backward
-        # compatibility and should be removed after Ocata EOL.
-        if volume['status'] != 'available':
-            msg = _("volume '%(vol)s' status must be 'available'. Currently "
-                    "in '%(status)s'") % {'vol': volume['id'],
-                                          'status': volume['status']}
-            raise exception.InvalidVolume(reason=msg)
-        if volume['attach_status'] == 'attached':
-            msg = _("volume %s already attached") % volume['id']
-            raise exception.InvalidVolume(reason=msg)
-        self.volume_api.check_availability_zone(context, volume,
-                                                instance=instance)
 
     def _populate_instance_names(self, instance, num_instances, index):
         """Populate instance display_name and hostname.
@@ -1670,7 +1768,8 @@ class API(base.Base):
                config_drive=None, auto_disk_config=None, scheduler_hints=None,
                legacy_bdm=True, shutdown_terminate=False,
                check_server_group_quota=False, tags=None,
-               supports_multiattach=False, trusted_certs=None):
+               supports_multiattach=False, trusted_certs=None,
+               supports_port_resource_request=False):
         """Provision instances, sending instance information to the
         scheduler.  The scheduler will determine where the instance(s)
         go and will handle creating the DB entries.
@@ -1696,22 +1795,23 @@ class API(base.Base):
                 scheduler_hints, forced_host, forced_node, instance_type)
 
         return self._create_instance(
-                       context, instance_type,
-                       image_href, kernel_id, ramdisk_id,
-                       min_count, max_count,
-                       display_name, display_description,
-                       key_name, key_data, security_groups,
-                       availability_zone, user_data, metadata,
-                       injected_files, admin_password,
-                       access_ip_v4, access_ip_v6,
-                       requested_networks, config_drive,
-                       block_device_mapping, auto_disk_config,
-                       filter_properties=filter_properties,
-                       legacy_bdm=legacy_bdm,
-                       shutdown_terminate=shutdown_terminate,
-                       check_server_group_quota=check_server_group_quota,
-                       tags=tags, supports_multiattach=supports_multiattach,
-                       trusted_certs=trusted_certs)
+            context, instance_type,
+            image_href, kernel_id, ramdisk_id,
+            min_count, max_count,
+            display_name, display_description,
+            key_name, key_data, security_groups,
+            availability_zone, user_data, metadata,
+            injected_files, admin_password,
+            access_ip_v4, access_ip_v6,
+            requested_networks, config_drive,
+            block_device_mapping, auto_disk_config,
+            filter_properties=filter_properties,
+            legacy_bdm=legacy_bdm,
+            shutdown_terminate=shutdown_terminate,
+            check_server_group_quota=check_server_group_quota,
+            tags=tags, supports_multiattach=supports_multiattach,
+            trusted_certs=trusted_certs,
+            supports_port_resource_request=supports_port_resource_request)
 
     def _check_auto_disk_config(self, instance=None, image=None,
                                 **extra_instance_updates):
@@ -1797,17 +1897,6 @@ class API(base.Base):
         need to be looked up in a cell db and the normal delete path taken.
         """
         deleted = self._attempt_delete_of_buildrequest(context, instance)
-
-        # After service version 15 deletion of the BuildRequest will halt the
-        # build process in the conductor. In that case run the rest of this
-        # method and consider the instance deleted. If we have not yet reached
-        # service version 15 then just return False so the rest of the delete
-        # process will proceed usually.
-        service_version = objects.Service.get_minimum_version(
-            context, 'nova-osapi_compute')
-        if service_version < 15:
-            return False
-
         if deleted:
             # If we've reached this block the successful deletion of the
             # buildrequest indicates that the build process should be halted by
@@ -2045,7 +2134,9 @@ class API(base.Base):
 
     def _confirm_resize_on_deleting(self, context, instance):
         # If in the middle of a resize, use confirm_resize to
-        # ensure the original instance is cleaned up too
+        # ensure the original instance is cleaned up too along
+        # with its allocations (and migration-based allocations)
+        # in placement.
         migration = None
         for status in ('finished', 'confirming'):
             try:
@@ -2112,6 +2203,12 @@ class API(base.Base):
             # exist in the DB to destroy it.
             if 'id' in bdm:
                 bdm.destroy()
+
+    @property
+    def placementclient(self):
+        if self._placementclient is None:
+            self._placementclient = report.SchedulerReportClient()
+        return self._placementclient
 
     def _local_delete(self, context, instance, bdms, delete_type, cb):
         if instance.vm_state == vm_states.SHELVED_OFFLOADED:
@@ -2316,6 +2413,43 @@ class API(base.Base):
 
         self.compute_rpcapi.trigger_crash_dump(context, instance)
 
+    def _generate_minimal_construct_for_down_cells(self, context,
+                                                   down_cell_uuids,
+                                                   project, limit):
+        """Generate a list of minimal instance constructs for a given list of
+        cells that did not respond to a list operation. This will list
+        every instance mapping in the affected cells and return a minimal
+        objects.Instance for each (non-queued-for-delete) mapping.
+
+        :param context: RequestContext
+        :param down_cell_uuids: A list of cell UUIDs that did not respond
+        :param project: A project ID to filter mappings, or None
+        :param limit: A numeric limit on the number of results, or None
+        :returns: An InstanceList() of partial Instance() objects
+        """
+        unavailable_servers = objects.InstanceList()
+        for cell_uuid in down_cell_uuids:
+            LOG.warning("Cell %s is not responding and hence only "
+                        "partial results are available from this "
+                        "cell if any.", cell_uuid)
+            instance_mappings = (objects.InstanceMappingList.
+                get_not_deleted_by_cell_and_project(context, cell_uuid,
+                                                    project, limit=limit))
+            for im in instance_mappings:
+                unavailable_servers.objects.append(
+                    objects.Instance(
+                        context=context,
+                        uuid=im.instance_uuid,
+                        project_id=im.project_id,
+                        created_at=im.created_at
+                    )
+                )
+            if limit is not None:
+                limit -= len(instance_mappings)
+                if limit <= 0:
+                    break
+        return unavailable_servers
+
     def _get_instance_map_or_none(self, context, instance_uuid):
         try:
             inst_map = objects.InstanceMapping.get_by_instance_uuid(
@@ -2327,41 +2461,83 @@ class API(base.Base):
             inst_map = None
         return inst_map
 
-    def _get_instance(self, context, instance_uuid, expected_attrs):
-        # Before service version 15 the BuildRequest is not cleaned up during
-        # a delete request so there is no reason to look it up here as we can't
-        # trust that it's not referencing a deleted instance. Also even if
-        # there is an instance mapping we don't need to honor it for older
-        # service versions.
-        service_version = objects.Service.get_minimum_version(
-            context, 'nova-osapi_compute')
-        # If we're on cellsv1, we also need to consult the top-level
-        # merged replica instead of the cell directly, so fall through
-        # here in that case as well.
-        if service_version < 15 or CONF.cells.enable:
-            # If not using cells v1, we need to log a warning about the API
-            # service version being less than 15 (that check was added in
-            # newton), which indicates there is some lingering data during the
-            # transition to cells v2 which could cause an InstanceNotFound
-            # here. The warning message is a sort of breadcrumb.
-            # This can all go away once we drop cells v1 and assert that all
-            # deployments have upgraded from a base cells v2 setup with
-            # mappings.
-            if not CONF.cells.enable:
-                LOG.warning('The nova-osapi_compute service version is from '
-                            'before Ocata and may cause problems looking up '
-                            'instances in a cells v2 setup. Check your '
-                            'nova-api service configuration and cell '
-                            'mappings. You may need to remove stale '
-                            'nova-osapi_compute service records from the cell '
-                            'database.')
+    @staticmethod
+    def _save_user_id_in_instance_mapping(mapping, instance):
+        # TODO(melwitt): We take the opportunity to migrate user_id on the
+        # instance mapping if it's not yet been migrated. This can be removed
+        # in a future release, when all migrations are complete.
+        # If the instance came from a RequestSpec because of a down cell, its
+        # user_id could be None and the InstanceMapping.user_id field is
+        # non-nullable. Avoid trying to set/save the user_id in that case.
+        if 'user_id' not in mapping and instance.user_id is not None:
+            mapping.user_id = instance.user_id
+            mapping.save()
+
+    def _get_instance_from_cell(self, context, im, expected_attrs,
+                                cell_down_support):
+        # NOTE(danms): Even though we're going to scatter/gather to the
+        # right cell, other code depends on this being force targeted when
+        # the get call returns.
+        nova_context.set_target_cell(context, im.cell_mapping)
+
+        uuid = im.instance_uuid
+        result = nova_context.scatter_gather_single_cell(context,
+            im.cell_mapping, objects.Instance.get_by_uuid, uuid,
+            expected_attrs=expected_attrs)
+        cell_uuid = im.cell_mapping.uuid
+        if not nova_context.is_cell_failure_sentinel(result[cell_uuid]):
+            inst = result[cell_uuid]
+            self._save_user_id_in_instance_mapping(im, inst)
+            return inst
+        elif isinstance(result[cell_uuid], exception.InstanceNotFound):
+            raise exception.InstanceNotFound(instance_id=uuid)
+        elif cell_down_support:
+            if im.queued_for_delete:
+                # should be treated like deleted instance.
+                raise exception.InstanceNotFound(instance_id=uuid)
+
+            # instance in down cell, return a minimal construct
+            LOG.warning("Cell %s is not responding and hence only "
+                        "partial results are available from this "
+                        "cell.", cell_uuid)
+            try:
+                rs = objects.RequestSpec.get_by_instance_uuid(context,
+                                                              uuid)
+                # For BFV case, we could have rs.image but rs.image.id might
+                # still not be set. So we check the existence of both image
+                # and its id.
+                image_ref = (rs.image.id if rs.image and
+                             'id' in rs.image else None)
+                inst = objects.Instance(context=context, power_state=0,
+                                        uuid=uuid,
+                                        project_id=im.project_id,
+                                        created_at=im.created_at,
+                                        user_id=rs.user_id,
+                                        flavor=rs.flavor,
+                                        image_ref=image_ref,
+                                        availability_zone=rs.availability_zone)
+                self._save_user_id_in_instance_mapping(im, inst)
+                return inst
+            except exception.RequestSpecNotFound:
+                # could be that a deleted instance whose request
+                # spec has been archived is being queried.
+                raise exception.InstanceNotFound(instance_id=uuid)
+        else:
+            raise exception.NovaException(
+                _("Cell %s is not responding and hence instance "
+                  "info is not available.") % cell_uuid)
+
+    def _get_instance(self, context, instance_uuid, expected_attrs,
+                      cell_down_support=False):
+        # If we're on cellsv1, we need to consult the top-level
+        # merged replica instead of the cell directly.
+        if CONF.cells.enable:
             return objects.Instance.get_by_uuid(context, instance_uuid,
                                                 expected_attrs=expected_attrs)
         inst_map = self._get_instance_map_or_none(context, instance_uuid)
         if inst_map and (inst_map.cell_mapping is not None):
-            nova_context.set_target_cell(context, inst_map.cell_mapping)
-            instance = objects.Instance.get_by_uuid(
-                context, instance_uuid, expected_attrs=expected_attrs)
+            instance = self._get_instance_from_cell(context, inst_map,
+                expected_attrs, cell_down_support)
         elif inst_map and (inst_map.cell_mapping is None):
             # This means the instance has not been scheduled and put in
             # a cell yet. For now it also may mean that the deployer
@@ -2376,20 +2552,33 @@ class API(base.Base):
                 inst_map = self._get_instance_map_or_none(context,
                                                           instance_uuid)
                 if inst_map and (inst_map.cell_mapping is not None):
-                    nova_context.set_target_cell(context,
-                                                 inst_map.cell_mapping)
-                    instance = objects.Instance.get_by_uuid(
-                        context, instance_uuid,
-                        expected_attrs=expected_attrs)
+                    instance = self._get_instance_from_cell(context, inst_map,
+                        expected_attrs, cell_down_support)
                 else:
                     raise exception.InstanceNotFound(instance_id=instance_uuid)
         else:
+            # If we got here, we don't have an instance mapping, but we aren't
+            # sure why. The instance mapping might be missing because the
+            # upgrade is incomplete (map_instances wasn't run). Or because the
+            # instance was deleted and the DB was archived at which point the
+            # mapping is deleted. The former case is bad, but because of the
+            # latter case we can't really log any kind of warning/error here
+            # since it might be normal.
             raise exception.InstanceNotFound(instance_id=instance_uuid)
 
         return instance
 
-    def get(self, context, instance_id, expected_attrs=None):
-        """Get a single instance with the given instance_id."""
+    def get(self, context, instance_id, expected_attrs=None,
+            cell_down_support=False):
+        """Get a single instance with the given instance_id.
+
+        :param cell_down_support: True if the API (and caller) support
+                                  returning a minimal instance
+                                  construct if the relevant cell is
+                                  down. If False, an error is raised
+                                  since the instance cannot be retrieved
+                                  due to the cell being down.
+        """
         if not expected_attrs:
             expected_attrs = []
         expected_attrs.extend(['metadata', 'system_metadata',
@@ -2401,7 +2590,7 @@ class API(base.Base):
                            instance_uuid=instance_id)
 
                 instance = self._get_instance(context, instance_id,
-                                              expected_attrs)
+                    expected_attrs, cell_down_support=cell_down_support)
             else:
                 LOG.debug("Failed to fetch instance by id %s", instance_id)
                 raise exception.InstanceNotFound(instance_id=instance_id)
@@ -2412,7 +2601,8 @@ class API(base.Base):
         return instance
 
     def get_all(self, context, search_opts=None, limit=None, marker=None,
-                expected_attrs=None, sort_keys=None, sort_dirs=None):
+                expected_attrs=None, sort_keys=None, sort_dirs=None,
+                cell_down_support=False, all_tenants=False):
         """Get all instances filtered by one of the given parameters.
 
         If there is no filter and the context is an admin, it will retrieve
@@ -2426,6 +2616,14 @@ class API(base.Base):
         secondary sort ket, etc.). For each sort key, the associated sort
         direction is based on the list of sort directions in the 'sort_dirs'
         parameter.
+
+        :param cell_down_support: True if the API (and caller) support
+                                  returning a minimal instance
+                                  construct if the relevant cell is
+                                  down. If False, instances from
+                                  unreachable cells will be omitted.
+        :param all_tenants: True if the "all_tenants" filter was passed.
+
         """
         if search_opts is None:
             search_opts = {}
@@ -2554,8 +2752,9 @@ class API(base.Base):
                 context, filters, limit, marker, fields, sort_keys,
                 sort_dirs)
         else:
-            insts = instance_list.get_instance_objects_sorted(
-                context, filters, limit, marker, fields, sort_keys, sort_dirs)
+            insts, down_cell_uuids = instance_list.get_instance_objects_sorted(
+                context, filters, limit, marker, fields, sort_keys, sort_dirs,
+                cell_down_support=cell_down_support)
 
         def _get_unique_filter_method():
             seen_uuids = set()
@@ -2580,6 +2779,20 @@ class API(base.Base):
 
         if filter_ip:
             instances = self._ip_filter(instances, filters, orig_limit)
+
+        if cell_down_support:
+            # API and client want minimal construct instances for any cells
+            # that didn't return, so generate and prefix those to the actual
+            # results.
+            project = search_opts.get('project_id', context.project_id)
+            if all_tenants:
+                # NOTE(tssurya): The only scenario where project has to be None
+                # is when using "all_tenants" in which case we do not want
+                # the query to be restricted based on the project_id.
+                project = None
+            limit = (orig_limit - len(instances)) if limit else limit
+            return (self._generate_minimal_construct_for_down_cells(context,
+                down_cell_uuids, project, limit) + instances)
 
         return instances
 
@@ -2788,9 +3001,9 @@ class API(base.Base):
             raise exception.InvalidRequest(
                 _('Backup is not supported for volume-backed instances.'))
         else:
-            image_meta = self._create_image(context, instance,
-                                            name, 'backup',
-                                            extra_properties=props_copy)
+            image_meta = compute_utils.create_image(
+                context, instance, name, 'backup', self.image_api,
+                extra_properties=props_copy)
 
         # NOTE(comstud): Any changes to this method should also be made
         # to the backup_instance() method in nova/cells/messaging.py
@@ -2821,9 +3034,9 @@ class API(base.Base):
                                  when creating the image.
         :returns: A dict containing image metadata
         """
-        image_meta = self._create_image(context, instance, name,
-                                        'snapshot',
-                                        extra_properties=extra_properties)
+        image_meta = compute_utils.create_image(
+            context, instance, name, 'snapshot', self.image_api,
+            extra_properties=extra_properties)
 
         # NOTE(comstud): Any changes to this method should also be made
         # to the snapshot_instance() method in nova/cells/messaging.py
@@ -2867,62 +3080,6 @@ class API(base.Base):
 
         return image_meta
 
-    def _create_image(self, context, instance, name, image_type,
-                      extra_properties=None):
-        """Create new image entry in the image service.  This new image
-        will be reserved for the compute manager to upload a snapshot
-        or backup.
-
-        :param context: security context
-        :param instance: nova.objects.instance.Instance object
-        :param name: string for name of the snapshot
-        :param image_type: snapshot | backup
-        :param extra_properties: dict of extra image properties to include
-
-        """
-        properties = {
-            'instance_uuid': instance.uuid,
-            'user_id': str(context.user_id),
-            'image_type': image_type,
-        }
-        properties.update(extra_properties or {})
-
-        image_meta = self._initialize_instance_snapshot_metadata(
-            instance, name, properties)
-        # if we're making a snapshot, omit the disk and container formats,
-        # since the image may have been converted to another format, and the
-        # original values won't be accurate.  The driver will populate these
-        # with the correct values later, on image upload.
-        if image_type == 'snapshot':
-            image_meta.pop('disk_format', None)
-            image_meta.pop('container_format', None)
-        return self.image_api.create(context, image_meta)
-
-    def _initialize_instance_snapshot_metadata(self, instance, name,
-                                               extra_properties=None):
-        """Initialize new metadata for a snapshot of the given instance.
-
-        :param instance: nova.objects.instance.Instance object
-        :param name: string for name of the snapshot
-        :param extra_properties: dict of extra metadata properties to include
-
-        :returns: the new instance snapshot metadata
-        """
-        image_meta = utils.get_image_from_system_metadata(
-            instance.system_metadata)
-        image_meta.update({'name': name,
-                           'is_public': False})
-
-        # Delete properties that are non-inheritable
-        properties = image_meta['properties']
-        for key in CONF.non_inheritable_image_properties:
-            properties.pop(key, None)
-
-        # The properties in extra_properties have precedence
-        properties.update(extra_properties or {})
-
-        return image_meta
-
     # NOTE(melwitt): We don't check instance lock for snapshot because lock is
     #                intended to prevent accidental change/delete of instances
     @check_instance_state(vm_state=[vm_states.ACTIVE, vm_states.STOPPED,
@@ -2937,8 +3094,8 @@ class API(base.Base):
 
         :returns: the new image metadata
         """
-        image_meta = self._initialize_instance_snapshot_metadata(
-            instance, name, extra_properties)
+        image_meta = compute_utils.initialize_instance_snapshot_metadata(
+            context, instance, name, extra_properties)
         # the new image is simply a bucket of properties (particularly the
         # block device mapping, kernel and ramdisk IDs) with no image data,
         # hence the zero size
@@ -3187,6 +3344,9 @@ class API(base.Base):
         else:
             orig_image_ref = instance.image_ref
 
+        request_spec = objects.RequestSpec.get_by_instance_uuid(
+            context, instance.uuid)
+
         self._checks_for_create_and_rebuild(context, image_id, image,
                 flavor, metadata, files_to_inject, root_bdm)
 
@@ -3248,38 +3408,31 @@ class API(base.Base):
         # attached RequestSpec object but let's consider that the operator only
         # half migrated all their instances in the meantime.
         host = instance.host
-        try:
-            request_spec = objects.RequestSpec.get_by_instance_uuid(
-                context, instance.uuid)
-            # If a new image is provided on rebuild, we will need to run
-            # through the scheduler again, but we want the instance to be
-            # rebuilt on the same host it's already on.
-            if orig_image_ref != image_href:
-                # We have to modify the request spec that goes to the scheduler
-                # to contain the new image. We persist this since we've already
-                # changed the instance.image_ref above so we're being
-                # consistent.
-                request_spec.image = objects.ImageMeta.from_dict(image)
-                request_spec.save()
-                if 'scheduler_hints' not in request_spec:
-                    request_spec.scheduler_hints = {}
-                # Nuke the id on this so we can't accidentally save
-                # this hint hack later
-                del request_spec.id
+        # If a new image is provided on rebuild, we will need to run
+        # through the scheduler again, but we want the instance to be
+        # rebuilt on the same host it's already on.
+        if orig_image_ref != image_href:
+            # We have to modify the request spec that goes to the scheduler
+            # to contain the new image. We persist this since we've already
+            # changed the instance.image_ref above so we're being
+            # consistent.
+            request_spec.image = objects.ImageMeta.from_dict(image)
+            request_spec.save()
+            if 'scheduler_hints' not in request_spec:
+                request_spec.scheduler_hints = {}
+            # Nuke the id on this so we can't accidentally save
+            # this hint hack later
+            del request_spec.id
 
-                # NOTE(danms): Passing host=None tells conductor to
-                # call the scheduler. The _nova_check_type hint
-                # requires that the scheduler returns only the same
-                # host that we are currently on and only checks
-                # rebuild-related filters.
-                request_spec.scheduler_hints['_nova_check_type'] = ['rebuild']
-                request_spec.force_hosts = [instance.host]
-                request_spec.force_nodes = [instance.node]
-                host = None
-        except exception.RequestSpecNotFound:
-            # Some old instances can still have no RequestSpec object attached
-            # to them, we need to support the old way
-            request_spec = None
+            # NOTE(danms): Passing host=None tells conductor to
+            # call the scheduler. The _nova_check_type hint
+            # requires that the scheduler returns only the same
+            # host that we are currently on and only checks
+            # rebuild-related filters.
+            request_spec.scheduler_hints['_nova_check_type'] = ['rebuild']
+            request_spec.force_hosts = [instance.host]
+            request_spec.force_nodes = [instance.node]
+            host = None
 
         self.compute_task_api.rebuild_instance(context, instance=instance,
                 new_pass=admin_password, injected_files=files_to_inject,
@@ -3335,6 +3488,16 @@ class API(base.Base):
         # If this is a resize down, a revert might go over quota.
         self._check_quota_for_upsize(context, instance, instance.flavor,
                                      instance.old_flavor)
+
+        # Conductor updated the RequestSpec.flavor during the initial resize
+        # operation to point at the new flavor, so we need to update the
+        # RequestSpec to point back at the original flavor, otherwise
+        # subsequent move operations through the scheduler will be using the
+        # wrong flavor.
+        reqspec = objects.RequestSpec.get_by_instance_uuid(
+            context, instance.uuid)
+        reqspec.flavor = instance.old_flavor
+        reqspec.save()
 
         instance.task_state = task_states.RESIZE_REVERTING
         instance.save(expected_task_state=[None])
@@ -3484,15 +3647,27 @@ class API(base.Base):
                                          current_instance_type,
                                          new_instance_type)
 
-        instance.task_state = task_states.RESIZE_PREP
-        instance.progress = 0
-        instance.update(extra_instance_updates)
-        instance.save(expected_task_state=[None])
+        if not same_instance_type:
+            image = utils.get_image_from_system_metadata(
+                instance.system_metadata)
+            # Can skip root_bdm check since it will not change during resize.
+            self._validate_flavor_image_nostatus(
+                context, image, new_instance_type, root_bdm=None,
+                validate_pci=True)
 
         filter_properties = {'ignore_hosts': []}
 
         if not CONF.allow_resize_to_same_host:
             filter_properties['ignore_hosts'].append(instance.host)
+
+        request_spec = objects.RequestSpec.get_by_instance_uuid(
+            context, instance.uuid)
+        request_spec.ignore_hosts = filter_properties['ignore_hosts']
+
+        instance.task_state = task_states.RESIZE_PREP
+        instance.progress = 0
+        instance.update(extra_instance_updates)
+        instance.save(expected_task_state=[None])
 
         if self.cell_type == 'api':
             # Create migration record.
@@ -3507,43 +3682,21 @@ class API(base.Base):
             self._record_action_start(context, instance,
                                       instance_actions.RESIZE)
 
-        # NOTE(sbauza): The migration script we provided in Newton should make
-        # sure that all our instances are currently migrated to have an
-        # attached RequestSpec object but let's consider that the operator only
-        # half migrated all their instances in the meantime.
-        try:
-            request_spec = objects.RequestSpec.get_by_instance_uuid(
-                context, instance.uuid)
-            request_spec.ignore_hosts = filter_properties['ignore_hosts']
-        except exception.RequestSpecNotFound:
-            # Some old instances can still have no RequestSpec object attached
-            # to them, we need to support the old way
-            if host_name is not None:
-                # If there is no request spec we cannot honor the request
-                # and we need to fail.
-                raise exception.CannotMigrateWithTargetHost()
-            request_spec = None
-
         # TODO(melwitt): We're not rechecking for strict quota here to guard
         # against going over quota during a race at this time because the
         # resource consumption for this operation is written to the database
         # by compute.
         scheduler_hint = {'filter_properties': filter_properties}
 
-        if request_spec:
-            if host_name is None:
-                # If 'host_name' is not specified,
-                # clear the 'requested_destination' field of the RequestSpec.
-                request_spec.requested_destination = None
-            else:
-                # Set the host and the node so that the scheduler will
-                # validate them.
-                # TODO(takashin): It will be added to check whether
-                # the specified host is within the same cell as
-                # the instance or not. If not, raise specific error message
-                # that is clear to the caller.
-                request_spec.requested_destination = objects.Destination(
-                    host=node.host, node=node.hypervisor_hostname)
+        if host_name is None:
+            # If 'host_name' is not specified,
+            # clear the 'requested_destination' field of the RequestSpec.
+            request_spec.requested_destination = None
+        else:
+            # Set the host and the node so that the scheduler will
+            # validate them.
+            request_spec.requested_destination = objects.Destination(
+                host=node.host, node=node.hypervisor_hostname)
 
         self.compute_task_api.resize_instance(context, instance,
                 extra_instance_updates, scheduler_hint=scheduler_hint,
@@ -3567,8 +3720,8 @@ class API(base.Base):
 
         if not compute_utils.is_volume_backed_instance(context, instance):
             name = '%s-shelved' % instance.display_name
-            image_meta = self._create_image(context, instance, name,
-                    'snapshot')
+            image_meta = compute_utils.create_image(
+                context, instance, name, 'snapshot', self.image_api)
             image_id = image_meta['id']
             self.compute_rpcapi.shelve_instance(context, instance=instance,
                     image_id=image_id, clean_shutdown=clean_shutdown)
@@ -3594,18 +3747,14 @@ class API(base.Base):
         vm_states.SHELVED_OFFLOADED])
     def unshelve(self, context, instance):
         """Restore a shelved instance."""
+        request_spec = objects.RequestSpec.get_by_instance_uuid(
+            context, instance.uuid)
+
         instance.task_state = task_states.UNSHELVING
         instance.save(expected_task_state=[None])
 
         self._record_action_start(context, instance, instance_actions.UNSHELVE)
 
-        try:
-            request_spec = objects.RequestSpec.get_by_instance_uuid(
-                context, instance.uuid)
-        except exception.RequestSpecNotFound:
-            # Some old instances can still have no RequestSpec object attached
-            # to them, we need to support the old way
-            request_spec = None
         self.compute_task_api.unshelve_instance(context, instance,
                                                 request_spec)
 
@@ -4207,12 +4356,17 @@ class API(base.Base):
         def detach_volume(self, context, instance, bdms):
             self._local_cleanup_bdm_volumes(bdms, instance, context)
 
-        try:
-            self.volume_api.begin_detaching(context, volume['id'])
-        except exception.InvalidInput as exc:
-            raise exception.InvalidVolume(reason=exc.format_message())
         bdms = [objects.BlockDeviceMapping.get_by_volume_id(
                 context, volume['id'], instance.uuid)]
+        # The begin_detaching() call only works with in-use volumes,
+        # which will not be the case for volumes attached to a shelved
+        # offloaded server via the attachments API since those volumes
+        # will have `reserved` status.
+        if not bdms[0].attachment_id:
+            try:
+                self.volume_api.begin_detaching(context, volume['id'])
+            except exception.InvalidInput as exc:
+                raise exception.InvalidVolume(reason=exc.format_message())
         self._record_action_start(
             context, instance,
             instance_actions.DETACH_VOLUME)
@@ -4302,6 +4456,17 @@ class API(base.Base):
         """Use hotplug to add an network adapter to an instance."""
         self._record_action_start(
             context, instance, instance_actions.ATTACH_INTERFACE)
+
+        # NOTE(gibi): Checking if the requested port has resource request as
+        # such ports are currently not supported as they would at least
+        # need resource allocation manipulation in placement but might also
+        # need a new scheduling if resource on this host is not available.
+        if port_id:
+            port = self.network_api.show_port(context, port_id)
+            if port['port'].get('resource_request'):
+                raise exception.AttachInterfaceWithQoSPolicyNotSupported(
+                    instance_uuid=instance.uuid)
+
         return self.compute_rpcapi.attach_interface(context,
             instance=instance, network_id=network_id, port_id=port_id,
             requested_ip=requested_ip, tag=tag)
@@ -4374,6 +4539,9 @@ class API(base.Base):
             # state.
             nodes = objects.ComputeNodeList.get_all_by_host(context, host_name)
 
+        request_spec = objects.RequestSpec.get_by_instance_uuid(
+            context, instance.uuid)
+
         instance.task_state = task_states.MIGRATING
         instance.save(expected_task_state=[None])
 
@@ -4389,14 +4557,6 @@ class API(base.Base):
             self.consoleauth_rpcapi.delete_tokens_for_instance(
                 context, instance.uuid)
 
-        try:
-            request_spec = objects.RequestSpec.get_by_instance_uuid(
-                context, instance.uuid)
-        except exception.RequestSpecNotFound:
-            # Some old instances can still have no RequestSpec object attached
-            # to them, we need to support the old way
-            request_spec = None
-
         # NOTE(sbauza): Force is a boolean by the new related API version
         if force is False and host_name:
             # Unset the host to make sure we call the scheduler
@@ -4407,19 +4567,13 @@ class API(base.Base):
             # compute per service but doesn't support live migrations,
             # let's provide the first one.
             target = nodes[0]
-            if request_spec:
-                # TODO(sbauza): Hydrate a fake spec for old instances not yet
-                # having a request spec attached to them (particularly true for
-                # cells v1). For the moment, let's keep the same behaviour for
-                # all the instances but provide the destination only if a spec
-                # is found.
-                destination = objects.Destination(
-                    host=target.host,
-                    node=target.hypervisor_hostname
-                )
-                # This is essentially a hint to the scheduler to only consider
-                # the specified host but still run it through the filters.
-                request_spec.requested_destination = destination
+            destination = objects.Destination(
+                host=target.host,
+                node=target.hypervisor_hostname
+            )
+            # This is essentially a hint to the scheduler to only consider
+            # the specified host but still run it through the filters.
+            request_spec.requested_destination = destination
 
         try:
             self.compute_task_api.live_migrate_instance(context, instance,
@@ -4544,6 +4698,9 @@ class API(base.Base):
                       'expected to be down, but it was up.', inst_host)
             raise exception.ComputeServiceInUse(host=inst_host)
 
+        request_spec = objects.RequestSpec.get_by_instance_uuid(
+            context, instance.uuid)
+
         instance.task_state = task_states.REBUILDING
         instance.save(expected_task_state=[None])
         self._record_action_start(context, instance, instance_actions.EVACUATE)
@@ -4567,15 +4724,9 @@ class API(base.Base):
             action=fields_obj.NotificationAction.EVACUATE,
             source=fields_obj.NotificationSource.API)
 
-        try:
-            request_spec = objects.RequestSpec.get_by_instance_uuid(
-                context, instance.uuid)
-        except exception.RequestSpecNotFound:
-            # Some old instances can still have no RequestSpec object attached
-            # to them, we need to support the old way
-            request_spec = None
-
         # NOTE(sbauza): Force is a boolean by the new related API version
+        # TODO(stephenfin): Any reason we can't use 'not force' here to handle
+        # the pre-v2.29 API microversion, which wouldn't set force
         if force is False and host:
             nodes = objects.ComputeNodeList.get_all_by_host(context, host)
             # NOTE(sbauza): Unset the host to make sure we call the scheduler
@@ -4584,17 +4735,11 @@ class API(base.Base):
             # compute per service but doesn't support evacuations,
             # let's provide the first one.
             target = nodes[0]
-            if request_spec:
-                # TODO(sbauza): Hydrate a fake spec for old instances not yet
-                # having a request spec attached to them (particularly true for
-                # cells v1). For the moment, let's keep the same behaviour for
-                # all the instances but provide the destination only if a spec
-                # is found.
-                destination = objects.Destination(
-                    host=target.host,
-                    node=target.hypervisor_hostname
-                )
-                request_spec.requested_destination = destination
+            destination = objects.Destination(
+                host=target.host,
+                node=target.hypervisor_hostname
+            )
+            request_spec.requested_destination = destination
 
         return self.compute_task_api.rebuild_instance(context,
                        instance=instance,
@@ -4950,7 +5095,7 @@ class HostAPI(base.Base):
         return result
 
     def service_get_all(self, context, filters=None, set_zones=False,
-                        all_cells=False):
+                        all_cells=False, cell_down_support=False):
         """Returns a list of services, optionally filtering the results.
 
         If specified, 'filters' should be a dictionary containing services
@@ -4958,6 +5103,10 @@ class HostAPI(base.Base):
         the 'compute' topic, use filters={'topic': 'compute'}.
 
         If all_cells=True, then scan all cells and merge the results.
+
+        If cell_down_support=True then return minimal service records
+        for cells that do not respond based on what we have in the
+        host mappings. These will have only 'binary' and 'host' set.
         """
         if filters is None:
             filters = {}
@@ -4972,10 +5121,27 @@ class HostAPI(base.Base):
             services = []
             service_dict = nova_context.scatter_gather_all_cells(context,
                 objects.ServiceList.get_all, disabled, set_zones=set_zones)
-            for service in service_dict.values():
-                if service not in (nova_context.did_not_respond_sentinel,
-                                   nova_context.raised_exception_sentinel):
+            for cell_uuid, service in service_dict.items():
+                if not nova_context.is_cell_failure_sentinel(service):
                     services.extend(service)
+                elif cell_down_support:
+                    unavailable_services = objects.ServiceList()
+                    cid = [cm.id for cm in nova_context.CELLS
+                           if cm.uuid == cell_uuid]
+                    # We know cid[0] is in the list because we are using the
+                    # same list that scatter_gather_all_cells used
+                    hms = objects.HostMappingList.get_by_cell_id(context,
+                                                                 cid[0])
+                    for hm in hms:
+                        unavailable_services.objects.append(objects.Service(
+                            binary='nova-compute', host=hm.host))
+                    LOG.warning("Cell %s is not responding and hence only "
+                                "partial results are available from this "
+                                "cell.", cell_uuid)
+                    services.extend(unavailable_services)
+                else:
+                    LOG.warning("Cell %s is not responding and hence skipped "
+                                "from the results.", cell_uuid)
         else:
             services = objects.ServiceList.get_all(context, disabled,
                                                    set_zones=set_zones)
@@ -5168,9 +5334,15 @@ class AggregateAPI(base.Base):
     """Sub-set of the Compute Manager API for managing host aggregates."""
     def __init__(self, **kwargs):
         self.compute_rpcapi = compute_rpcapi.ComputeAPI()
-        self.scheduler_client = scheduler_client.SchedulerClient()
-        self.placement_client = self.scheduler_client.reportclient
+        self.query_client = query.SchedulerQueryClient()
+        self._placement_client = None  # Lazy-load on first access.
         super(AggregateAPI, self).__init__(**kwargs)
+
+    @property
+    def placement_client(self):
+        if self._placement_client is None:
+            self._placement_client = report.SchedulerReportClient()
+        return self._placement_client
 
     @wrap_exception()
     def create_aggregate(self, context, aggregate_name, availability_zone):
@@ -5181,7 +5353,7 @@ class AggregateAPI(base.Base):
         if availability_zone:
             aggregate.metadata = {'availability_zone': availability_zone}
         aggregate.create()
-        self.scheduler_client.update_aggregates(context, [aggregate])
+        self.query_client.update_aggregates(context, [aggregate])
         return aggregate
 
     def get_aggregate(self, context, aggregate_id):
@@ -5204,11 +5376,12 @@ class AggregateAPI(base.Base):
             aggregate.name = values.pop('name')
             aggregate.save()
         self.is_safe_to_update_az(context, values, aggregate=aggregate,
-                                  action_name=AGGREGATE_ACTION_UPDATE)
+                                  action_name=AGGREGATE_ACTION_UPDATE,
+                                  check_no_instances_in_az=True)
         if values:
             aggregate.update_metadata(values)
             aggregate.updated_at = timeutils.utcnow()
-        self.scheduler_client.update_aggregates(context, [aggregate])
+        self.query_client.update_aggregates(context, [aggregate])
         # If updated values include availability_zones, then the cache
         # which stored availability_zones and host need to be reset
         if values.get('availability_zone'):
@@ -5220,9 +5393,10 @@ class AggregateAPI(base.Base):
         """Updates the aggregate metadata."""
         aggregate = objects.Aggregate.get_by_id(context, aggregate_id)
         self.is_safe_to_update_az(context, metadata, aggregate=aggregate,
-                                  action_name=AGGREGATE_ACTION_UPDATE_META)
+                                  action_name=AGGREGATE_ACTION_UPDATE_META,
+                                  check_no_instances_in_az=True)
         aggregate.update_metadata(metadata)
-        self.scheduler_client.update_aggregates(context, [aggregate])
+        self.query_client.update_aggregates(context, [aggregate])
         # If updated metadata include availability_zones, then the cache
         # which stored availability_zones and host need to be reset
         if metadata and metadata.get('availability_zone'):
@@ -5250,7 +5424,7 @@ class AggregateAPI(base.Base):
             raise exception.InvalidAggregateActionDelete(
                 aggregate_id=aggregate_id, reason=msg)
         aggregate.destroy()
-        self.scheduler_client.delete_aggregate(context, aggregate)
+        self.query_client.delete_aggregate(context, aggregate)
         compute_utils.notify_about_aggregate_update(context,
                                                     "delete.end",
                                                     aggregate_payload)
@@ -5262,7 +5436,8 @@ class AggregateAPI(base.Base):
 
     def is_safe_to_update_az(self, context, metadata, aggregate,
                              hosts=None,
-                             action_name=AGGREGATE_ACTION_ADD):
+                             action_name=AGGREGATE_ACTION_ADD,
+                             check_no_instances_in_az=False):
         """Determine if updates alter an aggregate's availability zone.
 
             :param context: local context
@@ -5270,7 +5445,9 @@ class AggregateAPI(base.Base):
             :param aggregate: Aggregate to update
             :param hosts: Hosts to check. If None, aggregate.hosts is used
             :type hosts: list
-            :action_name: Calling method for logging purposes
+            :param action_name: Calling method for logging purposes
+            :param check_no_instances_in_az: if True, it checks
+                there is no instances on any hosts of the aggregate
 
         """
         if 'availability_zone' in metadata:
@@ -5291,6 +5468,18 @@ class AggregateAPI(base.Base):
                         "%s") % conflicting_azs
                 self._raise_invalid_aggregate_exc(action_name, aggregate.id,
                                                   msg)
+            same_az_name = (aggregate.availability_zone ==
+                            metadata['availability_zone'])
+            if check_no_instances_in_az and not same_az_name:
+                instance_count_by_cell = (
+                    nova_context.scatter_gather_skip_cell0(
+                        context,
+                        objects.InstanceList.get_count_by_hosts,
+                        _hosts))
+                if any(cnt for cnt in instance_count_by_cell.values()):
+                    msg = _("One or more hosts contain instances in this zone")
+                    self._raise_invalid_aggregate_exc(
+                        action_name, aggregate.id, msg)
 
     def _raise_invalid_aggregate_exc(self, action_name, aggregate_id, reason):
         if action_name == AGGREGATE_ACTION_ADD:
@@ -5359,7 +5548,7 @@ class AggregateAPI(base.Base):
                                   hosts=[host_name], aggregate=aggregate)
 
         aggregate.add_host(host_name)
-        self.scheduler_client.update_aggregates(context, [aggregate])
+        self.query_client.update_aggregates(context, [aggregate])
         try:
             self.placement_client.aggregate_add_host(
                 context, aggregate.uuid, host_name)
@@ -5425,7 +5614,7 @@ class AggregateAPI(base.Base):
             phase=fields_obj.NotificationPhase.START)
 
         aggregate.delete_host(host_name)
-        self.scheduler_client.update_aggregates(context, [aggregate])
+        self.query_client.update_aggregates(context, [aggregate])
         try:
             self.placement_client.aggregate_remove_host(
                 context, aggregate.uuid, host_name)

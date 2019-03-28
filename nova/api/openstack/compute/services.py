@@ -31,6 +31,7 @@ from nova import servicegroup
 from nova import utils
 
 UUID_FOR_ID_MIN_VERSION = '2.53'
+PARTIAL_CONSTRUCT_FOR_CELL_DOWN_MIN_VERSION = '2.69'
 
 
 class ServiceController(wsgi.Controller):
@@ -42,7 +43,13 @@ class ServiceController(wsgi.Controller):
         self.actions = {"enable": self._enable,
                         "disable": self._disable,
                         "disable-log-reason": self._disable_log_reason}
-        self.placementclient = report.SchedulerReportClient()
+        self._placementclient = None  # Lazy-load on first access.
+
+    @property
+    def placementclient(self):
+        if self._placementclient is None:
+            self._placementclient = report.SchedulerReportClient()
+        return self._placementclient
 
     def _get_services(self, req):
         # The API services are filtered out since they are not RPC services
@@ -53,11 +60,14 @@ class ServiceController(wsgi.Controller):
         context = req.environ['nova.context']
         context.can(services_policies.BASE_POLICY_NAME)
 
+        cell_down_support = api_version_request.is_supported(
+            req, min_version=PARTIAL_CONSTRUCT_FOR_CELL_DOWN_MIN_VERSION)
+
         _services = [
-           s
-           for s in self.host_api.service_get_all(context, set_zones=True,
-                                                  all_cells=True)
-           if s['binary'] not in api_services
+            s
+            for s in self.host_api.service_get_all(context, set_zones=True,
+                all_cells=True, cell_down_support=cell_down_support)
+            if s['binary'] not in api_services
         ]
 
         host = ''
@@ -73,7 +83,16 @@ class ServiceController(wsgi.Controller):
 
         return _services
 
-    def _get_service_detail(self, svc, additional_fields, req):
+    def _get_service_detail(self, svc, additional_fields, req,
+                            cell_down_support=False):
+        # NOTE(tssurya): The below logic returns a minimal service construct
+        # consisting of only the host, binary and status fields for the compute
+        # services in the down cell.
+        if (cell_down_support and 'uuid' not in svc):
+            return {'binary': svc.binary,
+                    'host': svc.host,
+                    'status': "UNKNOWN"}
+
         alive = self.servicegroup_api.service_is_up(svc)
         state = (alive and "up") or "down"
         active = 'enabled'
@@ -110,8 +129,10 @@ class ServiceController(wsgi.Controller):
 
     def _get_services_list(self, req, additional_fields=()):
         _services = self._get_services(req)
-        return [self._get_service_detail(svc, additional_fields, req)
-                for svc in _services]
+        cell_down_support = api_version_request.is_supported(req,
+            min_version=PARTIAL_CONSTRUCT_FOR_CELL_DOWN_MIN_VERSION)
+        return [self._get_service_detail(svc, additional_fields, req,
+                cell_down_support=cell_down_support) for svc in _services]
 
     def _enable(self, body, context):
         """Enable scheduling for a service."""
@@ -172,6 +193,15 @@ class ServiceController(wsgi.Controller):
 
     def _update(self, context, host, binary, payload):
         """Do the actual PUT/update"""
+        # If the user tried to perform an action
+        # (disable/enable/force down) on a non-nova-compute
+        # service, provide a more useful error message.
+        if binary != 'nova-compute':
+            msg = (_(
+                'Updating a %(binary)s service is not supported. Only '
+                'nova-compute services can be updated.') % {'binary': binary})
+            raise webob.exc.HTTPBadRequest(explanation=msg)
+
         try:
             self.host_api.service_update(context, host, binary, payload)
         except (exception.HostBinaryNotFound,
@@ -324,7 +354,7 @@ class ServiceController(wsgi.Controller):
         # technically disable a nova-scheduler service, although that doesn't
         # really do anything within Nova and is just confusing. Now trying to
         # do that will fail as a nova-scheduler service won't have a host
-        # mapping so you'll get a 404. In this new microversion, we close that
+        # mapping so you'll get a 400. In this new microversion, we close that
         # old gap and make sure you can only enable/disable and set forced_down
         # on nova-compute services since those are the only ones that make
         # sense to update for those operations.

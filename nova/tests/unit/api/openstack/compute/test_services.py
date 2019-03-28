@@ -19,6 +19,7 @@ import datetime
 import iso8601
 import mock
 from oslo_utils import fixture as utils_fixture
+from oslo_utils.fixture import uuidsentinel
 import six
 import webob.exc
 
@@ -35,7 +36,7 @@ from nova import test
 from nova.tests import fixtures
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit.objects import test_service
-from nova.tests import uuidsentinel
+
 
 # This is tied into the os-services API samples functional tests.
 FAKE_UUID_COMPUTE_HOST1 = 'e81d66a4-ddd3-4aba-8a84-171d1cb4d339'
@@ -120,7 +121,7 @@ fake_services_list = [
 
 def fake_service_get_all(services):
     def service_get_all(context, filters=None, set_zones=False,
-                        all_cells=False):
+                        all_cells=False, cell_down_support=False):
         if set_zones or 'availability_zone' in filters:
             return availability_zones.set_availability_zones(context,
                                                              services)
@@ -613,7 +614,7 @@ class ServicesTestV21(test.TestCase):
 
     def test_services_enable_with_invalid_binary(self):
         body = {'host': 'host1', 'binary': 'invalid'}
-        self.assertRaises(webob.exc.HTTPNotFound,
+        self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller.update,
                           self.req,
                           "enable",
@@ -636,7 +637,7 @@ class ServicesTestV21(test.TestCase):
 
     def test_services_disable_with_invalid_binary(self):
         body = {'host': 'host1', 'binary': 'invalid'}
-        self.assertRaises(webob.exc.HTTPNotFound,
+        self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller.update,
                           self.req,
                           "disable",
@@ -1077,6 +1078,16 @@ class ServicesTestV211(ServicesTestV21):
                     "host": "host1", "binary": "nova-compute"}
         self.assertRaises(exception.ValidationError,
             self.controller.update, req, 'force-down', body=req_body)
+
+    def test_update_forced_down_invalid_service(self):
+        req = fakes.HTTPRequest.blank('/fake/services',
+                                      use_admin_context=True,
+                                      version=self.wsgi_api_version)
+        req_body = {"forced_down": True,
+                    "host": "host1", "binary": "nova-scheduler"}
+        self.assertRaises(webob.exc.HTTPBadRequest,
+                          self.controller.update, req, 'force-down',
+                          body=req_body)
 
 
 class ServicesTestV252(ServicesTestV211):

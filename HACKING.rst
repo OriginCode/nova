@@ -68,6 +68,8 @@ Nova Specific Commandments
 - [N358] Return must always be followed by a space when returning a value.
 - [N359] Check for redundant import aliases.
 - [N360] Yield must always be followed by a space when yielding a value.
+- [N361] Check for usage of deprecated assertRegexpMatches and
+  assertNotRegexpMatches
 
 Creating Unit Tests
 -------------------
@@ -111,6 +113,10 @@ command directly. Running ``stestr run`` will run the entire test suite.
 ``stestr run --concurrency=1`` will run tests serially (by default, stestr runs
 tests in parallel). More information about stestr can be found at:
 http://stestr.readthedocs.io/
+
+By default tests log at ``INFO`` level. It is possible to make them
+log at ``DEBUG`` level by exporting the ``OS_DEBUG`` environment
+variable to ``True``.
 
 .. _Development Quickstart: https://docs.openstack.org/nova/latest/contributor/development-environment.html
 

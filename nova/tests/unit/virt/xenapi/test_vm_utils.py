@@ -20,12 +20,14 @@ from oslo_concurrency import lockutils
 from oslo_concurrency import processutils
 from oslo_config import fixture as config_fixture
 from oslo_utils import fixture as utils_fixture
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 from oslo_utils import uuidutils
 import six
 
 from nova.compute import flavors
 from nova.compute import power_state
+from nova.compute import utils as compute_utils
 import nova.conf
 from nova import context
 from nova import exception
@@ -36,7 +38,6 @@ from nova.tests.unit import fake_flavor
 from nova.tests.unit import fake_instance
 from nova.tests.unit.objects import test_flavor
 from nova.tests.unit.virt.xenapi import stubs
-from nova.tests import uuidsentinel as uuids
 from nova.virt import hardware
 from nova.virt.xenapi import driver as xenapi_conn
 from nova.virt.xenapi import fake
@@ -132,11 +133,12 @@ class LookupTestCase(VMUtilsTestBase):
 
 
 class GenerateConfigDriveTestCase(VMUtilsTestBase):
+    @mock.patch.object(compute_utils, 'disk_ops_semaphore')
     @mock.patch.object(vm_utils, 'safe_find_sr')
     @mock.patch.object(vm_utils, "create_vdi", return_value='vdi_ref')
     @mock.patch.object(vm_utils.instance_metadata, "InstanceMetadata")
     @mock.patch.object(vm_utils.configdrive, 'ConfigDriveBuilder')
-    @mock.patch.object(vm_utils.utils, 'execute')
+    @mock.patch('oslo_concurrency.processutils.execute')
     @mock.patch.object(vm_utils.volume_utils, 'stream_to_vdi')
     @mock.patch.object(vm_utils.os.path, 'getsize', return_value=100)
     @mock.patch.object(vm_utils, 'create_vbd', return_value='vbd_ref')
@@ -144,7 +146,7 @@ class GenerateConfigDriveTestCase(VMUtilsTestBase):
     def test_no_admin_pass(self, mock_tmpdir, mock_create_vbd, mock_size,
                            mock_stream, mock_execute, mock_builder,
                            mock_instance_metadata, mock_create_vdi,
-                           mock_find_sr):
+                           mock_find_sr, mock_disk_op_sema):
 
         mock_tmpdir.return_value.__enter__.return_value = '/mock'
 
@@ -153,7 +155,7 @@ class GenerateConfigDriveTestCase(VMUtilsTestBase):
             vm_utils.generate_configdrive('session', 'context', 'instance',
                                           'vm_ref', 'userdevice',
                                           'network_info')
-
+            mock_disk_op_sema.__enter__.assert_called_once()
             mock_size.assert_called_with('/mock/configdrive.vhd')
             mock_open.assert_called_with('/mock/configdrive.vhd')
             mock_execute.assert_called_with('qemu-img', 'convert', '-Ovpc',

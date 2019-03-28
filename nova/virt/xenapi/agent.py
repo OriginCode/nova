@@ -21,6 +21,7 @@ import time
 
 from os_xenapi.client import host_agent
 from os_xenapi.client import XenAPI
+from oslo_concurrency import processutils
 from oslo_log import log as logging
 from oslo_serialization import base64
 from oslo_serialization import jsonutils
@@ -360,8 +361,7 @@ def find_guest_agent(base_dir):
         # required
         LOG.info('XenServer tools installed in this '
                  'image are capable of network injection.  '
-                 'Networking files will not be'
-                 'manipulated')
+                 'Networking files will not be manipulated')
         return True
     xe_daemon_filename = os.path.join(base_dir,
         'usr', 'sbin', 'xe-daemon')
@@ -422,8 +422,8 @@ class SimpleDH(object):
                'pass:%s' % self._shared, '-nosalt']
         if decrypt:
             cmd.append('-d')
-        out, err = utils.execute(*cmd,
-                                 process_input=encodeutils.safe_encode(text))
+        out, err = processutils.execute(
+            *cmd, process_input=encodeutils.safe_encode(text))
         if err:
             raise RuntimeError(_('OpenSSL error: %s') % err)
         return out

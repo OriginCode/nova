@@ -2,12 +2,15 @@
 Feature Support Matrix
 ======================
 
+.. TODO: Add UML (User-Mode Linux) hypervisor and its support status
+   for the listed features to the support matrix.
+
 When considering which capabilities should be marked as mandatory the
 following general guiding principles were applied
 
 * **Inclusivity** - people have shown ability to make effective
   use of a wide range of virtualization technologies with broadly
-  varying featuresets. Aiming to keep the requirements as inclusive
+  varying feature sets. Aiming to keep the requirements as inclusive
   as possible, avoids second-guessing what a user may wish to use
   the cloud compute service for.
 
@@ -21,7 +24,7 @@ following general guiding principles were applied
 * **Competition** - an early leader in the cloud compute service space
   was Amazon EC2. A sanity check for whether a feature should be
   mandatory is to consider whether it was available in the first
-  public release of EC2. This had quite a narrow featureset, but
+  public release of EC2. This had quite a narrow feature set, but
   none the less found very high usage in many use cases. So it
   serves to illustrate that many features need not be considered
   mandatory in order to get useful work done.

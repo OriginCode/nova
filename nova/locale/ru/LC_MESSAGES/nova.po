@@ -16,7 +16,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova VERSION\n"
 "Report-Msgid-Bugs-To: https://bugs.launchpad.net/openstack-i18n/\n"
-"POT-Creation-Date: 2018-10-08 07:25+0000\n"
+"POT-Creation-Date: 2018-09-21 04:59+0000\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
@@ -80,15 +80,6 @@ msgid "%(memsize)d MB of memory assigned, but expected %(memtotal)d MB"
 msgstr "Назначено %(memsize)d МБ, но ожидалось %(memtotal)d МБ"
 
 #, python-format
-msgid "%(name)s has a minimum character requirement of %(min_length)s."
-msgstr ""
-"Минимальное число символов в %(name)s должно составлять %(min_length)s."
-
-#, python-format
-msgid "%(name)s has more than %(max_length)s characters."
-msgstr "%(name)s содержит более %(max_length)s символов."
-
-#, python-format
 msgid "%(path)s is not on local storage: %(reason)s"
 msgstr "%(path)s не находится в локальном хранилище: %(reason)s"
 
@@ -129,10 +120,6 @@ msgstr "%s не поддерживает горячее подключение �
 #, python-format
 msgid "%s format is not supported"
 msgstr "Формат %s не поддерживается"
-
-#, python-format
-msgid "%s is not a string or unicode"
-msgstr "%s не является строкой или unicode"
 
 #, python-format
 msgid "%s is not supported."
@@ -731,9 +718,6 @@ msgstr "Невозможно извлечь образ %(image_id)s"
 #, python-format
 msgid "Could not find a handler for %(driver_type)s volume."
 msgstr "Невозможно найти обработчик для тома %(driver_type)s."
-
-msgid "Could not find another compute"
-msgstr "Невозможно найти другой compute"
 
 #, python-format
 msgid "Could not find binary %(binary)s on host %(host)s."
@@ -1911,9 +1895,6 @@ msgstr "Недопустимое значение volume_size."
 msgid "Ironic node uuid not supplied to driver for instance %s."
 msgstr "Драйверу не передан UUID узла Ironic для экземпляра %s."
 
-msgid "Is the appropriate service running?"
-msgstr "Выполняется ли соответствующая служба?"
-
 #, python-format
 msgid ""
 "It is not allowed to create an interface on external network %(network_uuid)s"
@@ -3087,9 +3068,6 @@ msgstr "Фильтр брандмауэра для %s не существует"
 msgid "The floating IP request failed with a BadRequest"
 msgstr "Сбой нефиксированного IP-адреса с BadRequest"
 
-msgid "The input is not a string or unicode"
-msgstr "Введенное значение не является строкой или unicode"
-
 msgid ""
 "The instance requires a newer hypervisor version than has been provided."
 msgstr "Копии необходима новая версия гипервизора, вместо предоставленной."
@@ -4093,12 +4071,6 @@ msgstr "Значение vlan должно быть целым числом"
 #, python-format
 msgid "volume %s already attached"
 msgstr "Том %s уже присоединен"
-
-#, python-format
-msgid "volume '%(vol)s' status must be 'available'. Currently in '%(status)s'"
-msgstr ""
-"Требуемое состояние '%(vol)s' тома: 'available'. Текущее состояние: "
-"'%(status)s'"
 
 #, python-format
 msgid ""

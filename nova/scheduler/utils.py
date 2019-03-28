@@ -17,12 +17,13 @@
 import collections
 import re
 import sys
+import traceback
 
+import os_resource_classes as orc
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from six.moves.urllib import parse
 
-from nova.api.openstack.placement import lib as placement_lib
 from nova.compute import flavors
 from nova.compute import utils as compute_utils
 import nova.conf
@@ -32,8 +33,8 @@ from nova.i18n import _
 from nova import objects
 from nova.objects import base as obj_base
 from nova.objects import instance as obj_instance
-from nova import rc_fields as fields
 from nova import rpc
+from nova.scheduler.filters import utils as filters_utils
 
 
 LOG = logging.getLogger(__name__)
@@ -67,14 +68,28 @@ class ResourceRequest(object):
 
     def get_request_group(self, ident):
         if ident not in self._rg_by_id:
-            rq_grp = placement_lib.RequestGroup(use_same_provider=bool(ident))
+            rq_grp = objects.RequestGroup(use_same_provider=bool(ident))
             self._rg_by_id[ident] = rq_grp
         return self._rg_by_id[ident]
 
+    def add_request_group(self, request_group):
+        """Inserts the existing group with a unique integer id
+
+        The groups coming from the flavor can have arbitrary ids but every id
+        is an integer. So this function can ensure unique ids by using bigger
+        ids than the maximum of existing ids.
+
+        :param request_group: the RequestGroup to be added
+        """
+        # NOTE(gibi) [0] just here to always have a defined maximum
+        group_idents = [0] + [int(ident) for ident in self._rg_by_id if ident]
+        ident = max(group_idents) + 1
+        self._rg_by_id[ident] = request_group
+
     def _add_resource(self, groupid, rclass, amount):
         # Validate the class.
-        if not (rclass.startswith(fields.ResourceClass.CUSTOM_NAMESPACE) or
-                        rclass in fields.ResourceClass.STANDARD):
+        if not (rclass.startswith(orc.CUSTOM_NAMESPACE) or
+                        rclass in orc.STANDARDS):
             LOG.warning(
                 "Received an invalid ResourceClass '%(key)s' in extra_specs.",
                 {"key": rclass})
@@ -243,13 +258,15 @@ class ResourceRequest(object):
         """Produce a querystring of the form expected by
         GET /allocation_candidates.
         """
+        # TODO(gibi): We have a RequestGroup OVO so we can move this to that
+        # class as a member function.
         # NOTE(efried): The sorting herein is not necessary for the API; it is
         # to make testing easier and logging/debugging predictable.
         def to_queryparams(request_group, suffix):
             res = request_group.resources
             required_traits = request_group.required_traits
             forbidden_traits = request_group.forbidden_traits
-            aggregates = request_group.member_of
+            aggregates = request_group.aggregates
 
             resource_query = ",".join(
                 sorted("%s:%s" % (rc, amount)
@@ -279,12 +296,31 @@ class ResourceRequest(object):
             qparams = []
         if self._group_policy is not None:
             qparams.append(('group_policy', self._group_policy))
+        nr_of_numbered_groups = 0
         for ident, rg in self._rg_by_id.items():
             # [('resourcesN', 'rclass:amount,rclass:amount,...'),
             #  ('requiredN', 'trait_name,!trait_name,...'),
             #  ('member_ofN', 'in:uuid,uuid,...'),
             #  ('member_ofN', 'in:uuid,uuid,...')]
             qparams.extend(to_queryparams(rg, ident or ''))
+            if ident:
+                nr_of_numbered_groups += 1
+        if nr_of_numbered_groups >= 2 and not self._group_policy:
+            # we know this will fail in placement so help the troubleshooting
+            LOG.warning(
+                "There is more than one numbered request group in the "
+                "allocation candidate query but the flavor did not specify "
+                "any group policy. This query will fail in placement due to "
+                "the missing group policy. If you specified more than one "
+                "numbered request group in the flavor extra_spec or booted "
+                "with more than one neutron port that has resource request "
+                "(i.e. the port has a QoS minimum bandwidth policy rule "
+                "attached) then you have to specify the group policy in the "
+                "flavor extra_spec. If it is OK to let these groups be "
+                "satisfied by overlapping resource providers then use "
+                "'group_policy': 'None'. If you want each group to be "
+                "satisfied from a separate resource provider then use "
+                "'group_policy': 'isolate'.")
         return parse.urlencode(sorted(qparams))
 
 
@@ -359,9 +395,9 @@ def resources_from_flavor(instance, flavor):
             swap_in_gb + flavor.ephemeral_gb)
 
     resources = {
-        fields.ResourceClass.VCPU: flavor.vcpus,
-        fields.ResourceClass.MEMORY_MB: flavor.memory_mb,
-        fields.ResourceClass.DISK_GB: disk,
+        orc.VCPU: flavor.vcpus,
+        orc.MEMORY_MB: flavor.memory_mb,
+        orc.DISK_GB: disk,
     }
     if "extra_specs" in flavor:
         # TODO(efried): This method is currently only used from places that
@@ -375,30 +411,13 @@ def resources_from_flavor(instance, flavor):
     return resources
 
 
-def merge_resources(original_resources, new_resources, sign=1):
-    """Merge a list of new resources with existing resources.
-
-    Either add the resources (if sign is 1) or subtract (if sign is -1).
-    If the resulting value is 0 do not include the resource in the results.
-    """
-
-    all_keys = set(original_resources.keys()) | set(new_resources.keys())
-    for key in all_keys:
-        value = (original_resources.get(key, 0) +
-                 (sign * new_resources.get(key, 0)))
-        if value:
-            original_resources[key] = value
-        else:
-            original_resources.pop(key, None)
-
-
 def resources_from_request_spec(spec_obj):
     """Given a RequestSpec object, returns a ResourceRequest of the resources,
     traits, and aggregates it represents.
     """
     spec_resources = {
-        fields.ResourceClass.VCPU: spec_obj.vcpus,
-        fields.ResourceClass.MEMORY_MB: spec_obj.memory_mb,
+        orc.VCPU: spec_obj.vcpus,
+        orc.MEMORY_MB: spec_obj.memory_mb,
     }
 
     requested_disk_mb = ((1024 * spec_obj.ephemeral_gb) +
@@ -424,7 +443,7 @@ def resources_from_request_spec(spec_obj):
     # NOTE(sbauza): Some flavors provide zero size for disk values, we need
     # to avoid asking for disk usage.
     if requested_disk_gb != 0:
-        spec_resources[fields.ResourceClass.DISK_GB] = requested_disk_gb
+        spec_resources[orc.DISK_GB] = requested_disk_gb
 
     # Process extra_specs
     if "extra_specs" in spec_obj.flavor:
@@ -451,12 +470,19 @@ def resources_from_request_spec(spec_obj):
     for rclass, amount in spec_resources.items():
         res_req.get_request_group(None).resources[rclass] = amount
 
+    requested_resources = (spec_obj.requested_resources
+                           if 'requested_resources' in spec_obj
+                              and spec_obj.requested_resources
+                           else [])
+    for group in requested_resources:
+        res_req.add_request_group(group)
+
     if 'requested_destination' in spec_obj:
         destination = spec_obj.requested_destination
         if destination and destination.aggregates:
             grp = res_req.get_request_group(None)
-            grp.member_of = [tuple(ored.split(','))
-                             for ored in destination.aggregates]
+            grp.aggregates = [ored.split(',')
+                              for ored in destination.aggregates]
 
     # Don't limit allocation candidates when using force_hosts or force_nodes.
     if 'force_hosts' in spec_obj and spec_obj.force_hosts:
@@ -471,7 +497,7 @@ def resources_from_request_spec(spec_obj):
 # some sort of skip_filters flag.
 def claim_resources_on_destination(
         context, reportclient, instance, source_node, dest_node,
-        source_node_allocations=None):
+        source_allocations=None, consumer_generation=None):
     """Copies allocations from source node to dest node in Placement
 
     Normally the scheduler will allocate resources on a chosen destination
@@ -490,21 +516,66 @@ def claim_resources_on_destination(
                         lives
     :param dest_node: destination ComputeNode where the instance is being
                       moved
+    :param source_allocations: The consumer's current allocations on the
+                               source compute
+    :param consumer_generation: The expected generation of the consumer.
+                                None if a new consumer is expected
     :raises NoValidHost: If the allocation claim on the destination
                          node fails.
+    :raises: keystoneauth1.exceptions.base.ClientException on failure to
+             communicate with the placement API
+    :raises: ConsumerAllocationRetrievalFailed if the placement API call fails
+    :raises: AllocationUpdateFailed: If a parallel consumer update changed the
+                                     consumer
     """
     # Get the current allocations for the source node and the instance.
-    if not source_node_allocations:
-        source_node_allocations = (
-            reportclient.get_allocations_for_consumer_by_provider(
-                context, source_node.uuid, instance.uuid))
-    if source_node_allocations:
+    if not source_allocations:
+        # NOTE(gibi): This is the forced evacuate case where the caller did not
+        # provide any allocation request. So we ask placement here for the
+        # current allocation and consumer generation and use that for the new
+        # allocation on the dest_node. If the allocation fails due to consumer
+        # generation conflict then the claim will raise and the operation will
+        # be aborted.
+        # NOTE(gibi): This only detect a small portion of possible
+        # cases when allocation is modified outside of the this
+        # code path. The rest can only be detected if nova would
+        # cache at least the consumer generation of the instance.
+        allocations = reportclient.get_allocs_for_consumer(
+            context, instance.uuid)
+        source_allocations = allocations.get('allocations', {})
+        consumer_generation = allocations.get('consumer_generation')
+    else:
+        # NOTE(gibi) This is the live migrate case. The caller provided the
+        # allocation that needs to be used on the dest_node along with the
+        # expected consumer_generation of the consumer (which is the instance).
+        pass
+
+    if source_allocations:
         # Generate an allocation request for the destination node.
+        # NOTE(gibi): if the source allocation allocates from more than one RP
+        # then we need to fail as the dest allocation might also need to be
+        # complex (e.g. nested) and we cannot calculate that allocation request
+        # properly without a placement allocation candidate call.
+        # Alternatively we could sum up the source allocation and try to
+        # allocate that from the root RP of the dest host. It would only work
+        # if the dest host would not require nested allocation for this server
+        # which is really a rare case.
+        if len(source_allocations) > 1:
+            reason = (_('Unable to move instance %(instance_uuid)s to '
+                        'host %(host)s. The instance has complex allocations '
+                        'on the source host so move cannot be forced.') %
+                      {'instance_uuid': instance.uuid,
+                       'host': dest_node.host})
+            raise exception.NoValidHost(reason=reason)
         alloc_request = {
             'allocations': {
-                dest_node.uuid: {'resources': source_node_allocations}
-            }
+                dest_node.uuid: {
+                    'resources':
+                        source_allocations[source_node.uuid]['resources']}
+            },
         }
+        # import locally to avoid cyclic import
+        from nova.scheduler.client import report
         # The claim_resources method will check for existing allocations
         # for the instance and effectively "double up" the allocations for
         # both the source and destination node. That's why when requesting
@@ -513,7 +584,8 @@ def claim_resources_on_destination(
         if reportclient.claim_resources(
                 context, instance.uuid, alloc_request,
                 instance.project_id, instance.user_id,
-                allocation_request_version='1.12'):
+                allocation_request_version=report.CONSUMER_GENERATION_VERSION,
+                consumer_generation=consumer_generation):
             LOG.debug('Instance allocations successfully created on '
                       'destination node %(dest)s: %(alloc_request)s',
                       {'dest': dest_node.uuid,
@@ -595,8 +667,10 @@ def set_vm_state_and_notify(context, instance_uuid, service, method, updates,
                    reason=ex)
 
     event_type = '%s.%s' % (service, method)
-    # TODO(mriedem): Send a versioned notification.
     notifier.error(context, event_type, payload)
+    compute_utils.notify_about_compute_task_error(
+        context, method, instance_uuid, request_spec, vm_state, ex,
+        traceback.format_exc())
 
 
 def build_filter_properties(scheduler_hints, forced_host,
@@ -646,10 +720,13 @@ def populate_retry(filter_properties, instance_uuid):
     # In the case of multiple force hosts/nodes, scheduler should not
     # disable retry filter but traverse all force hosts/nodes one by
     # one till scheduler gets a valid target host.
-    if (max_attempts == 1 or len(force_hosts) == 1
-                           or len(force_nodes) == 1):
-        # re-scheduling is disabled.
-        LOG.debug('Re-scheduling is disabled.')
+    if (max_attempts == 1 or len(force_hosts) == 1 or len(force_nodes) == 1):
+        # re-scheduling is disabled, log why
+        if max_attempts == 1:
+            LOG.debug('Re-scheduling is disabled due to "max_attempts" config')
+        else:
+            LOG.debug("Re-scheduling is disabled due to forcing a host (%s) "
+                      "and/or node (%s)", force_hosts, force_nodes)
         return
 
     # retry is enabled, update attempt count:
@@ -844,8 +921,7 @@ def _get_instance_group_hosts_all_cells(context, instance_group):
         # is raised while targeting a cell and when a cell does not respond
         # as part of the "handling of a down cell" spec:
         # https://blueprints.launchpad.net/nova/+spec/handling-down-cell
-        if result not in (nova_context.did_not_respond_sentinel,
-                          nova_context.raised_exception_sentinel):
+        if not nova_context.is_cell_failure_sentinel(result):
             hosts.extend(result)
     return hosts
 
@@ -935,36 +1011,53 @@ def claim_resources(ctx, client, spec_obj, instance_uuid, alloc_req,
 
     project_id = spec_obj.project_id
 
-    # NOTE(jaypipes): So, the RequestSpec doesn't store the user_id,
-    # only the project_id, so we need to grab the user information from
-    # the context. Perhaps we should consider putting the user ID in
-    # the spec object?
-    user_id = ctx.user_id
+    # We didn't start storing the user_id in the RequestSpec until Rocky so
+    # if it's not set on an old RequestSpec, use the user_id from the context.
+    if 'user_id' in spec_obj and spec_obj.user_id:
+        user_id = spec_obj.user_id
+    else:
+        # FIXME(mriedem): This would actually break accounting if we relied on
+        # the allocations for something like counting quota usage because in
+        # the case of migrating or evacuating an instance, the user here is
+        # likely the admin, not the owner of the instance, so the allocation
+        # would be tracked against the wrong user.
+        user_id = ctx.user_id
 
+    # NOTE(gibi): this could raise AllocationUpdateFailed which means there is
+    # a serious issue with the instance_uuid as a consumer. Every caller of
+    # utils.claim_resources() assumes that instance_uuid will be a new consumer
+    # and therefore we passing None as expected consumer_generation to
+    # reportclient.claim_resources() here. If the claim fails
+    # due to consumer generation conflict, which in this case means the
+    # consumer is not new, then we let the AllocationUpdateFailed propagate and
+    # fail the build / migrate as the instance is in inconsistent state.
     return client.claim_resources(ctx, instance_uuid, alloc_req, project_id,
-            user_id, allocation_request_version=allocation_request_version)
+            user_id, allocation_request_version=allocation_request_version,
+            consumer_generation=None)
 
 
-def remove_allocation_from_compute(context, instance, compute_node_uuid,
-                                   reportclient, flavor=None):
-    """Removes the instance allocation from the compute host.
+def get_weight_multiplier(host_state, multiplier_name, multiplier_config):
+    """Given a HostState object, multplier_type name and multiplier_config,
+    returns the weight multiplier.
 
-    :param context: The request context
-    :param instance: the instance object owning the allocation
-    :param compute_node_uuid: the UUID of the compute node where the allocation
-                              needs to be removed
-    :param reportclient: the SchedulerReportClient instances to be used to
-                         communicate with Placement
-    :param flavor: If provided then it is used to calculate the amount of
-                   resource that needs to be removed. If not provided then
-                   instance.flavor will be used
-    :return: True if the removal was successful, False otherwise
+    It reads the "multiplier_name" from "aggregate metadata" in host_state
+    to override the multiplier_config. If the aggregate metadata doesn't
+    contain the multiplier_name, the multiplier_config will be returned
+    directly.
+
+    :param host_state: The HostState object, which contains aggregate metadata
+    :param multiplier_name: The weight multiplier name, like
+           "cpu_weight_multiplier".
+    :param multiplier_config: The weight multiplier configuration value
     """
+    aggregate_vals = filters_utils.aggregate_values_from_key(host_state,
+                                                             multiplier_name)
+    try:
+        value = filters_utils.validate_num_values(
+            aggregate_vals, multiplier_config, cast_to=float)
+    except ValueError as e:
+        LOG.warning("Could not decode '%(name)s' weight multiplier: %(exce)s",
+                    {'exce': e, 'name': multiplier_name})
+        value = multiplier_config
 
-    if not flavor:
-        flavor = instance.flavor
-
-    my_resources = resources_from_flavor(instance, flavor)
-    return reportclient.remove_provider_from_instance_allocation(
-        context, instance.uuid, compute_node_uuid, instance.user_id,
-        instance.project_id, my_resources)
+    return value

@@ -112,19 +112,19 @@ In this section we focus on this related to networking.
 
 -  **Port**
 
-   TODO
+   .. todo:: Add more details.
 
 -  **Floating IPs, Pools and DNS**
 
-   TODO
+   .. todo:: Add more details.
 
 -  **Security Groups**
 
-   TODO
+   .. todo:: Add more details.
 
 -  **Extended Networks**
 
-   TODO
+   .. todo:: Add more details.
 
 
 Administrator Concepts
@@ -182,6 +182,10 @@ on compute hosts rather than servers.
 
 -  **Services Actions**
 
+   .. note::
+      The services actions described in this section apply only to
+      **nova-compute** services.
+
    - **enable, disable, disable-log-reason**
 
      The service can be disabled to indicate the service is not available anymore.
@@ -196,20 +200,31 @@ on compute hosts rather than servers.
      .. note::
        This action is enabled in microversion 2.11.
 
-     This action allows you set the state of service down immediately. Actually
-     Nova only provides the health monitor of service status, there isn't any
-     guarantee about health status of other parts of infrastructure, like the
-     health status of data network, storage network and other components. The
-     more complete health monitor of infrastructure is provided by external
-     system normally. An external health monitor system can mark the service
-     down for notifying the fault.
+     This action allows you set the state of service down immediately. Nova
+     only provides a very basic health monitor of service status, there isn't
+     any guarantee about health status of other parts of infrastructure, like
+     the health status of data network, storage network and other
+     components.
+
+     If you have a more extensive health monitoring system external to Nova,
+     and know that the service in question is dead (and disconnected from the
+     network), this can be used to tell the rest of Nova it can trust that this
+     service is never coming back, and allow actions such as evacuate.
+
+     .. warning::
+
+        This must *only* be used if you have fully fenced the service in
+        question, and that it can never send updates to the rest of the
+        system. This can be done by powering off the node or completely
+        isolating its networking. If you force-down a service that is not
+        fenced you can corrupt the VMs that were running on that host.
 
 -  **Hosts**
 
    Hosts are the *physical machines* that provide the resources for the virtual
-   servers created in Nova. They run a ``hypervisor`` (see definition below)
+   servers created in Nova. They run a **hypervisor** (see definition below)
    that handles the actual creation and management of the virtual servers.
-   Hosts also run the ``Nova compute service``, which receives requests from
+   Hosts also run the **Nova compute service**, which receives requests from
    Nova to interact with the virtual servers on that machine. When compute
    service receives a request, it calls the appropriate methods of the driver
    for that hypervisor in order to carry out the request. The driver acts as
@@ -267,7 +282,7 @@ Relationship with Volume API
 
 Here we discuss about Cinder's API and how Nova users volume UUIDs.
 
-TODO - add more details.
+.. todo:: add more details.
 
 Relationship with Image API
 ===========================
@@ -275,7 +290,7 @@ Relationship with Image API
 Here we discuss about Glance's API and how Nova uses image UUIDs.
 We also discuss how Nova proxies setting image metadata.
 
-TODO - add more details.
+.. todo:: add more details.
 
 Interactions with neutron and nova-network (deprecated)
 =======================================================
@@ -287,4 +302,4 @@ Here we discuss about Neutron's API and how Nova users port UUIDs.
 We also discuss Nova automatically creating ports, proxying security groups,
 and proxying floating IPs. Also talk about the APIs we do not proxy.
 
-TODO - add more details.
+.. todo:: add more details.

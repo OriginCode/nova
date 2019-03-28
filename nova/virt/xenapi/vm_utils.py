@@ -23,7 +23,6 @@ import contextlib
 import math
 import os
 import time
-import urllib
 from xml.dom import minidom
 from xml.parsers import expat
 
@@ -42,10 +41,12 @@ from oslo_utils import versionutils
 import six
 from six.moves import range
 import six.moves.urllib.parse as urlparse
+import six.moves.urllib.request as urlrequest
 
 from nova.api.metadata import base as instance_metadata
 from nova.compute import power_state
 from nova.compute import task_states
+from nova.compute import utils as compute_utils
 import nova.conf
 from nova import exception
 from nova.i18n import _
@@ -1153,8 +1154,9 @@ def generate_configdrive(session, context, instance, vm_ref, userdevice,
                 cdb.make_drive(tmp_file)
                 # XAPI can only import a VHD file, so convert to vhd format
                 vhd_file = '%s.vhd' % tmp_file
-                utils.execute('qemu-img', 'convert', '-Ovpc', tmp_file,
-                              vhd_file)
+                with compute_utils.disk_ops_semaphore:
+                    processutils.execute('qemu-img', 'convert', '-Ovpc',
+                                         tmp_file, vhd_file)
                 vhd_file_size = os.path.getsize(vhd_file)
                 with open(vhd_file) as file_obj:
                     volume_utils.stream_to_vdi(
@@ -1950,7 +1952,7 @@ def _get_rrd_server():
 def _get_rrd(server, vm_uuid):
     """Return the VM RRD XML as a string."""
     try:
-        xml = urllib.urlopen("%s://%s:%s@%s/vm_rrd?uuid=%s" % (
+        xml = urlrequest.urlopen("%s://%s:%s@%s/vm_rrd?uuid=%s" % (
             server[0],
             CONF.xenserver.connection_username,
             CONF.xenserver.connection_password,

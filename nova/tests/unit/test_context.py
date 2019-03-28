@@ -15,13 +15,13 @@
 import mock
 from oslo_context import context as o_context
 from oslo_context import fixture as o_fixture
+from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova import context
 from nova import exception
 from nova import objects
 from nova import test
 from nova.tests import fixtures as nova_fixtures
-from nova.tests import uuidsentinel as uuids
 
 
 class ContextTestCase(test.NoDBTestCase):
@@ -256,8 +256,15 @@ class ContextTestCase(test.NoDBTestCase):
         with context.target_cell(ctxt, mapping) as cctxt:
             self.assertEqual(cctxt.db_connection, mock.sentinel.cdb)
             self.assertEqual(cctxt.mq_connection, mock.sentinel.cmq)
+            self.assertEqual(cctxt.cell_uuid, mapping.uuid)
         self.assertEqual(mock.sentinel.db_conn, ctxt.db_connection)
         self.assertEqual(mock.sentinel.mq_conn, ctxt.mq_connection)
+        self.assertIsNone(ctxt.cell_uuid)
+        # Test again now that we have populated the cache
+        with context.target_cell(ctxt, mapping) as cctxt:
+            self.assertEqual(cctxt.db_connection, mock.sentinel.cdb)
+            self.assertEqual(cctxt.mq_connection, mock.sentinel.cmq)
+            self.assertEqual(cctxt.cell_uuid, mapping.uuid)
 
     @mock.patch('nova.rpc.create_transport')
     @mock.patch('nova.db.api.create_context_manager')
@@ -327,6 +334,14 @@ class ContextTestCase(test.NoDBTestCase):
             self.assertEqual(mock.sentinel.mq_conn_obj, cctxt.mq_connection)
         mock_create_cm.assert_not_called()
         mock_create_tport.assert_not_called()
+
+    def test_is_cell_failure_sentinel(self):
+        record = context.did_not_respond_sentinel
+        self.assertTrue(context.is_cell_failure_sentinel(record))
+        record = TypeError()
+        self.assertTrue(context.is_cell_failure_sentinel(record))
+        record = objects.Instance()
+        self.assertFalse(context.is_cell_failure_sentinel(record))
 
     @mock.patch('nova.context.target_cell')
     @mock.patch('nova.objects.InstanceList.get_by_filters')
@@ -415,8 +430,22 @@ class ContextTestCase(test.NoDBTestCase):
             ctxt, mappings, 30, objects.InstanceList.get_by_filters)
         self.assertEqual(2, len(results))
         self.assertIn(mock.sentinel.instances, results.values())
-        self.assertIn(context.raised_exception_sentinel, results.values())
+        self.assertIsInstance(results[mapping1.uuid], Exception)
+        # non-NovaException gets logged
         self.assertTrue(mock_log_exception.called)
+
+        # Now run it again with a NovaException to see it's not logged.
+        mock_log_exception.reset_mock()
+        mock_get_inst.side_effect = [mock.sentinel.instances,
+                                     exception.NotFound()]
+
+        results = context.scatter_gather_cells(
+            ctxt, mappings, 30, objects.InstanceList.get_by_filters)
+        self.assertEqual(2, len(results))
+        self.assertIn(mock.sentinel.instances, results.values())
+        self.assertIsInstance(results[mapping1.uuid], exception.NovaException)
+        # NovaExceptions are not logged, the caller should handle them.
+        mock_log_exception.assert_not_called()
 
     @mock.patch('nova.context.scatter_gather_cells')
     @mock.patch('nova.objects.CellMappingList.get_all')
@@ -458,4 +487,20 @@ class ContextTestCase(test.NoDBTestCase):
 
         mock_scatter.assert_called_once_with(
             ctxt, [mapping1], 60, objects.InstanceList.get_by_filters, filters,
+            sort_dir='foo')
+
+    @mock.patch('nova.context.scatter_gather_cells')
+    def test_scatter_gather_single_cell(self, mock_scatter):
+        ctxt = context.get_context()
+        mapping0 = objects.CellMapping(database_connection='fake://db0',
+                                       transport_url='none:///',
+                                       uuid=objects.CellMapping.CELL0_UUID)
+
+        filters = {'deleted': False}
+        context.scatter_gather_single_cell(ctxt, mapping0,
+            objects.InstanceList.get_by_filters, filters, sort_dir='foo')
+
+        mock_scatter.assert_called_once_with(
+            ctxt, [mapping0], context.CELL_TIMEOUT,
+            objects.InstanceList.get_by_filters, filters,
             sort_dir='foo')

@@ -347,7 +347,9 @@ class ComputeAPI(object):
         can accept 4.x calls from Pike nodes, and can be pinned to 4.x
         for Pike compatibility. All new changes should go against 5.x.
 
-        * 5.0  - Remove 4.x compatibility
+        * 5.0 - Remove 4.x compatibility
+        * 5.1 - Make prep_resize() take a RequestSpec object rather than a
+                legacy dict.
     '''
 
     VERSION_ALIASES = {
@@ -360,6 +362,8 @@ class ComputeAPI(object):
         'ocata': '4.13',
         'pike': '4.17',
         'queens': '5.0',
+        'rocky': '5.0',
+        'stein': '5.1',
     }
 
     def __init__(self):
@@ -385,8 +389,15 @@ class ComputeAPI(object):
         global NO_COMPUTES_WARNING
         if LAST_VERSION:
             return LAST_VERSION
-        service_version = objects.Service.get_minimum_version(
-            context.get_admin_context(), 'nova-compute')
+
+        # NOTE(danms): If we have a connection to the api database,
+        # we should iterate all cells. If not, we must only look locally.
+        if CONF.api_database.connection:
+            service_version = service_obj.get_minimum_version_all_cells(
+                context.get_admin_context(), ['nova-compute'])
+        else:
+            service_version = objects.Service.get_minimum_version(
+                context.get_admin_context(), 'nova-compute')
 
         history = service_obj.SERVICE_VERSION_HISTORY
 
@@ -699,7 +710,9 @@ class ComputeAPI(object):
             block_migration, host):
         version = '5.0'
         cctxt = self.router.client(ctxt).prepare(
-                server=host, version=version)
+                server=host, version=version,
+                call_monitor_timeout=CONF.rpc_response_timeout,
+                timeout=CONF.long_rpc_timeout)
         return cctxt.call(ctxt, 'post_live_migration_at_destination',
             instance=instance, block_migration=block_migration)
 
@@ -718,7 +731,15 @@ class ComputeAPI(object):
     def prep_resize(self, ctxt, instance, image, instance_type, host,
                     migration, request_spec, filter_properties, node,
                     clean_shutdown, host_list):
-        image_p = jsonutils.to_primitive(image)
+        # TODO(mriedem): We should pass the ImageMeta object through to the
+        # compute but that also requires plumbing changes through the resize
+        # flow for other methods like resize_instance and finish_resize.
+        image_p = objects_base.obj_to_primitive(image)
+        # FIXME(sbauza): Serialize/Unserialize the legacy dict because of
+        # oslo.messaging #1529084 to transform datetime values into strings.
+        # tl;dr: datetimes in dicts are not accepted as correct values by the
+        # rpc fake driver.
+        image_p = jsonutils.loads(jsonutils.dumps(image_p))
         msg_args = {'instance': instance,
                     'instance_type': instance_type,
                     'image': image_p,
@@ -729,7 +750,11 @@ class ComputeAPI(object):
                     'clean_shutdown': clean_shutdown,
                     'host_list': host_list}
         client = self.router.client(ctxt)
-        version = '5.0'
+        version = '5.1'
+        if not client.can_send_version(version):
+            msg_args['request_spec'] = (
+                request_spec.to_legacy_request_spec_dict())
+            version = '5.0'
         cctxt = client.prepare(server=host, version=version)
         cctxt.cast(ctxt, 'prep_resize', **msg_args)
 

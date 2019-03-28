@@ -148,15 +148,17 @@ class _Provider(object):
                     return True
         return False
 
-    def _update_generation(self, generation):
+    def _update_generation(self, generation, operation):
         if generation is not None and generation != self.generation:
             msg_args = {
                 'rp_uuid': self.uuid,
                 'old': self.generation,
                 'new': generation,
+                'op': operation
             }
             LOG.debug("Updating resource provider %(rp_uuid)s generation "
-                      "from %(old)s to %(new)s", msg_args)
+                      "from %(old)s to %(new)s during operation: %(op)s",
+                      msg_args)
             self.generation = generation
 
     def update_inventory(self, inventory, generation):
@@ -164,10 +166,14 @@ class _Provider(object):
         provider generation to set the provider to. The method returns whether
         the inventory has changed.
         """
-        self._update_generation(generation)
+        self._update_generation(generation, 'update_inventory')
         if self.has_inventory_changed(inventory):
+            LOG.debug('Updating inventory in ProviderTree for provider %s '
+                      'with inventory: %s', self.uuid, inventory)
             self.inventory = copy.deepcopy(inventory)
             return True
+        LOG.debug('Inventory has not changed in ProviderTree for provider: %s',
+                  self.uuid)
         return False
 
     def have_traits_changed(self, new):
@@ -179,7 +185,7 @@ class _Provider(object):
         provider generation to set the provider to. The method returns whether
         the traits have changed.
         """
-        self._update_generation(generation)
+        self._update_generation(generation, 'update_traits')
         if self.have_traits_changed(new):
             self.traits = set(new)  # create a copy of the new traits
             return True
@@ -204,7 +210,7 @@ class _Provider(object):
         provider generation to set the provider to. The method returns whether
         the aggregates have changed.
         """
-        self._update_generation(generation)
+        self._update_generation(generation, 'update_aggregates')
         if self.have_aggregates_changed(new):
             self.aggregates = set(new)  # create a copy of the new aggregates
             return True
@@ -230,10 +236,10 @@ class ProviderTree(object):
 
     def get_provider_uuids(self, name_or_uuid=None):
         """Return a list, in top-down traversable order, of the UUIDs of all
-        providers (in a subtree).
+        providers (in a (sub)tree).
 
         :param name_or_uuid: Provider name or UUID representing the root of a
-                             subtree for which to return UUIDs.  If not
+                             (sub)tree for which to return UUIDs.  If not
                              specified, the method returns all UUIDs in the
                              ProviderTree.
         """
@@ -247,6 +253,18 @@ class ProviderTree(object):
             for root in self.roots:
                 ret.extend(root.get_provider_uuids())
         return ret
+
+    def get_provider_uuids_in_tree(self, name_or_uuid):
+        """Returns a list, in top-down traversable order, of the UUIDs of all
+        providers in the whole tree of which the provider identified by
+        ``name_or_uuid`` is a member.
+
+        :param name_or_uuid: Provider name or UUID representing any member of
+                             whole tree for which to return UUIDs.
+        """
+        with self.lock:
+            return self._find_with_lock(
+                name_or_uuid, return_root=True).get_provider_uuids()
 
     def populate_from_iterable(self, provider_dicts):
         """Populates this ProviderTree from an iterable of provider dicts.
@@ -311,7 +329,7 @@ class ProviderTree(object):
                     # that don't wind up at the root, which means we can't have
                     # cycles.  But to quell the paranoia...
                     raise ValueError(
-                        _("Unexpectedly failed to find parents already in the"
+                        _("Unexpectedly failed to find parents already in the "
                           "tree for any of the following: %s") %
                         ','.join(set(to_add_by_uuid)))
 
@@ -378,11 +396,11 @@ class ProviderTree(object):
             self.roots.append(p)
             return p.uuid
 
-    def _find_with_lock(self, name_or_uuid):
+    def _find_with_lock(self, name_or_uuid, return_root=False):
         for root in self.roots:
             found = root.find(name_or_uuid)
             if found:
-                return found
+                return root if return_root else found
         raise ValueError(_("No such provider %s") % name_or_uuid)
 
     def data(self, name_or_uuid):

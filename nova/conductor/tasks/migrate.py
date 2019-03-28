@@ -19,7 +19,7 @@ from nova.conductor.tasks import base
 from nova import exception
 from nova.i18n import _
 from nova import objects
-from nova.scheduler import client as scheduler_client
+from nova.scheduler.client import report
 from nova.scheduler import utils as scheduler_utils
 
 LOG = logging.getLogger(__name__)
@@ -28,6 +28,17 @@ LOG = logging.getLogger(__name__)
 def replace_allocation_with_migration(context, instance, migration):
     """Replace instance's allocation with one for a migration.
 
+    :raises: keystoneauth1.exceptions.base.ClientException on failure to
+             communicate with the placement API
+    :raises: ConsumerAllocationRetrievalFailed if reading the current
+             allocation from placement fails
+    :raises: ComputeHostNotFound if the host of the instance is not found in
+             the databse
+    :raises: AllocationMoveFailed if moving the allocation from the
+             instance.uuid to the migration.uuid fails due to parallel
+             placement operation on the instance consumer
+    :raises: NoValidHost if placement rejectes the update for other reasons
+             (e.g. not enough resources)
     :returns: (source_compute_node, migration_allocation)
     """
     try:
@@ -42,12 +53,12 @@ def replace_allocation_with_migration(context, instance, migration):
         # and do any rollback required
         raise
 
-    schedclient = scheduler_client.SchedulerClient()
-    reportclient = schedclient.reportclient
+    reportclient = report.SchedulerReportClient()
 
-    orig_alloc = reportclient.get_allocations_for_consumer_by_provider(
-        context, source_cn.uuid, instance.uuid)
-    if not orig_alloc:
+    orig_alloc = reportclient.get_allocs_for_consumer(
+        context, instance.uuid)['allocations']
+    root_alloc = orig_alloc.get(source_cn.uuid, {}).get('resources', {})
+    if not root_alloc:
         LOG.debug('Unable to find existing allocations for instance on '
                   'source compute node: %s. This is normal if you are not '
                   'using the FilterScheduler.', source_cn.uuid,
@@ -57,9 +68,8 @@ def replace_allocation_with_migration(context, instance, migration):
     # FIXME(danms): This method is flawed in that it asssumes allocations
     # against only one provider. So, this may overwite allocations against
     # a shared provider, if we had one.
-    success = reportclient.set_and_clear_allocations(
-        context, source_cn.uuid, migration.uuid, orig_alloc,
-        instance.project_id, instance.user_id, consumer_to_clear=instance.uuid)
+    success = reportclient.move_allocations(context, instance.uuid,
+                                            migration.uuid)
     if not success:
         LOG.error('Unable to replace resource claim on source '
                   'host %(host)s node %(node)s for instance',
@@ -78,20 +88,16 @@ def replace_allocation_with_migration(context, instance, migration):
     return source_cn, orig_alloc
 
 
-def revert_allocation_for_migration(context, source_cn, instance, migration,
-                                    orig_alloc):
+def revert_allocation_for_migration(context, source_cn, instance, migration):
     """Revert an allocation made for a migration back to the instance."""
 
-    schedclient = scheduler_client.SchedulerClient()
-    reportclient = schedclient.reportclient
+    reportclient = report.SchedulerReportClient()
 
     # FIXME(danms): This method is flawed in that it asssumes allocations
     # against only one provider. So, this may overwite allocations against
     # a shared provider, if we had one.
-    success = reportclient.set_and_clear_allocations(
-        context, source_cn.uuid, instance.uuid, orig_alloc,
-        instance.project_id, instance.user_id,
-        consumer_to_clear=migration.uuid)
+    success = reportclient.move_allocations(context, migration.uuid,
+                                            instance.uuid)
     if not success:
         LOG.error('Unable to replace resource claim on source '
                   'host %(host)s node %(node)s for instance',
@@ -103,24 +109,18 @@ def revert_allocation_for_migration(context, source_cn, instance, migration,
                   {'inst': instance.uuid, 'rp': source_cn.uuid})
 
 
-def should_do_migration_allocation(context):
-    minver = objects.Service.get_minimum_version_multi(context,
-                                                       ['nova-compute'])
-    return minver >= 23
-
-
 class MigrationTask(base.TaskBase):
     def __init__(self, context, instance, flavor,
                  request_spec, clean_shutdown, compute_rpcapi,
-                 scheduler_client, host_list):
+                 query_client, report_client, host_list):
         super(MigrationTask, self).__init__(context, instance)
         self.clean_shutdown = clean_shutdown
         self.request_spec = request_spec
         self.flavor = flavor
 
         self.compute_rpcapi = compute_rpcapi
-        self.scheduler_client = scheduler_client
-        self.reportclient = scheduler_client.reportclient
+        self.query_client = query_client
+        self.reportclient = report_client
         self.host_list = host_list
 
         # Persist things from the happy path so we don't have to look
@@ -130,11 +130,6 @@ class MigrationTask(base.TaskBase):
         self._source_cn = None
 
     def _preallocate_migration(self):
-        if not should_do_migration_allocation(self.context):
-            # NOTE(danms): We can't pre-create the migration since we have
-            # old computes. Let the compute do it (legacy behavior).
-            return None
-
         # If this is a rescheduled migration, don't create a new record.
         migration_type = ("resize" if self.instance.flavor.id != self.flavor.id
                 else "migration")
@@ -165,25 +160,7 @@ class MigrationTask(base.TaskBase):
 
         return migration
 
-    def _execute(self):
-        # TODO(sbauza): Remove that once prep_resize() accepts a  RequestSpec
-        # object in the signature and all the scheduler.utils methods too
-        legacy_spec = self.request_spec.to_legacy_request_spec_dict()
-        legacy_props = self.request_spec.to_legacy_filter_properties_dict()
-        scheduler_utils.setup_instance_group(self.context, self.request_spec)
-        # If a target host is set in a requested destination,
-        # 'populate_retry' need not be executed.
-        if not ('requested_destination' in self.request_spec and
-                    self.request_spec.requested_destination and
-                        'host' in self.request_spec.requested_destination):
-            scheduler_utils.populate_retry(legacy_props,
-                                           self.instance.uuid)
-
-        # NOTE(sbauza): Force_hosts/nodes needs to be reset
-        # if we want to make sure that the next destination
-        # is not forced to be the original host
-        self.request_spec.reset_forced_destinations()
-
+    def _restrict_request_spec_to_cell(self, legacy_props):
         # NOTE(danms): Right now we only support migrate to the same
         # cell as the current instance, so request that the scheduler
         # limit thusly.
@@ -206,6 +183,29 @@ class MigrationTask(base.TaskBase):
         else:
             self.request_spec.requested_destination = objects.Destination(
                 cell=instance_mapping.cell_mapping)
+
+    def _execute(self):
+        # TODO(sbauza): Remove once all the scheduler.utils methods accept a
+        # RequestSpec object in the signature.
+        legacy_props = self.request_spec.to_legacy_filter_properties_dict()
+        scheduler_utils.setup_instance_group(self.context, self.request_spec)
+        # If a target host is set in a requested destination,
+        # 'populate_retry' need not be executed.
+        if not ('requested_destination' in self.request_spec and
+                    self.request_spec.requested_destination and
+                        'host' in self.request_spec.requested_destination):
+            scheduler_utils.populate_retry(legacy_props,
+                                           self.instance.uuid)
+
+        # NOTE(sbauza): Force_hosts/nodes needs to be reset
+        # if we want to make sure that the next destination
+        # is not forced to be the original host
+        self.request_spec.reset_forced_destinations()
+
+        # TODO(gibi): We need to make sure that the requested_resources field
+        # is re calculated based on neutron ports.
+
+        self._restrict_request_spec_to_cell(legacy_props)
 
         # Once _preallocate_migration() is done, the source node allocation is
         # moved from the instance consumer to the migration record consumer,
@@ -232,7 +232,7 @@ class MigrationTask(base.TaskBase):
         # pop the first alternate from the list to use for the destination, and
         # pass the remaining alternates to the compute.
         if self.host_list is None:
-            selection_lists = self.scheduler_client.select_destinations(
+            selection_lists = self.query_client.select_destinations(
                     self.context, self.request_spec, [self.instance.uuid],
                     return_objects=True, return_alternates=True)
             # Since there is only ever one instance to migrate per call, we
@@ -288,20 +288,19 @@ class MigrationTask(base.TaskBase):
             availability_zones.get_host_availability_zone(
                 self.context, host))
 
-        # FIXME(sbauza): Serialize/Unserialize the legacy dict because of
-        # oslo.messaging #1529084 to transform datetime values into strings.
-        # tl;dr: datetimes in dicts are not accepted as correct values by the
-        # rpc fake driver.
-        legacy_spec = jsonutils.loads(jsonutils.dumps(legacy_spec))
-
         LOG.debug("Calling prep_resize with selected host: %s; "
                   "Selected node: %s; Alternates: %s", host, node,
                   self.host_list, instance=self.instance)
         # RPC cast to the destination host to start the migration process.
         self.compute_rpcapi.prep_resize(
-            self.context, self.instance, legacy_spec['image'],
+            # NOTE(mriedem): Using request_spec.image here is potentially
+            # dangerous if it is not kept up to date (i.e. rebuild/unshelve);
+            # seems like the sane thing to do would be to pass the current
+            # instance.image_meta since that is what MoveClaim will use for
+            # any NUMA topology claims on the destination host...
+            self.context, self.instance, self.request_spec.image,
             self.flavor, host, migration,
-            request_spec=legacy_spec, filter_properties=legacy_props,
+            request_spec=self.request_spec, filter_properties=legacy_props,
             node=node, clean_shutdown=self.clean_shutdown,
             host_list=self.host_list)
 
@@ -320,5 +319,4 @@ class MigrationTask(base.TaskBase):
         # now.
 
         revert_allocation_for_migration(self.context, self._source_cn,
-                                        self.instance, self._migration,
-                                        self._held_allocations)
+                                        self.instance, self._migration)

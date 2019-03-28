@@ -31,6 +31,7 @@ import traceback
 
 from dateutil import parser as dateutil_parser
 import decorator
+from keystoneauth1 import exceptions as ks_exc
 import netaddr
 from oslo_config import cfg
 from oslo_db import exception as db_exc
@@ -44,6 +45,7 @@ import six
 import six.moves.urllib.parse as urlparse
 from sqlalchemy.engine import url as sqla_url
 
+# FIXME(cdent): This is a speedbump in the extraction process
 from nova.api.openstack.placement.objects import consumer as consumer_obj
 from nova.cmd import common as cmd_common
 from nova.compute import api as compute_api
@@ -58,12 +60,13 @@ from nova.i18n import _
 from nova import objects
 from nova.objects import block_device as block_device_obj
 from nova.objects import build_request as build_request_obj
+from nova.objects import compute_node as compute_node_obj
 from nova.objects import host_mapping as host_mapping_obj
 from nova.objects import instance as instance_obj
 from nova.objects import instance_mapping as instance_mapping_obj
 from nova.objects import keypair as keypair_obj
 from nova.objects import quotas as quotas_obj
-from nova.objects import request_spec
+from nova.objects import virtual_interface as virtual_interface_obj
 from nova import quota
 from nova import rpc
 from nova.scheduler.client import report
@@ -376,22 +379,16 @@ class DbCommands(object):
     # count, which is the maximum batch size requested by the
     # user. They must be idempotent. At most $count records should be
     # migrated. The function must return a tuple of (found, done). The
-    # found value indicates how many unmigrated records existed in the
-    # database prior to the migration (either total, or up to the
-    # $count limit provided), and a nonzero found value tells the user
+    # found value indicates how many unmigrated/candidate records existed in
+    # the database prior to the migration (either total, or up to the
+    # $count limit provided), and a nonzero found value may tell the user
     # that there is still work to do. The done value indicates whether
     # or not any records were actually migrated by the function. Thus
     # if both (found, done) are nonzero, work was done and some work
     # remains. If found is nonzero and done is zero, some records are
-    # not migratable, but all migrations that can complete have
-    # finished.
+    # not migratable (or don't need migrating), but all migrations that can
+    # complete have finished.
     online_migrations = (
-        # Added in Newton
-        # TODO(mriedem): Remove this in Stein along with the compatibility
-        # code in the api and conductor services; the nova-status upgrade check
-        # added in Rocky is the tool operators can use to make sure they have
-        # completed this migration.
-        request_spec.migrate_instances_add_request_spec,
         # Added in Newton
         keypair_obj.migrate_keypairs_to_api_db,
         # Added in Ocata
@@ -414,9 +411,16 @@ class DbCommands(object):
         # need to be populated if it was not specified during boot time.
         instance_obj.populate_missing_availability_zones,
         # Added in Rocky
+        # FIXME(cdent): This is a factor that needs to be addressed somehow
         consumer_obj.create_incomplete_consumers,
         # Added in Rocky
         instance_mapping_obj.populate_queued_for_delete,
+        # Added in Stein
+        compute_node_obj.migrate_empty_ratio,
+        # Added in Stein
+        virtual_interface_obj.fill_virtual_interface_list,
+        # Added in Stein
+        instance_mapping_obj.populate_user_id,
     )
 
     def __init__(self):
@@ -455,7 +459,7 @@ class DbCommands(object):
 
     @args('--version', metavar='<version>', help=argparse.SUPPRESS)
     @args('--local_cell', action='store_true',
-          help='Only sync db in the local cell: do not attempt to fan-out'
+          help='Only sync db in the local cell: do not attempt to fan-out '
                'to all cells')
     @args('version2', metavar='VERSION', nargs='?', help='Database version')
     def sync(self, version=None, local_cell=False, version2=None):
@@ -495,7 +499,10 @@ Error: %s""") % six.text_type(e))
         print(migration.db_version())
 
     @args('--max_rows', type=int, metavar='<number>', dest='max_rows',
-          help='Maximum number of deleted rows to archive. Defaults to 1000.')
+          help='Maximum number of deleted rows to archive. Defaults to 1000. '
+               'Note that this number does not include the corresponding '
+               'rows, if any, that are removed from the API database for '
+               'deleted instances.')
     @args('--verbose', action='store_true', dest='verbose', default=False,
           help='Print how many rows were archived per table.')
     @args('--until-complete', action='store_true', dest='until_complete',
@@ -526,7 +533,7 @@ Error: %s""") % six.text_type(e))
         try:
             # NOTE(tssurya): This check has been added to validate if the API
             # DB is reachable or not as this is essential for purging the
-            # instance_mappings and request_specs of the deleted instances.
+            # related API database records of the deleted instances.
             objects.CellMappingList.get_all(ctxt)
         except db_exc.CantStartEngineError:
             print(_('Failed to connect to API DB so aborting this archival '
@@ -588,7 +595,7 @@ Error: %s""") % six.text_type(e))
         # NOTE(danms): Return nonzero if we archived something
         return int(bool(table_to_rows_archived))
 
-    @args('--before', dest='before',
+    @args('--before', metavar='<before>', dest='before',
           help='If specified, purge rows from shadow tables that are older '
                'than this. Fuzzy time specs are allowed')
     @args('--all', dest='purge_all', action='store_true',
@@ -691,6 +698,10 @@ Error: %s""") % six.text_type(e))
                         'migrated') % {'total': found,
                                        'meth': name,
                                        'done': done})
+            # This is the per-migration method result for this batch, and
+            # _run_migration will either continue on to the next migration,
+            # or stop if up to this point we've processed max_count of
+            # records across all migration methods.
             migrations[name] = found, done
             if max_count is not None:
                 ran += done
@@ -722,6 +733,8 @@ Error: %s""") % six.text_type(e))
         while ran is None or ran != 0:
             migrations, exceptions = self._run_migration(ctxt, max_count)
             ran = 0
+            # For each batch of migration method results, build the cumulative
+            # set of results.
             for name in migrations:
                 migration_info.setdefault(name, (0, 0))
                 migration_info[name] = (
@@ -733,7 +746,7 @@ Error: %s""") % six.text_type(e))
                 break
 
         t = prettytable.PrettyTable([_('Migration'),
-                                     _('Total Needed'),
+                                     _('Total Needed'),  # Really: Total Found
                                      _('Completed')])
         for name in sorted(migration_info.keys()):
             info = migration_info[name]
@@ -1053,7 +1066,9 @@ class CellV2Commands(object):
             return None
 
         try:
-            messaging.TransportURL.parse(conf=CONF, url=transport_url)
+            messaging.TransportURL.parse(conf=CONF,
+                                         url=objects.CellMapping.format_mq_url(
+                                             transport_url))
         except (messaging.InvalidTransportURL, ValueError) as e:
             print(_('Invalid transport URL: %s') % six.text_type(e))
             return None
@@ -1186,6 +1201,7 @@ class CellV2Commands(object):
                 mapping.instance_uuid = instance.uuid
                 mapping.cell_mapping = cell_mapping
                 mapping.project_id = instance.project_id
+                mapping.user_id = instance.user_id
                 mapping.create()
             except db_exc.DBDuplicateEntry:
                 continue
@@ -1280,8 +1296,11 @@ class CellV2Commands(object):
             # Don't judge me. There's already an InstanceMapping with this UUID
             # so the marker needs to be non destructively modified.
             next_marker = next_marker.replace('-', ' ')
+            # This is just the marker record, so set user_id to the special
+            # marker name as well.
             objects.InstanceMapping(ctxt, instance_uuid=next_marker,
-                    project_id=marker_project_id).create()
+                    project_id=marker_project_id,
+                    user_id=marker_project_id).create()
             return 1
         return 0
 
@@ -1406,9 +1425,10 @@ class CellV2Commands(object):
                         if instance:
                             say('The instance with uuid %s has been deleted.'
                                 % uuid)
-                            say('Execute `nova-manage db archive_deleted_rows`'
-                                'command to archive this deleted instance and'
-                                'remove its instance_mapping.')
+                            say('Execute '
+                                '`nova-manage db archive_deleted_rows` '
+                                'command to archive this deleted '
+                                'instance and remove its instance_mapping.')
                             return 3
                     except exception.InstanceNotFound:
                         # instance is archived
@@ -1514,8 +1534,10 @@ class CellV2Commands(object):
                        _('Database Connection'), _('Disabled')]
 
         t = prettytable.PrettyTable(field_names)
-        for cell in sorted(cell_mappings, key=lambda _cell: _cell.name):
-            fields = [cell.name, cell.uuid]
+        for cell in sorted(cell_mappings,
+                           # CellMapping.name is optional
+                           key=lambda _cell: _cell.name or ''):
+            fields = [cell.name or '', cell.uuid]
             if verbose:
                 fields.extend([cell.transport_url, cell.database_connection])
             else:
@@ -1837,8 +1859,17 @@ class PlacementCommands(object):
             output(_('Instance %s is not on a host.') % instance.uuid)
             return
 
-        allocations = placement.get_allocations_for_consumer(
-            ctxt, instance.uuid, include_generation=True)
+        try:
+            allocations = placement.get_allocs_for_consumer(
+                ctxt, instance.uuid)
+        except ks_exc.ClientException as e:
+            raise exception.AllocationUpdateFailed(
+                consumer_uuid=instance.uuid,
+                error=_("Allocation retrieval failed: %s") % e)
+        except exception.ConsumerAllocationRetrievalFailed as e:
+            output(_("Allocation retrieval failed: %s") % e)
+            allocations = None
+
         # get_allocations_for_consumer uses safe_connect which will
         # return None if we can't communicate with Placement, and the
         # response can have an empty {'allocations': {}} response if
@@ -1864,17 +1895,19 @@ class PlacementCommands(object):
             # provider allocations.
             allocations['project_id'] = instance.project_id
             allocations['user_id'] = instance.user_id
-            # We use 1.28 for PUT /allocations/{consumer_id} to mirror
-            # the body structure from get_allocations_for_consumer.
-            resp = placement.put('/allocations/%s' % instance.uuid,
-                                 allocations, version='1.28')
+            # We use CONSUMER_GENERATION_VERSION for PUT
+            # /allocations/{consumer_id} to mirror the body structure from
+            # get_allocs_for_consumer.
+            resp = placement.put(
+                '/allocations/%s' % instance.uuid,
+                allocations, version=report.CONSUMER_GENERATION_VERSION)
             if resp:
                 output(_('Successfully updated allocations for '
                          'instance %s.') % instance.uuid)
                 return True
             else:
                 raise exception.AllocationUpdateFailed(
-                    instance=instance.uuid, error=resp.text)
+                    consumer_uuid=instance.uuid, error=resp.text)
 
         # This instance doesn't have allocations so we need to find
         # its compute node resource provider.
@@ -1887,7 +1920,8 @@ class PlacementCommands(object):
             instance, instance.flavor)
         if placement.put_allocations(
                 ctxt, node_uuid, instance.uuid, resources,
-                instance.project_id, instance.user_id):
+                instance.project_id, instance.user_id,
+                consumer_generation=None):
             output(_('Successfully created allocations for '
                      'instance %(instance)s against resource '
                      'provider %(provider)s.') %
@@ -1962,6 +1996,7 @@ class PlacementCommands(object):
 
         return num_processed
 
+    # FIXME(cdent): This needs to be addressed as part of extraction.
     @action_description(
         _("Iterates over non-cell0 cells looking for instances which do "
           "not have allocations in the Placement service, or have incomplete "

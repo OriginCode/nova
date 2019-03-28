@@ -21,7 +21,9 @@
 import errno
 import os
 import re
+import uuid
 
+import os_traits
 from oslo_concurrency import processutils
 from oslo_log import log as logging
 from oslo_utils import fileutils
@@ -45,38 +47,38 @@ RESIZE_SNAPSHOT_NAME = 'nova-resize'
 # Mapping used to convert libvirt cpu features to traits, for more details, see
 # https://github.com/libvirt/libvirt/blob/master/src/cpu/cpu_map.xml.
 CPU_TRAITS_MAPPING = {
-    '3dnow': 'HW_CPU_X86_3DNOW',
-    'abm': 'HW_CPU_X86_ABM',
-    'aes': 'HW_CPU_X86_AESNI',
-    'avx': 'HW_CPU_X86_AVX',
-    'avx2': 'HW_CPU_X86_AVX2',
-    'avx512bw': 'HW_CPU_X86_AVX512BW',
-    'avx512cd': 'HW_CPU_X86_AVX512CD',
-    'avx512dq': 'HW_CPU_X86_AVX512DQ',
-    'avx512er': 'HW_CPU_X86_AVX512ER',
-    'avx512f': 'HW_CPU_X86_AVX512F',
-    'avx512pf': 'HW_CPU_X86_AVX512PF',
-    'avx512vl': 'HW_CPU_X86_AVX512VL',
-    'bmi1': 'HW_CPU_X86_BMI',
-    'bmi2': 'HW_CPU_X86_BMI2',
-    'pclmuldq': 'HW_CPU_X86_CLMUL',
-    'f16c': 'HW_CPU_X86_F16C',
-    'fma': 'HW_CPU_X86_FMA3',
-    'fma4': 'HW_CPU_X86_FMA4',
-    'mmx': 'HW_CPU_X86_MMX',
-    'mpx': 'HW_CPU_X86_MPX',
-    'sha-ni': 'HW_CPU_X86_SHA',
-    'sse': 'HW_CPU_X86_SSE',
-    'sse2': 'HW_CPU_X86_SSE2',
-    'sse3': 'HW_CPU_X86_SSE3',
-    'sse4.1': 'HW_CPU_X86_SSE41',
-    'sse4.2': 'HW_CPU_X86_SSE42',
-    'sse4a': 'HW_CPU_X86_SSE4A',
-    'ssse3': 'HW_CPU_X86_SSSE3',
-    'svm': 'HW_CPU_X86_SVM',
-    'tbm': 'HW_CPU_X86_TBM',
-    'vmx': 'HW_CPU_X86_VMX',
-    'xop': 'HW_CPU_X86_XOP'
+    '3dnow': os_traits.HW_CPU_X86_3DNOW,
+    'abm': os_traits.HW_CPU_X86_ABM,
+    'aes': os_traits.HW_CPU_X86_AESNI,
+    'avx': os_traits.HW_CPU_X86_AVX,
+    'avx2': os_traits.HW_CPU_X86_AVX2,
+    'avx512bw': os_traits.HW_CPU_X86_AVX512BW,
+    'avx512cd': os_traits.HW_CPU_X86_AVX512CD,
+    'avx512dq': os_traits.HW_CPU_X86_AVX512DQ,
+    'avx512er': os_traits.HW_CPU_X86_AVX512ER,
+    'avx512f': os_traits.HW_CPU_X86_AVX512F,
+    'avx512pf': os_traits.HW_CPU_X86_AVX512PF,
+    'avx512vl': os_traits.HW_CPU_X86_AVX512VL,
+    'bmi1': os_traits.HW_CPU_X86_BMI,
+    'bmi2': os_traits.HW_CPU_X86_BMI2,
+    'pclmuldq': os_traits.HW_CPU_X86_CLMUL,
+    'f16c': os_traits.HW_CPU_X86_F16C,
+    'fma': os_traits.HW_CPU_X86_FMA3,
+    'fma4': os_traits.HW_CPU_X86_FMA4,
+    'mmx': os_traits.HW_CPU_X86_MMX,
+    'mpx': os_traits.HW_CPU_X86_MPX,
+    'sha-ni': os_traits.HW_CPU_X86_SHA,
+    'sse': os_traits.HW_CPU_X86_SSE,
+    'sse2': os_traits.HW_CPU_X86_SSE2,
+    'sse3': os_traits.HW_CPU_X86_SSE3,
+    'sse4.1': os_traits.HW_CPU_X86_SSE41,
+    'sse4.2': os_traits.HW_CPU_X86_SSE42,
+    'sse4a': os_traits.HW_CPU_X86_SSE4A,
+    'ssse3': os_traits.HW_CPU_X86_SSSE3,
+    'svm': os_traits.HW_CPU_X86_SVM,
+    'tbm': os_traits.HW_CPU_X86_TBM,
+    'vmx': os_traits.HW_CPU_X86_VMX,
+    'xop': os_traits.HW_CPU_X86_XOP
 }
 
 
@@ -92,7 +94,7 @@ def create_image(disk_format, path, size):
                  M for Mebibytes, 'G' for Gibibytes, 'T' for Tebibytes).
                  If no suffix is given, it will be interpreted as bytes.
     """
-    utils.execute('qemu-img', 'create', '-f', disk_format, path, size)
+    processutils.execute('qemu-img', 'create', '-f', disk_format, path, size)
 
 
 def create_cow_image(backing_file, path, size=None):
@@ -124,7 +126,7 @@ def create_cow_image(backing_file, path, size=None):
         csv_opts = ",".join(cow_opts)
         cow_opts = ['-o', csv_opts]
     cmd = base_cmd + cow_opts + [path]
-    utils.execute(*cmd)
+    processutils.execute(*cmd)
 
 
 def create_ploop_image(disk_format, path, size, fs_type):
@@ -181,8 +183,8 @@ def pick_disk_driver_name(hypervisor_version, is_block_dev=False):
                     return 'qemu'
             # libvirt will use xend/xm toolstack
             try:
-                out, err = utils.execute('tap-ctl', 'check',
-                                         check_exit_code=False)
+                out, err = processutils.execute('tap-ctl', 'check',
+                                                check_exit_code=False)
                 if out == 'ok\n':
                     # 4000000 == 4.0.0
                     if hypervisor_version > 4000000:
@@ -250,7 +252,7 @@ def copy_image(src, dest, host=None, receive=False,
         # rather recreated efficiently.  In addition, since
         # coreutils 8.11, holes can be read efficiently too.
         # we add '-r' argument because ploop disks are directories
-        utils.execute('cp', '-r', src, dest)
+        processutils.execute('cp', '-r', src, dest)
     else:
         if receive:
             src = "%s:%s" % (utils.safe_ip_format(host), src)
@@ -308,14 +310,9 @@ def extract_snapshot(disk_path, source_fmt, out_path, dest_fmt):
     if dest_fmt == 'ploop':
         dest_fmt = 'parallels'
 
-    qemu_img_cmd = ('qemu-img', 'convert', '-f', source_fmt, '-O', dest_fmt)
-
-    # Conditionally enable compression of snapshots.
-    if CONF.libvirt.snapshot_compression and dest_fmt == "qcow2":
-        qemu_img_cmd += ('-c',)
-
-    qemu_img_cmd += (disk_path, out_path)
-    utils.execute(*qemu_img_cmd)
+    compress = CONF.libvirt.snapshot_compression and dest_fmt == "qcow2"
+    images.convert_image(disk_path, out_path, source_fmt, dest_fmt,
+                         compress=compress)
 
 
 def load_file(path):
@@ -542,3 +539,32 @@ def get_cpu_model_from_arch(arch):
     elif arch == obj_fields.Architecture.PPC64LE:
         mode = 'POWER8'
     return mode
+
+
+def machine_type_mappings():
+    mappings = {}
+    for mapping in CONF.libvirt.hw_machine_type or {}:
+        host_arch, _, machine_type = mapping.partition('=')
+        if machine_type == '':
+            LOG.warning("Invalid hw_machine_type config value %s", mapping)
+        else:
+            mappings[host_arch] = machine_type
+    return mappings
+
+
+def get_default_machine_type(arch):
+    return machine_type_mappings().get(arch)
+
+
+def mdev_name2uuid(mdev_name):
+    """Convert an mdev name (of the form mdev_<uuid_with_underscores>) to a
+    uuid (of the form 8-4-4-4-12).
+    """
+    return str(uuid.UUID(mdev_name[5:].replace('_', '-')))
+
+
+def mdev_uuid2name(mdev_uuid):
+    """Convert an mdev uuid (of the form 8-4-4-4-12) to a name (of the form
+    mdev_<uuid_with_underscores>).
+    """
+    return "mdev_" + mdev_uuid.replace('-', '_')

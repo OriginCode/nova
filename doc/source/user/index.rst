@@ -13,6 +13,7 @@ End user guide
    metadata-service
    certificate-validation
    resize
+   reboot
 
 .. todo:: The rest of this document should probably move to the admin guide.
 
@@ -52,7 +53,7 @@ the defaults from the :doc:`install guide </install/index>` will be sufficient.
   allows sharding of your compute environment. Upfront planning is key to a
   successful Cells v2 layout.
 
-* :doc:`Placement service </user/placement>`: Overview of the placement
+* :placement-doc:`Placement service <>`: Overview of the placement
   service, including how it fits in with the rest of nova.
 
 * :doc:`Running nova-api on wsgi </user/wsgi>`: Considerations for using a real

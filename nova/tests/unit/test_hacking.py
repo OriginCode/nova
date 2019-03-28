@@ -12,10 +12,12 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import sys
 import textwrap
 
 import mock
 import pep8
+import testtools
 
 from nova.hacking import checks
 from nova import test
@@ -577,6 +579,11 @@ class HackingTestCase(test.NoDBTestCase):
                                    checks.check_config_option_in_central_place,
                                    filename="nova/tests/dummy_test.py")
 
+    # TODO(cdent): Remove when https://bugs.launchpad.net/nova/+bug/1804062
+    # is resolved.
+    @testtools.skipIf(
+        sys.version_info[0:3] >= (3, 6, 7),
+        'tokenize has backwards incompatible behavior from 3.6.7')
     def test_check_doubled_words(self):
         errors = [(1, 0, "N343")]
 
@@ -839,3 +846,17 @@ class HackingTestCase(test.NoDBTestCase):
                   yieldx_func(a, b)
                """
         self._assert_has_no_errors(code, checks.yield_followed_by_space)
+
+    def test_assert_regexpmatches(self):
+        code = """
+                   self.assertRegexpMatches("Test", output)
+                   self.assertNotRegexpMatches("Notmatch", output)
+               """
+        errors = [(x + 1, 0, 'N361') for x in range(2)]
+        self._assert_has_errors(code, checks.assert_regexpmatches,
+                                expected_errors=errors)
+        code = """
+                   self.assertRegexpMatchesfoo("Test", output)
+                   self.assertNotRegexpMatchesbar("Notmatch", output)
+               """
+        self._assert_has_no_errors(code, checks.assert_regexpmatches)

@@ -24,7 +24,7 @@ is important for maintaining the strong ecosystem around nova.
 
 Our process is always evolving, just as nova and the community around nova
 evolves over time. If there are things that seem strange, or you have ideas on
-how to improve things, please bring them forward on IRC or the openstack-dev
+how to improve things, please bring them forward on IRC or the openstack-discuss
 mailing list, so we continue to improve how the nova community operates.
 
 This section looks at the processes and why. The main aim behind all the
@@ -99,7 +99,5 @@ Nova Major Subsystems
 Major subsystems in nova have different needs; some of those are documented
 here. If you are contributing to one of these please read the subsystem guide
 before diving in.
-
-* :doc:`/contributor/placement`
 
 * :doc:`/user/conductor`

@@ -12,6 +12,7 @@
 
 import mock
 from oslo_serialization import jsonutils
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_versionedobjects import base as o_vo_base
 
 from nova import exception
@@ -21,7 +22,6 @@ from nova.objects import build_request
 from nova.tests.unit import fake_build_request
 from nova.tests.unit import fake_instance
 from nova.tests.unit.objects import test_objects
-from nova.tests import uuidsentinel as uuids
 
 
 class _TestBuildRequestObject(object):
@@ -59,7 +59,7 @@ class _TestBuildRequestObject(object):
         instance = fake_instance.fake_instance_obj(self.context,
                 objects.Instance, uuid=fake_req['instance_uuid'])
         instance.VERSION = '99'
-        fake_req['instance'] = jsonutils.dumps(instance.obj_to_primitive)
+        fake_req['instance'] = jsonutils.dumps(instance.obj_to_primitive())
         get_by_uuid.return_value = fake_req
 
         self.assertRaises(exception.BuildRequestNotFound,

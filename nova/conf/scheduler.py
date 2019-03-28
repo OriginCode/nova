@@ -34,10 +34,6 @@ used.
 
 Other options are:
 
-* 'caching_scheduler' which aggressively caches the system state for better
-  individual scheduler performance at the risk of more retries when running
-  multiple schedulers. [DEPRECATED]
-* 'chance_scheduler' which simply picks a host at random. [DEPRECATED]
 * 'fake_scheduler' which is used for testing.
 
 Possible values:
@@ -45,8 +41,6 @@ Possible values:
 * Any of the drivers included in Nova:
 
   * filter_scheduler
-  * caching_scheduler
-  * chance_scheduler
   * fake_scheduler
 
 * You may also set this to the entry point name of a custom scheduler driver,
@@ -64,8 +58,8 @@ Periodic task interval.
 
 This value controls how often (in seconds) to run periodic tasks in the
 scheduler. The specific tasks that are run for each period are determined by
-the particular scheduler being used. Currently the only in-tree scheduler
-driver that uses this option is the ``caching_scheduler``.
+the particular scheduler being used. Currently there are no in-tree scheduler
+driver that use this option.
 
 If this is larger than the nova-service 'service_down_time' setting, the
 ComputeFilter (if enabled) may think the compute service is down. As each
@@ -307,6 +301,9 @@ Related options:
 * enabled_filters
 """),
     cfg.ListOpt("enabled_filters",
+        # NOTE(artom) If we change the defaults here, we should also update
+        # Tempest's scheduler_enabled_filters to keep the default values in
+        # sync.
         default=[
           "RetryFilter",
           "AvailabilityZoneFilter",
@@ -470,32 +467,28 @@ Possible values:
 * A positive integer or float value, where the value corresponds to the
   multiplier ratio for this weigher.
 """),
-    # TODO(sfinucan): Add 'min' parameter and remove warning in 'affinity.py'
     cfg.FloatOpt("soft_affinity_weight_multiplier",
         default=1.0,
-        deprecated_group="DEFAULT",
+        min=0.0,
         help="""
 Multiplier used for weighing hosts for group soft-affinity.
 
 Possible values:
 
-* An integer or float value, where the value corresponds to weight multiplier
-  for hosts with group soft affinity. Only a positive value are meaningful, as
-  negative values would make this behave as a soft anti-affinity weigher.
+* A non-negative integer or float value, where the value corresponds to
+  weight multiplier for hosts with group soft affinity.
 """),
     cfg.FloatOpt(
         "soft_anti_affinity_weight_multiplier",
         default=1.0,
-        deprecated_group="DEFAULT",
+        min=0.0,
         help="""
 Multiplier used for weighing hosts for group soft-anti-affinity.
 
 Possible values:
 
-* An integer or float value, where the value corresponds to weight multiplier
-  for hosts with group soft anti-affinity. Only a positive value are
-  meaningful, as negative values would make this behave as a soft affinity
-  weigher.
+* A non-negative integer or float value, where the value corresponds to
+  weight multiplier for hosts with group soft anti-affinity.
 """),
     cfg.FloatOpt(
         "build_failure_weight_multiplier",
