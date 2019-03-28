@@ -1,5 +1,4 @@
 Install-missed-files.patch
 clean-up-build_requests-table-on-upgrades.patch
 remove-crashing-blockdiag-doc-line.patch
-revert-restore-async-keyword.patch
 fix-python3-compatibility-ceph.patch
