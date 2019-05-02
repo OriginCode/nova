@@ -1,3 +1,11 @@
+nova (2:19.0.0-2) experimental; urgency=medium
+
+  * d/control:
+      - Bump openstack-pkg-tools to version 99
+  * d/copyright: Update year for my line
+
+ -- Michal Arbet <michal.arbet@ultimum.io>  Thu, 02 May 2019 19:14:47 +0200
+
 nova (2:19.0.0-1) experimental; urgency=medium
 
   * New upstream release.
