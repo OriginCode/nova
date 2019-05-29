@@ -1,3 +1,11 @@
+nova (2:19.0.0-3) experimental; urgency=medium
+
+  * Add upstream patch to fix broken request_spec, which in certain cases lead
+    to breaking instance migration:
+    - Workaround_missing_RequestSpec.instance_group.uuid.patch
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 29 May 2019 14:33:07 +0200
+
 nova (2:19.0.0-2) experimental; urgency=medium
 
   * d/control:

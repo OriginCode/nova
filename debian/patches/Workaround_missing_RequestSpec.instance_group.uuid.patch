@@ -1,0 +1,45 @@
+Author: Matt Riedemann <mriedem.os@gmail.com>
+Date: Tue, 28 May 2019 11:24:11 -0400
+Subject: [PATCH] Workaround missing RequestSpec.instance_group.uuid
+ It's clear that we could have a RequestSpec.instance_group
+ without a uuid field if the InstanceGroup is set from the
+ _populate_group_info method which should only be used for
+ legacy translation of request specs using legacy filter
+ properties dicts.
+ .
+ To workaround the issue, we look for the group scheduler hint
+ to get the group uuid before loading it from the DB.
+ .
+ The related functional regression recreate test is updated
+ to show this solves the issue.
+Change-Id: I20981c987549eec40ad9762e74b0db16e54f4e63
+Closes-Bug: #1830747
+Origin: upstream, https://review.opendev.org/#/c/661786
+Last-Update: 2019-05-29
+
+diff --git a/nova/objects/request_spec.py b/nova/objects/request_spec.py
+index b99c8a0..415183d 100644
+--- a/nova/objects/request_spec.py
++++ b/nova/objects/request_spec.py
+@@ -242,6 +242,8 @@ class RequestSpec(base.NovaObject):
+             policies = list(filter_properties.get('group_policies'))
+             hosts = list(filter_properties.get('group_hosts'))
+             members = list(filter_properties.get('group_members'))
++            # TODO(mriedem): We could try to get the group uuid from the
++            # group hint in the filter_properties.
+             self.instance_group = objects.InstanceGroup(policy=policies[0],
+                                                         hosts=hosts,
+                                                         members=members)
+@@ -545,6 +547,12 @@ class RequestSpec(base.NovaObject):
+         spec._context = context
+ 
+         if 'instance_group' in spec and spec.instance_group:
++            # NOTE(mriedem): We could have a half-baked instance group with no
++            # uuid if some legacy translation was performed on this spec in the
++            # past. In that case, try to workaround the issue by getting the
++            # group uuid from the scheduler hint.
++            if 'uuid' not in spec.instance_group:
++                spec.instance_group.uuid = spec.get_scheduler_hint('group')
+             # NOTE(danms): We don't store the full instance group in
+             # the reqspec since it would be stale almost immediately.
+             # Instead, load it by uuid here so it's up-to-date.
