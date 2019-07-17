@@ -1,3 +1,9 @@
+nova (2:19.0.0-4) unstable; urgency=medium
+
+  * Uploading to unstable.
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 17 Jul 2019 14:59:35 +0200
+
 nova (2:19.0.0-3) experimental; urgency=medium
 
   * Add upstream patch to fix broken request_spec, which in certain cases lead
