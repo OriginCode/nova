@@ -90,45 +90,57 @@ maintain_var_lib_nova_perms () {
 }
 
 manage_neutron_config () {
-	# The keystone auth for talking to Neutron
-	db_get nova/neutron_url
-	pkgos_inifile set ${NOVA_CONF} neutron endpoint_override ${RET}
+	db_get nova/configure_ksat
+	if [ "${RET}" = "true" ] ; then
+		db_get nova/configure_neutron
+		if [ "${RET}" = "true" ] ; then
+			# The keystone auth for talking to Neutron
+			db_get nova/neutron_url
+			pkgos_inifile set ${NOVA_CONF} neutron endpoint_override ${RET}
 
-	db_get nova/neutron_admin_tenant_name
-	NEUTRON_IN_NOVA_TENANT=${RET}
-	pkgos_inifile set ${NOVA_CONF} neutron project_name ${NEUTRON_IN_NOVA_TENANT}
+			db_get nova/neutron_admin_tenant_name
+			NEUTRON_IN_NOVA_TENANT=${RET}
+			pkgos_inifile set ${NOVA_CONF} neutron project_name ${NEUTRON_IN_NOVA_TENANT}
 
-	db_get nova/neutron_admin_username
-	pkgos_inifile set ${NOVA_CONF} neutron username ${RET}
+			db_get nova/neutron_admin_username
+			pkgos_inifile set ${NOVA_CONF} neutron username ${RET}
 
-	db_get nova/neutron_admin_password
-	pkgos_inifile set ${NOVA_CONF} neutron password ${RET}
+			db_get nova/neutron_admin_password
+			pkgos_inifile set ${NOVA_CONF} neutron password ${RET}
 
-	# The metadata_proxy_shared_secret
-	db_get nova/metadata_secret
-	pkgos_inifile set ${NOVA_CONF} neutron metadata_proxy_shared_secret ${RET}
+			# The metadata_proxy_shared_secret
+			db_get nova/metadata_secret
+			pkgos_inifile set ${NOVA_CONF} neutron metadata_proxy_shared_secret ${RET}
 
-	# Neutron auth url point to keystone public url
-	db_get nova/ksat-public-url
-	pkgos_inifile set ${NOVA_CONF} neutron auth_url ${RET}
+			# Neutron auth url point to keystone public url
+			db_get nova/ksat-public-url
+			pkgos_inifile set ${NOVA_CONF} neutron auth_url ${RET}
+		fi
+	fi
 }
 
 manage_placement_config () {
-	db_get nova/placement_admin_username
-	pkgos_inifile set ${NOVA_CONF} placement username ${RET}
+	db_get nova/configure_ksat
+	if [ "${RET}" = "true" ] ; then
+		db_get nova/configure_placement
+		if [ "${RET}" = "true" ] ; then
+			db_get nova/placement_admin_username
+			pkgos_inifile set ${NOVA_CONF} placement username ${RET}
 
-	db_get nova/placement_admin_password
-	pkgos_inifile set ${NOVA_CONF} placement password ${RET}
+			db_get nova/placement_admin_password
+			pkgos_inifile set ${NOVA_CONF} placement password ${RET}
 
-	db_get nova/placement_admin_tenant_name
-	pkgos_inifile set ${NOVA_CONF} placement project_name ${RET}
+			db_get nova/placement_admin_tenant_name
+			pkgos_inifile set ${NOVA_CONF} placement project_name ${RET}
 
-	db_get nova/placement_os_region_name
-	pkgos_inifile set ${NOVA_CONF} placement region_name ${RET}
+			db_get nova/placement_os_region_name
+			pkgos_inifile set ${NOVA_CONF} placement region_name ${RET}
 
-	# Placement auth url point to keystone public url
-	db_get nova/ksat-public-url
-	pkgos_inifile set ${NOVA_CONF} placement auth_url ${RET}
+			# Placement auth url point to keystone public url
+			db_get nova/ksat-public-url
+			pkgos_inifile set ${NOVA_CONF} placement auth_url ${RET}
+		fi
+	fi
 }
 
 run_db_sync (){

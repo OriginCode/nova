@@ -44,21 +44,45 @@ manage_nova_my_ip () {
 }
 
 read_placement_config () {
-	pkgos_read_config -p high ${NOVA_CONF} placement project_name nova/placement_admin_tenant_name
-	pkgos_read_config -p high ${NOVA_CONF} placement region_name nova/placement_os_region_name
-	pkgos_read_config -p high ${NOVA_CONF} placement username nova/placement_admin_username
-	pkgos_read_config -p high ${NOVA_CONF} placement password nova/placement_admin_password
+	# If we want to setup placement correctly, we need
+	# to have keystone_auth url specified from user correctly.
+	# If user didn't configure ksat via debconf, we will not configure
+	# placement as well
+	db_get nova/configure_ksat
+	if  [ "${RET}" = "true" ] ; then
+		db_input high nova/configure_placement || true
+		db_go
+		db_get nova/configure_placement
+		if  [ "${RET}" = "true" ] ; then
+			pkgos_read_config -p high ${NOVA_CONF} placement project_name nova/placement_admin_tenant_name
+			pkgos_read_config -p high ${NOVA_CONF} placement region_name nova/placement_os_region_name
+			pkgos_read_config -p high ${NOVA_CONF} placement username nova/placement_admin_username
+			pkgos_read_config -p high ${NOVA_CONF} placement password nova/placement_admin_password
+		fi
+	fi
 }
 
 read_neutron_config () {
-	# Keystone auth credential to talk to Neutron
-	pkgos_read_config -p high ${NOVA_CONF} neutron endpoint_override nova/neutron_url
-	pkgos_read_config -p medium ${NOVA_CONF} neutron project_name nova/neutron_admin_tenant_name
-	pkgos_read_config -p medium ${NOVA_CONF} neutron username nova/neutron_admin_username
-	pkgos_read_config -p high ${NOVA_CONF} neutron password nova/neutron_admin_password
+	# If we want to setup neutron correctly, we need
+	# to have keystone_auth url specified from user correctly.
+	# If user didn't configure ksat via debconf, we will not configure
+	# neutron as well
+	db_get nova/configure_ksat
+	if  [ "${RET}" = "true" ] ; then
+		db_input high nova/configure_neutron || true
+		db_go
+		db_get nova/configure_neutron
+		if  [ "${RET}" = "true" ] ; then
+			# Keystone auth credential to talk to Neutron
+			pkgos_read_config -p high ${NOVA_CONF} neutron endpoint_override nova/neutron_url
+			pkgos_read_config -p medium ${NOVA_CONF} neutron project_name nova/neutron_admin_tenant_name
+			pkgos_read_config -p medium ${NOVA_CONF} neutron username nova/neutron_admin_username
+			pkgos_read_config -p high ${NOVA_CONF} neutron password nova/neutron_admin_password
 
-	# The metadata_proxy_shared_secret
-	pkgos_read_config -p high ${NOVA_CONF} neutron metadata_proxy_shared_secret nova/metadata_secret
+			# The metadata_proxy_shared_secret
+			pkgos_read_config -p high ${NOVA_CONF} neutron metadata_proxy_shared_secret nova/metadata_secret
+		fi
+	fi
 }
 
 pkgos_var_user_group nova /bin/sh
