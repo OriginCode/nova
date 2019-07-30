@@ -163,38 +163,30 @@ msgstr "Nom de la région du système de Cinder :"
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:9001
-#| msgid "Please enter the URL of the Neutron server."
 msgid "Please enter the region name for cinder service."
 msgstr "Veuillez indiquer le nom de la région pour le service Cinder."
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:10001
-#| msgid "Neutron server URL:"
 msgid "Glance api server URL:"
 msgstr "Adresse URL de l'API du serveur Glance :"
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:10001
-#| msgid "Please enter the URL of the Neutron server."
 msgid "Please enter the URL of the Glance api server."
 msgstr "Veuillez indiquer l'adresse URL de l'API du serveur Glance."
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:11001
-#| msgid "Neutron admin tenant name:"
 msgid "Placement admin tenant name:"
 msgstr "Nom du projet (« tenant ») de l’administrateur de Placement :"
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:11001
-#| msgid ""
-#| "Nova needs to be able to communicate with Neutron through Keystone. "
-#| "Therefore Nova needs to know the Neutron admin tenant, username and "
-#| "password."
 msgid ""
 "Nova needs to be able to communicate with Placement through Keystone. "
 "Therefore Nova needs to know the Placement admin tenant, username and "
@@ -207,21 +199,18 @@ msgstr ""
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:11001
-#| msgid "Please enter the name of the admin tenant for Neutron."
 msgid "Please enter the name of the admin tenant for Placement."
 msgstr "Veuillez entrer le nom du projet de l’administrateur pour Placement."
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:12001
-#| msgid "Neutron administrator username:"
 msgid "Placement administrator username:"
 msgstr "Nom d'utilisateur de l'administrateur pour Placement :"
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:12001
-#| msgid "Please enter the username of the Neutron administrator."
 msgid "Please enter the username of the Placement administrator."
 msgstr ""
 "Veuillez indiquer le nom d'utilisateur de l'administrateur pour Placement."
@@ -229,14 +218,12 @@ msgstr ""
 #. Type: password
 #. Description
 #: ../nova-common.templates.in:13001
-#| msgid "Neutron administrator password:"
 msgid "Placement administrator password:"
 msgstr "Mot de passe de l'administrateur de Placement :"
 
 #. Type: password
 #. Description
 #: ../nova-common.templates.in:13001
-#| msgid "Please enter the password of the Neutron administrator."
 msgid "Please enter the password of the Placement administrator."
 msgstr "Veuillez indiquer le mot de passe de l'administrateur de Placement."
 
@@ -249,7 +236,6 @@ msgstr "Nom de la région du système de Placement :"
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:14001
-#| msgid "Please enter the URL of the Neutron server."
 msgid "Please enter the region name for Placement service."
 msgstr "Veuillez indiquer le nom de la région pour le service Placement."
 

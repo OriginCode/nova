@@ -181,17 +181,12 @@ msgstr "Voer de URL in van de api-server van Glance."
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:11001
-#| msgid "Neutron admin tenant name:"
 msgid "Placement admin tenant name:"
 msgstr "Naam van de cliëntruimte (tenant) voor de beheerder van Placement:"
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:11001
-#| msgid ""
-#| "Nova needs to be able to communicate with Neutron through Keystone. "
-#| "Therefore Nova needs to know the Neutron admin tenant, username and "
-#| "password."
 msgid ""
 "Nova needs to be able to communicate with Placement through Keystone. "
 "Therefore Nova needs to know the Placement admin tenant, username and "
@@ -204,7 +199,6 @@ msgstr ""
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:11001
-#| msgid "Please enter the name of the admin tenant for Neutron."
 msgid "Please enter the name of the admin tenant for Placement."
 msgstr ""
 "Geef de naam op van de cliëntruimte (tenant) van de beheerder van Placement."
@@ -212,42 +206,36 @@ msgstr ""
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:12001
-#| msgid "Neutron administrator username:"
 msgid "Placement administrator username:"
 msgstr "Gebruikersnaam van de beheerder van Placement:"
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:12001
-#| msgid "Please enter the username of the Neutron administrator."
 msgid "Please enter the username of the Placement administrator."
 msgstr "Voer de gebruikersnaam in van de beheerder van Placement."
 
 #. Type: password
 #. Description
 #: ../nova-common.templates.in:13001
-#| msgid "Neutron administrator password:"
 msgid "Placement administrator password:"
 msgstr "Wachtwoord van de beheerder van Placement:"
 
 #. Type: password
 #. Description
 #: ../nova-common.templates.in:13001
-#| msgid "Please enter the password of the Neutron administrator."
 msgid "Please enter the password of the Placement administrator."
 msgstr "Geef het wachtwoord op van de beheerder van Placement."
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:14001
-#| msgid "Cinder os region name:"
 msgid "Placement os region name:"
 msgstr "Naam van de os-regio voor Placement:"
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:14001
-#| msgid "Please enter the region name for cinder service."
 msgid "Please enter the region name for Placement service."
 msgstr "Voer de regionaam voor de Placement-dienst in."
 
