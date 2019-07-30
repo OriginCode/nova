@@ -2,6 +2,7 @@ nova (2:19.0.0-5) UNRELEASED; urgency=medium
 
   [ Ondřej Nový ]
   * Use debhelper-compat instead of debian/compat.
+  * Bump Standards-Version to 4.4.0.
 
   [ Michal Arbet ]
   * Fix bug when package was installed noninteractive
