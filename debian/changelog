@@ -1,4 +1,4 @@
-nova (2:19.0.0-5) UNRELEASED; urgency=medium
+nova (2:19.0.0-5) unstable; urgency=medium
 
   [ Ondřej Nový ]
   * Use debhelper-compat instead of debian/compat.
