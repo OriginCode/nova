@@ -1,4 +1,4 @@
-nova (2:19.0.0-5) unstable; urgency=medium
+nova (2:19.0.1-1) unstable; urgency=medium
 
   [ Ondřej Nový ]
   * Use debhelper-compat instead of debian/compat.
@@ -8,6 +8,9 @@ nova (2:19.0.0-5) unstable; urgency=medium
   * Fix bug when package was installed noninteractive
     and auth_url in placement/neutron section was changed
   * Update pofiles
+  * New upstream version
+  * Remove upstream applied patch
+    - debian/patches/Workaround_missing_RequestSpec.instance_group.uuid.patch
 
  -- Michal Arbet <michal.arbet@ultimum.io>  Tue, 30 Jul 2019 10:06:06 +0200
 
