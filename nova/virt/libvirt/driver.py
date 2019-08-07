@@ -77,6 +77,7 @@ from nova import block_device
 from nova.compute import power_state
 from nova.compute import task_states
 from nova.compute import utils as compute_utils
+from nova.compute import vm_states
 import nova.conf
 from nova.console import serial as serial_console
 from nova.console import type as ctype
@@ -1274,8 +1275,15 @@ class LibvirtDriver(driver.ComputeDriver):
                         encryption=None, allow_native_luks=True):
         vol_driver = self._get_volume_driver(connection_info)
         vol_driver.connect_volume(connection_info, instance)
-        self._attach_encryptor(context, connection_info, encryption,
-                               allow_native_luks)
+        try:
+            self._attach_encryptor(
+                context, connection_info, encryption, allow_native_luks)
+        except Exception:
+            # Encryption failed so rollback the volume connection.
+            with excutils.save_and_reraise_exception(logger=LOG):
+                LOG.exception("Failure attaching encryptor; rolling back "
+                              "volume connection", instance=instance)
+                vol_driver.disconnect_volume(connection_info, instance)
 
     def _should_disconnect_target(self, context, connection_info, instance):
         connection_count = 0
@@ -1428,6 +1436,14 @@ class LibvirtDriver(driver.ComputeDriver):
             return self._host.delete_secret('volume', volume_id)
         if encryption is None:
             encryption = self._get_volume_encryption(context, connection_info)
+        # NOTE(lyarwood): Handle bug #1821696 where volume secrets have been
+        # removed manually by returning if native LUKS decryption is available
+        # and device_path is not present in the connection_info. This avoids
+        # VolumeEncryptionNotSupported being thrown when we incorrectly build
+        # the encryptor below due to the secrets not being present above.
+        if (encryption and self._use_native_luks(encryption) and
+            not connection_info['data'].get('device_path')):
+            return
         if encryption:
             encryptor = self._get_volume_encryptor(connection_info,
                                                    encryption)
@@ -1507,11 +1523,17 @@ class LibvirtDriver(driver.ComputeDriver):
         # distributions provide Libvirt 3.3.0 or earlier with
         # https://libvirt.org/git/?p=libvirt.git;a=commit;h=7189099 applied.
         except libvirt.libvirtError as ex:
-            if 'Incorrect number of padding bytes' in six.text_type(ex):
-                LOG.warning(_('Failed to attach encrypted volume due to a '
-                    'known Libvirt issue, see the following bug for details: '
-                    'https://bugzilla.redhat.com/show_bug.cgi?id=1447297'))
-                raise
+            with excutils.save_and_reraise_exception():
+                if 'Incorrect number of padding bytes' in six.text_type(ex):
+                    LOG.warning(_('Failed to attach encrypted volume due to a '
+                                  'known Libvirt issue, see the following bug '
+                                  'for details: '
+                                  'https://bugzilla.redhat.com/1447297'))
+                else:
+                    LOG.exception(_('Failed to attach volume at mountpoint: '
+                                    '%s'), mountpoint, instance=instance)
+                self._disconnect_volume(context, connection_info, instance,
+                                        encryption=encryption)
         except Exception:
             LOG.exception(_('Failed to attach volume at mountpoint: %s'),
                           mountpoint, instance=instance)
@@ -8320,7 +8342,7 @@ class LibvirtDriver(driver.ComputeDriver):
                                          dest=target,
                                          host=fallback_from_host,
                                          receive=True)
-            image.cache(fetch_func=copy_from_host,
+            image.cache(fetch_func=copy_from_host, size=size,
                         filename=filename)
 
     def _create_images_and_backing(self, context, instance, instance_dir,
@@ -8662,14 +8684,19 @@ class LibvirtDriver(driver.ComputeDriver):
                     # should ignore this instance and move on.
                     if guest.uuid in local_instances:
                         inst = local_instances[guest.uuid]
-                        if inst.task_state is not None:
+                        # bug 1774249 indicated when instance is in RESIZED
+                        # state it might also can't find back disk
+                        if (inst.task_state is not None or
+                            inst.vm_state == vm_states.RESIZED):
                             LOG.info('Periodic task is updating the host '
                                      'stats; it is trying to get disk info '
                                      'for %(i_name)s, but the backing disk '
                                      'was removed by a concurrent operation '
-                                     '(task_state=%(task_state)s)',
+                                     '(task_state=%(task_state)s) and '
+                                     '(vm_state=%(vm_state)s)',
                                      {'i_name': guest.name,
-                                      'task_state': inst.task_state},
+                                      'task_state': inst.task_state,
+                                      'vm_state': inst.vm_state},
                                      instance=inst)
                             err_ctxt.reraise = False
 
@@ -9144,28 +9171,37 @@ class LibvirtDriver(driver.ComputeDriver):
                                errors_count=stats[4])
             except libvirt.libvirtError:
                 pass
-        for interface in dom_io["ifaces"]:
+
+        for interface in xml_doc.findall('./devices/interface'):
+            mac_address = interface.find('mac').get('address')
+            target = interface.find('./target')
+
+            # add nic that has no target (therefore no stats)
+            if target is None:
+                diags.add_nic(mac_address=mac_address)
+                continue
+
+            # add nic with stats
+            dev = target.get('dev')
             try:
-                # interfaceStats might launch an exception if the method
-                # is not supported by the underlying hypervisor being
-                # used by libvirt
-                stats = domain.interfaceStats(interface)
-                diags.add_nic(rx_octets=stats[0],
-                              rx_errors=stats[2],
-                              rx_drop=stats[3],
-                              rx_packets=stats[1],
-                              tx_octets=stats[4],
-                              tx_errors=stats[6],
-                              tx_drop=stats[7],
-                              tx_packets=stats[5])
+                if dev:
+                    # interfaceStats might launch an exception if the
+                    # method is not supported by the underlying hypervisor
+                    # being used by libvirt
+                    stats = domain.interfaceStats(dev)
+                    diags.add_nic(mac_address=mac_address,
+                                  rx_octets=stats[0],
+                                  rx_errors=stats[2],
+                                  rx_drop=stats[3],
+                                  rx_packets=stats[1],
+                                  tx_octets=stats[4],
+                                  tx_errors=stats[6],
+                                  tx_drop=stats[7],
+                                  tx_packets=stats[5])
+
             except libvirt.libvirtError:
                 pass
 
-        # Update mac addresses of interface if stats have been reported
-        if diags.nic_details:
-            nodes = xml_doc.findall('./devices/interface/mac')
-            for index, node in enumerate(nodes):
-                diags.nic_details[index].mac_address = node.get('address')
         return diags
 
     @staticmethod

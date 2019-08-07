@@ -135,10 +135,8 @@ latex_documents = [
 
 # keep this ordered to keep mriedem happy
 #
-# NOTE(kchamart): Versioned TripleO Docs is not a yet a "thing".  Remove
-# this note when they can be versioned, and add 'tripleo-docs' to the
-# set of projects below.
-
+# NOTE(stephenfin): Projects that don't have a release branch, like TripleO and
+# reno, should not be included here
 openstack_projects = [
     'ceilometer',
     'cinder',
@@ -155,10 +153,17 @@ openstack_projects = [
     'placement',
     'python-novaclient',
     'python-openstackclient',
-    'reno',
     'watcher',
 ]
 # -- Custom extensions --------------------------------------------------------
+
+# NOTE(mdbooth): (2019-03-20) Sphinx loads policies defined in setup.cfg, which
+# includes the placement policy at nova/api/openstack/placement/policies.py.
+# Loading this imports nova/api/openstack/__init__.py, which imports
+# nova.monkey_patch, which will do eventlet monkey patching to the sphinx
+# process. As well as being unnecessary and a bad idea, this breaks on
+# python3.6 (but not python3.7), so don't do that.
+os.environ['OS_NOVA_DISABLE_EVENTLET_PATCHING'] = '1'
 
 
 def monkey_patch_blockdiag():
