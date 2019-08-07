@@ -2,4 +2,3 @@ Install-missed-files.patch
 clean-up-build_requests-table-on-upgrades.patch
 remove-crashing-blockdiag-doc-line.patch
 fix-python3-compatibility-ceph.patch
-Workaround_missing_RequestSpec.instance_group.uuid.patch
