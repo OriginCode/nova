@@ -103,7 +103,7 @@ _Description: Placement os region name:
 Template: nova/configure_neutron
 Type: boolean
 Default: false
-Description: Manage neutron config through debconf?
+_Description: Manage neutron config through debconf?
  Nova service must contact Neutron, and this is configured through
  the [neutron] section of the configuration. Specify if you wish
  to handle this configuration through debconf.
@@ -111,8 +111,7 @@ Description: Manage neutron config through debconf?
 Template: nova/configure_placement
 Type: boolean
 Default: false
-Description: Manage placement config through debconf?
+_Description: Manage placement config through debconf?
  Nova service must contact Placement, and this is configured through
  the [placement] section of the configuration. Specify if you wish
  to handle this configuration through debconf.
-

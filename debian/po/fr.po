@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova 2_18.0.3-4\n"
 "Report-Msgid-Bugs-To: nova@packages.debian.org\n"
-"POT-Creation-Date: 2018-11-11 11:15+0100\n"
+"POT-Creation-Date: 2019-08-09 10:06+0200\n"
 "PO-Revision-Date: 2018-11-19 14:34+0100\n"
 "Last-Translator: Alban Vidal <alban.vidal@zordhak.fr>\n"
 "Language-Team: French <debian-l10n-french@lists.debian.org>\n"
@@ -238,6 +238,36 @@ msgstr "Nom de la région du système de Placement :"
 #: ../nova-common.templates.in:14001
 msgid "Please enter the region name for Placement service."
 msgstr "Veuillez indiquer le nom de la région pour le service Placement."
+
+#. Type: boolean
+#. Description
+#: ../nova-common.templates.in:15001
+msgid "Manage neutron config through debconf?"
+msgstr ""
+
+#. Type: boolean
+#. Description
+#: ../nova-common.templates.in:15001
+msgid ""
+"Nova service must contact Neutron, and this is configured through the "
+"[neutron] section of the configuration. Specify if you wish to handle this "
+"configuration through debconf."
+msgstr ""
+
+#. Type: boolean
+#. Description
+#: ../nova-common.templates.in:16001
+msgid "Manage placement config through debconf?"
+msgstr ""
+
+#. Type: boolean
+#. Description
+#: ../nova-common.templates.in:16001
+msgid ""
+"Nova service must contact Placement, and this is configured through the "
+"[placement] section of the configuration. Specify if you wish to handle this "
+"configuration through debconf."
+msgstr ""
 
 #. Type: boolean
 #. Description
