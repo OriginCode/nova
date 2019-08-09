@@ -2,3 +2,4 @@ Install-missed-files.patch
 clean-up-build_requests-table-on-upgrades.patch
 remove-crashing-blockdiag-doc-line.patch
 fix-python3-compatibility-ceph.patch
+CVE-2019-14433_Replace_non-nova_server_fault_message.patch
