@@ -1,3 +1,13 @@
+nova (2:19.0.2-1) unstable; urgency=medium
+
+  * New upstream version
+  * Remove upstream applied patches:
+    - CVE-2019-14433_Replace_non-nova_server_fault_message.patch
+    - fix-python3-compatibility-ceph.patch
+  * Fix lintian syntax-error-in-debconf-template templates
+
+ -- Michal Arbet <michal.arbet@ultimum.io>  Thu, 15 Aug 2019 14:55:23 +0200
+
 nova (2:19.0.1-2) unstable; urgency=high
 
   * CVE-2019-14433 / OSSA-2019-003: a Server Resource Faults Leak External
