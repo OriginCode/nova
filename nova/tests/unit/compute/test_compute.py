@@ -4507,7 +4507,10 @@ class ComputeTestCase(BaseTestCase,
         self.assertEqual('ERROR', msg.priority)
         payload = msg.payload
         message = payload['message']
-        self.assertNotEqual(-1, message.find("i'm dying"))
+        # The fault message does not contain the exception value, only the
+        # class name.
+        self.assertEqual(-1, message.find("i'm dying"))
+        self.assertIn('TestingException', message)
 
     def test_terminate_usage_notification(self):
         # Ensure terminate_instance generates correct usage notification.
@@ -5936,7 +5939,9 @@ class ComputeTestCase(BaseTestCase,
             old_vm_state = vm_states.ACTIVE
         else:
             old_vm_state = vm_states.STOPPED
-        params = {'vm_state': old_vm_state}
+        params = {'vm_state': old_vm_state,
+                  'info_cache': objects.InstanceInfoCache(
+                      network_info=network_model.NetworkInfo([]))}
         instance = self._create_fake_instance_obj(params)
 
         self.stub_out('nova.virt.fake.FakeDriver.finish_migration', fake)
@@ -6086,7 +6091,9 @@ class ComputeTestCase(BaseTestCase,
         def fake(*args, **kwargs):
             pass
 
-        instance = self._create_fake_instance_obj()
+        params = {'info_cache': objects.InstanceInfoCache(
+                      network_info=network_model.NetworkInfo([]))}
+        instance = self._create_fake_instance_obj(params)
 
         self.stub_out('nova.virt.fake.FakeDriver.finish_migration', fake)
         self.stub_out('nova.virt.fake.FakeDriver.finish_revert_migration',
@@ -6939,11 +6946,12 @@ class ComputeTestCase(BaseTestCase,
 
         def fake_db_fault_create(ctxt, values):
             self.assertIn('raise NotImplementedError', values['details'])
+            self.assertIn('test', values['details'])
             del values['details']
 
             expected = {
                 'code': 500,
-                'message': 'test',
+                'message': 'NotImplementedError',
                 'instance_uuid': instance['uuid'],
                 'host': self.compute.host
             }
@@ -6974,12 +6982,14 @@ class ComputeTestCase(BaseTestCase,
             global raised_exc
 
             self.assertIn('raise messaging.RemoteError', values['details'])
+            self.assertIn('Remote error: test My Test Message\nNone.',
+                          values['details'])
             del values['details']
 
             expected = {
                 'code': 500,
                 'instance_uuid': instance['uuid'],
-                'message': 'Remote error: test My Test Message\nNone.',
+                'message': 'RemoteError',
                 'host': self.compute.host
             }
             self.assertEqual(expected, values)
@@ -7034,7 +7044,7 @@ class ComputeTestCase(BaseTestCase,
         def fake_db_fault_create(ctxt, values):
             expected = {
                 'code': 500,
-                'message': 'test',
+                'message': 'NotImplementedError',
                 'details': '',
                 'instance_uuid': instance['uuid'],
                 'host': self.compute.host
@@ -7070,9 +7080,11 @@ class ComputeTestCase(BaseTestCase,
                       fake_db_fault_create)
 
         ctxt = context.get_admin_context()
-        compute_utils.add_instance_fault_from_exc(ctxt,
-                                                  instance,
-                                                  NotImplementedError(message))
+        # Use a NovaException because non-nova exceptions will just have the
+        # class name recorded in the fault message which will not exercise our
+        # length trim code.
+        exc = exception.NovaException(message=message)
+        compute_utils.add_instance_fault_from_exc(ctxt, instance, exc)
 
     def test_add_instance_fault_with_message(self):
         instance = self._create_fake_instance_obj()
@@ -10530,10 +10542,13 @@ class ComputeAPITestCase(BaseTestCase):
         with mock.patch.dict(self.compute.driver.capabilities,
                              supports_attach_interface=True,
                              supports_tagged_attach_interface=False):
-            self.assertRaises(
-                exception.NetworkInterfaceTaggedAttachNotSupported,
+            expected_exception = self.assertRaises(
+                messaging.ExpectedException,
                 self.compute.attach_interface, self.context, instance,
                 'fake-network-id', 'fake-port-id', 'fake-req-ip', tag='foo')
+        wrapped_exc = expected_exception.exc_info[1]
+        self.assertIsInstance(
+            wrapped_exc, exception.NetworkInterfaceTaggedAttachNotSupported)
 
     def test_attach_interface_failed(self):
         new_type = flavors.get_flavor_by_flavor_id('4')

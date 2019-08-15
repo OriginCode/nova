@@ -18,6 +18,7 @@
 import copy
 
 import mock
+from oslo_db import exception as db_exc
 import oslo_messaging as messaging
 from oslo_serialization import jsonutils
 from oslo_utils.fixture import uuidsentinel as uuids
@@ -692,28 +693,36 @@ class _BaseTaskTestCase(object):
             mock.call(self.context, instances[1].uuid)])
         self.assertFalse(mock_get_by_host.called)
 
-    @mock.patch("nova.scheduler.utils.claim_resources", return_value=False)
+    @mock.patch('nova.compute.utils.notify_about_compute_task_error')
     @mock.patch.object(objects.Instance, 'save')
-    def test_build_instances_exhaust_host_list(self, _mock_save, mock_claim):
+    def test_build_instances_exhaust_host_list(self, _mock_save, mock_notify):
         # A list of three alternate hosts for one instance
         host_lists = copy.deepcopy(fake_host_lists_alt)
         instance = fake_instance.fake_instance_obj(self.context)
         image = {'fake-data': 'should_pass_silently'}
-        expected_claim_count = len(host_lists[0])
 
         # build_instances() is a cast, we need to wait for it to complete
         self.useFixture(cast_as_call.CastAsCall(self))
+
+        self.conductor.build_instances(
+            context=self.context,
+            instances=[instance], image=image,
+            filter_properties={},
+            admin_password='admin_password',
+            injected_files='injected_files',
+            requested_networks=None,
+            security_groups='security_groups',
+            block_device_mapping=None,
+            legacy_bdm=None,
+            host_lists=host_lists
+        )
+
         # Since claim_resources() is mocked to always return False, we will run
-        # out of alternate hosts, and MaxRetriesExceeded should be raised.
-        self.assertRaises(exc.MaxRetriesExceeded,
-                self.conductor.build_instances, context=self.context,
-                instances=[instance], image=image, filter_properties={},
-                admin_password='admin_password',
-                injected_files='injected_files', requested_networks=None,
-                security_groups='security_groups',
-                block_device_mapping=None, legacy_bdm=None,
-                host_lists=host_lists)
-        self.assertEqual(expected_claim_count, mock_claim.call_count)
+        # out of alternate hosts, and complain about MaxRetriesExceeded.
+        mock_notify.assert_called_once_with(
+            self.context, 'build_instances',
+            instance.uuid, test.MatchType(dict), 'error',
+            test.MatchType(exc.MaxRetriesExceeded), test.MatchType(str))
 
     @mock.patch.object(conductor_manager.ComputeTaskManager,
             '_destroy_build_request')
@@ -3313,6 +3322,41 @@ class ConductorTaskRPCAPITestCase(_BaseTaskTestCase,
         inst = mock.MagicMock()
         self.assertEqual(mock.sentinel.iransofaraway,
                          test(None, ctxt, inst))
+        mock_im.assert_called_once_with(ctxt, inst.uuid)
+
+    @mock.patch.object(objects.InstanceMapping, 'get_by_instance_uuid',
+                       side_effect=db_exc.CantStartEngineError)
+    def test_targets_cell_no_api_db_conn_noop(self, mock_im):
+        """Tests that targets_cell noops on CantStartEngineError if the API
+        DB is not configured because we assume we're in the cell conductor.
+        """
+        self.flags(connection=None, group='api_database')
+
+        @conductor_manager.targets_cell
+        def _test(self, context, instance):
+            return mock.sentinel.iransofaraway
+
+        ctxt = mock.MagicMock()
+        inst = mock.MagicMock()
+        self.assertEqual(mock.sentinel.iransofaraway,
+                         _test(None, ctxt, inst))
+        mock_im.assert_called_once_with(ctxt, inst.uuid)
+
+    @mock.patch.object(objects.InstanceMapping, 'get_by_instance_uuid',
+                       side_effect=db_exc.CantStartEngineError)
+    def test_targets_cell_no_api_db_conn_reraise(self, mock_im):
+        """Tests that targets_cell reraises CantStartEngineError if the
+        API DB is configured.
+        """
+        self.flags(connection='mysql://dbhost?nova_api', group='api_database')
+
+        @conductor_manager.targets_cell
+        def _test(self, context, instance):
+            return mock.sentinel.iransofaraway
+
+        ctxt = mock.MagicMock()
+        inst = mock.MagicMock()
+        self.assertRaises(db_exc.CantStartEngineError, _test, None, ctxt, inst)
         mock_im.assert_called_once_with(ctxt, inst.uuid)
 
     def test_schedule_and_build_instances_with_tags(self):

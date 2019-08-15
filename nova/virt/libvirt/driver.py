@@ -284,6 +284,11 @@ MIN_QEMU_FILE_BACKED_DISCARD_VERSION = (2, 10, 0)
 MIN_LIBVIRT_NATIVE_TLS_VERSION = (4, 4, 0)
 MIN_QEMU_NATIVE_TLS_VERSION = (2, 11, 0)
 
+# If the host has this libvirt version, then we skip the retry loop of
+# instance destroy() call, as libvirt itself increased the wait time
+# before the SIGKILL signal takes effect.
+MIN_LIBVIRT_BETTER_SIGKILL_HANDLING = (4, 7, 0)
+
 VGPU_RESOURCE_SEMAPHORE = "vgpu_resources"
 
 
@@ -486,6 +491,8 @@ class LibvirtDriver(driver.ComputeDriver):
 
         self._check_file_backed_memory_support()
 
+        self._check_my_ip()
+
         if (CONF.libvirt.virt_type == 'lxc' and
                 not (CONF.libvirt.uid_maps and CONF.libvirt.gid_maps)):
             LOG.warning("Running libvirt-lxc without user namespaces is "
@@ -637,6 +644,13 @@ class LibvirtDriver(driver.ComputeDriver):
                 raise exception.InternalError(
                     'Running Nova with file_backed_memory requires '
                     'ram_allocation_ratio configured to 1.0')
+
+    def _check_my_ip(self):
+        ips = compute_utils.get_machine_ips()
+        if CONF.my_ip not in ips:
+            LOG.warning('my_ip address (%(my_ip)s) was not found on '
+                        'any of the interfaces: %(ifaces)s',
+                        {'my_ip': CONF.my_ip, 'ifaces': ", ".join(ips)})
 
     def _prepare_migration_flags(self):
         migration_flags = 0
@@ -953,18 +967,36 @@ class LibvirtDriver(driver.ComputeDriver):
                         # steal time from the cloud host. ie 15 wallclock
                         # seconds may have passed, but the VM might have only
                         # have a few seconds of scheduled run time.
-                        LOG.warning('Error from libvirt during destroy. '
-                                    'Code=%(errcode)s Error=%(e)s; '
-                                    'attempt %(attempt)d of 3',
-                                    {'errcode': errcode, 'e': e,
-                                     'attempt': attempt},
-                                    instance=instance)
+                        #
+                        # TODO(kchamart): Once MIN_LIBVIRT_VERSION
+                        # reaches v4.7.0, (a) rewrite the above note,
+                        # and (b) remove the following code that retries
+                        # _destroy() API call (which gives SIGKILL 30
+                        # seconds to take effect) -- because from v4.7.0
+                        # onwards, libvirt _automatically_ increases the
+                        # timeout to 30 seconds.  This was added in the
+                        # following libvirt commits:
+                        #
+                        #   - 9a4e4b942 (process: wait longer 5->30s on
+                        #     hard shutdown)
+                        #
+                        #   - be2ca0444 (process: wait longer on kill
+                        #     per assigned Hostdev)
                         with excutils.save_and_reraise_exception() as ctxt:
-                            # Try up to 3 times before giving up.
-                            if attempt < 3:
-                                ctxt.reraise = False
-                                self._destroy(instance, attempt + 1)
-                                return
+                            if not self._host.has_min_version(
+                                    MIN_LIBVIRT_BETTER_SIGKILL_HANDLING):
+                                LOG.warning('Error from libvirt during '
+                                            'destroy. Code=%(errcode)s '
+                                            'Error=%(e)s; attempt '
+                                            '%(attempt)d of 6 ',
+                                            {'errcode': errcode, 'e': e,
+                                             'attempt': attempt},
+                                            instance=instance)
+                                # Try up to 6 times before giving up.
+                                if attempt < 6:
+                                    ctxt.reraise = False
+                                    self._destroy(instance, attempt + 1)
+                                    return
 
                 if not is_okay:
                     with excutils.save_and_reraise_exception():
@@ -3256,11 +3288,6 @@ class LibvirtDriver(driver.ComputeDriver):
         return self._get_console_output_file(instance, console_path)
 
     def get_host_ip_addr(self):
-        ips = compute_utils.get_machine_ips()
-        if CONF.my_ip not in ips:
-            LOG.warning('my_ip address (%(my_ip)s) was not found on '
-                        'any of the interfaces: %(ifaces)s',
-                        {'my_ip': CONF.my_ip, 'ifaces': ", ".join(ips)})
         return CONF.my_ip
 
     def get_vnc_console(self, context, instance):
@@ -4249,36 +4276,6 @@ class LibvirtDriver(driver.ComputeDriver):
 
         return meta
 
-    def _get_machine_type(self, image_meta, caps):
-        # The guest machine type can be set as an image metadata
-        # property, or otherwise based on architecture-specific
-        # defaults.
-        mach_type = None
-
-        if image_meta.properties.get('hw_machine_type') is not None:
-            mach_type = image_meta.properties.hw_machine_type
-        else:
-            # NOTE(kchamart): For ARMv7 and AArch64, use the 'virt'
-            # board as the default machine type.  It is the recommended
-            # board, which is designed to be used with virtual machines.
-            # The 'virt' board is more flexible, supports PCI, 'virtio',
-            # has decent RAM limits, etc.
-            if caps.host.cpu.arch in (fields.Architecture.ARMV7,
-                                      fields.Architecture.AARCH64):
-                mach_type = "virt"
-
-            if caps.host.cpu.arch in (fields.Architecture.S390,
-                                      fields.Architecture.S390X):
-                mach_type = 's390-ccw-virtio'
-
-            # If set in the config, use that as the default.
-            mach_type = (
-                libvirt_utils.get_default_machine_type(caps.host.cpu.arch)
-                or mach_type
-            )
-
-        return mach_type
-
     @staticmethod
     def _create_idmaps(klass, map_strings):
         idmaps = []
@@ -4952,7 +4949,7 @@ class LibvirtDriver(driver.ComputeDriver):
                     guest.os_loader_type = "pflash"
                 else:
                     raise exception.UEFINotSupported()
-            guest.os_mach_type = self._get_machine_type(image_meta, caps)
+            guest.os_mach_type = libvirt_utils.get_machine_type(image_meta)
             if image_meta.properties.get('hw_boot_menu') is None:
                 guest.os_bootmenu = strutils.bool_from_string(
                     flavor.extra_specs.get('hw:boot_menu', 'no'))
@@ -5668,14 +5665,15 @@ class LibvirtDriver(driver.ComputeDriver):
                                    block_device_info=None, power_on=True,
                                    vifs_already_plugged=False,
                                    post_xml_callback=None,
-                                   destroy_disks_on_failure=False):
+                                   destroy_disks_on_failure=False,
+                                   external_events=None):
 
         """Do required network setup and create domain."""
         timeout = CONF.vif_plugging_timeout
-        if (self._conn_supports_start_paused and
-            utils.is_neutron() and not
-            vifs_already_plugged and power_on and timeout):
-            events = self._get_neutron_events(network_info)
+        if (self._conn_supports_start_paused and utils.is_neutron() and not
+                vifs_already_plugged and power_on and timeout):
+            events = (external_events if external_events
+                      else self._get_neutron_events(network_info))
         else:
             events = []
 
@@ -5944,17 +5942,12 @@ class LibvirtDriver(driver.ComputeDriver):
         hypervisor is capable of hosting.  Each tuple consists
         of the triplet (arch, hypervisor_type, vm_mode).
 
-        Supported hypervisor_type is filtered by virt_type,
-        a parameter set by operators via `nova.conf`.
-
         :returns: List of tuples describing instance capabilities
         """
         caps = self._host.get_capabilities()
         instance_caps = list()
         for g in caps.guests:
             for dt in g.domtype:
-                if dt != CONF.libvirt.virt_type:
-                    continue
                 try:
                     instance_cap = (
                         fields.Architecture.canonicalize(g.arch),
@@ -6372,7 +6365,7 @@ class LibvirtDriver(driver.ComputeDriver):
             rp_name = allocated_rp.name
             # There can be multiple roots, we need to find the root name
             # to guess the physical device name
-            roots = self.provider_tree.roots
+            roots = list(self.provider_tree.roots)
             for root in roots:
                 if rp_name.startswith(root.name + '_'):
                     # The RP name convention is :
@@ -6380,10 +6373,11 @@ class LibvirtDriver(driver.ComputeDriver):
                     parent_device = rp_name[len(root.name) + 1:]
                     break
             else:
-                LOG.warning("pGPU device name %(name)s can't be guessed from "
-                            "the ProviderTree "
-                            "roots %(roots)s", {'name': rp_name,
-                                                 'roots': roots})
+                LOG.warning(
+                    "pGPU device name %(name)s can't be guessed from the "
+                    "ProviderTree roots %(roots)s",
+                    {'name': rp_name,
+                     'roots': ', '.join([root.name for root in roots])})
                 # We f... have no idea what was the parent device
                 # If we can't find devices having available VGPUs, just raise
                 raise exception.ComputeResourcesUnavailable(
@@ -8345,6 +8339,26 @@ class LibvirtDriver(driver.ComputeDriver):
             image.cache(fetch_func=copy_from_host, size=size,
                         filename=filename)
 
+        # NOTE(lyarwood): If the instance vm_state is shelved offloaded then we
+        # must be unshelving for _try_fetch_image_cache to be called.
+        if instance.vm_state == vm_states.SHELVED_OFFLOADED:
+            # NOTE(lyarwood): When using the rbd imagebackend the call to cache
+            # above will attempt to clone from the shelved snapshot in Glance
+            # if available from this compute. We then need to flatten the
+            # resulting image to avoid it still referencing and ultimately
+            # blocking the removal of the shelved snapshot at the end of the
+            # unshelve. This is a no-op for all but the rbd imagebackend.
+            try:
+                image.flatten()
+                LOG.debug('Image %s flattened successfully while unshelving '
+                          'instance.', image.path, instance=instance)
+            except NotImplementedError:
+                # NOTE(lyarwood): There's an argument to be made for logging
+                # our inability to call flatten here, however given this isn't
+                # implemented for most of the backends it may do more harm than
+                # good, concerning operators etc so for now just pass.
+                pass
+
     def _create_images_and_backing(self, context, instance, instance_dir,
                                    disk_info, fallback_from_host=None):
         """:param context: security context
@@ -9023,9 +9037,24 @@ class LibvirtDriver(driver.ComputeDriver):
         xml = self._get_guest_xml(context, instance, network_info, disk_info,
                                   instance.image_meta,
                                   block_device_info=block_device_info)
-        self._create_domain_and_network(context, xml, instance, network_info,
-                                        block_device_info=block_device_info,
-                                        power_on=power_on)
+        # NOTE(artom) In some Neutron or port configurations we've already
+        # waited for vif-plugged events in the compute manager's
+        # _finish_revert_resize_network_migrate_finish(), right after updating
+        # the port binding. For any ports not covered by those "bind-time"
+        # events, we wait for "plug-time" events here.
+        # TODO(artom) This DB lookup is done for backportability. A subsequent
+        # patch will remove it and change the finish_revert_migration() method
+        # signature to pass is the migration object.
+        migration = objects.Migration.get_by_id_and_instance(
+            context, instance.migration_context.migration_id, instance.uuid)
+        events = network_info.get_plug_time_events(migration)
+        if events:
+            LOG.debug('Instance is using plug-time events: %s', events,
+                      instance=instance)
+        self._create_domain_and_network(
+            context, xml, instance, network_info,
+            block_device_info=block_device_info, power_on=power_on,
+            external_events=events)
 
         if power_on:
             timer = loopingcall.FixedIntervalLoopingCall(

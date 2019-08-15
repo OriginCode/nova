@@ -407,6 +407,11 @@ class TestInstanceNotificationSample(
             # Ensure that instance is in active state after an action
             self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
 
+            # if the test step did not raised then we consider the step as
+            # succeeded. We drop the logs to avoid causing subunit parser
+            # errors due to logging too much at the end of the test case.
+            self.stdlog.delete_stored_logs()
+
     def test_create_delete_server(self):
         fake_trusted_certs = ['cert-id-1', 'cert-id-2']
         server = self._boot_a_server(
@@ -836,6 +841,7 @@ class TestInstanceNotificationSample(
 
         self.api.post_server_action(server['id'], {'unshelve': None})
         self._wait_for_state_change(self.api, server, 'ACTIVE')
+        self._wait_for_notification('instance.unshelve.end')
 
     def _test_unshelve_server(self, server):
         # setting the shelved_offload_time to 0 should set the
@@ -853,6 +859,7 @@ class TestInstanceNotificationSample(
         post = {'unshelve': None}
         self.api.post_server_action(server['id'], post)
         self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
+        self._wait_for_notification('instance.unshelve.end')
         self.assertEqual(9, len(fake_notifier.VERSIONED_NOTIFICATIONS))
         self._verify_notification(
             'instance-unshelve-start',

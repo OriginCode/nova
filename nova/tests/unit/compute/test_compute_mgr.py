@@ -1172,8 +1172,9 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
             mock_finish.assert_called_once_with(self.context, instance,
                                                 [], [], power_on)
             mock_save.assert_called_once_with()
-            mock_get_info.assert_has_calls([mock.call(instance),
-                                            mock.call(instance)])
+            mock_get_info.assert_has_calls(
+                [mock.call(instance, use_cache=False),
+                 mock.call(instance, use_cache=False)])
         self.assertIsNone(instance.task_state)
 
     def test_init_instance_reverts_crashed_migration_from_active(self):
@@ -1644,6 +1645,20 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
             call = mock.call(self.context, instance, True)
             self.compute.stop_instance.assert_has_calls([call])
             self.assertIsNone(init_return)
+
+    def test_get_power_state(self):
+        instance = objects.Instance(self.context)
+        instance.uuid = uuids.instance
+        instance.id = 1
+        instance.vm_state = vm_states.STOPPED
+        instance.task_state = None
+        instance.host = self.compute.host
+        with mock.patch.object(self.compute.driver, 'get_info') as mock_info:
+            mock_info.return_value = hardware.InstanceInfo(
+                state=power_state.SHUTDOWN)
+            res = self.compute._get_power_state(self.context, instance)
+            mock_info.assert_called_once_with(instance, use_cache=False)
+            self.assertEqual(res, power_state.SHUTDOWN)
 
     @mock.patch('nova.objects.InstanceList.get_by_filters')
     def test_get_instances_on_driver(self, mock_instance_list):
@@ -4058,15 +4073,16 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
         instance = fake_instance.fake_instance_obj(self.context)
 
         def do_test():
-            with self.compute._error_out_instance_on_exception(self.context,
-                                                               instance):
+            with self.compute._error_out_instance_on_exception(
+                    self.context, instance, instance_state=vm_states.STOPPED):
                 raise exception.InstanceFaultRollback(
                     inner_exception=test.TestingException('test'))
 
         self.assertRaises(test.TestingException, do_test)
+        # The vm_state should be set to the instance_state parameter.
         inst_update_mock.assert_called_once_with(
             self.context, instance,
-            vm_state=vm_states.ACTIVE, task_state=None)
+            vm_state=vm_states.STOPPED, task_state=None)
 
     @mock.patch('nova.compute.manager.ComputeManager.'
                 '_set_instance_obj_error_state')
@@ -4860,6 +4876,39 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
         mock_delete_instance.assert_called_once_with(
             self.context, instance, bdms)
 
+    @mock.patch('nova.context.RequestContext.elevated')
+    def test_terminate_instance_no_network_info(self, mock_elevated):
+        # Tests that we refresh the network info if it was empty
+        instance = fake_instance.fake_instance_obj(
+            self.context, vm_state=vm_states.ACTIVE)
+        empty_nw_info = network_model.NetworkInfo()
+        instance.info_cache = objects.InstanceInfoCache(
+            network_info=empty_nw_info)
+        vif = fake_network_cache_model.new_vif()
+        nw_info = network_model.NetworkInfo([vif])
+        bdms = objects.BlockDeviceMappingList()
+        elevated = context.get_admin_context()
+        mock_elevated.return_value = elevated
+
+        # Call shutdown instance
+        with test.nested(
+            mock.patch.object(self.compute.network_api, 'get_instance_nw_info',
+                              return_value=nw_info),
+            mock.patch.object(self.compute, '_get_instance_block_device_info'),
+            mock.patch.object(self.compute.driver, 'destroy')
+        ) as (
+            mock_nw_api_info, mock_get_bdi, mock_destroy
+        ):
+            self.compute._shutdown_instance(self.context, instance, bdms,
+                notify=False, try_deallocate_networks=False)
+
+        # Verify
+        mock_nw_api_info.assert_called_once_with(elevated, instance)
+        mock_get_bdi.assert_called_once_with(elevated, instance, bdms=bdms)
+        # destroy should have been called with the refresh network_info
+        mock_destroy.assert_called_once_with(
+            elevated, instance, nw_info, mock_get_bdi.return_value)
+
     @mock.patch('nova.compute.utils.notify_about_instance_action')
     @mock.patch.object(nova.compute.manager.ComputeManager,
                        '_notify_about_instance_usage')
@@ -5038,6 +5087,97 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
                 self.compute._notify_volume_usage_detach(
                     self.context, fake_instance, fake_bdm)
         block_stats.assert_called_once_with(fake_instance, 'vda')
+
+    def _test_finish_revert_resize_network_migrate_finish(
+            self, vifs, events, migration=None):
+        instance = fake_instance.fake_instance_obj(self.context)
+        instance.info_cache = objects.InstanceInfoCache(
+            network_info=network_model.NetworkInfo(vifs))
+        if migration is None:
+            migration = objects.Migration(
+                source_compute='fake-source',
+                dest_compute='fake-dest')
+
+        def fake_migrate_instance_finish(context, instance, migration):
+            # NOTE(artom) This looks weird, but it's checking that the
+            # temporaty_mutation() context manager did its job.
+            self.assertEqual(migration.dest_compute, migration.source_compute)
+
+        with test.nested(
+            mock.patch.object(self.compute.virtapi,
+                              'wait_for_instance_event'),
+            mock.patch.object(self.compute.network_api,
+                              'migrate_instance_finish',
+                              side_effect=fake_migrate_instance_finish)
+        ) as (mock_wait, mock_migrate_instance_finish):
+            self.compute._finish_revert_resize_network_migrate_finish(
+                self.context, instance, migration)
+            mock_wait.assert_called_once_with(
+                instance, events, deadline=CONF.vif_plugging_timeout,
+                error_callback=self.compute._neutron_failed_migration_callback)
+            mock_migrate_instance_finish.assert_called_once_with(
+                self.context, instance, migration)
+
+    def test_finish_revert_resize_network_migrate_finish_wait(self):
+        """Test that we wait for bind-time events if we have a hybrid-plugged
+        VIF.
+        """
+        self._test_finish_revert_resize_network_migrate_finish(
+            [network_model.VIF(id=uuids.hybrid_vif,
+                               details={'ovs_hybrid_plug': True}),
+             network_model.VIF(id=uuids.normal_vif,
+                               details={'ovs_hybrid_plug': False})],
+            [('network-vif-plugged', uuids.hybrid_vif)])
+
+    def test_finish_revert_resize_network_migrate_finish_same_host(self):
+        """Test that we're not waiting for any events if its a same host
+        resize revert.
+        """
+        migration = objects.Migration(
+            source_compute='fake-source', dest_compute='fake-source')
+
+        self._test_finish_revert_resize_network_migrate_finish(
+            [network_model.VIF(id=uuids.hybrid_vif,
+                               details={'ovs_hybrid_plug': True}),
+             network_model.VIF(id=uuids.normal_vif,
+                               details={'ovs_hybrid_plug': False})],
+            [], migration=migration
+        )
+
+    def test_finish_revert_resize_network_migrate_finish_dont_wait(self):
+        """Test that we're not waiting for any events if we don't have any
+        hybrid-plugged VIFs.
+        """
+        self._test_finish_revert_resize_network_migrate_finish(
+            [network_model.VIF(id=uuids.hybrid_vif,
+                               details={'ovs_hybrid_plug': False}),
+             network_model.VIF(id=uuids.normal_vif,
+                               details={'ovs_hybrid_plug': False})],
+            [])
+
+    def test_finish_revert_resize_network_migrate_finish_no_vif_timeout(self):
+        """Test that we're not waiting for any events if vif_plugging_timeout
+        is 0.
+        """
+        self.flags(vif_plugging_timeout=0)
+        self._test_finish_revert_resize_network_migrate_finish(
+            [network_model.VIF(id=uuids.hybrid_vif,
+                               details={'ovs_hybrid_plug': True}),
+             network_model.VIF(id=uuids.normal_vif,
+                               details={'ovs_hybrid_plug': True})],
+            [])
+
+    @mock.patch.object(utils, 'is_neutron', return_value=False)
+    def test_finish_revert_resize_network_migrate_finish_not_neutron(self, _):
+        """Test that we're not waiting for any events if we're not using
+        Neutron.
+        """
+        self._test_finish_revert_resize_network_migrate_finish(
+            [network_model.VIF(id=uuids.hybrid_vif,
+                               details={'ovs_hybrid_plug': True}),
+             network_model.VIF(id=uuids.normal_vif,
+                               details={'ovs_hybrid_plug': True})],
+            [])
 
 
 class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
@@ -8815,6 +8955,68 @@ class ComputeManagerMigrationTestCase(test.NoDBTestCase,
                           'end', flavor)])
 
         doit()
+
+    def test_prep_resize_fails_unable_to_migrate_to_self(self):
+        """Asserts that _prep_resize handles UnableToMigrateToSelf when
+        _prep_resize is called on the host on which the instance lives and
+        the flavor is not changing.
+        """
+        instance = fake_instance.fake_instance_obj(
+            self.context, host=self.compute.host,
+            expected_attrs=['system_metadata', 'flavor'])
+        migration = mock.MagicMock(spec='nova.objects.Migration')
+        with mock.patch.dict(self.compute.driver.capabilities,
+                             {'supports_migrate_to_same_host': False}):
+            ex = self.assertRaises(
+                exception.InstanceFaultRollback, self.compute._prep_resize,
+                self.context, instance.image_meta, instance, instance.flavor,
+                filter_properties={}, node=instance.node, migration=migration)
+        self.assertIsInstance(
+            ex.inner_exception, exception.UnableToMigrateToSelf)
+
+    @mock.patch('nova.compute.utils.notify_usage_exists')
+    @mock.patch('nova.compute.manager.ComputeManager.'
+                '_notify_about_instance_usage')
+    @mock.patch('nova.compute.utils.notify_about_resize_prep_instance')
+    @mock.patch('nova.objects.Instance.save')
+    @mock.patch('nova.compute.manager.ComputeManager._revert_allocation')
+    @mock.patch('nova.compute.manager.ComputeManager.'
+                '_reschedule_resize_or_reraise')
+    @mock.patch('nova.compute.utils.add_instance_fault_from_exc')
+    def test_prep_resize_fails_rollback(
+            self, add_instance_fault_from_exc, _reschedule_resize_or_reraise,
+            _revert_allocation, mock_instance_save,
+            notify_about_resize_prep_instance, _notify_about_instance_usage,
+            notify_usage_exists):
+        """Tests that if _prep_resize raises InstanceFaultRollback, the
+        instance.vm_state is reset properly in _error_out_instance_on_exception
+        """
+        instance = fake_instance.fake_instance_obj(
+            self.context, host=self.compute.host, vm_state=vm_states.STOPPED,
+            expected_attrs=['system_metadata', 'flavor'])
+        migration = mock.MagicMock(spec='nova.objects.Migration')
+        request_spec = mock.MagicMock(spec='nova.objects.RequestSpec')
+        ex = exception.InstanceFaultRollback(
+            inner_exception=exception.UnableToMigrateToSelf(
+                instance_id=instance.uuid, host=instance.host))
+
+        def fake_reschedule_resize_or_reraise(*args, **kwargs):
+            raise ex
+
+        _reschedule_resize_or_reraise.side_effect = (
+            fake_reschedule_resize_or_reraise)
+
+        with mock.patch.object(self.compute, '_prep_resize', side_effect=ex):
+            self.assertRaises(
+                # _error_out_instance_on_exception should reraise the
+                # UnableToMigrateToSelf inside InstanceFaultRollback.
+                exception.UnableToMigrateToSelf, self.compute.prep_resize,
+                self.context, instance.image_meta, instance, instance.flavor,
+                request_spec, filter_properties={}, node=instance.node,
+                clean_shutdown=True, migration=migration, host_list=[])
+        # The instance.vm_state should remain unchanged
+        # (_error_out_instance_on_exception will set to ACTIVE by default).
+        self.assertEqual(vm_states.STOPPED, instance.vm_state)
 
     def test_get_updated_nw_info_with_pci_mapping(self):
         old_dev = objects.PciDevice(address='0000:04:00.2')

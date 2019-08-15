@@ -1580,6 +1580,33 @@ class TestUpdateComputeNode(BaseTestCase):
         # The retry is restricted to _update_to_placement
         self.assertEqual(1, mock_resource_change.call_count)
 
+    def test_update_compute_node_save_fails_restores_old_resources(self):
+        """Tests the scenario that compute_node.save() fails and the
+        old_resources value for the node is restored to its previous value
+        before calling _resource_change updated it.
+        """
+        self._setup_rt()
+        orig_compute = _COMPUTE_NODE_FIXTURES[0].obj_clone()
+        # Pretend the ComputeNode was just created in the DB but not yet saved
+        # with the free_disk_gb field.
+        delattr(orig_compute, 'free_disk_gb')
+        nodename = orig_compute.hypervisor_hostname
+        self.rt.old_resources[nodename] = orig_compute
+        # Now have an updated compute node with free_disk_gb set which should
+        # make _resource_change modify old_resources and return True.
+        updated_compute = _COMPUTE_NODE_FIXTURES[0].obj_clone()
+        ctxt = context.get_admin_context()
+        # Mock ComputeNode.save() to trigger some failure (realistically this
+        # could be a DBConnectionError).
+        with mock.patch.object(updated_compute, 'save',
+                               side_effect=test.TestingException('db error')):
+            self.assertRaises(test.TestingException,
+                              self.rt._update,
+                              ctxt, updated_compute, startup=True)
+        # Make sure that the old_resources entry for the node has not changed
+        # from the original.
+        self.assertTrue(self.rt._resource_change(updated_compute))
+
     def test_copy_resources_no_update_allocation_ratios(self):
         """Tests that a ComputeNode object's allocation ratio fields are
         not set if the configured allocation ratio values are default None.
@@ -2746,6 +2773,29 @@ class TestUpdateUsageFromMigration(test.NoDBTestCase):
                                         migration,
                                         _NODENAME)
         self.assertFalse(get_mock.called)
+
+    def test_missing_old_flavor_outbound_resize(self):
+        """Tests the case that an instance is not being tracked on the source
+        host because it has been resized to a dest host. The confirm_resize
+        operation in ComputeManager sets instance.old_flavor to None before
+        the migration.status is changed to "confirmed" so the source compute
+        RT considers it an in-progress migration and tries to update tracked
+        usage from the instance.old_flavor (which is None when
+        _update_usage_from_migration runs). This test just makes sure that the
+        RT method gracefully handles the instance.old_flavor being gone.
+        """
+        migration = _MIGRATION_FIXTURES['source-only']
+        rt = resource_tracker.ResourceTracker(
+            migration.source_compute, mock.sentinel.virt_driver)
+        ctxt = context.get_admin_context()
+        instance = objects.Instance(
+            uuid=migration.instance_uuid, old_flavor=None,
+            migration_context=objects.MigrationContext())
+        rt._update_usage_from_migration(
+            ctxt, instance, migration, migration.source_node)
+        self.assertNotIn('Starting to track outgoing migration',
+                         self.stdlog.logger.output)
+        self.assertNotIn(migration.instance_uuid, rt.tracked_migrations)
 
 
 class TestUpdateUsageFromMigrations(BaseTestCase):

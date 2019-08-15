@@ -1289,7 +1289,7 @@ class ComputeManager(manager.Manager):
         """Retrieve the power state for the given instance."""
         LOG.debug('Checking state', instance=instance)
         try:
-            return self.driver.get_info(instance).state
+            return self.driver.get_info(instance, use_cache=False).state
         except exception.InstanceNotFound:
             return power_state.NOSTATE
 
@@ -2614,6 +2614,12 @@ class ComputeManager(manager.Manager):
                     phase=fields.NotificationPhase.START, bdms=bdms)
 
         network_info = instance.get_network_info()
+
+        # NOTE(arnaudmorin) to avoid nova destroying the instance without
+        # unplugging the interface, refresh network_info if it is empty.
+        if not network_info:
+            network_info = self.network_api.get_instance_nw_info(
+                context, instance)
 
         # NOTE(vish) get bdms before destroying the instance
         vol_bdms = [bdm for bdm in bdms if bdm.is_volume]
@@ -4202,6 +4208,49 @@ class ComputeManager(manager.Manager):
             self.compute_rpcapi.finish_revert_resize(context, instance,
                     migration, migration.source_compute)
 
+    def _finish_revert_resize_network_migrate_finish(self, context, instance,
+                                                     migration):
+        """Causes port binding to be updated. In some Neutron or port
+        configurations - see NetworkModel.get_bind_time_events() - we
+        expect the vif-plugged event from Neutron immediately and wait for it.
+        The rest of the time, the event is expected further along in the
+        virt driver, so we don't wait here.
+
+        :param context: The request context.
+        :param instance: The instance undergoing the revert resize.
+        :param migration: The Migration object of the resize being reverted.
+        :raises: eventlet.timeout.Timeout or
+                 exception.VirtualInterfacePlugException.
+        """
+        network_info = instance.get_network_info()
+        events = []
+        deadline = CONF.vif_plugging_timeout
+        if deadline and utils.is_neutron() and network_info:
+            events = network_info.get_bind_time_events(migration)
+            if events:
+                LOG.debug('Will wait for bind-time events: %s', events)
+        error_cb = self._neutron_failed_migration_callback
+        try:
+            with self.virtapi.wait_for_instance_event(instance, events,
+                                                      deadline=deadline,
+                                                      error_callback=error_cb):
+                # NOTE(hanrong): we need to change migration.dest_compute to
+                # source host temporarily.
+                # "network_api.migrate_instance_finish" will setup the network
+                # for the instance on the destination host. For revert resize,
+                # the instance will back to the source host, the setup of the
+                # network for instance should be on the source host. So set
+                # the migration.dest_compute to source host at here.
+                with utils.temporary_mutation(
+                        migration, dest_compute=migration.source_compute):
+                    self.network_api.migrate_instance_finish(context,
+                                                             instance,
+                                                             migration)
+        except eventlet.timeout.Timeout:
+            with excutils.save_and_reraise_exception():
+                LOG.error('Timeout waiting for Neutron events: %s', events,
+                          instance=instance)
+
     @wrap_exception()
     @reverts_task_state
     @wrap_instance_event(prefix='compute')
@@ -4249,17 +4298,8 @@ class ComputeManager(manager.Manager):
 
             self.network_api.setup_networks_on_host(context, instance,
                                                     migration.source_compute)
-            # NOTE(hanrong): we need to change migration.dest_compute to
-            # source host temporarily. "network_api.migrate_instance_finish"
-            # will setup the network for the instance on the destination host.
-            # For revert resize, the instance will back to the source host, the
-            # setup of the network for instance should be on the source host.
-            # So set the migration.dest_compute to source host at here.
-            with utils.temporary_mutation(
-                    migration, dest_compute=migration.source_compute):
-                self.network_api.migrate_instance_finish(context,
-                                                         instance,
-                                                         migration)
+            self._finish_revert_resize_network_migrate_finish(
+                context, instance, migration)
             network_info = self.network_api.get_instance_nw_info(context,
                                                                  instance)
 
@@ -4364,8 +4404,12 @@ class ComputeManager(manager.Manager):
             # check driver whether support migrate to same host
             if not self.driver.capabilities.get(
                     'supports_migrate_to_same_host', False):
-                raise exception.UnableToMigrateToSelf(
-                    instance_id=instance.uuid, host=self.host)
+                # Raise InstanceFaultRollback so that the
+                # _error_out_instance_on_exception context manager in
+                # prep_resize will set the instance.vm_state properly.
+                raise exception.InstanceFaultRollback(
+                    inner_exception=exception.UnableToMigrateToSelf(
+                        instance_id=instance.uuid, host=self.host))
 
         # NOTE(danms): Stash the new instance_type to avoid having to
         # look it up in the database later
@@ -4439,8 +4483,13 @@ class ComputeManager(manager.Manager):
         if node is None:
             node = self._get_nodename(instance, refresh=True)
 
-        with self._error_out_instance_on_exception(context, instance), \
-                 errors_out_migration_ctxt(migration):
+        # Pass instance_state=instance.vm_state because we can resize
+        # a STOPPED server and we don't want to set it back to ACTIVE
+        # in case _prep_resize fails.
+        instance_state = instance.vm_state
+        with self._error_out_instance_on_exception(
+                context, instance, instance_state=instance_state),\
+                errors_out_migration_ctxt(migration):
             self._send_prep_resize_notifications(
                 context, instance, fields.NotificationPhase.START,
                 instance_type)
@@ -4776,7 +4825,22 @@ class ComputeManager(manager.Manager):
                                        migration)
         except Exception:
             with excutils.save_and_reraise_exception():
-                self._revert_allocation(context, instance, migration)
+                # At this point, resize_instance (which runs on the source) has
+                # already updated the instance host/node values to point to
+                # this (the dest) compute, so we need to leave the allocations
+                # against the dest node resource provider intact and drop the
+                # allocations against the source node resource provider. If the
+                # user tries to recover the server by hard rebooting it, it
+                # will happen on this host so that's where the allocations
+                # should go. Note that this is the same method called from
+                # confirm_resize to cleanup the source node allocations held
+                # by the migration record.
+                LOG.info('Deleting allocations for old flavor on source node '
+                         '%s after finish_resize failure. You may be able to '
+                         'recover the instance by hard rebooting it.',
+                         migration.source_compute, instance=instance)
+                self._delete_allocation_after_move(
+                    context, instance, migration)
 
     def _finish_resize_helper(self, context, disk_info, image, instance,
                               migration):
@@ -6132,6 +6196,20 @@ class ComputeManager(manager.Manager):
                                     {'port_id': port_id, 'error': ex},
                                     instance=instance)
 
+    # TODO(mriedem): There are likely race failures which can result in
+    # NotFound and QuotaError exceptions getting traced as well.
+    @messaging.expected_exceptions(
+        # Do not log a traceback for user errors. We use Invalid generically
+        # since this method can raise lots of different exceptions:
+        # AttachInterfaceNotSupported
+        # NetworkInterfaceTaggedAttachNotSupported
+        # NetworkAmbiguous
+        # PortNotUsable
+        # PortInUse
+        # PortNotUsableDNS
+        # AttachSRIOVPortNotSupported
+        # NetworksWithQoSPolicyNotSupported
+        exception.Invalid)
     @wrap_exception()
     @wrap_instance_event(prefix='compute')
     @wrap_instance_fault
@@ -6442,8 +6520,8 @@ class ComputeManager(manager.Manager):
         return migrate_data
 
     @staticmethod
-    def _neutron_failed_live_migration_callback(event_name, instance):
-        msg = ('Neutron reported failure during live migration '
+    def _neutron_failed_migration_callback(event_name, instance):
+        msg = ('Neutron reported failure during migration '
                'with %(event)s for instance %(uuid)s')
         msg_args = {'event': event_name, 'uuid': instance.uuid}
         if CONF.vif_plugging_is_fatal:
@@ -6521,7 +6599,7 @@ class ComputeManager(manager.Manager):
                 disk = None
 
             deadline = CONF.vif_plugging_timeout
-            error_cb = self._neutron_failed_live_migration_callback
+            error_cb = self._neutron_failed_migration_callback
             # In order to avoid a race with the vif plugging that the virt
             # driver does on the destination host, we register our events
             # to wait for before calling pre_live_migration. Then if the
@@ -8251,29 +8329,60 @@ class ComputeManager(manager.Manager):
     @contextlib.contextmanager
     def _error_out_instance_on_exception(self, context, instance,
                                          instance_state=vm_states.ACTIVE):
+        """Context manager to set instance.vm_state after some operation raises
+
+        Used to handle NotImplementedError and InstanceFaultRollback errors
+        and reset the instance vm_state and task_state. The vm_state is set
+        to the $instance_state parameter and task_state is set to None.
+        For all other types of exceptions, the vm_state is set to ERROR and
+        the task_state is left unchanged (although most callers will have the
+        @reverts_task_state decorator which will set the task_state to None).
+
+        Re-raises the original exception *except* in the case of
+        InstanceFaultRollback in which case the wrapped `inner_exception` is
+        re-raised.
+
+        :param context: The nova auth request context for the operation.
+        :param instance: The instance to update. The vm_state will be set by
+            this context manager when an exception is raised.
+        :param instance_state: For NotImplementedError and
+            InstanceFaultRollback this is the vm_state to set the instance to
+            when handling one of those types of exceptions. By default the
+            instance will be set to ACTIVE, but the caller should control this
+            in case there have been no changes to the running state of the
+            instance. For example, resizing a stopped server where prep_resize
+            fails early and does not change the power state of the guest should
+            not set the instance status to ACTIVE but remain STOPPED.
+            This parameter is ignored for all other types of exceptions and the
+            instance vm_state is set to ERROR.
+        """
+        # NOTE(mriedem): Why doesn't this method just save off the
+        # original instance.vm_state here rather than use a parameter? Or use
+        # instance_state=None as an override but default to the current
+        # vm_state when rolling back.
         instance_uuid = instance.uuid
         try:
             yield
-        except NotImplementedError as error:
-            with excutils.save_and_reraise_exception():
-                LOG.info("Setting instance back to %(state)s after: "
-                         "%(error)s",
+        except (NotImplementedError, exception.InstanceFaultRollback) as error:
+            # Use reraise=False to determine if we want to raise the original
+            # exception or something else.
+            with excutils.save_and_reraise_exception(reraise=False) as ctxt:
+                LOG.info("Setting instance back to %(state)s after: %(error)s",
                          {'state': instance_state, 'error': error},
                          instance_uuid=instance_uuid)
                 self._instance_update(context, instance,
                                       vm_state=instance_state,
                                       task_state=None)
-        except exception.InstanceFaultRollback as error:
-            LOG.info("Setting instance back to ACTIVE after: %s",
-                     error, instance_uuid=instance_uuid)
-            self._instance_update(context, instance,
-                                  vm_state=vm_states.ACTIVE,
-                                  task_state=None)
-            raise error.inner_exception
+                if isinstance(error, exception.InstanceFaultRollback):
+                    # Raise the wrapped exception.
+                    raise error.inner_exception
+                # Else re-raise the NotImplementedError.
+                ctxt.reraise = True
         except Exception:
             LOG.exception('Setting instance vm_state to ERROR',
                           instance_uuid=instance_uuid)
             with excutils.save_and_reraise_exception():
+                # NOTE(mriedem): Why don't we pass clean_task_state=True here?
                 self._set_instance_obj_error_state(context, instance)
 
     @wrap_exception()
