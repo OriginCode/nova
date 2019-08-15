@@ -115,3 +115,4 @@ _Description: Manage placement config through debconf?
  Nova service must contact Placement, and this is configured through
  the [placement] section of the configuration. Specify if you wish
  to handle this configuration through debconf.
+
