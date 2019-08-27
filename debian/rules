@@ -57,7 +57,8 @@ override_dh_install:
 	done
 
 ifeq (,$(findstring nocheck, $(DEB_BUILD_OPTIONS)))
-	pkgos-dh_auto_test --no-py2 'nova\.tests\.unit\.(?!(.*virt.libvirt\.test_driver\.LibvirtConnTestCase\.test_spawn_with_config_drive.*|.*test_wsgi\.TestWSGIServerWithSSL.*|.*virt\.xenapi.*|.*test_hacking\.HackingTestCase.*|.*CreateInstanceTypeTest\.test_name_with_non_printable_characters.*|.*PatternPropertiesTestCase\.test_validate_patternProperties_fails.*))'
+	pkgos-dh_auto_test --no-py2 'nova\.tests\.unit\.(?!(.*virt.libvirt\.test_driver\.LibvirtConnTestCase\.test_spawn_with_config_drive.*|.*test_wsgi\.TestWSGIServerWithSSL.*|.*virt\.xenapi.*|.*test_hacking\.HackingTestCase.*|.*CreateInstanceTypeTest\.test_name_with_non_printable_characters.*|.*PatternPropertiesTestCase\.test_validate_patternProperties_fails.*|.*virt\.libvirt\.test_driver\.LibvirtDriverTestCase\.test_get_disk_xml.*|.*virt\.libvirt\.test_driver\.LibvirtConnTestCase\.test_detach_volume_with_vir_domain_affect_live_flag.*|.*virt\.libvirt\.test_driver\.LibvirtConnTestCase\.test_update_volume_xml.*))'
+
 endif
 
 	rm -rf $(CURDIR)/debian/tmp/usr/etc

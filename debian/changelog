@@ -1,3 +1,12 @@
+nova (2:19.0.2-2) unstable; urgency=medium
+
+  * Black list these until the launchpad bug 1841667 is fixed:
+    - LibvirtDriverTestCase.test_get_disk_xml
+    - LibvirtConnTestCase.test_detach_volume_with_vir_domain_affect_live_flag
+    - LibvirtConnTestCase.test_update_volume_xml
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 27 Aug 2019 22:42:06 +0200
+
 nova (2:19.0.2-1) unstable; urgency=medium
 
   * New upstream version
