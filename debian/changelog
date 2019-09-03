@@ -1,3 +1,13 @@
+nova (2:19.0.2-3) UNRELEASED; urgency=medium
+
+  * Switch nova-api and nova-api-metadata to uwsgi.
+    - Add 2 ini files for uwsgi.
+    - Nova-api now carries 2 .init.in files.
+    - Removed debconf template for API selections.
+    - add more dh_installinit overrides.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 03 Sep 2019 10:50:51 +0200
+
 nova (2:19.0.2-2) unstable; urgency=medium
 
   * Black list these until the launchpad bug 1841667 is fixed:

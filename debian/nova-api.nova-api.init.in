@@ -1,0 +1,22 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          nova-api
+# Required-Start:    $network $local_fs $remote_fs $syslog
+# Required-Stop:     $remote_fs
+# Should-Start:      postgresql mysql keystone rabbitmq-server ntp
+# Should-Stop:       postgresql mysql keystone rabbitmq-server ntp
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Nova API server
+# Description:       Frontend Nova API server
+### END INIT INFO
+
+# Author: Julien Danjou <acid@debian.org>
+
+# PATH should only include /usr/* if it runs after the mountnfs.sh script
+DESC="OpenStack Nova API (nova-api)"
+PROJECT_NAME=nova
+NAME=${PROJECT_NAME}-api
+UWSGI_PORT=8774
+UWSGI_INI_PATH=/etc/nova/nova-api-uwsgi.ini
+UWSGI_INI_APP=/usr/bin/nova-api-wsgi

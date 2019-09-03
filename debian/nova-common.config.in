@@ -7,25 +7,6 @@ NOVA_CONF=/etc/nova/nova.conf
 
 #PKGOS-INCLUDE#
 
-set_enabled_apis_multiselect () {
-	local NOVA_APIS NOVA_API MULTISEL_VAL
-	pkgos_inifile get ${NOVA_CONF} DEFAULT enabled_apis
-	if [ -n "${RET}" ] && [ ! "${RET}" = "NOT_FOUND" ] ; then
-		NOVA_APIS=`echo $RET | sed "s/,/ /g"`
-		for NOVA_API in ${NOVA_APIS} ; do
-			if [ -n "${MULTISEL_VAL}" ] ; then
-				MULTISEL_VAL="${MULTISEL_VAL}, "
-			fi
-			MULTISEL_VAL="${MULTISEL_VAL}${NOVA_API}"
-		done
-		if [ -n "${MULTISEL_VAL}" ] ; then
-			db_set nova/active-api ${MULTISEL_VAL}
-		fi
-	fi
-	db_input high nova/active-api || true
-	db_go
-}
-
 manage_nova_my_ip () {
 	pkgos_inifile get ${NOVA_CONF} DEFAULT my_ip
 	if [ -n "${RET}" ] && [ ! "${RET}" = "NOT_FOUND" ] ; then
@@ -92,7 +73,6 @@ pkgos_read_admin_creds ${NOVA_CONF} keystone_authtoken nova
 read_neutron_config
 read_placement_config
 
-set_enabled_apis_multiselect
 manage_nova_my_ip
 
 # Cinder os_region_name config

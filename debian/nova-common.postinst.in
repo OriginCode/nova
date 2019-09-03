@@ -50,16 +50,6 @@ create_placement_user () {
         fi
 }
 
-manage_nova_api_field () {
-	db_get nova/active-api
-	if [ -n "${RET}" ] ; then
-		# We get an answer from a multiselect debconf, so we trim spaces out
-		# before putting it in the config file
-		NOVA_APIS=`echo ${RET} | sed "s/ //g"`
-		pkgos_inifile set ${NOVA_CONF} DEFAULT enabled_apis ${NOVA_APIS}
-	fi
-}
-
 manage_nova_my_ip_field () {
 	db_get nova/my-ip
 	if [ -n "${RET}" ] ; then
@@ -191,7 +181,6 @@ if [ "$1" = "configure" ] || [ "$1" = "reconfigure" ] ; then
 
 	# Tweak config files depending on debconf answers
 	pkgos_rabbit_write_conf /etc/nova/nova.conf oslo_messaging_rabbit nova
-	manage_nova_api_field
 	manage_nova_my_ip_field
 
 	manage_neutron_config

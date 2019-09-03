@@ -1,2 +1,4 @@
 etc/nova/rootwrap.d/api-metadata.filters
 usr/bin/nova-api
+debian/nova-api-uwsgi.ini		/etc/nova
+debian/nova-api-metadata-uwsgi.ini	/etc/nova

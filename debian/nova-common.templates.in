@@ -7,18 +7,6 @@
 # Even minor modifications require translation updates and such
 # changes should be coordinated with translators and reviewers.
 
-Template: nova/active-api
-Type: multiselect
-Choices: osapi_compute, metadata
-_Description: API to activate:
- Openstack Nova supports different API services, each of them binding on a
- different port. Select which one nova-api should support.
- .
- If it is a compute node that you are setting-up, then you only need to run the
- metadata API server. If you run Cinder, then you don't need osapi_volume (you
- cannot run osapi_volume and cinder-api on the same server: they bind on the
- same port).
-
 Template: nova/my-ip
 Type: string
 _Description: Value for my_ip:

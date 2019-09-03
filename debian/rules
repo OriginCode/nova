@@ -185,6 +185,8 @@ override_dh_installmenu:
 	dh_installinit --name=nova-spicehtml5proxy
 	dh_installinit --name=nova-xenvncproxy
 	dh_installinit --name=nova-serialproxy
+	dh_installinit --name=nova-api
+	dh_installinit --name=nova-api-metadata
 	install -D -m 0644 $(CURDIR)/debian/nova-consoleproxy.mydefault $(CURDIR)/debian/nova-consoleproxy/usr/share/nova-consoleproxy/default
 
 override_dh_python3:
