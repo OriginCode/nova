@@ -1,4 +1,4 @@
-nova (2:19.0.2-3) UNRELEASED; urgency=medium
+nova (2:19.0.2-3) unstable; urgency=medium
 
   * Switch nova-api and nova-api-metadata to uwsgi.
     - Add 2 ini files for uwsgi.
