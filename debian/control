@@ -135,6 +135,8 @@ Depends:
  debconf,
  iptables,
  nova-common (= ${binary:Version}),
+ python3-pastescript,
+ uwsgi-plugin-python3,
  ${misc:Depends},
  ${ostack-lsb-base},
  ${python3:Depends},

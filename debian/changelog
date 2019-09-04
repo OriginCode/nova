@@ -5,6 +5,8 @@ nova (2:19.0.2-3) UNRELEASED; urgency=medium
     - Nova-api now carries 2 .init.in files.
     - Removed debconf template for API selections.
     - add more dh_installinit overrides.
+    - add python3-pastescript and uwsgi-plugin-python3 as depends.
+
 
  -- Thomas Goirand <zigo@debian.org>  Tue, 03 Sep 2019 10:50:51 +0200
 
