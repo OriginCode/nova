@@ -215,7 +215,7 @@ Depends:
  adduser,
  conntrack,
  curl,
- dmidecode,
+ dmidecode [amd64 i386],
  ebtables,
  fdisk | util-linux (<< 2.29.2-3~),
  gawk,

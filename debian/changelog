@@ -1,3 +1,9 @@
+nova (2:19.0.2-4) unstable; urgency=medium
+
+  * Set dmidecode as depends only for amd64 and i386.
+
+ -- Thomas Goirand <zigo@debian.org>  Fri, 13 Sep 2019 13:28:11 +0200
+
 nova (2:19.0.2-3) unstable; urgency=medium
 
   * Switch nova-api and nova-api-metadata to uwsgi.
