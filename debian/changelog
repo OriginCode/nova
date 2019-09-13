@@ -1,6 +1,7 @@
 nova (2:19.0.2-4) unstable; urgency=medium
 
-  * Set dmidecode as depends only for amd64, i386 and arm64.
+  * Set dmidecode as recommends only, because it's not available on all
+    platforms.
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 13 Sep 2019 13:28:11 +0200
 
