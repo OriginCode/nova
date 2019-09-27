@@ -2,6 +2,7 @@ nova (2:20.0.0~rc1-1) UNRELEASED; urgency=medium
 
   * New upstream release.
   * Fixed (build-)depends for this release.
+  * Refreshed remove-crashing-blockdiag-doc-line.patch.
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 27 Sep 2019 12:17:18 +0200
 
