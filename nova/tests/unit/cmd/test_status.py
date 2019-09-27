@@ -35,10 +35,10 @@ from requests import models
 from nova.cmd import status
 import nova.conf
 from nova import context
+from nova import exception
 # NOTE(mriedem): We only use objects as a convenience to populate the database
 # in the tests, we don't use them in the actual CLI.
 from nova import objects
-from nova.scheduler import utils as scheduler_utils
 from nova import test
 from nova.tests import fixtures as nova_fixtures
 
@@ -509,282 +509,40 @@ class TestUpgradeCheckIronicFlavorMigration(test.NoDBTestCase):
             result.details)
 
 
-def _create_minimal_request_spec(ctxt, instance):
-    request_spec = objects.RequestSpec.from_components(
-        ctxt, instance.uuid, instance.image_meta,
-        instance.flavor, instance.numa_topology,
-        instance.pci_requests,
-        {}, None, instance.availability_zone,
-        project_id=instance.project_id,
-        user_id=instance.user_id
-    )
-    scheduler_utils.setup_instance_group(ctxt, request_spec)
-    request_spec.create()
-
-
-class TestUpgradeCheckRequestSpecMigration(test.NoDBTestCase):
-    """Tests for the nova-status upgrade check for request spec migration."""
-
-    # We'll setup the database ourselves because we need to use cells fixtures
-    # for multiple cell mappings.
-    USES_DB_SELF = True
-
-    # This will create three cell mappings: cell0, cell1 (default) and cell2
-    NUMBER_OF_CELLS = 2
+class TestUpgradeCheckCinderAPI(test.NoDBTestCase):
 
     def setUp(self):
-        super(TestUpgradeCheckRequestSpecMigration, self).setUp()
-        self.output = StringIO()
-        self.useFixture(fixtures.MonkeyPatch('sys.stdout', self.output))
-        # We always need the API DB to be setup.
-        self.useFixture(nova_fixtures.Database(database='api'))
+        super(TestUpgradeCheckCinderAPI, self).setUp()
         self.cmd = status.UpgradeCommands()
 
-    @staticmethod
-    def _create_instance_in_cell(ctxt, cell, is_deleted=False,
-                                 create_request_spec=False):
-        with context.target_cell(ctxt, cell) as cctxt:
-            inst = objects.Instance(
-                context=cctxt,
-                uuid=uuidutils.generate_uuid())
-            inst.create()
+    def test_cinder_not_configured(self):
+        self.flags(auth_type=None, group='cinder')
+        self.assertEqual(upgradecheck.Code.SUCCESS,
+                         self.cmd._check_cinder().code)
 
-            if is_deleted:
-                inst.destroy()
-
-        if create_request_spec:
-            # Fake out some fields in the Instance so we don't lazy-load them.
-            inst.flavor = objects.Flavor()
-            inst.numa_topology = None
-            inst.system_metadata = {}
-            inst.pci_requests = None
-            inst.project_id = 'fake-project'
-            inst.user_id = 'fake-user'
-            _create_minimal_request_spec(ctxt, inst)
-
-        return inst
-
-    def test_fresh_install_no_cell_mappings(self):
-        """Tests the scenario where we don't have any cell mappings (no cells
-        v2 setup yet) so we don't know what state we're in and we return a
-        warning.
-        """
-        result = self.cmd._check_request_spec_migration()
-        self.assertEqual(upgradecheck.Code.WARNING, result.code)
-        self.assertIn('Unable to determine request spec migrations without '
-                      'cell mappings.', result.details)
-
-    def test_deleted_instance_one_cell_migrated_other_success(self):
-        """Tests the scenario that we have two cells, one has only a single
-        deleted instance in it and the other has a single already-migrated
-        instance in it, so the overall result is success.
-        """
-        self._setup_cells()
-        ctxt = context.get_admin_context()
-
-        # Create a deleted instance in cell1.
-        self._create_instance_in_cell(
-            ctxt, self.cell_mappings['cell1'], is_deleted=True)
-
-        # Create a migrated instance in cell2.
-        self._create_instance_in_cell(
-            ctxt, self.cell_mappings['cell2'], create_request_spec=True)
-
-        result = self.cmd._check_request_spec_migration()
-        self.assertEqual(upgradecheck.Code.SUCCESS, result.code)
-
-    def test_unmigrated_request_spec_instances(self):
-        """Tests the scenario that we have a migrated instance in cell1 and
-        an unmigrated instance in cell2 so the check fails.
-        """
-        self._setup_cells()
-        ctxt = context.get_admin_context()
-
-        # Create a migrated instance in cell1.
-        self._create_instance_in_cell(
-            ctxt, self.cell_mappings['cell1'], create_request_spec=True)
-
-        # Create an unmigrated instance in cell2.
-        self._create_instance_in_cell(ctxt, self.cell_mappings['cell2'])
-
-        result = self.cmd._check_request_spec_migration()
+    @mock.patch('nova.volume.cinder.is_microversion_supported',
+                side_effect=exception.CinderAPIVersionNotAvailable(
+                    version='3.44'))
+    def test_microversion_not_available(self, mock_version_check):
+        self.flags(auth_type='password', group='cinder')
+        result = self.cmd._check_cinder()
+        mock_version_check.assert_called_once()
         self.assertEqual(upgradecheck.Code.FAILURE, result.code)
-        self.assertIn("The following cells have instances which do not have "
-                      "matching request_specs in the API database: %s Run "
-                      "'nova-manage db online_data_migrations' on each cell "
-                      "to create the missing request specs." %
-                      self.cell_mappings['cell2'].uuid, result.details)
-
-
-class TestUpgradeCheckConsoles(test.NoDBTestCase):
-    """Tests for the nova-status upgrade check for consoles."""
-
-    # We'll setup the database ourselves because we need to use cells fixtures
-    # for multiple cell mappings.
-    USES_DB_SELF = True
-
-    # This will create three cell mappings: cell0, cell1 (default) and cell2
-    NUMBER_OF_CELLS = 2
-
-    def setUp(self):
-        super(TestUpgradeCheckConsoles, self).setUp()
-        self.output = StringIO()
-        self.useFixture(fixtures.MonkeyPatch('sys.stdout', self.output))
-        # We always need the API DB to be setup.
-        self.useFixture(nova_fixtures.Database(database='api'))
-        self.cmd = status.UpgradeCommands()
-
-    @staticmethod
-    def _create_service_in_cell(ctxt, cell, binary, is_deleted=False,
-                                disabled=False, version=None,
-                                create_token_auth=False):
-        with context.target_cell(ctxt, cell) as cctxt:
-            service = objects.Service(context=cctxt, binary=binary,
-                                      disabled=disabled, host='dontcare')
-            if version:
-                service.version = version
-            service.create()
-
-            if is_deleted:
-                service.destroy()
-
-            if create_token_auth:
-                # We have to create an instance in order to create a token
-                # auth.
-                inst = objects.Instance(context=cctxt,
-                                        uuid=uuidutils.generate_uuid())
-                inst.create()
-                auth = objects.ConsoleAuthToken(context=cctxt,
-                                                console_type='novnc',
-                                                host='hostname', port=6080,
-                                                instance_uuid=inst.uuid)
-                auth.authorize(CONF.consoleauth.token_ttl)
-
-        return service
-
-    def test_check_cells_v1_enabled(self):
-        """This is a 'success' case since the console auths check is
-        ignored when running cells v1.
-        """
-        self.flags(enable=True, group='cells')
-        result = self.cmd._check_console_auths()
-        self.assertEqual(upgradecheck.Code.SUCCESS, result.code)
-
-    def test_check_workaround_enabled(self):
-        """This is a 'success' case since the console auths check is
-        ignored when the workaround is already enabled.
-        """
-        self.flags(enable_consoleauth=True, group='workarounds')
-        result = self.cmd._check_console_auths()
-        self.assertEqual(upgradecheck.Code.SUCCESS, result.code)
-
-    def test_deleted_disabled_consoleauth(self):
-        """Tests that services other than nova-consoleauth and deleted/disabled
-        nova-consoleauth services are filtered out.
-        """
-        self._setup_cells()
-        ctxt = context.get_admin_context()
-
-        # Create a compute service in cell1.
-        self._create_service_in_cell(ctxt, self.cell_mappings['cell1'],
-                                     'nova-compute')
-        # Create a deleted consoleauth service in cell1.
-        self._create_service_in_cell(ctxt, self.cell_mappings['cell1'],
-                                     'nova-consoleauth', is_deleted=True)
-        # Create a compute service in cell2.
-        self._create_service_in_cell(ctxt, self.cell_mappings['cell2'],
-                                     'nova-compute')
-        # Create a disabled consoleauth service in cell2.
-        self._create_service_in_cell(ctxt, self.cell_mappings['cell2'],
-                                     'nova-consoleauth', disabled=True)
-
-        result = self.cmd._check_console_auths()
-        self.assertEqual(upgradecheck.Code.SUCCESS, result.code)
-
-    def test_consoleauth_with_upgrade_not_started(self):
-        """Tests the scenario where the deployment is using consoles but has no
-        compute services >= Rocky, i.e. a not started upgrade.
-        """
-        self._setup_cells()
-        ctxt = context.get_admin_context()
-
-        # Create a deleted consoleauth service in cell1.
-        self._create_service_in_cell(ctxt, self.cell_mappings['cell1'],
-                                     'nova-consoleauth', is_deleted=True)
-        # Create a live consoleauth service in cell0. (Asserts we check cell0).
-        self._create_service_in_cell(ctxt, self.cell_mappings['cell0'],
-                                     'nova-consoleauth')
-        # Create Queens compute services in the cells.
-        for cell in ['cell1', 'cell2']:
-            self._create_service_in_cell(ctxt, self.cell_mappings[cell],
-                                         'nova-compute', version=30)
-
-        result = self.cmd._check_console_auths()
-        self.assertEqual(upgradecheck.Code.WARNING, result.code)
-
-    def test_consoleauth_with_upgrade_complete(self):
-        """Tests the scenario where the deployment is using consoles and has
-        all compute services >= Rocky in every cell database, i.e. a completed
-        upgrade.
-        """
-        self._setup_cells()
-        ctxt = context.get_admin_context()
-
-        # Create a live consoleauth service in cell1 with token auth.
-        self._create_service_in_cell(ctxt, self.cell_mappings['cell1'],
-                                     'nova-consoleauth',
-                                     create_token_auth=True)
-
-        # Create a live consoleauth service in cell2 with token auth.
-        self._create_service_in_cell(ctxt, self.cell_mappings['cell2'],
-                                     'nova-consoleauth',
-                                     create_token_auth=True)
-
-        # Create Rocky compute services in the cells.
-        for cell in ['cell1', 'cell2']:
-            self._create_service_in_cell(ctxt, self.cell_mappings[cell],
-                                         'nova-compute', version=35)
-
-        # Create a Queens compute service in cell0. This not actually valid,
-        # we do it to assert that we skip cell0 when checking service versions.
-        self._create_service_in_cell(ctxt, self.cell_mappings['cell0'],
-                                     'nova-compute', version=30)
-
-        result = self.cmd._check_console_auths()
-        self.assertEqual(upgradecheck.Code.SUCCESS, result.code)
-
-    def test_consoleauth_with_upgrade_partial(self):
-        """Tests the scenario where the deployment is using consoles and has
-        compute services >= Rocky in at least one, but not all, cell databases,
-        i.e. a partial upgrade.
-        """
-        self._setup_cells()
-        ctxt = context.get_admin_context()
-
-        # Create a live consoleauth service in cell1.
-        self._create_service_in_cell(ctxt, self.cell_mappings['cell1'],
-                                     'nova-consoleauth')
-
-        # Create a live consoleauth service in cell2 with token auth.
-        self._create_service_in_cell(ctxt, self.cell_mappings['cell2'],
-                                     'nova-consoleauth',
-                                     create_token_auth=True)
-
-        # Create a Queens compute service in cell1.
-        self._create_service_in_cell(ctxt, self.cell_mappings['cell1'],
-                                     'nova-compute', version=30)
-
-        # Create a Rocky compute service in cell2.
-        self._create_service_in_cell(ctxt, self.cell_mappings['cell2'],
-                                     'nova-compute', version=35)
-
-        result = self.cmd._check_console_auths()
-
-        self.assertEqual(upgradecheck.Code.WARNING, result.code)
-        self.assertIn("One or more cells were found which have nova-compute "
-                      "services older than Rocky. "
-                      "Please set the '[workarounds]enable_consoleauth' "
-                      "configuration option to 'True' on your console proxy "
-                      "host if you are performing a rolling upgrade to enable "
-                      "consoles to function during a partial upgrade.",
+        self.assertIn('Cinder API 3.44 or greater is required.',
                       result.details)
+
+    @mock.patch('nova.volume.cinder.is_microversion_supported',
+                side_effect=test.TestingException('oops'))
+    def test_unknown_error(self, mock_version_check):
+        self.flags(auth_type='password', group='cinder')
+        result = self.cmd._check_cinder()
+        mock_version_check.assert_called_once()
+        self.assertEqual(upgradecheck.Code.WARNING, result.code)
+        self.assertIn('oops', result.details)
+
+    @mock.patch('nova.volume.cinder.is_microversion_supported')
+    def test_microversion_available(self, mock_version_check):
+        self.flags(auth_type='password', group='cinder')
+        result = self.cmd._check_cinder()
+        mock_version_check.assert_called_once()
+        self.assertEqual(upgradecheck.Code.SUCCESS, result.code)

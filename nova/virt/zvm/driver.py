@@ -45,6 +45,21 @@ DEFAULT_EPH_DISK_FMT = 'ext3'
 
 class ZVMDriver(driver.ComputeDriver):
     """z/VM implementation of ComputeDriver."""
+    capabilities = {
+        "supports_pcpus": False,
+
+        # Image type support flags
+        "supports_image_type_aki": False,
+        "supports_image_type_ami": False,
+        "supports_image_type_ari": False,
+        "supports_image_type_iso": False,
+        "supports_image_type_qcow2": False,
+        "supports_image_type_raw": True,
+        "supports_image_type_vdi": False,
+        "supports_image_type_vhd": False,
+        "supports_image_type_vhdx": False,
+        "supports_image_type_vmdk": False,
+    }
 
     def __init__(self, virtapi):
         super(ZVMDriver, self).__init__(virtapi)
@@ -128,7 +143,7 @@ class ZVMDriver(driver.ComputeDriver):
 
     def spawn(self, context, instance, image_meta, injected_files,
               admin_password, allocations, network_info=None,
-              block_device_info=None):
+              block_device_info=None, power_on=True):
 
         LOG.info("Spawning new instance %s on zVM hypervisor",
                  instance.name, instance=instance)

@@ -14,11 +14,7 @@ import time
 
 from oslo_utils.fixture import uuidsentinel as uuids
 
-from nova.scheduler.client import report
-
 import nova.conf
-from nova import context as nova_context
-from nova.scheduler import weights
 from nova import test
 from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional.api import client
@@ -26,8 +22,8 @@ from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import integrated_helpers
 import nova.tests.unit.image.fake
 from nova.tests.unit import policy_fixture
+from nova.tests.unit import utils as test_utils
 from nova import utils
-from nova.virt import fake
 
 CONF = nova.conf.CONF
 
@@ -60,42 +56,18 @@ class AggregatesTest(integrated_helpers._IntegratedTestBase):
         self.assertEqual(2, self._add_hosts_to_aggregate())
 
 
-class AggregateRequestFiltersTest(test.TestCase,
-                                  integrated_helpers.InstanceHelperMixin):
+class AggregateRequestFiltersTest(
+        integrated_helpers.ProviderUsageBaseTestCase):
     microversion = 'latest'
     compute_driver = 'fake.MediumFakeDriver'
 
     def setUp(self):
-        self.flags(compute_driver=self.compute_driver)
         super(AggregateRequestFiltersTest, self).setUp()
 
-        self.useFixture(policy_fixture.RealPolicyFixture())
-        self.useFixture(nova_fixtures.NeutronFixture(self))
-        self.useFixture(nova_fixtures.AllServicesCurrent())
-
-        placement = self.useFixture(func_fixtures.PlacementFixture())
-        self.placement_api = placement.api
-        api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
-            api_version='v2.1'))
-
-        self.admin_api = api_fixture.admin_api
-        self.admin_api.microversion = self.microversion
-        self.api = self.admin_api
-
-        # the image fake backend needed for image discovery
-        nova.tests.unit.image.fake.stub_out_image_service(self)
-
-        self.start_service('conductor')
-        self.scheduler_service = self.start_service('scheduler')
-
-        self.computes = {}
         self.aggregates = {}
 
         self._start_compute('host1')
         self._start_compute('host2')
-
-        self.context = nova_context.get_admin_context()
-        self.report_client = report.SchedulerReportClient()
 
         self.flavors = self.api.get_flavors()
 
@@ -117,8 +89,6 @@ class AggregateRequestFiltersTest(test.TestCase,
                      compute service.
         :return: the nova compute service object
         """
-        fake.set_nodes([host])
-        self.addCleanup(fake.restore_nodes)
         compute = self.start_service('compute', host=host)
         self.computes[host] = compute
         return compute
@@ -144,14 +114,6 @@ class AggregateRequestFiltersTest(test.TestCase,
         agg = self.aggregates[agg]
         self.admin_api.add_host_to_aggregate(agg['id'], host)
 
-        host_uuid = self._get_provider_uuid_by_host(host)
-
-        # Make sure we have a view of the provider we're about to mess with
-        # FIXME(efried): This should be a thing we can do without internals
-        self.report_client._ensure_resource_provider(
-            self.context, host_uuid, name=host)
-        self.report_client.aggregate_add_host(self.context, agg['uuid'], host)
-
     def _wait_for_state_change(self, server, from_status):
         for i in range(0, 50):
             server = self.api.get_server(server['id'])
@@ -161,10 +123,12 @@ class AggregateRequestFiltersTest(test.TestCase,
 
         return server
 
-    def _boot_server(self, az=None):
+    def _boot_server(self, az=None, flavor_id=None, image_id=None):
+        flavor_id = flavor_id or self.flavors[0]['id']
+        image_uuid = image_id or '155d900f-4e14-4e4c-a73d-069cbf4541e6'
         server_req = self._build_minimal_create_server_request(
-            self.api, 'test-instance', flavor_id=self.flavors[0]['id'],
-            image_uuid='155d900f-4e14-4e4c-a73d-069cbf4541e6',
+            self.api, 'test-instance', flavor_id=flavor_id,
+            image_uuid=image_uuid,
             networks='none', az=az)
 
         created_server = self.api.post_server({'server': server_req})
@@ -224,6 +188,23 @@ class AggregateRequestFiltersTest(test.TestCase,
             },
         }
         self.admin_api.post_aggregate_action(agg['id'], action)
+
+    def _set_traits_on_aggregate(self, agg, traits):
+        """Set traits to aggregate.
+
+        :param agg: Name of the nova aggregate
+        :param traits: List of traits to be assigned to the aggregate
+        """
+        action = {
+            'set_metadata': {
+                'metadata': {
+                    'trait:' + trait: 'required'
+                    for trait in traits
+                }
+            }
+        }
+        self.admin_api.post_aggregate_action(
+            self.aggregates[agg]['id'], action)
 
 
 class AggregatePostTest(AggregateRequestFiltersTest):
@@ -388,23 +369,15 @@ class TenantAggregateFilterTest(AggregateRequestFiltersTest):
             self.assertEqual('host2', self._get_instance_host(server))
 
 
-class HostNameWeigher(weights.BaseHostWeigher):
-    def _weigh_object(self, host_state, weight_properties):
-        """Arbitrary preferring host1 over host2 over host3."""
-        weights = {'host1': 100, 'host2': 50, 'host3': 1}
-        return weights.get(host_state.host, 0)
-
-
 class AvailabilityZoneFilterTest(AggregateRequestFiltersTest):
     def setUp(self):
         # Default to enabling the filter
         self.flags(query_placement_for_availability_zone=True,
                    group='scheduler')
 
-        # Use our custom weigher defined above to make sure that we have
-        # a predictable scheduling sort order.
-        self.flags(weight_classes=[__name__ + '.HostNameWeigher'],
-                   group='filter_scheduler')
+        # Use custom weigher to make sure that we have a predictable
+        # scheduling sort order.
+        self.useFixture(nova_fixtures.HostNameWeigherFixture())
 
         # NOTE(danms): Do this before calling setUp() so that
         # the scheduler service that is started sees the new value
@@ -422,23 +395,311 @@ class AvailabilityZoneFilterTest(AggregateRequestFiltersTest):
         self.assertEqual(['host2', 'host2'], hosts)
 
 
+class IsolateAggregateFilterTest(AggregateRequestFiltersTest):
+    def setUp(self):
+        # Default to enabling the filter
+        self.flags(enable_isolated_aggregate_filtering=True,
+                   group='scheduler')
+
+        # Use a custom weigher that would prefer host1 if the isolate
+        # aggregate filter were not in place otherwise it's not deterministic
+        # whether we're landing on host2 because of the filter or just by
+        # chance.
+        self.useFixture(nova_fixtures.HostNameWeigherFixture())
+
+        super(IsolateAggregateFilterTest, self).setUp()
+        self.image_service = nova.tests.unit.image.fake.FakeImageService()
+        # setting traits to flavors
+        flavor_body = {'flavor': {'name': 'test_flavor',
+                                  'ram': 512,
+                                  'vcpus': 1,
+                                  'disk': 1
+                                  }}
+        self.flavor_with_trait_dxva = self.api.post_flavor(flavor_body)
+        self.admin_api.post_extra_spec(
+            self.flavor_with_trait_dxva['id'],
+            {'extra_specs': {'trait:HW_GPU_API_DXVA': 'required'}})
+        flavor_body['flavor']['name'] = 'test_flavor1'
+        self.flavor_with_trait_sgx = self.api.post_flavor(flavor_body)
+        self.admin_api.post_extra_spec(
+            self.flavor_with_trait_sgx['id'],
+            {'extra_specs': {'trait:HW_CPU_X86_SGX': 'required'}})
+        self.flavor_without_trait = self.flavors[0]
+
+        with nova.utils.temporary_mutation(self.api, microversion='2.35'):
+            images = self.api.get_images()
+            self.image_id_without_trait = images[0]['id']
+
+    def test_filter_with_no_valid_host(self):
+        """Test 'isolate_aggregates' filter with no valid hosts.
+
+        No required traits set in image/flavor, so all aggregates with
+        required traits set should be ignored.
+        """
+
+        rp_uuid1 = self._get_provider_uuid_by_host('host1')
+        self._set_provider_traits(
+            rp_uuid1, ['HW_CPU_X86_VMX', 'HW_CPU_X86_SGX'])
+        self._set_traits_on_aggregate(
+            'only-host1', ['HW_CPU_X86_VMX', 'HW_CPU_X86_SGX'])
+
+        rp_uuid2 = self._get_provider_uuid_by_host('host2')
+        self._set_provider_traits(
+            rp_uuid2, ['HW_CPU_X86_VMX', 'HW_CPU_X86_SGX'])
+        self._set_traits_on_aggregate(
+            'only-host2', ['HW_CPU_X86_VMX', 'HW_CPU_X86_SGX'])
+
+        server = self._boot_server(
+            flavor_id=self.flavor_without_trait['id'],
+            image_id=self.image_id_without_trait)
+        self.assertIsNone(self._get_instance_host(server))
+        server = self.api.get_server(server['id'])
+        self.assertEqual('ERROR', server['status'])
+        self.assertIn('No valid host', server['fault']['message'])
+
+    def test_filter_without_trait(self):
+        """Test 'isolate_aggregates' filter with valid hosts.
+
+        No required traits set in image/flavor so instance should be booted on
+        host from an aggregate with no required traits set.
+        """
+
+        rp_uuid1 = self._get_provider_uuid_by_host('host1')
+        self._set_provider_traits(
+            rp_uuid1, ['HW_CPU_X86_VMX', 'HW_CPU_X86_SGX'])
+        self._set_traits_on_aggregate(
+            'only-host1', ['HW_CPU_X86_VMX', 'HW_CPU_X86_SGX'])
+
+        server = self._boot_server(
+            flavor_id=self.flavor_without_trait['id'],
+            image_id=self.image_id_without_trait)
+        self.assertEqual('host2', self._get_instance_host(server))
+
+    def test_filter_with_trait_on_flavor(self):
+        """Test filter with matching required traits set only in one aggregate.
+
+        Required trait (HW_GPU_API_DXVA) set in flavor so instance should be
+        booted on host with matching required traits set on aggregates.
+        """
+
+        rp_uuid2 = self._get_provider_uuid_by_host('host2')
+        self._set_provider_traits(rp_uuid2, ['HW_GPU_API_DXVA'])
+
+        rp_uuid1 = self._get_provider_uuid_by_host('host1')
+        self._set_provider_traits(
+            rp_uuid1, ['HW_CPU_X86_VMX', 'HW_CPU_X86_SGX'])
+
+        self._set_traits_on_aggregate('only-host2', ['HW_GPU_API_DXVA'])
+        self._set_traits_on_aggregate(
+            'only-host1', ['HW_CPU_X86_VMX', 'HW_CPU_X86_SGX'])
+        server = self._boot_server(
+            flavor_id=self.flavor_with_trait_dxva['id'],
+            image_id=self.image_id_without_trait)
+
+        self.assertEqual('host2', self._get_instance_host(server))
+
+    def test_filter_with_common_trait_on_aggregates(self):
+        """Test filter with common required traits set to aggregates.
+
+        Required trait (HW_CPU_X86_SGX) set in flavor so instance should be
+        booted on host with exact matching required traits set on aggregates.
+        """
+
+        rp_uuid2 = self._get_provider_uuid_by_host('host2')
+        self._set_provider_traits(rp_uuid2, ['HW_CPU_X86_SGX'])
+
+        rp_uuid1 = self._get_provider_uuid_by_host('host1')
+        self._set_provider_traits(
+            rp_uuid1, ['HW_CPU_X86_VMX', 'HW_CPU_X86_SGX'])
+
+        self._set_traits_on_aggregate('only-host2', ['HW_CPU_X86_SGX'])
+        self._set_traits_on_aggregate(
+            'only-host1', ['HW_CPU_X86_VMX', 'HW_CPU_X86_SGX'])
+        server = self._boot_server(
+            flavor_id=self.flavor_with_trait_sgx['id'],
+            image_id=self.image_id_without_trait)
+
+        self.assertEqual('host2', self._get_instance_host(server))
+
+    def test_filter_with_traits_on_image_and_flavor(self):
+        """Test filter with common traits set to image/flavor and aggregates.
+
+        Required trait (HW_CPU_X86_SGX) set in flavor and
+        required trait (HW_CPU_X86_VMX) set in image, so instance should be
+        booted on host with exact matching required traits set on aggregates.
+        """
+
+        rp_uuid2 = self._get_provider_uuid_by_host('host2')
+        self._set_provider_traits(
+            rp_uuid2, ['HW_CPU_X86_VMX', 'HW_CPU_X86_SGX'])
+
+        rp_uuid1 = self._get_provider_uuid_by_host('host1')
+        self._set_provider_traits(rp_uuid1, ['HW_GPU_API_DXVA'])
+
+        self._set_traits_on_aggregate('only-host1', ['HW_GPU_API_DXVA'])
+        self._set_traits_on_aggregate(
+            'only-host2', ['HW_CPU_X86_VMX', 'HW_CPU_X86_SGX'])
+
+        # Creating a new image and setting traits on it.
+        with nova.utils.temporary_mutation(self.api, microversion='2.35'):
+            self.ctxt = test_utils.get_test_admin_context()
+            img_ref = self.image_service.create(self.ctxt, {'name': 'image10'})
+            image_id_with_trait = img_ref['id']
+            self.addCleanup(
+                self.image_service.delete, self.ctxt, image_id_with_trait)
+            self.api.api_put('/images/%s/metadata' % image_id_with_trait,
+                             {'metadata': {
+                                 'trait:HW_CPU_X86_VMX': 'required'}})
+        server = self._boot_server(
+            flavor_id=self.flavor_with_trait_sgx['id'],
+            image_id=image_id_with_trait)
+        self.assertEqual('host2', self._get_instance_host(server))
+
+    def test_filter_with_traits_image_flavor_subset_of_aggregates(self):
+        """Test filter with image/flavor required traits subset of aggregates.
+
+        Image and flavor has a nonempty set of required traits that's subset
+        set of the traits on the aggregates.
+        """
+
+        rp_uuid2 = self._get_provider_uuid_by_host('host2')
+        self._set_provider_traits(
+            rp_uuid2, ['HW_CPU_X86_VMX', 'HW_GPU_API_DXVA', 'HW_CPU_X86_SGX'])
+
+        self._set_traits_on_aggregate(
+            'only-host2',
+            ['HW_CPU_X86_VMX', 'HW_GPU_API_DXVA', 'HW_CPU_X86_SGX'])
+
+        # Creating a new image and setting traits on it.
+        with nova.utils.temporary_mutation(self.api, microversion='2.35'):
+            self.ctxt = test_utils.get_test_admin_context()
+            img_ref = self.image_service.create(self.ctxt, {'name': 'image10'})
+            image_id_with_trait = img_ref['id']
+            self.addCleanup(
+                self.image_service.delete, self.ctxt, image_id_with_trait)
+            self.api.api_put('/images/%s/metadata' % image_id_with_trait,
+                             {'metadata': {
+                                 'trait:HW_CPU_X86_VMX': 'required'}})
+        server = self._boot_server(
+            flavor_id=self.flavor_with_trait_sgx['id'],
+            image_id=image_id_with_trait)
+
+        self.assertIsNone(self._get_instance_host(server))
+        server = self.api.get_server(server['id'])
+        self.assertEqual('ERROR', server['status'])
+        self.assertIn('No valid host', server['fault']['message'])
+
+    def test_filter_with_traits_image_flavor_disjoint_of_aggregates(self):
+        """Test filter with image/flav required traits disjoint of aggregates.
+
+        Image and flavor has a nonempty set of required traits that's disjoint
+        set of the traits on the aggregates.
+        """
+
+        rp_uuid2 = self._get_provider_uuid_by_host('host2')
+        self._set_provider_traits(rp_uuid2, ['HW_CPU_X86_VMX'])
+
+        rp_uuid1 = self._get_provider_uuid_by_host('host1')
+        self._set_provider_traits(rp_uuid1, ['HW_GPU_API_DXVA'])
+
+        self._set_traits_on_aggregate('only-host1', ['HW_GPU_API_DXVA'])
+        self._set_traits_on_aggregate('only-host2', ['HW_CPU_X86_VMX'])
+
+        # Creating a new image and setting traits on it.
+        with nova.utils.temporary_mutation(self.api, microversion='2.35'):
+            self.ctxt = test_utils.get_test_admin_context()
+            img_ref = self.image_service.create(self.ctxt, {'name': 'image10'})
+            image_id_with_trait = img_ref['id']
+            self.addCleanup(
+                self.image_service.delete, self.ctxt, image_id_with_trait)
+            self.api.api_put('/images/%s/metadata' % image_id_with_trait,
+                             {'metadata': {
+                                 'trait:HW_CPU_X86_VMX': 'required'}})
+        server = self._boot_server(
+            flavor_id=self.flavor_with_trait_sgx['id'],
+            image_id=image_id_with_trait)
+
+        self.assertIsNone(self._get_instance_host(server))
+        server = self.api.get_server(server['id'])
+        self.assertEqual('ERROR', server['status'])
+        self.assertIn('No valid host', server['fault']['message'])
+
+
+class IsolateAggregateFilterTestWithConcernFilters(IsolateAggregateFilterTest):
+    def setUp(self):
+        filters = CONF.filter_scheduler.enabled_filters
+
+        # NOTE(shilpasd): To test `isolate_aggregates` request filter, along
+        # with following filters which also filters hosts based on aggregate
+        # metadata.
+        if 'AggregateImagePropertiesIsolation' not in filters:
+            filters.append('AggregateImagePropertiesIsolation')
+        if 'AggregateInstanceExtraSpecsFilter' not in filters:
+            filters.append('AggregateInstanceExtraSpecsFilter')
+        self.flags(enabled_filters=filters, group='filter_scheduler')
+
+        super(IsolateAggregateFilterTestWithConcernFilters, self).setUp()
+
+
+class IsolateAggregateFilterTestWOConcernFilters(IsolateAggregateFilterTest):
+    def setUp(self):
+        filters = CONF.filter_scheduler.enabled_filters
+
+        # NOTE(shilpasd): To test `isolate_aggregates` request filter, removed
+        # following filters which also filters hosts based on aggregate
+        # metadata.
+        if 'AggregateImagePropertiesIsolation' in filters:
+            filters.remove('AggregateImagePropertiesIsolation')
+        if 'AggregateInstanceExtraSpecsFilter' in filters:
+            filters.remove('AggregateInstanceExtraSpecsFilter')
+        self.flags(enabled_filters=filters, group='filter_scheduler')
+
+        super(IsolateAggregateFilterTestWOConcernFilters, self).setUp()
+
+
 class TestAggregateFiltersTogether(AggregateRequestFiltersTest):
     def setUp(self):
+        # Use a custom weigher that would prefer host1 if the forbidden
+        # aggregate filter were not in place otherwise it's not deterministic
+        # whether we're landing on host2 because of the filter or just by
+        # chance.
+        self.useFixture(nova_fixtures.HostNameWeigherFixture())
+
         # NOTE(danms): Do this before calling setUp() so that
         # the scheduler service that is started sees the new value
         filters = CONF.filter_scheduler.enabled_filters
         filters.remove('AvailabilityZoneFilter')
+
+        # NOTE(shilpasd): To test `isolate_aggregates` request filter, removed
+        # following filters which also filters hosts based on aggregate
+        # metadata.
+        if 'AggregateImagePropertiesIsolation' in filters:
+            filters.remove('AggregateImagePropertiesIsolation')
+        if 'AggregateInstanceExtraSpecsFilter' in filters:
+            filters.remove('AggregateInstanceExtraSpecsFilter')
         self.flags(enabled_filters=filters, group='filter_scheduler')
 
         super(TestAggregateFiltersTogether, self).setUp()
 
-        # Default to enabling both filters
+        # Default to enabling all filters
         self.flags(limit_tenants_to_placement_aggregate=True,
                    group='scheduler')
         self.flags(placement_aggregate_required_for_tenants=True,
                    group='scheduler')
         self.flags(query_placement_for_availability_zone=True,
                    group='scheduler')
+        self.flags(enable_isolated_aggregate_filtering=True,
+                   group='scheduler')
+        # setting traits to flavors
+        flavor_body = {'flavor': {'name': 'test_flavor',
+                                  'ram': 512,
+                                  'vcpus': 1,
+                                  'disk': 1
+                                  }}
+        self.flavor_with_trait_dxva = self.api.post_flavor(flavor_body)
+        self.admin_api.post_extra_spec(
+            self.flavor_with_trait_dxva['id'],
+            {'extra_specs': {'trait:HW_GPU_API_DXVA': 'required'}})
 
     def test_tenant_with_az_match(self):
         # Grant our tenant access to the aggregate with
@@ -466,13 +727,46 @@ class TestAggregateFiltersTogether(AggregateRequestFiltersTest):
         server = self.api.get_server(server['id'])
         self.assertEqual('ERROR', server['status'])
 
+    def test_tenant_with_az_and_traits_match(self):
+        # Grant our tenant access to the aggregate with host2
+        self._grant_tenant_aggregate('only-host2',
+                                     [self.api.project_id])
+        # Set an az on only-host2
+        self._set_az_aggregate('only-host2', 'myaz')
+        # Set trait on host2
+        rp_uuid2 = self._get_provider_uuid_by_host('host2')
+        self._set_provider_traits(rp_uuid2, ['HW_GPU_API_DXVA'])
+        # Set trait on aggregate only-host2
+        self._set_traits_on_aggregate('only-host2', ['HW_GPU_API_DXVA'])
+        # Boot the server into that az and make sure we land
+        server = self._boot_server(
+            flavor_id=self.flavor_with_trait_dxva['id'], az='myaz')
+        self.assertEqual('host2', self._get_instance_host(server))
+
+    def test_tenant_with_az_and_traits_mismatch(self):
+        # Grant our tenant access to the aggregate with host2
+        self._grant_tenant_aggregate('only-host2',
+                                     [self.api.project_id])
+        # Set an az on only-host1
+        self._set_az_aggregate('only-host2', 'myaz')
+        # Set trait on host2
+        rp_uuid2 = self._get_provider_uuid_by_host('host2')
+        self._set_provider_traits(rp_uuid2, ['HW_CPU_X86_VMX'])
+        # Set trait on aggregate only-host2
+        self._set_traits_on_aggregate('only-host2', ['HW_CPU_X86_VMX'])
+        # Boot the server into that az and make sure we fail
+        server = self._boot_server(
+            flavor_id=self.flavor_with_trait_dxva['id'], az='myaz')
+        self.assertIsNone(self._get_instance_host(server))
+        server = self.api.get_server(server['id'])
+        self.assertEqual('ERROR', server['status'])
+        self.assertIn('No valid host', server['fault']['message'])
+
 
 class TestAggregateMultiTenancyIsolationFilter(
     test.TestCase, integrated_helpers.InstanceHelperMixin):
 
     def _start_compute(self, host):
-        fake.set_nodes([host])
-        self.addCleanup(fake.restore_nodes)
         self.start_service('compute', host=host)
 
     def setUp(self):
@@ -555,3 +849,122 @@ class TestAggregateMultiTenancyIsolationFilter(
             server = user_api.post_server(server_req)
         self._wait_for_state_change(user_api, server, 'ACTIVE')
         self.assertEqual(2, len(self.filtered_hosts))
+
+
+class AggregateMultiTenancyIsolationColdMigrateTest(
+        test.TestCase, integrated_helpers.InstanceHelperMixin):
+
+    @staticmethod
+    def _create_aggregate(admin_api, name):
+        return admin_api.api_post(
+            '/os-aggregates', {'aggregate': {'name': name}}).body['aggregate']
+
+    @staticmethod
+    def _add_host_to_aggregate(admin_api, aggregate, host):
+        add_host_req_body = {
+            "add_host": {
+                "host": host
+            }
+        }
+        admin_api.api_post(
+            '/os-aggregates/%s/action' % aggregate['id'], add_host_req_body)
+
+    @staticmethod
+    def _isolate_aggregate(admin_api, aggregate, tenant_id):
+        set_meta_req_body = {
+            "set_metadata": {
+                "metadata": {
+                    "filter_tenant_id": tenant_id
+                }
+            }
+        }
+        admin_api.api_post(
+            '/os-aggregates/%s/action' % aggregate['id'], set_meta_req_body)
+
+    def setUp(self):
+        super(AggregateMultiTenancyIsolationColdMigrateTest, self).setUp()
+        self.useFixture(policy_fixture.RealPolicyFixture())
+        self.useFixture(nova_fixtures.NeutronFixture(self))
+        self.useFixture(func_fixtures.PlacementFixture())
+        # Intentionally keep these separate since we want to create the
+        # server with the non-admin user in a different project.
+        admin_api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
+            api_version='v2.1', project_id=uuids.admin_project))
+        self.admin_api = admin_api_fixture.admin_api
+        self.admin_api.microversion = 'latest'
+        user_api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
+            api_version='v2.1', project_id=uuids.user_project))
+        self.api = user_api_fixture.api
+        self.api.microversion = 'latest'
+
+        # the image fake backend needed for image discovery
+        nova.tests.unit.image.fake.stub_out_image_service(self)
+        self.addCleanup(nova.tests.unit.image.fake.FakeImageService_reset)
+
+        self.start_service('conductor')
+        # Enable the AggregateMultiTenancyIsolation filter before starting the
+        # scheduler service.
+        enabled_filters = CONF.filter_scheduler.enabled_filters
+        if 'AggregateMultiTenancyIsolation' not in enabled_filters:
+            enabled_filters.append('AggregateMultiTenancyIsolation')
+            self.flags(
+                enabled_filters=enabled_filters, group='filter_scheduler')
+        # Add a custom weigher which will weigh host1, which will be in the
+        # admin project aggregate, higher than the other hosts which are in
+        # the non-admin project aggregate.
+        self.useFixture(nova_fixtures.HostNameWeigherFixture())
+        self.start_service('scheduler')
+
+        for host in ('host1', 'host2', 'host3'):
+            self.start_service('compute', host=host)
+
+        # Create an admin-only aggregate for the admin project. This is needed
+        # because if host1 is not in an aggregate with the filter_tenant_id
+        # metadata key, the filter will accept that host even for the non-admin
+        # project.
+        admin_aggregate = self._create_aggregate(
+            self.admin_api, 'admin-aggregate')
+        self._add_host_to_aggregate(self.admin_api, admin_aggregate, 'host1')
+
+        # Restrict the admin project to the admin aggregate.
+        self._isolate_aggregate(
+            self.admin_api, admin_aggregate, uuids.admin_project)
+
+        # Create the tenant aggregate for the non-admin project.
+        tenant_aggregate = self._create_aggregate(
+            self.admin_api, 'tenant-aggregate')
+
+        # Add two compute hosts to the tenant aggregate. We exclude host1
+        # since that is weighed higher due to HostNameWeigherFixture and we
+        # want to ensure the scheduler properly filters out host1 before we
+        # even get to weighing the selected hosts.
+        for host in ('host2', 'host3'):
+            self._add_host_to_aggregate(self.admin_api, tenant_aggregate, host)
+
+        # Restrict the non-admin project to the tenant aggregate.
+        self._isolate_aggregate(
+            self.admin_api, tenant_aggregate, uuids.user_project)
+
+    def test_cold_migrate_server(self):
+        """Creates a server using the non-admin project, then cold migrates
+        the server and asserts the server goes to the other host in the
+        isolated host aggregate via the AggregateMultiTenancyIsolation filter.
+        """
+        img = nova.tests.unit.image.fake.AUTO_DISK_CONFIG_ENABLED_IMAGE_UUID
+        server_req_body = self._build_minimal_create_server_request(
+            self.api, 'test_cold_migrate_server', image_uuid=img,
+            networks='none')
+        server = self.api.post_server({'server': server_req_body})
+        server = self._wait_for_state_change(self.admin_api, server, 'ACTIVE')
+        # Ensure the server ended up in host2 or host3
+        original_host = server['OS-EXT-SRV-ATTR:host']
+        self.assertNotEqual('host1', original_host)
+        # Now cold migrate the server and it should end up in the other host
+        # in the same tenant-isolated aggregate.
+        self.admin_api.api_post(
+            '/servers/%s/action' % server['id'], {'migrate': None})
+        server = self._wait_for_state_change(
+            self.admin_api, server, 'VERIFY_RESIZE')
+        # Ensure the server is on the other host in the same aggregate.
+        expected_host = 'host3' if original_host == 'host2' else 'host2'
+        self.assertEqual(expected_host, server['OS-EXT-SRV-ATTR:host'])

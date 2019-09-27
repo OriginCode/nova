@@ -53,6 +53,9 @@ def fake_db_migration(**updates):
         'disk_total': 234567,
         'disk_processed': 23456,
         'disk_remaining': 211111,
+        'cross_cell_move': False,
+        'user_id': None,
+        'project_id': None,
     }
 
     if updates:
@@ -105,13 +108,45 @@ class _TestMigrationObject(object):
         mig.source_compute = 'foo'
         mig.migration_type = 'resize'
         mig.uuid = uuidsentinel.migration
+        mig.user_id = 'fake-user'
+        mig.project_id = 'fake-project'
         mig.create()
         self.assertEqual(fake_migration['dest_compute'], mig.dest_compute)
         self.assertIn('uuid', mig)
+        self.assertFalse(mig.cross_cell_move)
+        self.assertIn('user_id', mig)
+        self.assertIn('project_id', mig)
         mock_create.assert_called_once_with(ctxt,
                                             {'source_compute': 'foo',
                                              'migration_type': 'resize',
-                                             'uuid': uuidsentinel.migration})
+                                             'uuid': uuidsentinel.migration,
+                                             'user_id': 'fake-user',
+                                             'project_id': 'fake-project'})
+
+    @mock.patch.object(db, 'migration_create')
+    def test_create_with_user_id_and_project_id_set_in_ctxt(self, mock_create):
+        ctxt = context.get_admin_context()
+        ctxt.user_id = 'fake-user'
+        ctxt.project_id = 'fake-project'
+        fake_migration = fake_db_migration(user_id='fake-user',
+                                           project_id='fake-project')
+        mock_create.return_value = fake_migration
+        mig = migration.Migration(context=ctxt)
+        mig.source_compute = 'foo'
+        mig.migration_type = 'resize'
+        mig.uuid = uuidsentinel.migration
+        mig.create()
+        self.assertEqual(fake_migration['dest_compute'], mig.dest_compute)
+        self.assertIn('uuid', mig)
+        self.assertFalse(mig.cross_cell_move)
+        self.assertEqual('fake-user', mig['user_id'])
+        self.assertEqual('fake-project', mig['project_id'])
+        mock_create.assert_called_once_with(ctxt,
+                                            {'source_compute': 'foo',
+                                             'migration_type': 'resize',
+                                             'uuid': uuidsentinel.migration,
+                                             'user_id': 'fake-user',
+                                             'project_id': 'fake-project'})
 
     @mock.patch.object(db, 'migration_create')
     def test_recreate_fails(self, mock_create):
@@ -122,12 +157,16 @@ class _TestMigrationObject(object):
         mig.source_compute = 'foo'
         mig.migration_type = 'resize'
         mig.uuid = uuidsentinel.migration
+        mig.user_id = 'fake-user'
+        mig.project_id = 'fake-project'
         mig.create()
         self.assertRaises(exception.ObjectActionError, mig.create)
         mock_create.assert_called_once_with(ctxt,
                                             {'source_compute': 'foo',
                                              'migration_type': 'resize',
-                                             'uuid': uuidsentinel.migration})
+                                             'uuid': uuidsentinel.migration,
+                                             'user_id': 'fake-user',
+                                             'project_id': 'fake-project'})
 
     def test_create_fails_migration_type(self):
         ctxt = context.get_admin_context()
@@ -249,6 +288,16 @@ class _TestMigrationObject(object):
         self.assertEqual('migration', mig.migration_type)
         self.assertTrue(mig.obj_attr_is_set('migration_type'))
 
+    def test_obj_load_attr_hidden(self):
+        mig = objects.Migration()
+        self.assertFalse(mig.hidden)
+        self.assertIn('hidden', mig)
+
+    def test_obj_load_attr_cross_cell_move(self):
+        mig = objects.Migration()
+        self.assertFalse(mig.cross_cell_move)
+        self.assertIn('cross_cell_move', mig)
+
     @mock.patch('nova.db.api.migration_get_by_id_and_instance')
     def test_get_by_id_and_instance(self, fake_get):
         ctxt = context.get_admin_context()
@@ -275,6 +324,39 @@ class _TestMigrationObject(object):
         # Make sure that it was saved and we get the same one back
         mig = objects.Migration.get_by_id(self.context, db_mig.id)
         self.assertEqual(uuid, mig.uuid)
+
+    def test_obj_make_compatible(self):
+        mig = objects.Migration(
+            cross_cell_move=True,                                # added in 1.6
+            uuid=uuidsentinel.migration,                         # added in 1.5
+            memory_total=1024, memory_processed=0, memory_remaining=0,  # 1.4
+            disk_total=20, disk_processed=0, disk_remaining=0,
+            migration_type='resize', hidden=False,               # added in 1.2
+            source_compute='fake-host'                           # added in 1.0
+        )
+        data = lambda x: x['nova_object.data']
+        primitive = data(mig.obj_to_primitive(target_version='1.6'))
+        self.assertIn('cross_cell_move', primitive)
+        self.assertNotIn('user_id', primitive)
+        self.assertNotIn('project_id', primitive)
+        primitive = data(mig.obj_to_primitive(target_version='1.5'))
+        self.assertIn('uuid', primitive)
+        self.assertNotIn('cross_cell_move', primitive)
+        primitive = data(mig.obj_to_primitive(target_version='1.4'))
+        self.assertIn('memory_total', primitive)
+        self.assertNotIn('uuid', primitive)
+        primitive = data(mig.obj_to_primitive(target_version='1.3'))
+        self.assertIn('migration_type', primitive)
+        self.assertNotIn('memory_total', primitive)
+        primitive = data(mig.obj_to_primitive(target_version='1.1'))
+        self.assertIn('source_compute', primitive)
+        self.assertNotIn('migration_type', primitive)
+
+    @mock.patch('nova.db.api.migration_get_by_uuid')
+    def test_get_by_uuid(self, mock_db_get):
+        mock_db_get.return_value = fake_db_migration(uuid=uuidsentinel.mig)
+        mig = objects.Migration.get_by_uuid(self.context, uuidsentinel.mig)
+        self.assertEqual(uuidsentinel.mig, mig.uuid)
 
     def test_is_same_host(self):
         same_host = objects.Migration(source_compute='fake-host',

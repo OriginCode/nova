@@ -21,7 +21,7 @@ from nova.api.openstack import common
 from nova.api.openstack.compute.schemas import evacuate
 from nova.api.openstack import wsgi
 from nova.api import validation
-from nova import compute
+from nova.compute import api as compute
 import nova.conf
 from nova import exception
 from nova.i18n import _
@@ -33,8 +33,8 @@ CONF = nova.conf.CONF
 
 
 class EvacuateController(wsgi.Controller):
-    def __init__(self, *args, **kwargs):
-        super(EvacuateController, self).__init__(*args, **kwargs)
+    def __init__(self):
+        super(EvacuateController, self).__init__()
         self.compute_api = compute.API()
         self.host_api = compute.HostAPI()
         self.network_api = network.API()
@@ -132,8 +132,6 @@ class EvacuateController(wsgi.Controller):
         try:
             self.compute_api.evacuate(context, instance, host,
                                       on_shared_storage, password, force)
-        except exception.InstanceUnknownCell as e:
-            raise exc.HTTPNotFound(explanation=e.format_message())
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
                     'evacuate', id)

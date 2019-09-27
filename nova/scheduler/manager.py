@@ -25,6 +25,7 @@ from oslo_log import log as logging
 import oslo_messaging as messaging
 from oslo_serialization import jsonutils
 from oslo_service import periodic_task
+import six
 from stevedore import driver
 
 import nova.conf
@@ -43,6 +44,8 @@ LOG = logging.getLogger(__name__)
 CONF = nova.conf.CONF
 
 QUOTAS = quota.QUOTAS
+
+HOST_MAPPING_EXISTS_WARNING = False
 
 
 class SchedulerManager(manager.Manager):
@@ -67,13 +70,24 @@ class SchedulerManager(manager.Manager):
         spacing=CONF.scheduler.discover_hosts_in_cells_interval,
         run_immediately=True)
     def _discover_hosts_in_cells(self, context):
-        host_mappings = host_mapping_obj.discover_hosts(context)
-        if host_mappings:
-            LOG.info('Discovered %(count)i new hosts: %(hosts)s',
-                     {'count': len(host_mappings),
-                      'hosts': ','.join(['%s:%s' % (hm.cell_mapping.name,
-                                                    hm.host)
-                                         for hm in host_mappings])})
+        global HOST_MAPPING_EXISTS_WARNING
+        try:
+            host_mappings = host_mapping_obj.discover_hosts(context)
+            if host_mappings:
+                LOG.info('Discovered %(count)i new hosts: %(hosts)s',
+                         {'count': len(host_mappings),
+                          'hosts': ','.join(['%s:%s' % (hm.cell_mapping.name,
+                                                        hm.host)
+                                             for hm in host_mappings])})
+        except exception.HostMappingExists as exp:
+            msg = ('This periodic task should only be enabled on a single '
+                   'scheduler to prevent collisions between multiple '
+                   'schedulers: %s' % six.text_type(exp))
+            if not HOST_MAPPING_EXISTS_WARNING:
+                LOG.warning(msg)
+                HOST_MAPPING_EXISTS_WARNING = True
+            else:
+                LOG.debug(msg)
 
     @periodic_task.periodic_task(spacing=CONF.scheduler.periodic_task_interval,
                                  run_immediately=True)
@@ -85,6 +99,9 @@ class SchedulerManager(manager.Manager):
         # and enabled cells caches in the host manager. So every time an
         # existing cell is disabled or enabled or a new cell is created, a
         # SIGHUP signal has to be sent to the scheduler for proper scheduling.
+        # NOTE(mriedem): Similarly there is a host-to-cell cache which should
+        # be reset if a host is deleted from a cell and "discovered" in another
+        # cell.
         self.driver.host_manager.refresh_cells_caches()
 
     @messaging.expected_exceptions(exception.NoValidHost)
@@ -133,18 +150,47 @@ class SchedulerManager(manager.Manager):
             except exception.RequestFilterFailed as e:
                 raise exception.NoValidHost(reason=e.message)
 
-            resources = utils.resources_from_request_spec(spec_obj)
+            resources = utils.resources_from_request_spec(
+                ctxt, spec_obj, self.driver.host_manager,
+                enable_pinning_translate=True)
             res = self.placement_client.get_allocation_candidates(ctxt,
                                                                   resources)
             if res is None:
                 # We have to handle the case that we failed to connect to the
                 # Placement service and the safe_connect decorator on
                 # get_allocation_candidates returns None.
-                alloc_reqs, provider_summaries, allocation_request_version = (
-                        None, None, None)
-            else:
-                (alloc_reqs, provider_summaries,
-                            allocation_request_version) = res
+                res = None, None, None
+
+            alloc_reqs, provider_summaries, allocation_request_version = res
+            alloc_reqs = alloc_reqs or []
+            provider_summaries = provider_summaries or {}
+
+            # if the user requested pinned CPUs, we make a second query to
+            # placement for allocation candidates using VCPUs instead of PCPUs.
+            # This is necessary because users might not have modified all (or
+            # any) of their compute nodes meaning said compute nodes will not
+            # be reporting PCPUs yet. This is okay to do because the
+            # NUMATopologyFilter (scheduler) or virt driver (compute node) will
+            # weed out hosts that are actually using new style configuration
+            # but simply don't have enough free PCPUs (or any PCPUs).
+            # TODO(stephenfin): Remove when we drop support for 'vcpu_pin_set'
+            if (resources.cpu_pinning_requested and
+                    not CONF.workarounds.disable_fallback_pcpu_query):
+                LOG.debug('Requesting fallback allocation candidates with '
+                          'VCPU instead of PCPU')
+                resources = utils.resources_from_request_spec(
+                    ctxt, spec_obj, self.driver.host_manager,
+                    enable_pinning_translate=False)
+                res = self.placement_client.get_allocation_candidates(
+                    ctxt, resources)
+                if res:
+                    # merge the allocation requests and provider summaries from
+                    # the two requests together
+                    alloc_reqs_fallback, provider_summaries_fallback, _ = res
+
+                    alloc_reqs.extend(alloc_reqs_fallback)
+                    provider_summaries.update(provider_summaries_fallback)
+
             if not alloc_reqs:
                 LOG.info("Got no allocation candidates from the Placement "
                          "API. This could be due to insufficient resources "

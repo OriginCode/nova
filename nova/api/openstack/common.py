@@ -14,7 +14,6 @@
 #    under the License.
 
 import collections
-import functools
 import itertools
 import re
 
@@ -31,6 +30,7 @@ from nova.compute import vm_states
 import nova.conf
 from nova import exception
 from nova.i18n import _
+from nova.network.neutronv2 import constants
 from nova import objects
 from nova import quota
 from nova import utils
@@ -40,6 +40,9 @@ CONF = nova.conf.CONF
 LOG = logging.getLogger(__name__)
 QUOTAS = quota.QUOTAS
 
+
+POWER_ON = 'POWER_ON'
+POWER_OFF = 'POWER_OFF'
 
 _STATE_MAP = {
     vm_states.ACTIVE: {
@@ -495,15 +498,6 @@ def get_flavor(context, flavor_id):
         raise exc.HTTPNotFound(explanation=error.format_message())
 
 
-def check_cells_enabled(function):
-    @functools.wraps(function)
-    def inner(*args, **kwargs):
-        if not CONF.cells.enable:
-            raise_feature_not_supported()
-        return function(*args, **kwargs)
-    return inner
-
-
 def is_all_tenants(search_opts):
     """Checks to see if the all_tenants flag is in search_opts
 
@@ -520,6 +514,21 @@ def is_all_tenants(search_opts):
         # The empty string is considered enabling all_tenants
         all_tenants = 'all_tenants' in search_opts
     return all_tenants
+
+
+def is_locked(search_opts):
+    """Converts the value of the locked parameter to a boolean. Note that
+    this function will be called only if locked exists in search_opts.
+
+    :param dict search_opts: The search options for a request
+    :returns: boolean indicating if locked is being requested or not
+    """
+    locked = search_opts.get('locked')
+    try:
+        locked = strutils.bool_from_string(locked, strict=True)
+    except ValueError as err:
+        raise exception.InvalidInput(six.text_type(err))
+    return locked
 
 
 def supports_multiattach_volume(req):
@@ -573,9 +582,9 @@ def instance_has_port_with_resource_request(
     # instance has no port with resource request. If the instance is shelve
     # offloaded then we still have to hit neutron.
     search_opts = {'device_id': instance_uuid,
-                   'fields': ['resource_request']}
+                   'fields': [constants.RESOURCE_REQUEST]}
     ports = network_api.list_ports(context, **search_opts).get('ports', [])
     for port in ports:
-        if port.get('resource_request'):
+        if port.get(constants.RESOURCE_REQUEST):
             return True
     return False

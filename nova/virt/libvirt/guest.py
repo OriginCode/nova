@@ -40,9 +40,8 @@ import six
 from nova.compute import power_state
 from nova import exception
 from nova.i18n import _
-from nova.privsep import libvirt as libvirt_privsep
+import nova.privsep.libvirt
 from nova.virt import hardware
-from nova.virt.libvirt import compat
 from nova.virt.libvirt import config as vconfig
 
 libvirt = None
@@ -200,7 +199,7 @@ class Guest(object):
         interfaces = self.get_interfaces()
         try:
             for interface in interfaces:
-                libvirt_privsep.enable_hairpin(interface)
+                nova.privsep.libvirt.enable_hairpin(interface)
         except Exception:
             with excutils.save_and_reraise_exception():
                 LOG.error('Error enabling hairpin mode with XML: %s',
@@ -517,16 +516,12 @@ class Guest(object):
         """Configures a new user password."""
         self._domain.setUserPassword(user, new_pass, 0)
 
-    def _get_domain_info(self, host):
-        """Returns information on Guest
-
-        :param host: a host.Host object with current
-                     connection. Unfortunately we need to pass it
-                     because of a workaround with < version 1.2..11
+    def _get_domain_info(self):
+        """Returns information on Guest.
 
         :returns list: [state, maxMem, memory, nrVirtCpu, cpuTime]
         """
-        return compat.get_domain_info(libvirt, host, self._domain)
+        return self._domain.info()
 
     def get_info(self, host):
         """Retrieve information from libvirt for a specific instance name.
@@ -538,7 +533,7 @@ class Guest(object):
         :returns hardware.InstanceInfo:
         """
         try:
-            dom_info = self._get_domain_info(host)
+            dom_info = self._get_domain_info()
         except libvirt.libvirtError as ex:
             error_code = ex.get_error_code()
             if error_code == libvirt.VIR_ERR_NO_DOMAIN:
@@ -580,12 +575,12 @@ class Guest(object):
         :param reuse_ext: Reuse any existing external files
         :param quiesce: Use QGA to quiece all mounted file systems
         """
-        flags = no_metadata and (libvirt.VIR_DOMAIN_SNAPSHOT_CREATE_NO_METADATA
-                                 or 0)
-        flags |= disk_only and (libvirt.VIR_DOMAIN_SNAPSHOT_CREATE_DISK_ONLY
-                                or 0)
-        flags |= reuse_ext and (libvirt.VIR_DOMAIN_SNAPSHOT_CREATE_REUSE_EXT
-                                or 0)
+        flags = no_metadata and (
+            libvirt.VIR_DOMAIN_SNAPSHOT_CREATE_NO_METADATA or 0)
+        flags |= disk_only and (
+            libvirt.VIR_DOMAIN_SNAPSHOT_CREATE_DISK_ONLY or 0)
+        flags |= reuse_ext and (
+            libvirt.VIR_DOMAIN_SNAPSHOT_CREATE_REUSE_EXT or 0)
         flags |= quiesce and libvirt.VIR_DOMAIN_SNAPSHOT_CREATE_QUIESCE or 0
 
         device_xml = conf.to_xml()
@@ -629,21 +624,14 @@ class Guest(object):
            VIR_MIGRATE_UNDEFINE_SOURCE If the migration is successful,
                                        undefine the domain on the
                                        source host.
-           VIR_MIGRATE_PAUSED Leave the domain suspended on the remote
-                              side.
-           VIR_MIGRATE_NON_SHARED_DISK Migration with non-shared
-                                       storage with full disk copy
            VIR_MIGRATE_NON_SHARED_INC Migration with non-shared
                                       storage with incremental disk
                                       copy
-           VIR_MIGRATE_CHANGE_PROTECTION Protect against domain
-                                         configuration changes during
-                                         the migration process (set
-                                         automatically when
-                                         supported).
-           VIR_MIGRATE_UNSAFE Force migration even if it is considered
-                              unsafe.
-           VIR_MIGRATE_OFFLINE Migrate offline
+           VIR_MIGRATE_AUTO_CONVERGE Slow down domain to make sure it does
+                                     not change its memory faster than a
+                                     hypervisor can transfer the changed
+                                     memory to the destination host
+           VIR_MIGRATE_POSTCOPY Tell libvirt to enable post-copy migration
            VIR_MIGRATE_TLS Use QEMU-native TLS
         :param bandwidth: The maximum bandwidth in MiB/s
         """

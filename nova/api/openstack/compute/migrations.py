@@ -18,7 +18,7 @@ from nova.api.openstack.compute.schemas import migrations as schema_migrations
 from nova.api.openstack.compute.views import migrations as migrations_view
 from nova.api.openstack import wsgi
 from nova.api import validation
-from nova import compute
+from nova.compute import api as compute
 from nova import exception
 from nova.i18n import _
 from nova.objects import base as obj_base
@@ -56,11 +56,16 @@ class MigrationsController(wsgi.Controller):
             del obj['deleted']
             del obj['deleted_at']
             del obj['hidden']
+            del obj['cross_cell_move']
             if not add_uuid:
                 del obj['uuid']
             if 'memory_total' in obj:
                 for key in detail_keys:
                     del obj[key]
+            if 'user_id' in obj:
+                del obj['user_id']
+            if 'project_id' in obj:
+                del obj['project_id']
             # NOTE(Shaohe Feng) above version 2.23, add migration_type for all
             # kinds of migration, but we only add links just for in-progress
             # live-migration.

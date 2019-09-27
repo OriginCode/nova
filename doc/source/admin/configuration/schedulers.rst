@@ -18,13 +18,11 @@ Compute is configured with the following default scheduler options in the
 
    [filter_scheduler]
    available_filters = nova.scheduler.filters.all_filters
-   enabled_filters = RetryFilter, AvailabilityZoneFilter, ComputeFilter, ComputeCapabilitiesFilter, ImagePropertiesFilter, ServerGroupAntiAffinityFilter, ServerGroupAffinityFilter
+   enabled_filters = AvailabilityZoneFilter, ComputeFilter, ComputeCapabilitiesFilter, ImagePropertiesFilter, ServerGroupAntiAffinityFilter, ServerGroupAffinityFilter
 
 By default, the scheduler ``driver`` is configured as a filter scheduler, as
 described in the next section. In the default configuration, this scheduler
 considers hosts that meet all the following criteria:
-
-* Have not been attempted for scheduling purposes (``RetryFilter``).
 
 * Are in the requested availability zone (``AvailabilityZoneFilter``).
 
@@ -50,6 +48,65 @@ target host. For information about instance evacuation, see
 :ref:`Evacuate instances <node-down-evacuate-instances>`.
 
 .. _compute-scheduler-filters:
+
+Prefiltering
+~~~~~~~~~~~~
+
+As of the Rocky release, the scheduling process includes a prefilter
+step to increase the efficiency of subsequent stages. These prefilters
+are largely optional, and serve to augment the request that is sent to
+placement to reduce the set of candidate compute hosts based on
+attributes that placement is able to answer for us ahead of time. In
+addition to the prefilters listed here, also see `Tenant Isolation
+with Placement`_ and `Availability Zones with Placement`_.
+
+Compute Image Type Support
+--------------------------
+
+Starting in the Train release, there is a prefilter available for
+excluding compute nodes that do not support the ``disk_format`` of the
+image used in a boot request. This behavior is enabled by setting
+:oslo.config:option:`[scheduler]/query_placement_for_image_type_support=True
+<scheduler.query_placement_for_image_type_support>`. For
+example, the libvirt driver, when using ceph as an ephemeral backend,
+does not support ``qcow2`` images (without an expensive conversion
+step). In this case (and especially if you have a mix of ceph and
+non-ceph backed computes), enabling this feature will ensure that the
+scheduler does not send requests to boot a ``qcow2`` image to computes
+backed by ceph.
+
+Compute Disabled Status Support
+-------------------------------
+
+Starting in the Train release, there is a mandatory `pre-filter
+<https://specs.openstack.org/openstack/nova-specs/specs/train/approved/pre-filter-disabled-computes.html>`_
+which will exclude disabled compute nodes similar to (but does not fully
+replace) the `ComputeFilter`_. Compute node resource providers with the
+``COMPUTE_STATUS_DISABLED`` trait will be excluded as scheduling candidates.
+The trait is managed by the ``nova-compute`` service and should mirror the
+``disabled`` status on the related compute service record in the
+`os-services`_ API. For example, if a compute service's status is ``disabled``,
+the related compute node resource provider(s) for that service should have the
+``COMPUTE_STATUS_DISABLED`` trait. When the service status is ``enabled`` the
+``COMPUTE_STATUS_DISABLED`` trait shall be removed.
+
+If the compute service is down when the status is changed, the trait will be
+synchronized by the compute service when it is restarted. Similarly, if an
+error occurs when trying to add or remove the trait on a given resource
+provider, the trait will be synchronized when the ``update_available_resource``
+periodic task runs - which is controlled by the
+:oslo.config:option:`update_resources_interval` configuration option.
+
+.. _os-services: https://docs.openstack.org/api-ref/compute/#compute-services-os-services
+
+Isolate Aggregates
+------------------
+
+Starting in the Train release, there is an optional placement pre-request filter
+:doc:`/reference/isolate-aggregates`
+When enabled, the traits required in the server's flavor and image must be at
+least those required in an aggregate's metadata in order for the server to be
+eligible to boot on hosts in that aggregate.
 
 Filter scheduler
 ~~~~~~~~~~~~~~~~
@@ -91,14 +148,9 @@ you wanted to use both the built-in filters and your custom filter, your
    available_filters = nova.scheduler.filters.all_filters
    available_filters = myfilter.MyFilter
 
-The ``enabled_filters`` configuration option in ``nova.conf`` defines
-the list of filters that are applied by the ``nova-scheduler`` service. The
-default filters are:
-
-.. code-block:: ini
-
-   [filter_scheduler]
-   enabled_filters = RetryFilter, AvailabilityZoneFilter, ComputeCapabilitiesFilter, ImagePropertiesFilter, ServerGroupAntiAffinityFilter, ServerGroupAffinityFilter
+The :oslo.config:option:`filter_scheduler.enabled_filters` configuration option
+in ``nova.conf`` defines the list of filters that are applied by the
+``nova-scheduler`` service.
 
 Compute filters
 ~~~~~~~~~~~~~~~
@@ -108,25 +160,53 @@ The following sections describe the available compute filters.
 AggregateCoreFilter
 -------------------
 
+.. deprecated:: 20.0.0
+
+  ``AggregateCoreFilter`` is deprecated since the 20.0.0 Train release.
+  As of the introduction of the placement service in Ocata, the behavior
+  of this filter :ref:`has changed <bug-1804125>` and no longer should be used.
+  In the 18.0.0 Rocky release nova `automatically mirrors`_ host aggregates
+  to placement aggregates.
+  In the 19.0.0 Stein release initial allocation ratios support was added
+  which allows management of the allocation ratios via the placement API in
+  addition to the existing capability to manage allocation ratios via the nova
+  config. See `Allocation ratios`_ for details.
+
+.. _`automatically mirrors`: https://specs.openstack.org/openstack/nova-specs/specs/rocky/implemented/placement-mirror-host-aggregates.html
+
 Filters host by CPU core numbers with a per-aggregate ``cpu_allocation_ratio``
 value. If the per-aggregate value is not found, the value falls back to the
 global setting.  If the host is in more than one aggregate and more than one
 value is found, the minimum value will be used.  For information about how to
-use this filter, see :ref:`host-aggregates`. See also :ref:`CoreFilter`.
+use this filter, see :ref:`host-aggregates`.
 
 Note the ``cpu_allocation_ratio`` :ref:`bug 1804125 <bug-1804125>` restriction.
 
 AggregateDiskFilter
 -------------------
 
+.. deprecated:: 20.0.0
+
+  ``AggregateDiskFilter`` is deprecated since the 20.0.0 Train release.
+  As of the introduction of the placement service in Ocata, the behavior
+  of this filter :ref:`has changed <bug-1804125>` and no longer should be used.
+  In the 18.0.0 Rocky release nova `automatically mirrors`_ host aggregates
+  to placement aggregates.
+  In the 19.0.0 Stein release initial allocation ratios support was added
+  which allows management of the allocation ratios via the placement API in
+  addition to the existing capability to manage allocation ratios via the nova
+  config. See `Allocation ratios`_ for details.
+
 Filters host by disk allocation with a per-aggregate ``disk_allocation_ratio``
 value. If the per-aggregate value is not found, the value falls back to the
 global setting.  If the host is in more than one aggregate and more than one
 value is found, the minimum value will be used.  For information about how to
-use this filter, see :ref:`host-aggregates`. See also :ref:`DiskFilter`.
+use this filter, see :ref:`host-aggregates`.
 
 Note the ``disk_allocation_ratio`` :ref:`bug 1804125 <bug-1804125>`
 restriction.
+
+.. _`AggregateImagePropertiesIsolation`:
 
 AggregateImagePropertiesIsolation
 ---------------------------------
@@ -192,6 +272,13 @@ following options in the ``nova.conf`` file:
    # Separator used between the namespace and keys (string).
    aggregate_image_properties_isolation_separator = .
 
+.. note::
+
+   This filter has limitations as described in `bug 1677217
+   <https://bugs.launchpad.net/nova/+bug/1677217>`_
+   which are addressed in placement :doc:`/reference/isolate-aggregates`
+   request filter.
+
 .. _AggregateInstanceExtraSpecsFilter:
 
 AggregateInstanceExtraSpecsFilter
@@ -253,12 +340,24 @@ used.  For information about how to use this filter, see
 AggregateRamFilter
 ------------------
 
+.. deprecated:: 20.0.0
+
+  ``AggregateRamFilter`` is deprecated since the 20.0.0 Train release.
+  As of the introduction of the placement service in Ocata, the behavior
+  of this filter :ref:`has changed <bug-1804125>` and no longer should be used.
+  In the 18.0.0 Rocky release nova `automatically mirrors`_ host aggregates
+  to placement aggregates.
+  In the 19.0.0 Stein release initial allocation ratios support was added
+  which allows management of the allocation ratios via the placement API in
+  addition to the existing capability to manage allocation ratios via the nova
+  config. See `Allocation ratios`_ for details.
+
 Filters host by RAM allocation of instances with a per-aggregate
 ``ram_allocation_ratio`` value. If the per-aggregate value is not found, the
 value falls back to the global setting.  If the host is in more than one
 aggregate and thus more than one value is found, the minimum value will be
 used.  For information about how to use this filter, see
-:ref:`host-aggregates`.  See also :ref:`ramfilter`.
+:ref:`host-aggregates`.
 
 Note the ``ram_allocation_ratio`` :ref:`bug 1804125 <bug-1804125>` restriction.
 
@@ -277,6 +376,8 @@ AllHostsFilter
 --------------
 
 This is a no-op filter. It does not eliminate any of the available hosts.
+
+.. _AvailabilityZoneFilter:
 
 AvailabilityZoneFilter
 ----------------------
@@ -318,50 +419,6 @@ Passes all hosts that are operational and enabled.
 
 In general, you should always enable this filter.
 
-.. _CoreFilter:
-
-CoreFilter
-----------
-
-.. deprecated:: 19.0.0
-
-   ``CoreFilter`` is deprecated since the 19.0.0 Stein release. VCPU
-   filtering is performed natively using the Placement service when using the
-   ``filter_scheduler`` driver. Furthermore, enabling CoreFilter may
-   incorrectly filter out `baremetal nodes`_ which must be scheduled using
-   custom resource classes.
-
-Only schedules instances on hosts if sufficient CPU cores are available.  If
-this filter is not set, the scheduler might over-provision a host based on
-cores. For example, the virtual cores running on an instance may exceed the
-physical cores.
-
-You can configure this filter to enable a fixed amount of vCPU overcommitment
-by using the ``cpu_allocation_ratio`` configuration option in ``nova.conf``.
-The default setting is:
-
-.. code-block:: ini
-
-   cpu_allocation_ratio = 16.0
-
-With this setting, if 8 vCPUs are on a node, the scheduler allows instances up
-to 128 vCPU to be run on that node.
-
-To disallow vCPU overcommitment set:
-
-.. code-block:: ini
-
-   cpu_allocation_ratio = 1.0
-
-.. note::
-
-   The Compute API always returns the actual number of CPU cores available on a
-   compute node regardless of the value of the ``cpu_allocation_ratio``
-   configuration key. As a result changes to the ``cpu_allocation_ratio`` are
-   not reflected via the command line clients or the dashboard.  Changes to
-   this configuration key are only taken into account internally in the
-   scheduler.
-
 DifferentHostFilter
 -------------------
 
@@ -395,77 +452,6 @@ With the API, use the ``os:scheduler_hints`` key. For example:
            ]
        }
    }
-
-.. _DiskFilter:
-
-DiskFilter
-----------
-
-.. deprecated:: 19.0.0
-
-   ``DiskFilter`` is deprecated since the 19.0.0 Stein release. DISK_GB
-   filtering is performed natively using the Placement service when using the
-   ``filter_scheduler`` driver. Furthermore, enabling DiskFilter may
-   incorrectly filter out `baremetal nodes`_ which must be scheduled using
-   custom resource classes.
-
-Only schedules instances on hosts if there is sufficient disk space available
-for root and ephemeral storage.
-
-You can configure this filter to enable a fixed amount of disk overcommitment
-by using the ``disk_allocation_ratio`` configuration option in the
-``nova.conf`` configuration file.  The default setting disables the possibility
-of the overcommitment and allows launching a VM only if there is a sufficient
-amount of disk space available on a host:
-
-.. code-block:: ini
-
-   disk_allocation_ratio = 1.0
-
-DiskFilter always considers the value of the ``disk_available_least`` property
-and not the one of the ``free_disk_gb`` property of a hypervisor's statistics:
-
-.. code-block:: console
-
-   $ openstack hypervisor stats show
-   +----------------------+-------+
-   | Field                | Value |
-   +----------------------+-------+
-   | count                | 1     |
-   | current_workload     | 0     |
-   | disk_available_least | 14    |
-   | free_disk_gb         | 27    |
-   | free_ram_mb          | 15374 |
-   | local_gb             | 27    |
-   | local_gb_used        | 0     |
-   | memory_mb            | 15886 |
-   | memory_mb_used       | 512   |
-   | running_vms          | 0     |
-   | vcpus                | 8     |
-   | vcpus_used           | 0     |
-   +----------------------+-------+
-
-As it can be viewed from the command output above, the amount of the available
-disk space can be less than the amount of the free disk space.  It happens
-because the ``disk_available_least`` property accounts for the virtual size
-rather than the actual size of images.  If you use an image format that is
-sparse or copy on write so that each virtual instance does not require a 1:1
-allocation of a virtual disk to a physical storage, it may be useful to allow
-the overcommitment of disk space.
-
-To enable scheduling instances while overcommitting disk resources on the node,
-adjust the value of the ``disk_allocation_ratio`` configuration option to
-greater than ``1.0``:
-
-.. code-block:: none
-
-   disk_allocation_ratio > 1.0
-
-.. note::
-
-   If the value is set to ``>1``, we recommend keeping track of the free disk
-   space, as the value approaching ``0`` may result in the incorrect
-   functioning of instances using it at the moment.
 
 .. _ImagePropertiesFilter:
 
@@ -562,6 +548,14 @@ migrate, rescue or unshelve task states are running on it.
 JsonFilter
 ----------
 
+.. warning:: This filter is not enabled by default and not comprehensively
+    tested, and thus could fail to work as expected in non-obvious ways.
+    Furthermore, the filter variables are based on attributes of the
+    `HostState`_ class which could change from release to release so usage
+    of this filter is generally not recommended. Consider using other filters
+    such as the :ref:`ImagePropertiesFilter` or
+    :ref:`traits-based scheduling <extra-specs-required-traits>`.
+
 The JsonFilter allows a user to construct a custom filter by passing a
 scheduler hint in JSON format. The following operators are supported:
 
@@ -575,10 +569,12 @@ scheduler hint in JSON format. The following operators are supported:
 * or
 * and
 
-The filter supports the following variables:
+The filter supports any attribute in the `HostState`_ class such as the
+following variables:
 
 * ``$free_ram_mb``
 * ``$free_disk_mb``
+* ``$hypervisor_hostname``
 * ``$total_usable_ram_mb``
 * ``$vcpus_total``
 * ``$vcpus_used``
@@ -601,9 +597,11 @@ With the API, use the ``os:scheduler_hints`` key:
            "flavorRef": "1"
        },
        "os:scheduler_hints": {
-           "query": "[>=,$free_ram_mb,1024]"
+           "query": "[\">=\",\"$free_ram_mb\",1024]"
        }
    }
+
+.. _HostState: https://opendev.org/openstack/nova/src/branch/master/nova/scheduler/host_manager.py
 
 MetricsFilter
 -------------
@@ -645,47 +643,25 @@ PciPassthroughFilter
 The filter schedules instances on a host if the host has devices that meet the
 device requests in the ``extra_specs`` attribute for the flavor.
 
-.. _RamFilter:
-
-RamFilter
----------
-
-.. deprecated:: 19.0.0
-
-   ``RamFilter`` is deprecated since the 19.0.0 Stein release. MEMORY_MB
-   filtering is performed natively using the Placement service when using the
-   ``filter_scheduler`` driver. Furthermore, enabling RamFilter may
-   incorrectly filter out `baremetal nodes`_ which must be scheduled using
-   custom resource classes.
-
-.. _baremetal nodes: https://docs.openstack.org/ironic/latest/install/configure-nova-flavors.html
-
-Only schedules instances on hosts that have sufficient RAM available.  If this
-filter is not set, the scheduler may over provision a host based on RAM (for
-example, the RAM allocated by virtual machine instances may exceed the physical
-RAM).
-
-You can configure this filter to enable a fixed amount of RAM overcommitment by
-using the ``ram_allocation_ratio`` configuration option in ``nova.conf``. The
-default setting is:
-
-.. code-block:: ini
-
-   ram_allocation_ratio = 1.5
-
-This setting enables 1.5 GB instances to run on any compute node with 1 GB of
-free RAM.
-
 RetryFilter
 -----------
+
+.. deprecated:: 20.0.0
+
+   Since the 17.0.0 (Queens) release, the scheduler has provided alternate
+   hosts for rescheduling so the scheduler does not need to be called during
+   a reschedule which makes the ``RetryFilter`` useless. See the
+   `Return Alternate Hosts`_ spec for details.
 
 Filters out hosts that have already been attempted for scheduling purposes.  If
 the scheduler selects a host to respond to a service request, and the host
 fails to respond to the request, this filter prevents the scheduler from
 retrying that host for the service request.
 
-This filter is only useful if the ``scheduler_max_attempts`` configuration
-option is set to a value greater than zero.
+This filter is only useful if the :oslo.config:option:`scheduler.max_attempts`
+configuration option is set to a value greater than one.
+
+.. _Return Alternate Hosts: https://specs.openstack.org/openstack/nova-specs/specs/queens/implemented/return-alternate-hosts.html
 
 SameHostFilter
 --------------
@@ -1060,7 +1036,7 @@ as well as the other filters that are typically enabled:
 .. code-block:: ini
 
    [filter_scheduler]
-   enabled_filters=AggregateInstanceExtraSpecsFilter,RetryFilter,AvailabilityZoneFilter,ComputeCapabilitiesFilter,ImagePropertiesFilter,ServerGroupAntiAffinityFilter,ServerGroupAffinityFilter
+   enabled_filters=...,AggregateInstanceExtraSpecsFilter
 
 Example: Specify compute hosts with SSDs
 ----------------------------------------
@@ -1363,16 +1339,6 @@ The allocation ratio configuration is used both during reporting of compute
 node `resource provider inventory`_ to the placement service and during
 scheduling.
 
-The (deprecated) `CoreFilter`_, `DiskFilter`_ and `RamFilter`_ filters will use
-the allocation ratio from the compute node directly when calculating available
-capacity on a given node during scheduling.
-
-The `AggregateCoreFilter`_, `AggregateDiskFilter`_ and `AggregateRamFilter`_
-filters allow overriding per-compute allocation ratios by setting an allocation
-ratio value using host aggregate metadata. This provides a convenient way to
-manage a group of compute hosts with similar allocation ratios while leaving
-the configuration settings alone.
-
 .. _bug-1804125:
 
 .. note:: Regarding the `AggregateCoreFilter`_, `AggregateDiskFilter`_ and
@@ -1390,7 +1356,7 @@ the configuration settings alone.
    See `bug 1804125 <https://bugs.launchpad.net/nova/+bug/1804125>`_ for more
    details.
 
-.. _resource provider inventory: https://developer.openstack.org/api-ref/placement/?expanded=#resource-provider-inventories
+.. _resource provider inventory: https://docs.openstack.org/api-ref/placement/?expanded=#resource-provider-inventories
 
 Usage scenarios
 ---------------
@@ -1435,6 +1401,42 @@ here.
 
 .. _osc-placement: https://docs.openstack.org/osc-placement/latest/index.html
 
+.. _hypervisor-specific-considerations:
+
+Hypervisor-specific considerations
+----------------------------------
+
+Nova provides three configuration options,
+:oslo.config:option:`reserved_host_cpus`,
+:oslo.config:option:`reserved_host_memory_mb`, and
+:oslo.config:option:`reserved_host_disk_mb`, that can be used to set aside some
+number of resources that will not be consumed by an instance, whether these
+resources are overcommitted or not. Some virt drivers may benefit from the use
+of these options to account for hypervisor-specific overhead.
+
+HyperV
+    Hyper-V creates a VM memory file on the local disk when an instance starts.
+    The size of this file corresponds to the amount of RAM allocated to the
+    instance.
+
+    You should configure the
+    :oslo.config:option:`reserved_host_disk_mb` config option to
+    account for this overhead, based on the amount of memory available
+    to instances.
+
+XenAPI
+    XenServer memory overhead is proportional to the size of the VM and larger
+    flavor VMs become more efficient with respect to overhead. This overhead
+    can be calculated using the following formula::
+
+      overhead (MB) = (instance.memory * 0.00781) + (instance.vcpus * 1.5) + 3
+
+    You should configure the
+    :oslo.config:option:`reserved_host_memory_mb` config option to
+    account for this overhead, based on the size of your hosts and
+    instances. For more information, refer to
+    https://wiki.openstack.org/wiki/XenServer/Overhead.
+
 Cells considerations
 ~~~~~~~~~~~~~~~~~~~~
 
@@ -1454,6 +1456,8 @@ related commands. To enable or disable a cell, use
 use :command:`nova-manage cell_v2 create_cell`. See the
 :ref:`man-page-cells-v2` man page for details on command usage.
 
+
+.. _compute-capabilities-as-traits:
 
 Compute capabilities as traits
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1521,4 +1525,8 @@ There are some rules associated with capability-defined traits.
 5. Compute capability traits are standard traits defined in the `os-traits`_
    library.
 
-.. _os-traits: http://git.openstack.org/cgit/openstack/os-traits/tree/os_traits/compute
+.. _os-traits: https://opendev.org/openstack/os-traits/src/branch/master/os_traits/compute
+
+:ref:`Further information on capabilities and traits
+<taxonomy_of_traits_and_capabilities>` can be found in the
+:doc:`Technical Reference Deep Dives section </reference/index>`.

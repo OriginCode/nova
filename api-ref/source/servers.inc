@@ -99,8 +99,10 @@ List Servers
 
 .. rest_method:: GET /servers
 
-Lists IDs, names, and links for all servers.
+Lists IDs, names, and links for servers.
 
+By default the servers are filtered using the project ID associated
+with the authenticated request.
 
 Servers contain a status attribute that indicates the current server
 state. You can filter on the server status when you complete a list
@@ -154,9 +156,10 @@ There is whitelist for valid filter keys. Any filter key other than from
 whitelist will be silently ignored.
 
 - For non-admin users, whitelist is different from admin users whitelist.
-  Valid whitelist for non-admin users includes
+  The valid whitelist can be configured using the
+  ``os_compute_api:servers:allow_all_filters`` policy rule. By default,
+  the valid whitelist for non-admin users includes
 
-  - ``all_tenants``
   - ``changes-since``
   - ``flavor``
   - ``image``
@@ -170,6 +173,7 @@ whitelist will be silently ignored.
   - ``tags`` (New in version 2.26)
   - ``tags-any`` (New in version 2.26)
   - ``changes-before`` (New in version 2.66)
+  - ``locked`` (New in version 2.73)
 
 
 - For admin user, whitelist includes all filter keys mentioned in
@@ -179,7 +183,7 @@ whitelist will be silently ignored.
    due to a transient condition in the deployment like infrastructure failure,
    the response body for those unavailable servers will be missing keys. See
    `handling down cells
-   <https://developer.openstack.org/api-guide/compute/down_cells.html>`__
+   <https://docs.openstack.org/api-guide/compute/down_cells.html>`__
    section of the Compute API guide for more information on the keys that
    would be returned in the partial constructs.
 
@@ -240,6 +244,7 @@ Request
   - tags: tags_query
   - tags-any: tags_any_query
   - changes-before: changes_before_server
+  - locked: locked_query_server
 
 Response
 --------
@@ -296,7 +301,7 @@ request body to boot a server from a volume.
 Include the ``key_name`` parameter in the create request body to add a
 keypair to the server when you create it. To create a keypair, make a
 `create keypair
-<http://developer.openstack.org/api-ref/compute/#create-or-import-keypair>`__
+<https://docs.openstack.org/api-ref/compute/#create-or-import-keypair>`__
 request.
 
 .. note:: Starting with microversion 2.37 the ``networks`` field is required.
@@ -392,6 +397,8 @@ Request
   - description: server_description
   - tags: server_tags_create
   - trusted_image_certificates: server_trusted_image_certificates_create_req
+  - host: server_host_create
+  - hypervisor_hostname: server_hypervisor_hostname_create
   - os:scheduler_hints: os:scheduler_hints
   - os:scheduler_hints.build_near_host_ip: os:scheduler_hints_build_near_host_ip
   - os:scheduler_hints.cidr: os:scheduler_hints_cidr
@@ -420,6 +427,11 @@ Request
 **Example Create Server With Trusted Image Certificates (v2.63)**
 
 .. literalinclude:: ../../doc/api_samples/servers/v2.63/server-create-req.json
+   :language: javascript
+
+**Example Create Server With Host and Hypervisor Hostname (v2.74)**
+
+.. literalinclude:: ../../doc/api_samples/servers/v2.74/server-create-req-with-host-and-node.json
    :language: javascript
 
 Response
@@ -503,7 +515,7 @@ List Servers Detailed
 
 .. rest_method:: GET /servers/detail
 
-For each server, shows server details including configuration drive,
+For each server, shows server details including config drive,
 extended status, and server usage information.
 
 The extended status information appears in the OS-EXT-STS:vm_state,
@@ -518,7 +530,7 @@ HostId is unique per account and is not globally unique.
    due to a transient condition in the deployment like infrastructure failure,
    the response body for those unavailable servers will be missing keys. See
    `handling down cells
-   <https://developer.openstack.org/api-guide/compute/down_cells.html>`__
+   <https://docs.openstack.org/api-guide/compute/down_cells.html>`__
    section of the Compute API guide for more information on the keys that
    would be returned in the partial constructs.
 
@@ -577,6 +589,7 @@ Request
   - tags: tags_query
   - tags-any: tags_any_query
   - changes-before: changes_before_server
+  - locked: locked_query_server
 
 Response
 --------
@@ -646,10 +659,11 @@ Response
   - description: server_description_resp
   - tags: tags
   - trusted_image_certificates: server_trusted_image_certificates_resp
+  - locked_reason: locked_reason_resp
 
-**Example List Servers Detailed (2.63)**
+**Example List Servers Detailed (2.73)**
 
-.. literalinclude:: /../../doc/api_samples/servers/v2.63/servers-details-resp.json
+.. literalinclude:: /../../doc/api_samples/servers/v2.73/servers-details-resp.json
    :language: javascript
 
 **Example List Servers Detailed (2.69)**
@@ -685,7 +699,7 @@ The server must exist.
    due to a transient condition in the deployment like infrastructure failure,
    the response body for the unavailable server will be missing keys. See
    `handling down cells
-   <http://developer.openstack.org/api-guide/compute/down_cells.html>`__
+   <https://docs.openstack.org/api-guide/compute/down_cells.html>`__
    section of the Compute API guide for more information on the keys that
    would be returned in the partial constructs.
 
@@ -769,10 +783,11 @@ Response
   - tags: tags
   - trusted_image_certificates: server_trusted_image_certificates_resp
   - server_groups: server_groups_2_71
+  - locked_reason: locked_reason_resp
 
-**Example Show Server Details (2.63)**
+**Example Show Server Details (2.73)**
 
-.. literalinclude:: ../../doc/api_samples/servers/v2.63/server-get-resp.json
+.. literalinclude:: ../../doc/api_samples/servers/v2.73/server-get-resp.json
    :language: javascript
 
 **Example Show Server Details (2.69)**
@@ -861,10 +876,35 @@ Response
   - tags: tags
   - trusted_image_certificates: server_trusted_image_certificates_resp
   - server_groups: server_groups_2_71
+  - locked_reason: locked_reason_resp
+  - config_drive: config_drive_resp_update_rebuild
+  - OS-EXT-AZ:availability_zone: OS-EXT-AZ:availability_zone_update_rebuild
+  - OS-EXT-SRV-ATTR:host: OS-EXT-SRV-ATTR:host_update_rebuild
+  - OS-EXT-SRV-ATTR:hypervisor_hostname: OS-EXT-SRV-ATTR:hypervisor_hostname_update_rebuild
+  - OS-EXT-SRV-ATTR:instance_name: OS-EXT-SRV-ATTR:instance_name_update_rebuild
+  - OS-EXT-STS:power_state: OS-EXT-STS:power_state_update_rebuild
+  - OS-EXT-STS:task_state: OS-EXT-STS:task_state_update_rebuild
+  - OS-EXT-STS:vm_state: OS-EXT-STS:vm_state_update_rebuild
+  - OS-EXT-SRV-ATTR:hostname: server_hostname_update_rebuild
+  - OS-EXT-SRV-ATTR:reservation_id: server_reservation_id_update_rebuild
+  - OS-EXT-SRV-ATTR:launch_index: server_launch_index_update_rebuild
+  - OS-EXT-SRV-ATTR:kernel_id: server_kernel_id_update_rebuild
+  - OS-EXT-SRV-ATTR:ramdisk_id: server_ramdisk_id_update_rebuild
+  - OS-EXT-SRV-ATTR:root_device_name: server_root_device_name_update_rebuild
+  - OS-EXT-SRV-ATTR:user_data: server_user_data_update
+  - os-extended-volumes:volumes_attached: os-extended-volumes:volumes_attached_update_rebuild
+  - os-extended-volumes:volumes_attached.id: os-extended-volumes:volumes_attached.id_update_rebuild
+  - os-extended-volumes:volumes_attached.delete_on_termination: os-extended-volumes:volumes_attached.delete_on_termination_update_rebuild
+  - OS-SRV-USG:launched_at: OS-SRV-USG:launched_at_update_rebuild
+  - OS-SRV-USG:terminated_at: OS-SRV-USG:terminated_at_update_rebuild
+  - security_groups: security_groups_obj_update_rebuild
+  - security_group.name: name_update_rebuild
+  - host_status: host_status_update_rebuild
+  - key_name: key_name_resp_update
 
-**Example Update Server (2.63)**
+**Example Update Server (2.75)**
 
-.. literalinclude:: ../../doc/api_samples/servers/v2.63/server-update-resp.json
+.. literalinclude:: ../../doc/api_samples/servers/v2.75/server-update-resp.json
    :language: javascript
 
 Delete Server

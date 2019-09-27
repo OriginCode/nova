@@ -25,8 +25,8 @@ semantics of real hypervisor connections.
 
 import collections
 import contextlib
-import copy
 import time
+import uuid
 
 import fixtures
 import os_resource_classes as orc
@@ -45,36 +45,12 @@ from nova.objects import fields as obj_fields
 from nova.objects import migrate_data
 from nova.virt import driver
 from nova.virt import hardware
+from nova.virt.ironic import driver as ironic
 from nova.virt import virtapi
 
 CONF = nova.conf.CONF
 
 LOG = logging.getLogger(__name__)
-
-
-_FAKE_NODES = None
-
-
-def set_nodes(nodes):
-    """Sets FakeDriver's node.list.
-
-    It has effect on the following methods:
-        get_available_nodes()
-        get_available_resource
-
-    To restore the change, call restore_nodes()
-    """
-    global _FAKE_NODES
-    _FAKE_NODES = nodes
-
-
-def restore_nodes():
-    """Resets FakeDriver's node list modified by set_nodes().
-
-    Usually called from tearDown().
-    """
-    global _FAKE_NODES
-    _FAKE_NODES = [CONF.host]
 
 
 class FakeInstance(object):
@@ -135,6 +111,11 @@ class FakeDriver(driver.ComputeDriver):
         "supports_extend_volume": True,
         "supports_multiattach": True,
         "supports_trusted_certs": True,
+        "supports_pcpus": False,
+
+        # Supported image types
+        "supports_image_type_raw": True,
+        "supports_image_type_vhd": False,
         }
 
     # Since we don't have a real hypervisor, pretend we have lots of
@@ -167,15 +148,21 @@ class FakeDriver(driver.ComputeDriver):
         self._mounts = {}
         self._interfaces = {}
         self.active_migrations = {}
-        self._nodes = self._init_nodes()
-
-    def _init_nodes(self):
-        if not _FAKE_NODES:
-            set_nodes([CONF.host])
-        return copy.copy(_FAKE_NODES)
+        self._host = None
+        self._nodes = None
 
     def init_host(self, host):
-        return
+        self._host = host
+        # NOTE(gibi): this is unnecessary complex and fragile but this is
+        # how many current functional sample tests expect the node name.
+        self._nodes = (['fake-mini'] if self._host == 'compute'
+                       else [self._host])
+
+    def _set_nodes(self, nodes):
+        # NOTE(gibi): this is not part of the driver interface but used
+        # by our tests to customize the discovered nodes by the fake
+        # driver.
+        self._nodes = nodes
 
     def list_instances(self):
         return [self.instances[uuid].name for uuid in self.instances.keys()]
@@ -193,7 +180,7 @@ class FakeDriver(driver.ComputeDriver):
 
     def spawn(self, context, instance, image_meta, injected_files,
               admin_password, allocations, network_info=None,
-              block_device_info=None):
+              block_device_info=None, power_on=True):
 
         if network_info:
             for vif in network_info:
@@ -205,7 +192,7 @@ class FakeDriver(driver.ComputeDriver):
                 self._interfaces[vif['id']] = vif
 
         uuid = instance.uuid
-        state = power_state.RUNNING
+        state = power_state.RUNNING if power_on else power_state.SHUTDOWN
         flavor = instance.flavor
         self.resources.claim(
             vcpus=flavor.vcpus,
@@ -253,7 +240,8 @@ class FakeDriver(driver.ComputeDriver):
         pass
 
     def finish_revert_migration(self, context, instance, network_info,
-                                block_device_info=None, power_on=True):
+                                migration, block_device_info=None,
+                                power_on=True):
         self.instances[instance.uuid] = FakeInstance(
             instance.name, power_state.RUNNING, instance.uuid)
 
@@ -606,7 +594,7 @@ class FakeDriver(driver.ComputeDriver):
         # claim resources and track the instance on this "hypervisor".
         self.spawn(context, instance, image_meta, injected_files,
                    admin_password, allocations,
-                   block_device_info=block_device_info)
+                   block_device_info=block_device_info, power_on=power_on)
 
     def confirm_migration(self, context, migration, instance, network_info):
         # Confirm migration cleans up the guest from the source host so just
@@ -677,6 +665,9 @@ class FakeVirtAPI(virtapi.VirtAPI):
         # fall through
         yield
 
+    def update_compute_provider_status(self, context, rp_uuid, enabled):
+        pass
+
 
 class SmallFakeDriver(FakeDriver):
     # The api samples expect specific cpu memory and disk sizes. In order to
@@ -697,6 +688,18 @@ class MediumFakeDriver(FakeDriver):
     vcpus = 10
     memory_mb = 8192
     local_gb = 1028
+
+
+class PowerUpdateFakeDriver(SmallFakeDriver):
+    # A specific fake driver for the power-update external event testing.
+
+    def __init__(self, virtapi):
+        super(PowerUpdateFakeDriver, self).__init__(virtapi=None)
+        self.driver = ironic.IronicDriver(virtapi=virtapi)
+
+    def power_update_event(self, instance, target_power_state):
+        """Update power state of the specified instance in the nova DB."""
+        self.driver.power_update_event(instance, target_power_state)
 
 
 class MediumFakeDriverWithNestedCustomResources(MediumFakeDriver):
@@ -738,6 +741,19 @@ class FakeFinishMigrationFailDriver(FakeDriver):
         raise exception.VirtualInterfaceCreateException()
 
 
+class PredictableNodeUUIDDriver(SmallFakeDriver):
+    """SmallFakeDriver variant that reports a predictable node uuid in
+    get_available_resource, like IronicDriver.
+    """
+    def get_available_resource(self, nodename):
+        resources = super(
+            PredictableNodeUUIDDriver, self).get_available_resource(nodename)
+        # This is used in ComputeNode.update_from_virt_driver which is called
+        # from the ResourceTracker when creating a ComputeNode.
+        resources['uuid'] = uuid.uuid5(uuid.NAMESPACE_DNS, nodename)
+        return resources
+
+
 class FakeRescheduleDriver(FakeDriver):
     """FakeDriver derivative that triggers a reschedule on the first spawn
     attempt. This is expected to only be used in tests that have more than
@@ -749,7 +765,7 @@ class FakeRescheduleDriver(FakeDriver):
 
     def spawn(self, context, instance, image_meta, injected_files,
               admin_password, allocations, network_info=None,
-              block_device_info=None):
+              block_device_info=None, power_on=True):
         if not self.rescheduled.get(instance.uuid, False):
             # We only reschedule on the first time something hits spawn().
             self.rescheduled[instance.uuid] = True
@@ -757,7 +773,8 @@ class FakeRescheduleDriver(FakeDriver):
                 reason='FakeRescheduleDriver')
         super(FakeRescheduleDriver, self).spawn(
             context, instance, image_meta, injected_files,
-            admin_password, allocations, network_info, block_device_info)
+            admin_password, allocations, network_info, block_device_info,
+            power_on)
 
 
 class FakeRescheduleDriverWithNestedCustomResources(
@@ -771,7 +788,7 @@ class FakeBuildAbortDriver(FakeDriver):
     """
     def spawn(self, context, instance, image_meta, injected_files,
               admin_password, allocations, network_info=None,
-              block_device_info=None):
+              block_device_info=None, power_on=True):
         raise exception.BuildAbortException(
             instance_uuid=instance.uuid, reason='FakeBuildAbortDriver')
 
@@ -787,14 +804,15 @@ class FakeUnshelveSpawnFailDriver(FakeDriver):
     """
     def spawn(self, context, instance, image_meta, injected_files,
               admin_password, allocations, network_info=None,
-              block_device_info=None):
+              block_device_info=None, power_on=True):
         if instance.vm_state == vm_states.SHELVED_OFFLOADED:
             raise exception.VirtualInterfaceCreateException(
                 'FakeUnshelveSpawnFailDriver')
         # Otherwise spawn normally during the initial build.
         super(FakeUnshelveSpawnFailDriver, self).spawn(
             context, instance, image_meta, injected_files,
-            admin_password, allocations, network_info, block_device_info)
+            admin_password, allocations, network_info, block_device_info,
+            power_on)
 
 
 class FakeUnshelveSpawnFailDriverWithNestedCustomResources(
@@ -855,6 +873,13 @@ class FakeLiveMigrateDriverWithNestedCustomResources(
 
 class FakeDriverWithPciResources(SmallFakeDriver):
 
+    PCI_ADDR_PF1 = '0000:01:00.0'
+    PCI_ADDR_PF1_VF1 = '0000:01:00.1'
+    PCI_ADDR_PF2 = '0000:02:00.0'
+    PCI_ADDR_PF2_VF1 = '0000:02:00.1'
+    PCI_ADDR_PF3 = '0000:03:00.0'
+    PCI_ADDR_PF3_VF1 = '0000:03:00.1'
+
     # NOTE(gibi): Always use this fixture along with the
     # FakeDriverWithPciResources to make the necessary configuration for the
     # driver.
@@ -914,17 +939,17 @@ class FakeDriverWithPciResources(SmallFakeDriver):
     def get_available_resource(self, nodename):
         host_status = super(
             FakeDriverWithPciResources, self).get_available_resource(nodename)
-        # 01:00 - PF - ens1
+        # 01:00.0 - PF - ens1
         #  |---- 01:00.1 - VF
         #
-        # 02:00 - PF - ens2
+        # 02:00.0 - PF - ens2
         #  |---- 02:00.1 - VF
         #
-        # 03:00 - PF - ens3
+        # 03:00.0 - PF - ens3
         #  |---- 03:00.1 - VF
         host_status['pci_passthrough_devices'] = jsonutils.dumps([
             {
-                'address': '0000:01:00.0',
+                'address': self.PCI_ADDR_PF1,
                 'product_id': 'fake-product_id',
                 'vendor_id': 'fake-vendor_id',
                 'status': 'available',
@@ -934,18 +959,18 @@ class FakeDriverWithPciResources(SmallFakeDriver):
                 'label': 'fake-label',
             },
             {
-                'address': '0000:01:00.1',
+                'address': self.PCI_ADDR_PF1_VF1,
                 'product_id': 'fake-product_id',
                 'vendor_id': 'fake-vendor_id',
                 'status': 'available',
                 'dev_type': 'type-VF',
-                'parent_addr': '0000:01:00',
+                'parent_addr': self.PCI_ADDR_PF1,
                 'numa_node': 0,
                 'label': 'fake-label',
-                "parent_ifname": "ens1",
+                "parent_ifname": self._host + "-ens1",
             },
             {
-                'address': '0000:02:00.0',
+                'address': self.PCI_ADDR_PF2,
                 'product_id': 'fake-product_id',
                 'vendor_id': 'fake-vendor_id',
                 'status': 'available',
@@ -955,18 +980,18 @@ class FakeDriverWithPciResources(SmallFakeDriver):
                 'label': 'fake-label',
             },
             {
-                'address': '0000:02:00.1',
+                'address': self.PCI_ADDR_PF2_VF1,
                 'product_id': 'fake-product_id',
                 'vendor_id': 'fake-vendor_id',
                 'status': 'available',
                 'dev_type': 'type-VF',
-                'parent_addr': '0000:02:00',
+                'parent_addr': self.PCI_ADDR_PF2,
                 'numa_node': 0,
                 'label': 'fake-label',
-                "parent_ifname": "ens2",
+                "parent_ifname": self._host + "-ens2",
             },
             {
-                'address': '0000:03:00.0',
+                'address': self.PCI_ADDR_PF3,
                 'product_id': 'fake-product_id',
                 'vendor_id': 'fake-vendor_id',
                 'status': 'available',
@@ -976,15 +1001,15 @@ class FakeDriverWithPciResources(SmallFakeDriver):
                 'label': 'fake-label',
             },
             {
-                'address': '0000:03:00.1',
+                'address': self.PCI_ADDR_PF3_VF1,
                 'product_id': 'fake-product_id',
                 'vendor_id': 'fake-vendor_id',
                 'status': 'available',
                 'dev_type': 'type-VF',
-                'parent_addr': '0000:03:00',
+                'parent_addr': self.PCI_ADDR_PF3,
                 'numa_node': 0,
                 'label': 'fake-label',
-                "parent_ifname": "ens3",
+                "parent_ifname": self._host + "-ens3",
             },
         ])
         return host_status

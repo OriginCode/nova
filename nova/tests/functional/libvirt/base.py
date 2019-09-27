@@ -14,29 +14,31 @@
 # under the License.
 
 import copy
+import io
+
 import fixtures
 import mock
 
+from nova import conf
 from nova.objects import fields as obj_fields
-
 from nova.tests import fixtures as nova_fixtures
-from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import test_servers as base
 from nova.tests.unit.virt.libvirt import fake_imagebackend
-from nova.tests.unit.virt.libvirt import fake_libvirt_utils
 from nova.tests.unit.virt.libvirt import fakelibvirt
 
 
+CONF = conf.CONF
+
+
 class ServersTestBase(base.ServersTestBase):
+
+    ADDITIONAL_FILTERS = []
 
     def setUp(self):
         super(ServersTestBase, self).setUp()
 
         # Replace libvirt with fakelibvirt
         self.useFixture(fake_imagebackend.ImageBackendFixture())
-        self.useFixture(fixtures.MonkeyPatch(
-            'nova.virt.libvirt.driver.libvirt_utils',
-            fake_libvirt_utils))
         self.useFixture(fixtures.MonkeyPatch(
             'nova.virt.libvirt.driver.libvirt',
             fakelibvirt))
@@ -47,7 +49,24 @@ class ServersTestBase(base.ServersTestBase):
             'nova.virt.libvirt.guest.libvirt',
             fakelibvirt))
         self.useFixture(fakelibvirt.FakeLibvirtFixture())
-        self.useFixture(func_fixtures.PlacementFixture())
+
+        self.useFixture(fixtures.MockPatch(
+            'nova.virt.libvirt.LibvirtDriver._create_image'))
+        self.useFixture(fixtures.MockPatch(
+            'nova.virt.libvirt.LibvirtDriver._get_local_gb_info',
+            return_value={'total': 128, 'used': 44, 'free': 84}))
+        self.useFixture(fixtures.MockPatch(
+            'nova.virt.libvirt.driver.libvirt_utils.is_valid_hostname',
+            return_value=True))
+        self.useFixture(fixtures.MockPatch(
+            'nova.virt.libvirt.driver.libvirt_utils.file_open',
+            side_effect=lambda *a, **k: io.BytesIO(b'')))
+        self.useFixture(fixtures.MockPatch(
+            'nova.privsep.utils.supports_direct_io',
+            return_value=True))
+        self.useFixture(fixtures.MockPatch(
+            'nova.virt.libvirt.host.Host.get_online_cpus',
+            return_value=set(range(16))))
 
         # Mock the 'get_connection' function, as we're going to need to provide
         # custom capabilities for each test
@@ -62,22 +81,44 @@ class ServersTestBase(base.ServersTestBase):
         self.mock_arch.return_value = obj_fields.Architecture.X86_64
         self.addCleanup(_a.stop)
 
+        # Mock the 'get_arch' function as we may need to provide different host
+        # architectures during some tests. We default to x86_64
+        _a = mock.patch('nova.virt.libvirt.utils.get_arch')
+        self.mock_arch = _a.start()
+        self.mock_arch.return_value = obj_fields.Architecture.X86_64
+        self.addCleanup(_a.stop)
+
     def _setup_compute_service(self):
         # NOTE(stephenfin): We don't start the compute service here as we wish
         # to configure the host capabilities first. We instead start the
         # service in the test
         self.flags(compute_driver='libvirt.LibvirtDriver')
 
+    def _setup_scheduler_service(self):
+        enabled_filters = CONF.filter_scheduler.enabled_filters
+        enabled_filters += self.ADDITIONAL_FILTERS
+
+        self.flags(driver='filter_scheduler', group='scheduler')
+        self.flags(enabled_filters=enabled_filters, group='filter_scheduler')
+
+        return self.start_service('scheduler')
+
     def _get_connection(self, host_info, pci_info=None,
                         libvirt_version=fakelibvirt.FAKE_LIBVIRT_VERSION,
-                        mdev_info=None):
+                        mdev_info=None, hostname=None):
+        # sanity check
+        self.assertGreater(16, host_info.cpus,
+            "Host.get_online_cpus is only accounting for 16 CPUs but you're "
+            "requesting %d; change the mock or your test" % host_info.cpus)
+
         fake_connection = fakelibvirt.Connection(
             'qemu:///system',
             version=libvirt_version,
             hv_version=fakelibvirt.FAKE_QEMU_VERSION,
             host_info=host_info,
             pci_info=pci_info,
-            mdev_info=mdev_info)
+            mdev_info=mdev_info,
+            hostname=hostname)
         return fake_connection
 
 

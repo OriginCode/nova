@@ -15,21 +15,11 @@ import mock
 from nova.conductor import api as conductor_api
 from nova import context as nova_context
 from nova import objects
-from nova.scheduler import weights
 from nova import test
 from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import integrated_helpers
 from nova.tests.unit.image import fake as fake_image
-from nova.virt import fake as fake_virt
-
-
-class HostNameWeigher(weights.BaseHostWeigher):
-    # Prefer host1 over host2.
-    weights = {'host1': 100, 'host2': 50}
-
-    def _weigh_object(self, host_state, weight_properties):
-        return self.weights.get(host_state.host, 0)
 
 
 class MissingReqSpecInstanceGroupUUIDTestCase(
@@ -72,17 +62,14 @@ class MissingReqSpecInstanceGroupUUIDTestCase(
             api_version='v2.1'))
         self.api = api_fixture.admin_api
         self.start_service('conductor')
-        # Use our custom weigher defined above to make sure that we have
-        # a predictable scheduling sort order.
-        self.flags(weight_classes=[__name__ + '.HostNameWeigher'],
-                   group='filter_scheduler')
+        # Use a custom weigher to make sure that we have a predictable
+        # scheduling sort order.
+        self.useFixture(nova_fixtures.HostNameWeigherFixture())
         self.start_service('scheduler')
         # Start two computes, one where the server will be created and another
         # where we'll cold migrate it.
-        self.addCleanup(fake_virt.restore_nodes)
         self.computes = {}  # keep track of the compute services per host name
         for host in ('host1', 'host2'):
-            fake_virt.set_nodes([host])
             compute_service = self.start_service('compute', host=host)
             self.computes[host] = compute_service
 
@@ -117,17 +104,19 @@ class MissingReqSpecInstanceGroupUUIDTestCase(
         # This simulates the pre-Stein reschedule behavior.
         original_resize_instance = conductor_api.ComputeTaskAPI.resize_instance
 
-        def stub_resize_instance(_self, context, instance,
-                                 extra_instance_updates, scheduler_hint,
-                                 *args, **kwargs):
+        def stub_resize_instance(_self, context, instance, scheduler_hint,
+                                 flavor, *args, **kwargs):
             # Only remove the request spec if we know we're rescheduling
             # which we can determine from the filter_properties retry dict.
             filter_properties = scheduler_hint['filter_properties']
             if filter_properties.get('retry', {}).get('exc'):
+                # Assert the group_uuid is passed through the filter properties
+                self.assertIn('group_uuid', filter_properties)
+                self.assertEqual(group_id, filter_properties['group_uuid'])
                 kwargs.pop('request_spec', None)
             return original_resize_instance(
-                _self, context, instance, extra_instance_updates,
-                scheduler_hint, *args, **kwargs)
+                _self, context, instance, scheduler_hint, flavor, *args,
+                **kwargs)
         self.stub_out('nova.conductor.api.ComputeTaskAPI.resize_instance',
                       stub_resize_instance)
 

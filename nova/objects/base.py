@@ -26,10 +26,26 @@ from oslo_versionedobjects import base as ovoo_base
 from oslo_versionedobjects import exception as ovoo_exc
 import six
 
-from nova import exception
 from nova import objects
 from nova.objects import fields as obj_fields
 from nova import utils
+
+
+def all_things_equal(obj_a, obj_b):
+    if obj_b is None:
+        return False
+
+    for name in obj_a.fields:
+        set_a = name in obj_a
+        set_b = name in obj_b
+        if set_a != set_b:
+            return False
+        elif not set_a:
+            continue
+
+        if getattr(obj_a, name) != getattr(obj_b, name):
+            return False
+    return True
 
 
 def get_attrname(name):
@@ -110,30 +126,6 @@ class NovaObject(ovoo_base.VersionedObject):
     def obj_alternate_context(self, context):
         original_context = self._context
         self._context = context
-        try:
-            yield
-        finally:
-            self._context = original_context
-
-    # NOTE(danms): This is nova-specific
-    @contextlib.contextmanager
-    def obj_as_admin(self):
-        """Context manager to make an object call as an admin.
-
-        This temporarily modifies the context embedded in an object to
-        be elevated() and restores it after the call completes. Example
-        usage:
-
-           with obj.obj_as_admin():
-               obj.save()
-
-        """
-        if self._context is None:
-            raise exception.OrphanedObjectError(method='obj_as_admin',
-                                                objtype=self.obj_name())
-
-        original_context = self._context
-        self._context = self._context.elevated()
         try:
             yield
         finally:

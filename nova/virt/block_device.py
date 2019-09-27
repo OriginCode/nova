@@ -279,9 +279,8 @@ class DriverVolumeBlockDevice(DriverBlockDevice):
                        'device_type': None}
 
     def _transform(self):
-        if (not self._bdm_obj.source_type == self._valid_source
-                or not self._bdm_obj.destination_type ==
-                self._valid_destination):
+        if (not self._bdm_obj.source_type == self._valid_source or
+                not self._bdm_obj.destination_type == self._valid_destination):
             raise _InvalidType
 
         self.update(
@@ -289,11 +288,13 @@ class DriverVolumeBlockDevice(DriverBlockDevice):
              if k in self._new_fields | set(['delete_on_termination'])}
         )
         self['mount_device'] = self._bdm_obj.device_name
+        # connection_info might not be set so default to an empty dict so that
+        # it can be serialized to an empty JSON object.
         try:
             self['connection_info'] = jsonutils.loads(
                 self._bdm_obj.connection_info)
         except TypeError:
-            self['connection_info'] = None
+            self['connection_info'] = {}
         # volume_type might not be set on the internal bdm object so default
         # to None if not set
         self['volume_type'] = (
@@ -352,6 +353,20 @@ class DriverVolumeBlockDevice(DriverBlockDevice):
             return volume_api.get(context, volume_id, microversion='3.48')
         except exception.CinderAPIVersionNotAvailable:
             return volume_api.get(context, volume_id)
+
+    def _create_volume(self, context, instance, volume_api, size,
+                       wait_func=None, **create_kwargs):
+        av_zone = _get_volume_create_az_value(instance)
+        name = create_kwargs.pop('name', '')
+        description = create_kwargs.pop('description', '')
+        vol = volume_api.create(
+            context, size, name, description, volume_type=self.volume_type,
+            availability_zone=av_zone, **create_kwargs)
+
+        if wait_func:
+            self._call_wait_func(context, wait_func, volume_api, vol['id'])
+
+        return vol
 
     def _do_detach(self, context, instance, volume_api, virt_driver,
                    attachment_id=None, destroy_bdm=False):
@@ -718,14 +733,11 @@ class DriverVolSnapshotBlockDevice(DriverVolumeBlockDevice):
                virt_driver, wait_func=None):
 
         if not self.volume_id:
-            av_zone = _get_volume_create_az_value(instance)
             snapshot = volume_api.get_snapshot(context,
                                                self.snapshot_id)
-            vol = volume_api.create(context, self.volume_size, '', '',
-                                    snapshot, volume_type=self.volume_type,
-                                    availability_zone=av_zone)
-            if wait_func:
-                self._call_wait_func(context, wait_func, volume_api, vol['id'])
+            vol = self._create_volume(
+                context, instance, volume_api, self.volume_size,
+                wait_func=wait_func, snapshot=snapshot)
 
             self.volume_id = vol['id']
 
@@ -745,13 +757,9 @@ class DriverVolImageBlockDevice(DriverVolumeBlockDevice):
     def attach(self, context, instance, volume_api,
                virt_driver, wait_func=None):
         if not self.volume_id:
-            av_zone = _get_volume_create_az_value(instance)
-            vol = volume_api.create(context, self.volume_size,
-                                    '', '', image_id=self.image_id,
-                                    volume_type=self.volume_type,
-                                    availability_zone=av_zone)
-            if wait_func:
-                self._call_wait_func(context, wait_func, volume_api, vol['id'])
+            vol = self._create_volume(
+                context, instance, volume_api, self.volume_size,
+                wait_func=wait_func, image_id=self.image_id)
 
             self.volume_id = vol['id']
 
@@ -771,12 +779,9 @@ class DriverVolBlankBlockDevice(DriverVolumeBlockDevice):
                virt_driver, wait_func=None):
         if not self.volume_id:
             vol_name = instance.uuid + '-blank-vol'
-            av_zone = _get_volume_create_az_value(instance)
-            vol = volume_api.create(context, self.volume_size, vol_name, '',
-                                    volume_type=self.volume_type,
-                                    availability_zone=av_zone)
-            if wait_func:
-                self._call_wait_func(context, wait_func, volume_api, vol['id'])
+            vol = self._create_volume(
+                context, instance, volume_api, self.volume_size,
+                wait_func=wait_func, name=vol_name)
 
             self.volume_id = vol['id']
 
@@ -925,9 +930,9 @@ def is_implemented(bdm):
 
 
 def is_block_device_mapping(bdm):
-    return (bdm.source_type in ('image', 'volume', 'snapshot', 'blank')
-            and bdm.destination_type == 'volume'
-            and is_implemented(bdm))
+    return (bdm.source_type in ('image', 'volume', 'snapshot', 'blank') and
+            bdm.destination_type == 'volume' and
+            is_implemented(bdm))
 
 
 def get_volume_id(connection_info):

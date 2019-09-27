@@ -77,6 +77,19 @@ class PowerVMDriver(driver.ComputeDriver):
             'supports_extend_volume': True,
             'supports_multiattach': False,
             'supports_trusted_certs': False,
+            'supports_pcpus': False,
+
+            # Supported image types
+            "supports_image_type_aki": False,
+            "supports_image_type_ami": False,
+            "supports_image_type_ari": False,
+            "supports_image_type_iso": False,
+            "supports_image_type_qcow2": False,
+            "supports_image_type_raw": True,
+            "supports_image_type_vdi": False,
+            "supports_image_type_vhd": False,
+            "supports_image_type_vhdx": False,
+            "supports_image_type_vmdk": False,
         }
         super(PowerVMDriver, self).__init__(virtapi)
 
@@ -228,7 +241,7 @@ class PowerVMDriver(driver.ComputeDriver):
 
     def spawn(self, context, instance, image_meta, injected_files,
               admin_password, allocations, network_info=None,
-              block_device_info=None):
+              block_device_info=None, power_on=True):
         """Create a new instance/VM/domain on the virtualization platform.
 
         Once this successfully completes, the instance should be
@@ -252,6 +265,8 @@ class PowerVMDriver(driver.ComputeDriver):
         :param network_info: instance network information
         :param block_device_info: Information about block devices to be
                                   attached to the instance.
+        :param power_on: True if the instance should be powered on, False
+                         otherwise
         """
         self._log_operation('spawn', instance)
         # Define the flow

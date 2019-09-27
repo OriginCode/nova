@@ -57,6 +57,7 @@ def get_binary_name():
     """Grab the name of the binary we're running in."""
     return os.path.basename(inspect.stack()[-1][1])[:16]
 
+
 binary_name = get_binary_name()
 
 
@@ -260,11 +261,14 @@ class IptablesManager(object):
 
     """
 
-    def __init__(self, execute=None):
-        if not execute:
-            self.execute = _execute
-        else:
-            self.execute = execute
+    def __init__(self, redirect_privsep_calls_to=None):
+        # NOTE(mikal): This is only used by the xenapi hypervisor driver,
+        # which wants to intercept our calls to iptables and redirect them
+        # to an agent running in dom0.
+        # TODO(mikal): We really should make the dom0 agent feel more like
+        # privsep. They really are the same thing, just one is from a simpler
+        # time in our past.
+        self.redirect_privsep = redirect_privsep_calls_to
 
         self.ipv4 = {'filter': IptablesTable(),
                      'nat': IptablesTable(),
@@ -357,23 +361,42 @@ class IptablesManager(object):
         rules. This happens atomically, thanks to iptables-restore.
 
         """
-        s = [('iptables', self.ipv4)]
+        s = [(True, self.ipv4)]
         if CONF.use_ipv6:
-            s += [('ip6tables', self.ipv6)]
+            s += [(False, self.ipv6)]
 
-        for cmd, tables in s:
-            all_tables, _err = self.execute('%s-save' % (cmd,), '-c',
-                                                run_as_root=True,
-                                                attempts=5)
+        for is_ipv4, tables in s:
+            if not self.redirect_privsep:
+                all_tables, _err = nova.privsep.linux_net.iptables_get_rules(
+                                       ipv4=is_ipv4)
+            else:
+                if is_ipv4:
+                    cmd = 'iptables-save'
+                else:
+                    cmd = 'ip6tables-save'
+                all_tables, _err = self.redirect_privsep(
+                    cmd, '-c', run_as_root=True, attempts=5)
+
             all_lines = all_tables.split('\n')
             for table_name, table in tables.items():
                 start, end = self._find_table(all_lines, table_name)
                 all_lines[start:end] = self._modify_rules(
                         all_lines[start:end], table, table_name)
                 table.dirty = False
-            self.execute('%s-restore' % (cmd,), '-c', run_as_root=True,
-                         process_input=six.b('\n'.join(all_lines)),
-                         attempts=5)
+
+            if not self.redirect_privsep:
+                nova.privsep.linux_net.iptables_set_rules(all_lines,
+                                                          ipv4=is_ipv4)
+            else:
+                if is_ipv4:
+                    cmd = 'iptables-restore'
+                else:
+                    cmd = 'ip6tables-restore'
+                self.redirect_privsep(
+                    cmd, '-c', run_as_root=True,
+                    process_input=six.b('\n'.join(all_lines)),
+                    attempts=5)
+
         LOG.debug("IPTablesManager.apply completed with success")
 
     def _find_table(self, lines, table_name):
@@ -583,8 +606,8 @@ def metadata_forward():
 
 
 def _iptables_dest(ip):
-    if ((netaddr.IPAddress(ip).version == 4 and ip == '127.0.0.1')
-        or ip == '::1'):
+    if ((netaddr.IPAddress(ip).version == 4 and ip == '127.0.0.1') or
+            ip == '::1'):
         return '-m addrtype --dst-type LOCAL'
     else:
         return '-d %s' % ip
@@ -689,7 +712,7 @@ def ensure_vpn_forward(public_ip, port, private_ip):
 def ensure_floating_forward(floating_ip, fixed_ip, device, network):
     """Ensure floating IP forwarding rule."""
     # NOTE(vish): Make sure we never have duplicate rules for the same ip
-    regex = '.*\s+%s(/32|\s+|$)' % floating_ip
+    regex = r'.*\s+%s(/32|\s+|$)' % floating_ip
     num_rules = iptables_manager.ipv4['nat'].remove_rules_regex(regex)
     if num_rules:
         LOG.warning('Removed %(num)d duplicate rules for floating IP '
@@ -735,19 +758,12 @@ def floating_forward_rules(floating_ip, fixed_ip, device):
     return rules
 
 
-def _enable_ipv4_forwarding():
-    sysctl_key = 'net.ipv4.ip_forward'
-    stdout, stderr = _execute('sysctl', '-n', sysctl_key)
-    if stdout.strip() is not '1':
-        _execute('sysctl', '-w', '%s=1' % sysctl_key, run_as_root=True)
-
-
 @utils.synchronized('lock_gateway', external=True)
 def initialize_gateway_device(dev, network_ref):
     if not network_ref:
         return
 
-    _enable_ipv4_forwarding()
+    nova.privsep.linux_net.enable_ipv4_forwarding()
 
     # NOTE(vish): The ip for dnsmasq has to be the first address on the
     #             bridge for it to respond to requests properly
@@ -983,47 +999,30 @@ def restart_dhcp(context, dev, network_ref, fixedips):
         else:
             LOG.debug('Pid %d is stale, relaunching dnsmasq', pid)
 
-    cmd = ['env',
-           'CONFIG_FILE=%s' % jsonutils.dumps(CONF.dhcpbridge_flagfile),
-           'NETWORK_ID=%s' % str(network_ref['id']),
-           'dnsmasq',
-           '--strict-order',
-           '--bind-interfaces',
-           '--conf-file=%s' % CONF.dnsmasq_config_file,
-           '--pid-file=%s' % _dhcp_file(dev, 'pid'),
-           '--dhcp-optsfile=%s' % _dhcp_file(dev, 'opts'),
-           '--listen-address=%s' % network_ref['dhcp_server'],
-           '--except-interface=lo',
-           '--dhcp-range=set:%s,%s,static,%s,%ss' %
-                         (network_ref['label'],
-                          network_ref['dhcp_start'],
-                          network_ref['netmask'],
-                          CONF.dhcp_lease_time),
-           '--dhcp-lease-max=%s' % len(netaddr.IPNetwork(network_ref['cidr'])),
-           '--dhcp-hostsfile=%s' % _dhcp_file(dev, 'conf'),
-           '--dhcp-script=%s' % CONF.dhcpbridge,
-           '--no-hosts',
-           '--leasefile-ro']
-
-    # dnsmasq currently gives an error for an empty domain,
-    # rather than ignoring.  So only specify it if defined.
-    if CONF.dhcp_domain:
-        cmd.append('--domain=%s' % CONF.dhcp_domain)
-
     dns_servers = CONF.dns_server
     if CONF.use_network_dns_servers:
         if network_ref.get('dns1'):
             dns_servers.append(network_ref.get('dns1'))
         if network_ref.get('dns2'):
             dns_servers.append(network_ref.get('dns2'))
-    if network_ref['multi_host']:
-        cmd.append('--addn-hosts=%s' % _dhcp_file(dev, 'hosts'))
-    if dns_servers:
-        cmd.append('--no-resolv')
-    for dns_server in dns_servers:
-        cmd.append('--server=%s' % dns_server)
 
-    _execute(*cmd, run_as_root=True)
+    hosts_path = None
+    if network_ref['multi_host']:
+        hosts_path = _dhcp_file(dev, 'hosts')
+
+    nova.privsep.linux_net.restart_dnsmasq(
+        jsonutils.dumps(CONF.dhcpbridge_flagfile),
+        network_ref,
+        CONF.dnsmasq_config_file,
+        _dhcp_file(dev, 'pid'),
+        _dhcp_file(dev, 'opts'),
+        CONF.dhcp_lease_time,
+        len(netaddr.IPNetwork(network_ref['cidr'])),
+        _dhcp_file(dev, 'conf'),
+        CONF.dhcpbridge,
+        CONF.api.dhcp_domain,
+        dns_servers,
+        hosts_path)
 
     _add_dnsmasq_accept_rules(dev)
 
@@ -1061,11 +1060,8 @@ interface %s
         else:
             LOG.debug('Pid %d is stale, relaunching radvd', pid)
 
-    cmd = ['radvd',
-           '-C', '%s' % _ra_file(dev, 'conf'),
-           '-p', '%s' % _ra_file(dev, 'pid')]
-
-    _execute(*cmd, run_as_root=True)
+    nova.privsep.linux_net.start_ra(_ra_file(dev, 'conf'),
+                                    _ra_file(dev, 'pid'))
 
 
 def _host_lease(fixedip):
@@ -1096,20 +1092,20 @@ def _host_dhcp(fixedip):
         net = _host_dhcp_network(fixedip.virtual_interface_id)
         return '%s,%s.%s,%s,net:%s' % (fixedip.virtual_interface.address,
                                hostname,
-                               CONF.dhcp_domain,
+                               CONF.api.dhcp_domain,
                                fixedip.address,
                                net)
     else:
         return '%s,%s.%s,%s' % (fixedip.virtual_interface.address,
                                hostname,
-                               CONF.dhcp_domain,
+                               CONF.api.dhcp_domain,
                                fixedip.address)
 
 
 def _host_dns(fixedip):
     return '%s\t%s.%s' % (fixedip.address,
                           fixedip.instance.hostname,
-                          CONF.dhcp_domain)
+                          CONF.api.dhcp_domain)
 
 
 def _host_dhcp_opts(vif_id=None, gateway=None):
@@ -1122,15 +1118,6 @@ def _host_dhcp_opts(vif_id=None, gateway=None):
     if gateway:
         values.append('%s' % gateway)
     return ','.join(values)
-
-
-def _execute(*cmd, **kwargs):
-    """Wrapper around utils._execute for fake_network."""
-    if CONF.fake_network:
-        LOG.debug('FAKE NET: %s', ' '.join(map(str, cmd)))
-        return 'fake', 0
-    else:
-        return utils.execute(*cmd, **kwargs)
 
 
 def _dhcp_file(dev, kind):
@@ -1180,29 +1167,6 @@ def _ra_pid_for(dev):
     if os.path.exists(pid_file):
         with open(pid_file, 'r') as f:
             return int(f.read())
-
-
-def _ovs_vsctl(args):
-    full_args = ['ovs-vsctl', '--timeout=%s' % CONF.ovs_vsctl_timeout] + args
-    try:
-        return utils.execute(*full_args, run_as_root=True)
-    except Exception as e:
-        LOG.error("Unable to execute %(cmd)s. Exception: %(exception)s",
-                  {'cmd': full_args, 'exception': e})
-        raise exception.OvsConfigurationFailure(inner_exception=e)
-
-
-def create_fp_dev(dev, sockpath, sockmode):
-    if not nova.privsep.linux_net.device_exists(dev):
-        utils.execute('fp-vdev', 'add', dev, '--sockpath', sockpath,
-                      '--sockmode', sockmode, run_as_root=True)
-        nova.privsep.linux_net.set_device_mtu(dev)
-        nova.privsep.linux_net.set_device_enabled(dev)
-
-
-def delete_fp_dev(dev):
-    if nova.privsep.linux_net.device_exists(dev):
-        utils.execute('fp-vdev', 'del', dev, run_as_root=True)
 
 
 def delete_bridge_dev(dev):
@@ -1336,10 +1300,8 @@ class LinuxBridgeInterfaceDriver(LinuxNetInterfaceDriver):
             interface = 'vlan%s' % vlan_num
         if not nova.privsep.linux_net.device_exists(interface):
             LOG.debug('Starting VLAN interface %s', interface)
-            _execute('ip', 'link', 'add', 'link', bridge_interface,
-                     'name', interface, 'type', 'vlan',
-                     'id', vlan_num, run_as_root=True,
-                     check_exit_code=[0, 2, 254])
+            nova.privsep.linux_net.add_vlan(bridge_interface, interface,
+                                            vlan_num)
             # (danwent) the bridge will inherit this address, so we want to
             # make sure it is the value set from the NetworkManager
             if mac_address:
@@ -1385,16 +1347,15 @@ class LinuxBridgeInterfaceDriver(LinuxNetInterfaceDriver):
                 msg = _('Failed to add bridge: %s') % err
                 raise exception.NovaException(msg)
 
-            _execute('brctl', 'setfd', bridge, 0, run_as_root=True)
-            # _execute('brctl setageing %s 10' % bridge, run_as_root=True)
-            _execute('brctl', 'stp', bridge, 'off', run_as_root=True)
+            nova.privsep.linux_net.bridge_setfd(bridge)
+            nova.privsep.linux_net.bridge_disable_stp(bridge)
             nova.privsep.linux_net.set_device_enabled(bridge)
 
         if interface:
             LOG.debug('Adding interface %(interface)s to bridge %(bridge)s',
                       {'interface': interface, 'bridge': bridge})
-            out, err = _execute('brctl', 'addif', bridge, interface,
-                                check_exit_code=False, run_as_root=True)
+            out, err = nova.privsep.linux_net.bridge_add_interface(
+                           bridge, interface)
             if (err and err != "device %s is already a member of a bridge; "
                      "can't enslave it to bridge %s.\n" % (interface, bridge)):
                 msg = _('Failed to add interface: %s') % err
@@ -1510,30 +1471,27 @@ def _exec_ebtables(table, rule, insert_rule=True, check_exit_code=True):
         #            other error (like a rule doesn't exist) so we have to
         #            to parse stderr.
         try:
-            cmd = ['ebtables', '--concurrent', '-t', table]
-            if insert_rule:
-                cmd.append('-I')
-            else:
-                cmd.append('-D')
-            cmd.extend(rule)
-
-            _execute(*cmd, check_exit_code=[0], run_as_root=True)
+            nova.privsep.linux_net.modify_ebtables(table, rule,
+                                                   insert_rule=insert_rule)
         except processutils.ProcessExecutionError as exc:
             # See if we can retry the error.
             if any(error in exc.stderr for error in retry_strings):
                 if count > attempts and check_exit_code:
-                    LOG.warning('%s failed. Not Retrying.', ' '.join(cmd))
+                    LOG.warning('Rule edit for %s failed. Not Retrying.',
+                                table)
                     raise
                 else:
                     # We need to sleep a bit before retrying
-                    LOG.warning("%(cmd)s failed. Sleeping %(time)s "
-                                "seconds before retry.",
-                                {'cmd': ' '.join(cmd), 'time': sleep})
+                    LOG.warning('Rule edit for %(table)s failed. '
+                                'Sleeping %(time)s seconds before retry.',
+                                {'table': table, 'time': sleep})
                     time.sleep(sleep)
             else:
                 # Not eligible for retry
                 if check_exit_code:
-                    LOG.warning('%s failed. Not Retrying.', ' '.join(cmd))
+                    LOG.warning('Rule edit for %s failed and not eligible '
+                                'for retry.',
+                                table)
                     raise
                 else:
                     return
@@ -1618,14 +1576,9 @@ class LinuxOVSInterfaceDriver(LinuxNetInterfaceDriver):
         dev = self.get_dev(network)
         if not nova.privsep.linux_net.device_exists(dev):
             bridge = CONF.linuxnet_ovs_integration_bridge
-            _ovs_vsctl(['--', '--may-exist', 'add-port', bridge, dev,
-                        '--', 'set', 'Interface', dev, 'type=internal',
-                        '--', 'set', 'Interface', dev,
-                        'external-ids:iface-id=%s' % dev,
-                        '--', 'set', 'Interface', dev,
-                        'external-ids:iface-status=active',
-                        '--', 'set', 'Interface', dev,
-                        'external-ids:attached-mac=%s' % mac_address])
+
+            nova.privsep.linux_net.ovs_plug(CONF.ovs_vsctl_timeout,
+                                            bridge, dev, mac_address)
             nova.privsep.linux_net.set_device_macaddr(
                 dev, mac_address)
             nova.privsep.linux_net.set_device_mtu(dev, network.get('mtu'))
@@ -1633,12 +1586,9 @@ class LinuxOVSInterfaceDriver(LinuxNetInterfaceDriver):
             if not gateway:
                 # If we weren't instructed to act as a gateway then add the
                 # appropriate flows to block all non-dhcp traffic.
-                _execute('ovs-ofctl',
-                         'add-flow', bridge, 'priority=1,actions=drop',
-                         run_as_root=True)
-                _execute('ovs-ofctl', 'add-flow', bridge,
-                         'udp,tp_dst=67,dl_dst=%s,priority=2,actions=normal' %
-                         mac_address, run_as_root=True)
+                nova.privsep.linux_net.ovs_drop_nondhcp(
+                    bridge, mac_address)
+
                 # .. and make sure iptbles won't forward it as well.
                 iptables_manager.ipv4['filter'].add_rule('FORWARD',
                     '--in-interface %s -j %s' % (bridge,
@@ -1655,7 +1605,9 @@ class LinuxOVSInterfaceDriver(LinuxNetInterfaceDriver):
     def unplug(self, network):
         dev = self.get_dev(network)
         bridge = CONF.linuxnet_ovs_integration_bridge
-        _ovs_vsctl(['--', '--if-exists', 'del-port', bridge, dev])
+
+        nova.privsep.linux_net.ovs_unplug(CONF.ovs_vsctl_timeout, bridge, dev)
+
         return dev
 
     def get_dev(self, network):
@@ -1676,8 +1628,5 @@ def set_vf_trusted(pci_addr, trusted):
     pf_ifname = pci_utils.get_ifname_by_pci_address(pci_addr,
                                                     pf_interface=True)
     vf_num = pci_utils.get_vf_num_by_pci_address(pci_addr)
-    utils.execute('ip', 'link', 'set', pf_ifname,
-                  'vf', vf_num,
-                  'trust', bool(trusted) and 'on' or 'off',
-                  run_as_root=True,
-                  check_exit_code=[0, 2, 254])
+    nova.privsep.linux_net.set_device_trust(
+        pf_ifname, vf_num, trusted)

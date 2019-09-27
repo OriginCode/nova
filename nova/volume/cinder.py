@@ -373,8 +373,6 @@ def _translate_attachment_ref(attachment_ref):
         translated_con_info['data'] = connection_info_data
         translated_con_info['status'] = attachment_ref.pop('status', None)
         translated_con_info['instance'] = attachment_ref.pop('instance', None)
-        translated_con_info['attach_mode'] = attachment_ref.pop('attach_mode',
-                                                                None)
         translated_con_info['attached_at'] = attachment_ref.pop('attached_at',
                                                                 None)
         translated_con_info['detached_at'] = attachment_ref.pop('detached_at',
@@ -382,7 +380,8 @@ def _translate_attachment_ref(attachment_ref):
 
         # Now the catch all...
         for k, v in attachment_ref.items():
-            if k != "id":
+            # Keep these as top-level fields on the attachment record.
+            if k not in ("id", "attach_mode"):
                 translated_con_info[k] = v
 
     attachment_ref['connection_info'] = translated_con_info
@@ -427,7 +426,8 @@ def translate_volume_exception(method):
 
 
 def translate_attachment_exception(method):
-    """Transforms the exception for the attachment but keeps its traceback intact.
+    """Transforms the exception for the attachment but keeps its traceback
+    intact.
     """
     def wrapper(self, ctx, attachment_id, *args, **kwargs):
         try:
@@ -507,7 +507,14 @@ class API(object):
             raise exception.InvalidVolume(reason=msg)
 
     def check_availability_zone(self, context, volume, instance=None):
-        """Ensure that the availability zone is the same."""
+        """Ensure that the availability zone is the same.
+
+        :param context: the nova request context
+        :param volume: the volume attached to the instance
+        :param instance: nova.objects.instance.Instance object
+        :raises: InvalidVolume if the instance availability zone does not
+            equal the volume's availability zone
+        """
 
         # TODO(walter-boring): move this check to Cinder as part of
         # the reserve call.

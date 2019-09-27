@@ -12,7 +12,10 @@
 
 import ddt
 import mock
+import os_resource_classes as orc
+from oslo_serialization import jsonutils
 from oslo_utils.fixture import uuidsentinel as uuids
+import six
 
 from nova import context as nova_context
 from nova import exception
@@ -24,12 +27,24 @@ from nova.tests.unit import fake_instance
 from nova.tests.unit.scheduler import fakes
 
 
-@ddt.ddt
-class TestUtils(test.NoDBTestCase):
+class FakeResourceRequest(object):
+    """A fake of ``nova.scheduler.utils.ResourceRequest``.
 
+    Allows us to assert that various properties of a real ResourceRequest
+    object are set as we'd like them to be.
+    """
+
+    def __init__(self):
+        self._rg_by_id = {}
+        self._group_policy = None
+        self._limit = 1000
+
+
+class TestUtilsBase(test.NoDBTestCase):
     def setUp(self):
-        super(TestUtils, self).setUp()
+        super(TestUtilsBase, self).setUp()
         self.context = nova_context.get_admin_context()
+        self.mock_host_manager = mock.Mock()
 
     def assertResourceRequestsEqual(self, expected, observed):
         self.assertEqual(expected._limit, observed._limit)
@@ -40,22 +55,16 @@ class TestUtils(test.NoDBTestCase):
         for ident in ex_by_id:
             self.assertEqual(vars(ex_by_id[ident]), vars(ob_by_id[ident]))
 
-    @staticmethod
-    def _get_image_with_traits():
-        image_prop = {
-            'properties': {
-                'trait:CUSTOM_IMAGE_TRAIT1': 'required',
-                'trait:CUSTOM_IMAGE_TRAIT2': 'required',
-            },
-            'id': 'c8b1790e-a07d-4971-b137-44f2432936cd'
-        }
-        image = objects.ImageMeta.from_dict(image_prop)
-        return image
 
-    def _test_resources_from_request_spec(self, expected, flavor,
-                                          image=objects.ImageMeta()):
+@ddt.ddt
+class TestUtils(TestUtilsBase):
+
+    def _test_resources_from_request_spec(self, expected, flavor, image=None):
+        if image is None:
+            image = objects.ImageMeta(properties=objects.ImageMetaProps())
         fake_spec = objects.RequestSpec(flavor=flavor, image=image)
-        resources = utils.resources_from_request_spec(fake_spec)
+        resources = utils.resources_from_request_spec(
+            self.context, fake_spec, self.mock_host_manager)
         self.assertResourceRequestsEqual(expected, resources)
         return resources
 
@@ -65,7 +74,7 @@ class TestUtils(test.NoDBTestCase):
                                 root_gb=10,
                                 ephemeral_gb=5,
                                 swap=0)
-        expected_resources = utils.ResourceRequest()
+        expected_resources = FakeResourceRequest()
         expected_resources._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
@@ -76,8 +85,33 @@ class TestUtils(test.NoDBTestCase):
         )
         self._test_resources_from_request_spec(expected_resources, flavor)
 
+    def test_resources_from_request_spec_flavor_req_traits(self):
+        flavor = objects.Flavor(
+            vcpus=1, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=0,
+            extra_specs={'trait:CUSTOM_FLAVOR_TRAIT': 'required'})
+        expected_resources = FakeResourceRequest()
+        expected_resources._rg_by_id[None] = objects.RequestGroup(
+            use_same_provider=False,
+            resources={
+                'VCPU': 1,
+                'MEMORY_MB': 1024,
+                'DISK_GB': 15,
+            },
+            required_traits=set(['CUSTOM_FLAVOR_TRAIT'])
+        )
+        resources = self._test_resources_from_request_spec(
+            expected_resources, flavor)
+        expected_result = set(['CUSTOM_FLAVOR_TRAIT'])
+        self.assertEqual(expected_result, resources.all_required_traits)
+
     def test_resources_from_request_spec_flavor_and_image_traits(self):
-        image = self._get_image_with_traits()
+        image = objects.ImageMeta.from_dict({
+            'properties': {
+                'trait:CUSTOM_IMAGE_TRAIT1': 'required',
+                'trait:CUSTOM_IMAGE_TRAIT2': 'required',
+            },
+            'id': 'c8b1790e-a07d-4971-b137-44f2432936cd',
+        })
         flavor = objects.Flavor(vcpus=1,
                                 memory_mb=1024,
                                 root_gb=10,
@@ -86,7 +120,7 @@ class TestUtils(test.NoDBTestCase):
                                 extra_specs={
                                     'trait:CUSTOM_FLAVOR_TRAIT': 'required',
                                     'trait:CUSTOM_IMAGE_TRAIT2': 'required'})
-        expected_resources = utils.ResourceRequest()
+        expected_resources = FakeResourceRequest()
         expected_resources._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
@@ -113,7 +147,7 @@ class TestUtils(test.NoDBTestCase):
                                 swap=0,
                                 extra_specs={
                                     'trait:CUSTOM_FLAVOR_TRAIT': 'forbidden'})
-        expected_resources = utils.ResourceRequest()
+        expected_resources = FakeResourceRequest()
         expected_resources._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
@@ -133,7 +167,7 @@ class TestUtils(test.NoDBTestCase):
                                 root_gb=0,
                                 ephemeral_gb=0,
                                 swap=0)
-        expected_resources = utils.ResourceRequest()
+        expected_resources = FakeResourceRequest()
         expected_resources._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
@@ -150,7 +184,7 @@ class TestUtils(test.NoDBTestCase):
                                 ephemeral_gb=5,
                                 swap=0,
                                 extra_specs={"resources:CUSTOM_TEST_CLASS": 1})
-        expected_resources = utils.ResourceRequest()
+        expected_resources = FakeResourceRequest()
         expected_resources._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
@@ -172,7 +206,7 @@ class TestUtils(test.NoDBTestCase):
                                     "resources:VCPU": 99,
                                     "resources:MEMORY_MB": 99,
                                     "resources:DISK_GB": 99})
-        expected_resources = utils.ResourceRequest()
+        expected_resources = FakeResourceRequest()
         expected_resources._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
@@ -192,7 +226,7 @@ class TestUtils(test.NoDBTestCase):
                                 extra_specs={
                                     "resources:VCPU": 0,
                                     "resources:DISK_GB": 0})
-        expected_resources = utils.ResourceRequest()
+        expected_resources = FakeResourceRequest()
         expected_resources._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
@@ -210,7 +244,7 @@ class TestUtils(test.NoDBTestCase):
                                 extra_specs={
                                     "resources:VGPU": 1,
                                     "resources:VGPU_DISPLAY_HEAD": 1})
-        expected_resources = utils.ResourceRequest()
+        expected_resources = FakeResourceRequest()
         expected_resources._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
@@ -233,7 +267,8 @@ class TestUtils(test.NoDBTestCase):
                                     "resources:DOESNT_EXIST": 0})
         fake_spec = objects.RequestSpec(flavor=flavor)
         with mock.patch("nova.scheduler.utils.LOG.warning") as mock_log:
-            utils.resources_from_request_spec(fake_spec)
+            utils.resources_from_request_spec(
+                self.context, fake_spec, self.mock_host_manager)
             mock_log.assert_called_once()
             args = mock_log.call_args[0]
             self.assertEqual(args[0], "Received an invalid ResourceClass "
@@ -265,7 +300,7 @@ class TestUtils(test.NoDBTestCase):
                          # Bogus values don't make it through
                          'resources1:MEMORY_MB': 'bogus',
                          'group_policy': 'none'})
-        expected_resources = utils.ResourceRequest()
+        expected_resources = FakeResourceRequest()
         expected_resources._group_policy = 'none'
         expected_resources._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
@@ -313,6 +348,38 @@ class TestUtils(test.NoDBTestCase):
         )
         self.assertEqual(expected_querystring, rr.to_querystring())
 
+    def test_all_required_traits(self):
+        flavor = objects.Flavor(vcpus=1,
+                        memory_mb=1024,
+                        root_gb=10,
+                        ephemeral_gb=5,
+                        swap=0,
+                        extra_specs={
+                            'trait:HW_CPU_X86_SSE': 'required',
+                            'trait:HW_CPU_X86_AVX': 'required',
+                            'trait:HW_CPU_X86_AVX2': 'forbidden'})
+        expected_resources = FakeResourceRequest()
+        expected_resources._rg_by_id[None] = objects.RequestGroup(
+            use_same_provider=False,
+            resources={
+                'VCPU': 1,
+                'MEMORY_MB': 1024,
+                'DISK_GB': 15,
+            },
+            required_traits={
+                'HW_CPU_X86_SSE',
+                'HW_CPU_X86_AVX'
+            },
+            forbidden_traits={
+                'HW_CPU_X86_AVX2'
+            }
+        )
+        resource = self._test_resources_from_request_spec(expected_resources,
+                                                          flavor)
+        expected_result = {'HW_CPU_X86_SSE', 'HW_CPU_X86_AVX'}
+        self.assertEqual(expected_result,
+                         resource.all_required_traits)
+
     def test_resources_from_request_spec_aggregates(self):
         destination = objects.Destination()
         flavor = objects.Flavor(vcpus=1, memory_mb=1024,
@@ -322,12 +389,14 @@ class TestUtils(test.NoDBTestCase):
                                       requested_destination=destination)
 
         destination.require_aggregates(['foo', 'bar'])
-        req = utils.resources_from_request_spec(reqspec)
+        req = utils.resources_from_request_spec(
+                self.context, reqspec, self.mock_host_manager)
         self.assertEqual([['foo', 'bar']],
                          req.get_request_group(None).aggregates)
 
         destination.require_aggregates(['baz'])
-        req = utils.resources_from_request_spec(reqspec)
+        req = utils.resources_from_request_spec(
+                self.context, reqspec, self.mock_host_manager)
         self.assertEqual([['foo', 'bar'], ['baz']],
                          req.get_request_group(None).aggregates)
 
@@ -337,23 +406,69 @@ class TestUtils(test.NoDBTestCase):
                                 swap=0)
         reqspec = objects.RequestSpec(flavor=flavor)
 
-        req = utils.resources_from_request_spec(reqspec)
+        req = utils.resources_from_request_spec(
+                self.context, reqspec, self.mock_host_manager)
         self.assertEqual([], req.get_request_group(None).aggregates)
 
         reqspec.requested_destination = None
-        req = utils.resources_from_request_spec(reqspec)
+        req = utils.resources_from_request_spec(
+                self.context, reqspec, self.mock_host_manager)
         self.assertEqual([], req.get_request_group(None).aggregates)
 
         reqspec.requested_destination = objects.Destination()
-        req = utils.resources_from_request_spec(reqspec)
+        req = utils.resources_from_request_spec(
+                self.context, reqspec, self.mock_host_manager)
         self.assertEqual([], req.get_request_group(None).aggregates)
 
         reqspec.requested_destination.aggregates = None
-        req = utils.resources_from_request_spec(reqspec)
+        req = utils.resources_from_request_spec(
+                self.context, reqspec, self.mock_host_manager)
         self.assertEqual([], req.get_request_group(None).aggregates)
 
-    @mock.patch("nova.scheduler.utils.ResourceRequest.from_extra_specs")
-    def test_process_extra_specs_granular_called(self, mock_proc):
+    def test_resources_from_request_spec_forbidden_aggregates(self):
+        flavor = objects.Flavor(vcpus=1, memory_mb=1024,
+                                root_gb=1, ephemeral_gb=0,
+                                swap=0)
+        reqspec = objects.RequestSpec(
+            flavor=flavor,
+            requested_destination=objects.Destination(
+                forbidden_aggregates=set(['foo', 'bar'])))
+
+        req = utils.resources_from_request_spec(self.context, reqspec,
+                                                self.mock_host_manager)
+        self.assertEqual(set(['foo', 'bar']),
+                         req.get_request_group(None).forbidden_aggregates)
+
+    def test_resources_from_request_spec_no_forbidden_aggregates(self):
+        flavor = objects.Flavor(vcpus=1, memory_mb=1024,
+                                root_gb=1, ephemeral_gb=0,
+                                swap=0)
+        reqspec = objects.RequestSpec(flavor=flavor)
+
+        req = utils.resources_from_request_spec(
+                self.context, reqspec, self.mock_host_manager)
+        self.assertEqual(set([]), req.get_request_group(None).
+                         forbidden_aggregates)
+
+        reqspec.requested_destination = None
+        req = utils.resources_from_request_spec(
+                self.context, reqspec, self.mock_host_manager)
+        self.assertEqual(set([]), req.get_request_group(None).
+                         forbidden_aggregates)
+
+        reqspec.requested_destination = objects.Destination()
+        req = utils.resources_from_request_spec(
+                self.context, reqspec, self.mock_host_manager)
+        self.assertEqual(set([]), req.get_request_group(None).
+                         forbidden_aggregates)
+
+        reqspec.requested_destination.forbidden_aggregates = None
+        req = utils.resources_from_request_spec(
+                self.context, reqspec, self.mock_host_manager)
+        self.assertEqual(set([]), req.get_request_group(None).
+                         forbidden_aggregates)
+
+    def test_process_extra_specs_granular_called(self):
         flavor = objects.Flavor(vcpus=1,
                                 memory_mb=1024,
                                 root_gb=10,
@@ -361,19 +476,20 @@ class TestUtils(test.NoDBTestCase):
                                 swap=0,
                                 extra_specs={"resources:CUSTOM_TEST_CLASS": 1})
         fake_spec = objects.RequestSpec(flavor=flavor)
-        utils.resources_from_request_spec(fake_spec)
-        mock_proc.assert_called_once()
+        # just call this to make sure things don't explode
+        utils.resources_from_request_spec(
+            self.context, fake_spec, self.mock_host_manager)
 
-    @mock.patch("nova.scheduler.utils.ResourceRequest.from_extra_specs")
-    def test_process_extra_specs_granular_not_called(self, mock_proc):
+    def test_process_extra_specs_granular_not_called(self):
         flavor = objects.Flavor(vcpus=1,
                                 memory_mb=1024,
                                 root_gb=10,
                                 ephemeral_gb=5,
                                 swap=0)
         fake_spec = objects.RequestSpec(flavor=flavor)
-        utils.resources_from_request_spec(fake_spec)
-        mock_proc.assert_not_called()
+        # just call this to make sure things don't explode
+        utils.resources_from_request_spec(
+            self.context, fake_spec, self.mock_host_manager)
 
     def test_process_missing_extra_specs_value(self):
         flavor = objects.Flavor(
@@ -384,7 +500,9 @@ class TestUtils(test.NoDBTestCase):
                 swap=0,
                 extra_specs={"resources:CUSTOM_TEST_CLASS": ""})
         fake_spec = objects.RequestSpec(flavor=flavor)
-        utils.resources_from_request_spec(fake_spec)
+        # just call this to make sure things don't explode
+        utils.resources_from_request_spec(
+                self.context, fake_spec, self.mock_host_manager)
 
     def test_process_no_force_hosts_or_force_nodes(self):
         flavor = objects.Flavor(vcpus=1,
@@ -392,7 +510,7 @@ class TestUtils(test.NoDBTestCase):
                                 root_gb=15,
                                 ephemeral_gb=0,
                                 swap=0)
-        expected = utils.ResourceRequest()
+        expected = FakeResourceRequest()
         expected._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
@@ -409,13 +527,19 @@ class TestUtils(test.NoDBTestCase):
         self.assertEqual(expected_querystring, rr.to_querystring())
 
     def test_process_use_force_nodes(self):
+        fake_nodes = objects.ComputeNodeList(objects=[
+            objects.ComputeNode(host='fake-host',
+                                uuid='12345678-1234-1234-1234-123456789012',
+                                hypervisor_hostname='test')])
+        self.mock_host_manager.get_compute_nodes_by_host_or_node.\
+            return_value = fake_nodes
         flavor = objects.Flavor(vcpus=1,
                                 memory_mb=1024,
                                 root_gb=15,
                                 ephemeral_gb=0,
                                 swap=0)
         fake_spec = objects.RequestSpec(flavor=flavor, force_nodes=['test'])
-        expected = utils.ResourceRequest()
+        expected = FakeResourceRequest()
         expected._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
@@ -423,23 +547,67 @@ class TestUtils(test.NoDBTestCase):
                 'MEMORY_MB': 1024,
                 'DISK_GB': 15,
             },
+            in_tree='12345678-1234-1234-1234-123456789012',
         )
-        expected._limit = None
-        resources = utils.resources_from_request_spec(fake_spec)
+        resources = utils.resources_from_request_spec(
+                self.context, fake_spec, self.mock_host_manager)
         self.assertResourceRequestsEqual(expected, resources)
         expected_querystring = (
-            'resources=DISK_GB%3A15%2CMEMORY_MB%3A1024%2CVCPU%3A1'
-        )
+            'in_tree=12345678-1234-1234-1234-123456789012&'
+            'limit=1000&resources=DISK_GB%3A15%2CMEMORY_MB%3A1024%2CVCPU%3A1')
         self.assertEqual(expected_querystring, resources.to_querystring())
+        self.mock_host_manager.get_compute_nodes_by_host_or_node.\
+            assert_called_once_with(self.context, None, 'test', cell=None)
 
     def test_process_use_force_hosts(self):
+        fake_nodes = objects.ComputeNodeList(objects=[
+            objects.ComputeNode(host='test',
+                                uuid='12345678-1234-1234-1234-123456789012')
+            ])
+        self.mock_host_manager.get_compute_nodes_by_host_or_node.\
+            return_value = fake_nodes
         flavor = objects.Flavor(vcpus=1,
                                 memory_mb=1024,
                                 root_gb=15,
                                 ephemeral_gb=0,
                                 swap=0)
         fake_spec = objects.RequestSpec(flavor=flavor, force_hosts=['test'])
-        expected = utils.ResourceRequest()
+        expected = FakeResourceRequest()
+        expected._rg_by_id[None] = objects.RequestGroup(
+            use_same_provider=False,
+            resources={
+                'VCPU': 1,
+                'MEMORY_MB': 1024,
+                'DISK_GB': 15,
+            },
+            in_tree='12345678-1234-1234-1234-123456789012',
+        )
+        resources = utils.resources_from_request_spec(
+                self.context, fake_spec, self.mock_host_manager)
+        self.assertResourceRequestsEqual(expected, resources)
+        expected_querystring = (
+            'in_tree=12345678-1234-1234-1234-123456789012&'
+            'limit=1000&resources=DISK_GB%3A15%2CMEMORY_MB%3A1024%2CVCPU%3A1')
+        self.assertEqual(expected_querystring, resources.to_querystring())
+        self.mock_host_manager.get_compute_nodes_by_host_or_node.\
+            assert_called_once_with(self.context, 'test', None, cell=None)
+
+    def test_process_use_force_hosts_multinodes_found(self):
+        fake_nodes = objects.ComputeNodeList(objects=[
+            objects.ComputeNode(host='test',
+                                uuid='12345678-1234-1234-1234-123456789012'),
+            objects.ComputeNode(host='test',
+                                uuid='87654321-4321-4321-4321-210987654321'),
+            ])
+        self.mock_host_manager.get_compute_nodes_by_host_or_node.\
+            return_value = fake_nodes
+        flavor = objects.Flavor(vcpus=1,
+                                memory_mb=1024,
+                                root_gb=15,
+                                ephemeral_gb=0,
+                                swap=0)
+        fake_spec = objects.RequestSpec(flavor=flavor, force_hosts=['test'])
+        expected = FakeResourceRequest()
         expected._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
@@ -448,13 +616,57 @@ class TestUtils(test.NoDBTestCase):
                 'DISK_GB': 15,
             },
         )
+        # Validate that the limit is unset
         expected._limit = None
-        resources = utils.resources_from_request_spec(fake_spec)
+
+        resources = utils.resources_from_request_spec(
+                self.context, fake_spec, self.mock_host_manager)
+        self.assertResourceRequestsEqual(expected, resources)
+        # Validate that the limit is unset
+        expected_querystring = (
+            'resources=DISK_GB%3A15%2CMEMORY_MB%3A1024%2CVCPU%3A1')
+        self.assertEqual(expected_querystring, resources.to_querystring())
+        self.mock_host_manager.get_compute_nodes_by_host_or_node.\
+            assert_called_once_with(self.context, 'test', None, cell=None)
+
+    def test_process_use_requested_destination(self):
+        fake_cell = objects.CellMapping(uuid=uuids.cell1, name='foo')
+        destination = objects.Destination(
+            host='fake-host', node='fake-node', cell=fake_cell)
+        fake_nodes = objects.ComputeNodeList(objects=[
+            objects.ComputeNode(host='fake-host',
+                                uuid='12345678-1234-1234-1234-123456789012',
+                                hypervisor_hostname='fake-node')
+            ])
+        self.mock_host_manager.get_compute_nodes_by_host_or_node.\
+            return_value = fake_nodes
+        flavor = objects.Flavor(vcpus=1,
+                                memory_mb=1024,
+                                root_gb=15,
+                                ephemeral_gb=0,
+                                swap=0)
+        fake_spec = objects.RequestSpec(
+            flavor=flavor, requested_destination=destination)
+        expected = FakeResourceRequest()
+        expected._rg_by_id[None] = objects.RequestGroup(
+            use_same_provider=False,
+            resources={
+                'VCPU': 1,
+                'MEMORY_MB': 1024,
+                'DISK_GB': 15,
+            },
+            in_tree='12345678-1234-1234-1234-123456789012',
+        )
+        resources = utils.resources_from_request_spec(
+                self.context, fake_spec, self.mock_host_manager)
         self.assertResourceRequestsEqual(expected, resources)
         expected_querystring = (
-            'resources=DISK_GB%3A15%2CMEMORY_MB%3A1024%2CVCPU%3A1'
-        )
+            'in_tree=12345678-1234-1234-1234-123456789012&'
+            'limit=1000&resources=DISK_GB%3A15%2CMEMORY_MB%3A1024%2CVCPU%3A1')
         self.assertEqual(expected_querystring, resources.to_querystring())
+        self.mock_host_manager.get_compute_nodes_by_host_or_node.\
+            assert_called_once_with(
+                self.context, 'fake-host', 'fake-node', cell=fake_cell)
 
     def test_resources_from_request_spec_having_requested_resources(self):
         flavor = objects.Flavor(
@@ -467,7 +679,8 @@ class TestUtils(test.NoDBTestCase):
         rg2 = objects.RequestGroup()
         reqspec = objects.RequestSpec(flavor=flavor,
                                       requested_resources=[rg1, rg2])
-        req = utils.resources_from_request_spec(reqspec)
+        req = utils.resources_from_request_spec(
+                self.context, reqspec, self.mock_host_manager)
         self.assertEqual({'MEMORY_MB': 1024, 'DISK_GB': 15, 'VCPU': 1},
                          req.get_request_group(None).resources)
         self.assertIs(rg1, req.get_request_group(1))
@@ -481,13 +694,15 @@ class TestUtils(test.NoDBTestCase):
                 ephemeral_gb=5,
                 swap=0)
         reqspec = objects.RequestSpec(flavor=flavor)
-        req = utils.resources_from_request_spec(reqspec)
+        req = utils.resources_from_request_spec(
+                self.context, reqspec, self.mock_host_manager)
         self.assertEqual({'MEMORY_MB': 1024, 'DISK_GB': 15, 'VCPU': 1},
                          req.get_request_group(None).resources)
         self.assertEqual(1, len(list(req.resource_groups())))
 
         reqspec = objects.RequestSpec(flavor=flavor, requested_resources=[])
-        req = utils.resources_from_request_spec(reqspec)
+        req = utils.resources_from_request_spec(
+                self.context, reqspec, self.mock_host_manager)
         self.assertEqual({'MEMORY_MB': 1024, 'DISK_GB': 15, 'VCPU': 1},
                          req.get_request_group(None).resources)
         self.assertEqual(1, len(list(req.resource_groups())))
@@ -511,7 +726,7 @@ class TestUtils(test.NoDBTestCase):
                                 swap=0)
         fake_spec = objects.RequestSpec(
             flavor=flavor, scheduler_hints=hints)
-        expected = utils.ResourceRequest()
+        expected = FakeResourceRequest()
         expected._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
@@ -521,7 +736,8 @@ class TestUtils(test.NoDBTestCase):
             },
         )
         expected._limit = None
-        resources = utils.resources_from_request_spec(fake_spec)
+        resources = utils.resources_from_request_spec(
+            self.context, fake_spec, self.mock_host_manager)
         self.assertResourceRequestsEqual(expected, resources)
         expected_querystring = (
             'resources=DISK_GB%3A15%2CMEMORY_MB%3A1024%2CVCPU%3A1'
@@ -591,40 +807,59 @@ class TestUtils(test.NoDBTestCase):
         actual = utils.resources_from_flavor(instance, flavor)
         self.assertEqual(expected, actual)
 
-    def test_resource_request_from_extra_specs(self):
-        extra_specs = {
-            'resources:VCPU': '2',
-            'resources:MEMORY_MB': '2048',
-            'trait:HW_CPU_X86_AVX': 'required',
-            # Key skipped because no colons
-            'nocolons': '42',
-            'trait:CUSTOM_MAGIC': 'required',
-            'trait:CUSTOM_BRONZE': 'forbidden',
-            # Resource skipped because invalid resource class name
-            'resources86:CUTSOM_MISSPELLED': '86',
-            'resources1:SRIOV_NET_VF': '1',
-            # Resource skipped because non-int-able value
-            'resources86:CUSTOM_FOO': 'seven',
-            # Resource skipped because negative value
-            'resources86:CUSTOM_NEGATIVE': '-7',
-            'resources1:IPV4_ADDRESS': '1',
-            # Trait skipped because unsupported value
-            'trait86:CUSTOM_GOLD': 'preferred',
-            'trait1:CUSTOM_PHYSNET_NET1': 'required',
-            'trait1:CUSTOM_PHYSNET_NET2': 'forbidden',
-            'resources2:SRIOV_NET_VF': '1',
-            'resources2:IPV4_ADDRESS': '2',
-            'trait2:CUSTOM_PHYSNET_NET2': 'required',
-            'trait2:HW_NIC_ACCEL_SSL': 'required',
-            # Groupings that don't quite match the patterns are ignored
-            'resources_5:SRIOV_NET_VF': '7',
-            'traitFoo:HW_NIC_ACCEL_SSL': 'required',
-            # Solo resource, no corresponding traits
-            'resources3:DISK_GB': '5',
-            'group_policy': 'isolate',
-        }
-        # Build up a ResourceRequest from the inside to compare against.
-        expected = utils.ResourceRequest()
+    def test_resource_request_init(self):
+        flavor = objects.Flavor(
+            vcpus=1, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=0)
+
+        expected = FakeResourceRequest()
+        expected._rg_by_id[None] = objects.RequestGroup(
+            use_same_provider=False,
+            resources={
+                'VCPU': 1,
+                'MEMORY_MB': 1024,
+                'DISK_GB': 15,
+            },
+        )
+        rs = objects.RequestSpec(flavor=flavor, is_bfv=False)
+        rr = utils.ResourceRequest(rs)
+        self.assertResourceRequestsEqual(expected, rr)
+
+    def test_resource_request_init_with_extra_specs(self):
+        flavor = objects.Flavor(
+            vcpus=1, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=0,
+            extra_specs={
+                'resources:VCPU': '2',
+                'resources:MEMORY_MB': '2048',
+                'trait:HW_CPU_X86_AVX': 'required',
+                # Key skipped because no colons
+                'nocolons': '42',
+                'trait:CUSTOM_MAGIC': 'required',
+                'trait:CUSTOM_BRONZE': 'forbidden',
+                # Resource skipped because invalid resource class name
+                'resources86:CUTSOM_MISSPELLED': '86',
+                'resources1:SRIOV_NET_VF': '1',
+                # Resource skipped because non-int-able value
+                'resources86:CUSTOM_FOO': 'seven',
+                # Resource skipped because negative value
+                'resources86:CUSTOM_NEGATIVE': '-7',
+                'resources1:IPV4_ADDRESS': '1',
+                # Trait skipped because unsupported value
+                'trait86:CUSTOM_GOLD': 'preferred',
+                'trait1:CUSTOM_PHYSNET_NET1': 'required',
+                'trait1:CUSTOM_PHYSNET_NET2': 'forbidden',
+                'resources2:SRIOV_NET_VF': '1',
+                'resources2:IPV4_ADDRESS': '2',
+                'trait2:CUSTOM_PHYSNET_NET2': 'required',
+                'trait2:HW_NIC_ACCEL_SSL': 'required',
+                # Groupings that don't quite match the patterns are ignored
+                'resources_5:SRIOV_NET_VF': '7',
+                'traitFoo:HW_NIC_ACCEL_SSL': 'required',
+                # Solo resource, no corresponding traits
+                'resources3:DISK_GB': '5',
+                'group_policy': 'isolate',
+            })
+
+        expected = FakeResourceRequest()
         expected._group_policy = 'isolate'
         expected._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
@@ -668,7 +903,8 @@ class TestUtils(test.NoDBTestCase):
             }
         )
 
-        rr = utils.ResourceRequest.from_extra_specs(extra_specs)
+        rs = objects.RequestSpec(flavor=flavor, is_bfv=False)
+        rr = utils.ResourceRequest(rs)
         self.assertResourceRequestsEqual(expected, rr)
         expected_querystring = (
             'group_policy=isolate&'
@@ -683,103 +919,180 @@ class TestUtils(test.NoDBTestCase):
         )
         self.assertEqual(expected_querystring, rr.to_querystring())
 
-    def test_more_than_one_resource_request_without_group_policy_warns(self):
-        extra_specs = {
-            'resources:VCPU': '2',
-            'resources1:CUSTOM_FOO': '1'
-        }
-        rr = utils.ResourceRequest.from_extra_specs(extra_specs)
-        rr.add_request_group(objects.RequestGroup(resources={'CUSTOM_BAR': 5}))
+    def _test_resource_request_init_with_legacy_extra_specs(self):
+        flavor = objects.Flavor(
+            vcpus=1, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=0,
+            extra_specs={
+                'hw:cpu_policy': 'dedicated',
+                'hw:cpu_thread_policy': 'isolate',
+                'hw:emulator_threads_policy': 'isolate',
+            })
 
-        rr.to_querystring()
-        self.assertIn(
-            "There is more than one numbered request group in the allocation "
-            "candidate query but the flavor did not specify any group policy.",
-            self.stdlog.logger.output)
+        return objects.RequestSpec(flavor=flavor, is_bfv=False)
 
-    def test_resource_request_from_extra_specs_append_request(self):
-        extra_specs = {
-            'resources:VCPU': '2',
-            'resources:MEMORY_MB': '2048',
-            'trait:HW_CPU_X86_AVX': 'required',
-        }
-        existing_req = utils.ResourceRequest()
-        existing_req._rg_by_id[None] = objects.RequestGroup(
-            use_same_provider=False,
-            required_traits={
-                'CUSTOM_MAGIC',
-            }
-        )
-        # Build up a ResourceRequest from the inside to compare against.
-        expected = utils.ResourceRequest()
+    def test_resource_request_init_with_legacy_extra_specs(self):
+        expected = FakeResourceRequest()
         expected._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
-                'VCPU': 2,
-                'MEMORY_MB': 2048,
+                # we should have two PCPUs, one due to hw:cpu_policy and the
+                # other due to hw:cpu_thread_policy
+                'PCPU': 2,
+                'MEMORY_MB': 1024,
+                'DISK_GB': 15,
             },
-            required_traits={
-                # In addition to traits from extra spec, we get traits from a
-                # previous existing resource request
-                'HW_CPU_X86_AVX',
-                'CUSTOM_MAGIC',
-            }
+            forbidden_traits={
+                # we should forbid hyperthreading due to hw:cpu_thread_policy
+                'HW_CPU_HYPERTHREADING',
+            },
         )
-        self.assertResourceRequestsEqual(
-            expected, utils.ResourceRequest.from_extra_specs(extra_specs,
-                                                             req=existing_req))
+        rs = self._test_resource_request_init_with_legacy_extra_specs()
+        rr = utils.ResourceRequest(rs)
+        self.assertResourceRequestsEqual(expected, rr)
+        self.assertTrue(rr.cpu_pinning_requested)
 
-    def test_resource_request_from_image_props(self):
-        props = {'trait:CUSTOM_TRUSTED': 'required'}
-        image_meta_props = objects.ImageMetaProps.from_dict(props)
-
-        # Build up a ResourceRequest from the inside to compare against.
-        expected = utils.ResourceRequest()
+    def test_resource_request_init_with_legacy_extra_specs_no_translate(self):
+        expected = FakeResourceRequest()
         expected._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
+            resources={
+                # we should have a VCPU despite hw:cpu_policy because
+                # enable_pinning_translate=False
+                'VCPU': 1,
+                'MEMORY_MB': 1024,
+                'DISK_GB': 15,
+            },
+            # we should not require hyperthreading despite hw:cpu_thread_policy
+            # because enable_pinning_translate=False
+            forbidden_traits=set(),
+        )
+        rs = self._test_resource_request_init_with_legacy_extra_specs()
+        rr = utils.ResourceRequest(rs, enable_pinning_translate=False)
+        self.assertResourceRequestsEqual(expected, rr)
+        self.assertFalse(rr.cpu_pinning_requested)
+
+    def test_resource_request_init_with_image_props(self):
+        flavor = objects.Flavor(
+            vcpus=1, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=0)
+        image = objects.ImageMeta.from_dict({
+            'properties': {
+                'trait:CUSTOM_TRUSTED': 'required',
+            },
+            'id': 'c8b1790e-a07d-4971-b137-44f2432936cd'
+        })
+
+        expected = FakeResourceRequest()
+        expected._rg_by_id[None] = objects.RequestGroup(
+            use_same_provider=False,
+            resources={
+                'VCPU': 1,
+                'MEMORY_MB': 1024,
+                'DISK_GB': 15,
+            },
             required_traits={
                 'CUSTOM_TRUSTED',
             }
         )
-        self.assertResourceRequestsEqual(
-            expected, utils.ResourceRequest.from_image_props(image_meta_props))
+        rs = objects.RequestSpec(flavor=flavor, image=image, is_bfv=False)
+        rr = utils.ResourceRequest(rs)
+        self.assertResourceRequestsEqual(expected, rr)
 
-    def test_resource_request_from_image_props_append_request(self):
-        props = {'trait:CUSTOM_MAGIC': 'required'}
-        image_meta_props = objects.ImageMetaProps.from_dict(props)
-
-        existing_req = utils.ResourceRequest()
-        existing_req._rg_by_id[None] = objects.RequestGroup(
-            use_same_provider=False,
-            resources={
-                'VCPU': 2,
-                'MEMORY_MB': 2048,
+    def _test_resource_request_init_with_legacy_image_props(self):
+        flavor = objects.Flavor(
+            vcpus=1, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=0)
+        image = objects.ImageMeta.from_dict({
+            'properties': {
+                'hw_cpu_policy': 'dedicated',
+                'hw_cpu_thread_policy': 'require',
             },
-            required_traits={
-                'HW_CPU_X86_AVX',
-            }
-        )
-        # Build up a ResourceRequest from the inside to compare against.
-        expected = utils.ResourceRequest()
+            'id': 'c8b1790e-a07d-4971-b137-44f2432936cd',
+        })
+        return objects.RequestSpec(flavor=flavor, image=image, is_bfv=False)
+
+    def test_resource_request_init_with_legacy_image_props(self):
+        expected = FakeResourceRequest()
         expected._rg_by_id[None] = objects.RequestGroup(
             use_same_provider=False,
             resources={
-                'VCPU': 2,
-                'MEMORY_MB': 2048,
+                # we should have a PCPU due to hw_cpu_policy
+                'PCPU': 1,
+                'MEMORY_MB': 1024,
+                'DISK_GB': 15,
             },
             required_traits={
-                # In addition to information already contained in the existing
-                # resource request, we add the traits from image properties
-                'HW_CPU_X86_AVX',
-                'CUSTOM_MAGIC',
-            }
+                # we should require hyperthreading due to hw_cpu_thread_policy
+                'HW_CPU_HYPERTHREADING',
+            },
         )
-        self.assertResourceRequestsEqual(
-            expected, utils.ResourceRequest.from_image_props(image_meta_props,
-                                                             req=existing_req))
+        rs = self._test_resource_request_init_with_legacy_image_props()
+        rr = utils.ResourceRequest(rs)
+        self.assertResourceRequestsEqual(expected, rr)
+        self.assertTrue(rr.cpu_pinning_requested)
+
+    def test_resource_request_init_with_legacy_image_props_no_translate(self):
+        expected = FakeResourceRequest()
+        expected._rg_by_id[None] = objects.RequestGroup(
+            use_same_provider=False,
+            resources={
+                # we should have a VCPU despite hw_cpu_policy because
+                # enable_pinning_translate=False
+                'VCPU': 1,
+                'MEMORY_MB': 1024,
+                'DISK_GB': 15,
+            },
+            # we should not require hyperthreading despite hw_cpu_thread_policy
+            # because enable_pinning_translate=False
+            required_traits=set(),
+        )
+        rs = self._test_resource_request_init_with_legacy_image_props()
+        rr = utils.ResourceRequest(rs, enable_pinning_translate=False)
+        self.assertResourceRequestsEqual(expected, rr)
+        self.assertFalse(rr.cpu_pinning_requested)
+
+    def test_resource_request_init_is_bfv(self):
+        flavor = objects.Flavor(
+            vcpus=1, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=1555)
+
+        expected = FakeResourceRequest()
+        expected._rg_by_id[None] = objects.RequestGroup(
+            use_same_provider=False,
+            resources={
+                'VCPU': 1,
+                'MEMORY_MB': 1024,
+                # this should only include the ephemeral and swap disk, and the
+                # latter should be converted from MB to GB and rounded up
+                'DISK_GB': 7,
+            },
+        )
+        rs = objects.RequestSpec(flavor=flavor, is_bfv=True)
+        rr = utils.ResourceRequest(rs)
+        self.assertResourceRequestsEqual(expected, rr)
+
+    def test_resource_request_with_vpmems(self):
+        flavor = objects.Flavor(
+            vcpus=1, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=0,
+            extra_specs={'hw:pmem': '4GB, 4GB,SMALL'})
+
+        expected = FakeResourceRequest()
+        expected._rg_by_id[None] = objects.RequestGroup(
+            use_same_provider=False,
+            resources={
+                'VCPU': 1,
+                'MEMORY_MB': 1024,
+                'DISK_GB': 15,
+                'CUSTOM_PMEM_NAMESPACE_4GB': 2,
+                'CUSTOM_PMEM_NAMESPACE_SMALL': 1
+            },
+        )
+        rs = objects.RequestSpec(flavor=flavor, is_bfv=False)
+        rr = utils.ResourceRequest(rs)
+        self.assertResourceRequestsEqual(expected, rr)
 
     def test_resource_request_add_group_inserts_the_group(self):
-        req = utils.ResourceRequest()
+        flavor = objects.Flavor(
+            vcpus=1, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=0)
+        rs = objects.RequestSpec(flavor=flavor, is_bfv=False)
+        req = utils.ResourceRequest(rs)
         rg1 = objects.RequestGroup()
         req.add_request_group(rg1)
         rg2 = objects.RequestGroup()
@@ -788,18 +1101,22 @@ class TestUtils(test.NoDBTestCase):
         self.assertIs(rg2, req.get_request_group(2))
 
     def test_resource_request_add_group_inserts_the_group_implicit_group(self):
-        req = utils.ResourceRequest()
-        # this implicitly creates the unnumbered group
-        unnumbered_rg = req.get_request_group(None)
+        flavor = objects.Flavor(
+            vcpus=1, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=0)
+        rs = objects.RequestSpec(flavor=flavor, is_bfv=False)
+        req = utils.ResourceRequest(rs)
+
+        # this implicitly creates the specified group
+        unnumbered_rg = req.get_request_group(42)
 
         rg1 = objects.RequestGroup()
         req.add_request_group(rg1)
         rg2 = objects.RequestGroup()
         req.add_request_group(rg2)
 
-        self.assertIs(rg1, req.get_request_group(1))
-        self.assertIs(rg2, req.get_request_group(2))
-        self.assertIs(unnumbered_rg, req.get_request_group(None))
+        self.assertIs(rg1, req.get_request_group(43))
+        self.assertIs(rg2, req.get_request_group(44))
+        self.assertIs(unnumbered_rg, req.get_request_group(42))
 
     def test_claim_resources_on_destination_no_source_allocations(self):
         """Tests the negative scenario where the instance does not have
@@ -819,10 +1136,15 @@ class TestUtils(test.NoDBTestCase):
                            'claim_resources',
                            new_callable=mock.NonCallableMock)
         def test(mock_claim, mock_get_allocs):
-            utils.claim_resources_on_destination(
+            ex = self.assertRaises(
+                exception.ConsumerAllocationRetrievalFailed,
+                utils.claim_resources_on_destination,
                 self.context, reportclient, instance, source_node, dest_node)
             mock_get_allocs.assert_called_once_with(
                 self.context, instance.uuid)
+            self.assertIn(
+                'Expected to find allocations for source node resource '
+                'provider %s' % source_node.uuid, six.text_type(ex))
 
         test()
 
@@ -1022,3 +1344,427 @@ class TestUtils(test.NoDBTestCase):
             1.8,
             utils.get_weight_multiplier(host1, 'cpu_weight_multiplier', 1.0)
         )
+
+    @mock.patch('nova.scheduler.utils.'
+                'fill_provider_mapping_based_on_allocation')
+    def test_fill_provider_mapping_returns_early_if_nothing_to_do(
+            self, mock_fill_provider):
+        context = nova_context.RequestContext()
+        request_spec = objects.RequestSpec()
+        # set up the request that there is nothing to do
+        request_spec.requested_resources = []
+        report_client = mock.sentinel.report_client
+        selection = objects.Selection()
+
+        utils.fill_provider_mapping(
+            context, report_client, request_spec, selection)
+
+        mock_fill_provider.assert_not_called()
+
+    @mock.patch('nova.scheduler.utils.'
+                'fill_provider_mapping_based_on_allocation')
+    def test_fill_provider_mapping(self, mock_fill_provider):
+        context = nova_context.RequestContext()
+        request_spec = objects.RequestSpec()
+        request_spec.requested_resources = [objects.RequestGroup()]
+        report_client = mock.sentinel.report_client
+        allocs = {
+            uuids.rp_uuid: {
+                'resources': {
+                    'NET_BW_EGR_KILOBIT_PER_SEC': 1,
+                }
+            }
+        }
+        allocation_req = {'allocations': allocs}
+        selection = objects.Selection(
+            allocation_request=jsonutils.dumps(allocation_req))
+
+        utils.fill_provider_mapping(
+            context, report_client, request_spec, selection)
+
+        mock_fill_provider.assert_called_once_with(
+            context, report_client, request_spec, allocs)
+
+    @mock.patch.object(objects.RequestSpec,
+                       'map_requested_resources_to_providers')
+    def test_fill_provider_mapping_based_on_allocation_returns_early(
+            self, mock_map):
+        context = nova_context.RequestContext()
+        request_spec = objects.RequestSpec()
+        # set up the request that there is nothing to do
+        request_spec.requested_resources = []
+        report_client = mock.sentinel.report_client
+        allocation = mock.sentinel.allocation
+
+        utils.fill_provider_mapping_based_on_allocation(
+            context, report_client, request_spec, allocation)
+
+        mock_map.assert_not_called()
+
+    @mock.patch('nova.scheduler.client.report.SchedulerReportClient')
+    @mock.patch.object(objects.RequestSpec,
+                       'map_requested_resources_to_providers')
+    def test_fill_provider_mapping_based_on_allocation(
+            self, mock_map, mock_report_client):
+        context = nova_context.RequestContext()
+        request_spec = objects.RequestSpec()
+        # set up the request that there is nothing to do
+        request_spec.requested_resources = [objects.RequestGroup()]
+        allocation = {
+            uuids.rp_uuid: {
+                'resources': {
+                    'NET_BW_EGR_KILOBIT_PER_SEC': 1,
+                }
+            }
+        }
+        traits = ['CUSTOM_PHYSNET1', 'CUSTOM_VNIC_TYPE_NORMAL']
+        mock_report_client.get_provider_traits.return_value = report.TraitInfo(
+            traits=['CUSTOM_PHYSNET1', 'CUSTOM_VNIC_TYPE_NORMAL'],
+            generation=0)
+
+        utils.fill_provider_mapping_based_on_allocation(
+            context, mock_report_client, request_spec, allocation)
+
+        mock_map.assert_called_once_with(allocation, {uuids.rp_uuid: traits})
+
+
+class TestEncryptedMemoryTranslation(TestUtilsBase):
+    flavor_name = 'm1.test'
+    image_name = 'cirros'
+
+    def _get_request_spec(self, extra_specs, image):
+        flavor = objects.Flavor(name=self.flavor_name,
+                                vcpus=1,
+                                memory_mb=1024,
+                                root_gb=10,
+                                ephemeral_gb=5,
+                                swap=0,
+                                extra_specs=extra_specs)
+
+        # NOTE(aspiers): RequestSpec.flavor is not nullable, but
+        # RequestSpec.image is.
+        reqspec = objects.RequestSpec(flavor=flavor)
+
+        if image:
+            reqspec.image = image
+
+        return reqspec
+
+    def _get_resource_request(self, extra_specs, image):
+        reqspec = self._get_request_spec(extra_specs, image)
+        return utils.ResourceRequest(reqspec)
+
+    def _get_expected_resource_request(self, mem_encryption_context):
+        expected_resources = {
+            'VCPU': 1,
+            'MEMORY_MB': 1024,
+            'DISK_GB': 15,
+        }
+        if mem_encryption_context:
+            expected_resources[orc.MEM_ENCRYPTION_CONTEXT] = 1
+
+        expected = FakeResourceRequest()
+        expected._rg_by_id[None] = objects.RequestGroup(
+            use_same_provider=False,
+            resources=expected_resources)
+        return expected
+
+    def _test_encrypted_memory_support_not_required(self, extra_specs,
+                                                    image=None):
+        resreq = self._get_resource_request(extra_specs, image)
+        expected = self._get_expected_resource_request(False)
+
+        self.assertResourceRequestsEqual(expected, resreq)
+
+    def test_encrypted_memory_support_empty_extra_specs(self):
+        self._test_encrypted_memory_support_not_required(extra_specs={})
+
+    def test_encrypted_memory_support_false_extra_spec(self):
+        for extra_spec in ('0', 'false', 'False'):
+            self._test_encrypted_memory_support_not_required(
+                extra_specs={'hw:mem_encryption': extra_spec})
+
+    def test_encrypted_memory_support_empty_image_props(self):
+        self._test_encrypted_memory_support_not_required(
+            extra_specs={},
+            image=objects.ImageMeta(properties=objects.ImageMetaProps()))
+
+    def test_encrypted_memory_support_false_image_prop(self):
+        for image_prop in ('0', 'false', 'False'):
+            self._test_encrypted_memory_support_not_required(
+                extra_specs={},
+                image=objects.ImageMeta(
+                    properties=objects.ImageMetaProps(
+                        hw_mem_encryption=image_prop))
+            )
+
+    def test_encrypted_memory_support_both_false(self):
+        for extra_spec in ('0', 'false', 'False'):
+            for image_prop in ('0', 'false', 'False'):
+                self._test_encrypted_memory_support_not_required(
+                    extra_specs={'hw:mem_encryption': extra_spec},
+                    image=objects.ImageMeta(
+                        properties=objects.ImageMetaProps(
+                            hw_mem_encryption=image_prop))
+                )
+
+    def _test_encrypted_memory_support_conflict(self, extra_spec,
+                                                image_prop_in,
+                                                image_prop_out):
+        # NOTE(aspiers): hw_mem_encryption image property is a
+        # FlexibleBooleanField, so the result should always be coerced
+        # to a boolean.
+        self.assertIsInstance(image_prop_out, bool)
+
+        image = objects.ImageMeta(
+            name=self.image_name,
+            properties=objects.ImageMetaProps(
+                hw_mem_encryption=image_prop_in)
+        )
+
+        reqspec = self._get_request_spec(
+            extra_specs={'hw:mem_encryption': extra_spec},
+            image=image)
+
+        # Sanity check that our test request spec has an extra_specs
+        # dict, which is needed in order for there to be a conflict.
+        self.assertIn('flavor', reqspec)
+        self.assertIn('extra_specs', reqspec.flavor)
+
+        error = (
+            "Flavor %(flavor_name)s has hw:mem_encryption extra spec "
+            "explicitly set to %(flavor_val)s, conflicting with "
+            "image %(image_name)s which has hw_mem_encryption property "
+            "explicitly set to %(image_val)s"
+        )
+        exc = self.assertRaises(
+            exception.FlavorImageConflict,
+            utils.ResourceRequest, reqspec
+        )
+        error_data = {
+            'flavor_name': self.flavor_name,
+            'flavor_val': extra_spec,
+            'image_name': self.image_name,
+            'image_val': image_prop_out,
+        }
+        self.assertEqual(error % error_data, str(exc))
+
+    def test_encrypted_memory_support_conflict1(self):
+        for extra_spec in ('0', 'false', 'False'):
+            for image_prop_in in ('1', 'true', 'True'):
+                self._test_encrypted_memory_support_conflict(
+                    extra_spec, image_prop_in, True
+                )
+
+    def test_encrypted_memory_support_conflict2(self):
+        for extra_spec in ('1', 'true', 'True'):
+            for image_prop_in in ('0', 'false', 'False'):
+                self._test_encrypted_memory_support_conflict(
+                    extra_spec, image_prop_in, False
+                )
+
+    @mock.patch.object(utils, 'LOG')
+    def _test_encrypted_memory_support_required(self, requesters, extra_specs,
+                                                mock_log, image=None):
+        resreq = self._get_resource_request(extra_specs, image)
+        expected = self._get_expected_resource_request(True)
+
+        self.assertResourceRequestsEqual(expected, resreq)
+        mock_log.debug.assert_has_calls([
+            mock.call('Added %s=1 to requested resources',
+                      orc.MEM_ENCRYPTION_CONTEXT)
+        ])
+
+    def test_encrypted_memory_support_extra_spec(self):
+        for extra_spec in ('1', 'true', 'True'):
+            self._test_encrypted_memory_support_required(
+                'hw:mem_encryption extra spec',
+                {'hw:mem_encryption': extra_spec},
+                image=objects.ImageMeta(
+                    id='005249be-3c2f-4351-9df7-29bb13c21b14',
+                    properties=objects.ImageMetaProps(
+                        hw_machine_type='q35',
+                        hw_firmware_type='uefi'))
+            )
+
+    def test_encrypted_memory_support_image_prop(self):
+        for image_prop in ('1', 'true', 'True'):
+            self._test_encrypted_memory_support_required(
+                'hw_mem_encryption image property',
+                {},
+                image=objects.ImageMeta(
+                    id='005249be-3c2f-4351-9df7-29bb13c21b14',
+                    name=self.image_name,
+                    properties=objects.ImageMetaProps(
+                        hw_machine_type='q35',
+                        hw_firmware_type='uefi',
+                        hw_mem_encryption=image_prop))
+            )
+
+    def test_encrypted_memory_support_both_required(self):
+        for extra_spec in ('1', 'true', 'True'):
+            for image_prop in ('1', 'true', 'True'):
+                self._test_encrypted_memory_support_required(
+                    'hw:mem_encryption extra spec and '
+                    'hw_mem_encryption image property',
+                    {'hw:mem_encryption': extra_spec},
+                    image=objects.ImageMeta(
+                        id='005249be-3c2f-4351-9df7-29bb13c21b14',
+                        name=self.image_name,
+                        properties=objects.ImageMetaProps(
+                            hw_machine_type='q35',
+                            hw_firmware_type='uefi',
+                            hw_mem_encryption=image_prop))
+                )
+
+
+class TestResourcesFromRequestGroupDefaultPolicy(test.NoDBTestCase):
+    """These test cases assert what happens when the group policy is missing
+    from the flavor but more than one numbered request group is requested from
+    various sources. Note that while image can provide required traits for the
+    resource request those traits are always added to the unnumbered group so
+    image cannot be a source of additional numbered groups.
+    """
+
+    def setUp(self):
+        super(TestResourcesFromRequestGroupDefaultPolicy, self).setUp()
+        self.context = nova_context.get_admin_context()
+        self.port_group1 = objects.RequestGroup.from_port_request(
+            self.context, uuids.port1,
+            port_resource_request={
+                "resources": {
+                    "NET_BW_IGR_KILOBIT_PER_SEC": 1000,
+                    "NET_BW_EGR_KILOBIT_PER_SEC": 1000},
+                "required": ["CUSTOM_PHYSNET_2",
+                             "CUSTOM_VNIC_TYPE_NORMAL"]
+            })
+        self.port_group2 = objects.RequestGroup.from_port_request(
+            self.context, uuids.port2,
+            port_resource_request={
+                "resources": {
+                    "NET_BW_IGR_KILOBIT_PER_SEC": 2000,
+                    "NET_BW_EGR_KILOBIT_PER_SEC": 2000},
+                "required": ["CUSTOM_PHYSNET_3",
+                             "CUSTOM_VNIC_TYPE_DIRECT"]
+            })
+        self.image = objects.ImageMeta(properties=objects.ImageMetaProps())
+
+    def test_one_group_from_flavor_dont_warn(self):
+        flavor = objects.Flavor(
+            vcpus=1, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=0,
+            extra_specs={
+                'resources1:CUSTOM_BAR': '2',
+            })
+        request_spec = objects.RequestSpec(
+            flavor=flavor, image=self.image, requested_resources=[])
+
+        rr = utils.resources_from_request_spec(
+            self.context, request_spec, host_manager=mock.Mock())
+
+        log = self.stdlog.logger.output
+        self.assertNotIn(
+            "There is more than one numbered request group in the allocation "
+            "candidate query but the flavor did not specify any group policy.",
+            log)
+        self.assertNotIn(
+            "To avoid the placement failure nova defaults the group policy to "
+            "'none'.",
+            log)
+        self.assertIsNone(rr.group_policy)
+        self.assertNotIn('group_policy=none', rr.to_querystring())
+
+    def test_one_group_from_port_dont_warn(self):
+        flavor = objects.Flavor(
+            vcpus=1, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=0,
+            extra_specs={})
+        request_spec = objects.RequestSpec(
+            flavor=flavor, image=self.image,
+            requested_resources=[self.port_group1])
+
+        rr = utils.resources_from_request_spec(
+            self.context, request_spec, host_manager=mock.Mock())
+
+        log = self.stdlog.logger.output
+        self.assertNotIn(
+            "There is more than one numbered request group in the allocation "
+            "candidate query but the flavor did not specify any group policy.",
+            log)
+        self.assertNotIn(
+            "To avoid the placement failure nova defaults the group policy to "
+            "'none'.",
+            log)
+        self.assertIsNone(rr.group_policy)
+        self.assertNotIn('group_policy=none', rr.to_querystring())
+
+    def test_two_groups_from_flavor_only_warns(self):
+        flavor = objects.Flavor(
+            vcpus=1, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=0,
+            extra_specs={
+                'resources1:CUSTOM_BAR': '2',
+                'resources2:CUSTOM_FOO': '1'
+            })
+        request_spec = objects.RequestSpec(
+            flavor=flavor, image=self.image, requested_resources=[])
+
+        rr = utils.resources_from_request_spec(
+            self.context, request_spec, host_manager=mock.Mock())
+
+        log = self.stdlog.logger.output
+        self.assertIn(
+            "There is more than one numbered request group in the allocation "
+            "candidate query but the flavor did not specify any group policy.",
+            log)
+        self.assertNotIn(
+            "To avoid the placement failure nova defaults the group policy to "
+            "'none'.",
+            log)
+        self.assertIsNone(rr.group_policy)
+        self.assertNotIn('group_policy', rr.to_querystring())
+
+    def test_one_group_from_flavor_one_from_port_policy_defaulted(self):
+        flavor = objects.Flavor(
+            vcpus=1, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=0,
+            extra_specs={
+                'resources1:CUSTOM_BAR': '2',
+            })
+        request_spec = objects.RequestSpec(
+            flavor=flavor, image=self.image,
+            requested_resources=[self.port_group1])
+
+        rr = utils.resources_from_request_spec(
+            self.context, request_spec, host_manager=mock.Mock())
+
+        log = self.stdlog.logger.output
+        self.assertIn(
+            "There is more than one numbered request group in the allocation "
+            "candidate query but the flavor did not specify any group policy.",
+            log)
+        self.assertIn(
+            "To avoid the placement failure nova defaults the group policy to "
+            "'none'.",
+            log)
+        self.assertEqual('none', rr.group_policy)
+        self.assertIn('group_policy=none', rr.to_querystring())
+
+    def test_two_groups_from_ports_policy_defaulted(self):
+        flavor = objects.Flavor(
+            vcpus=1, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=0,
+            extra_specs={})
+        request_spec = objects.RequestSpec(
+            flavor=flavor, image=self.image,
+            requested_resources=[self.port_group1, self.port_group2])
+
+        rr = utils.resources_from_request_spec(
+            self.context, request_spec, host_manager=mock.Mock())
+
+        log = self.stdlog.logger.output
+        self.assertIn(
+            "There is more than one numbered request group in the allocation "
+            "candidate query but the flavor did not specify any group policy.",
+            log)
+        self.assertIn(
+            "To avoid the placement failure nova defaults the group policy to "
+            "'none'.",
+            log)
+        self.assertEqual('none', rr.group_policy)
+        self.assertIn('group_policy=none', rr.to_querystring())

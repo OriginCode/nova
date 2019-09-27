@@ -505,13 +505,6 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         # os_vif.initialize is typically done in nova-compute startup
         os_vif.initialize()
         self.setup_os_vif_objects()
-        self.executes = []
-
-        def fake_execute(*cmd, **kwargs):
-            self.executes.append(cmd)
-            return None, None
-
-        self.stub_out('nova.utils.execute', fake_execute)
 
     def _get_node(self, xml):
         doc = etree.fromstring(xml)
@@ -603,6 +596,9 @@ class LibvirtVifTestCase(test.NoDBTestCase):
                                 is_public=True, vcpu_weight=None,
                                 id=2, disabled=False, rxtx_factor=1.0)
 
+        if image_meta is None:
+            image_meta = objects.ImageMeta.from_dict({})
+
         conf = self._get_conf()
         hostimpl = host.Host("qemu:///system")
         with mock.patch.object(hostimpl, 'has_min_version',
@@ -630,7 +626,8 @@ class LibvirtVifTestCase(test.NoDBTestCase):
                     deleted=0,
                     created_at=None, flavorid=1,
                     is_public=True, vcpu_weight=None,
-                    id=2, disabled=False, rxtx_factor=1.0)
+                    id=2, disabled=False, rxtx_factor=1.0,
+                    extra_specs={})
 
         d = vif.LibvirtGenericVIFDriver()
         image_meta = objects.ImageMeta.from_dict(
@@ -737,7 +734,7 @@ class LibvirtVifTestCase(test.NoDBTestCase):
     @mock.patch.object(host.Host, "has_min_version", return_value=False)
     def test_virtio_vhost_queue_sizes_nover(self, has_min_version):
         _, _, conf = self._test_virtio_config_queue_sizes()
-        self.assertIsNone(conf.vhost_rx_queue_size)
+        self.assertEqual(512, conf.vhost_rx_queue_size)
         self.assertIsNone(conf.vhost_tx_queue_size)
 
     @mock.patch.object(host.Host, "has_min_version", return_value=True)
@@ -753,7 +750,7 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         hostimpl, v, conf = self._test_virtio_config_queue_sizes()
         v._set_config_VIFVHostUser(self.instance, self.os_vif_vhostuser,
                                    conf, hostimpl)
-        self.assertIsNone(conf.vhost_rx_queue_size)
+        self.assertEqual(512, conf.vhost_rx_queue_size)
         self.assertIsNone(conf.vhost_tx_queue_size)
 
     def test_multiple_nics(self):
@@ -975,13 +972,11 @@ class LibvirtVifTestCase(test.NoDBTestCase):
     @mock.patch.object(pci_utils, 'get_vf_num_by_pci_address', return_value=1)
     @mock.patch('nova.privsep.linux_net.set_device_macaddr')
     @mock.patch('nova.privsep.linux_net.set_device_macaddr_and_vlan')
-    def _test_hw_veb_op(self, op, vlan, mock_set_macaddr_and_vlan,
-                        mock_set_macaddr, mock_get_vf_num,
-                        mock_get_ifname):
+    def test_unplug_hw_veb(self, mock_set_macaddr_and_vlan,
+                           mock_set_macaddr, mock_get_vf_num,
+                           mock_get_ifname):
+        d = vif.LibvirtGenericVIFDriver()
         mock_get_ifname.side_effect = ['eth1', 'eth13']
-        port_state = 'up' if vlan > 0 else 'down'
-        mac = ('00:00:00:00:00:00' if op.__name__ == 'unplug'
-               else self.vif_hw_veb_macvtap['address'])
         calls = {
             'get_ifname':
                 [mock.call(self.vif_hw_veb_macvtap['profile']['pci_slot'],
@@ -989,24 +984,17 @@ class LibvirtVifTestCase(test.NoDBTestCase):
                  mock.call(self.vif_hw_veb_macvtap['profile']['pci_slot'])],
             'get_vf_num':
                 [mock.call(self.vif_hw_veb_macvtap['profile']['pci_slot'])],
-            'set_macaddr': [mock.call('eth13', mac, port_state=port_state)]
+            'set_macaddr': [mock.call(
+                'eth13', '00:00:00:00:00:00', port_state='down')]
         }
-        op(self.instance, self.vif_hw_veb_macvtap)
+
+        d.unplug(self.instance, self.vif_hw_veb_macvtap)
+
         mock_get_ifname.assert_has_calls(calls['get_ifname'])
         mock_get_vf_num.assert_has_calls(calls['get_vf_num'])
         mock_set_macaddr.assert_has_calls(calls['set_macaddr'])
         mock_set_macaddr_and_vlan.assert_called_once_with(
-            'eth1', 1, mock.ANY, vlan)
-
-    def test_plug_hw_veb(self):
-        d = vif.LibvirtGenericVIFDriver()
-        self._test_hw_veb_op(
-            d.plug,
-            self.vif_hw_veb_macvtap['details'][network_model.VIF_DETAILS_VLAN])
-
-    def test_unplug_hw_veb(self):
-        d = vif.LibvirtGenericVIFDriver()
-        self._test_hw_veb_op(d.unplug, 0)
+            'eth1', 1, mock.ANY, 0)
 
     @mock.patch('nova.network.linux_net.set_vf_trusted')
     def test_plug_hw_veb_trusted(self, mset_vf_trusted):
@@ -1186,25 +1174,6 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         vlan = node.find("vlan").find("tag").get("id")
         vlan_want = self.vif_hw_veb["details"]["vlan"]
         self.assertEqual(int(vlan), vlan_want)
-
-    @mock.patch.object(pci_utils, 'get_ifname_by_pci_address',
-                       return_value='eth1')
-    @mock.patch.object(host.Host, "has_min_version", return_value=False)
-    def test_hw_veb_driver_macvtap_pre_vlan_support(self, ver_mock,
-                                                    mock_get_ifname):
-        d = vif.LibvirtGenericVIFDriver()
-        xml = self._get_instance_xml(
-            d, self.vif_hw_veb_macvtap,
-            has_min_libvirt_version=ver_mock.return_value)
-        node = self._get_node(xml)
-        self.assertEqual(node.get("type"), "direct")
-        self._assertTypeEquals(node, "direct", "source",
-                               "dev", "eth1")
-        self._assertTypeEquals(node, "direct", "source",
-                               "mode", "passthrough")
-        self._assertMacEquals(node, self.vif_hw_veb_macvtap)
-        vlan = node.find("vlan")
-        self.assertIsNone(vlan)
 
     def test_driver_macvtap_vlan(self):
         d = vif.LibvirtGenericVIFDriver()

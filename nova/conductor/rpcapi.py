@@ -304,6 +304,8 @@ class ComputeTaskAPI(object):
 
     # TODO(melwitt): Remove the reservations parameter in version 2.0 of the
     # RPC API.
+    # TODO(mriedem): Make request_spec required *and* a RequestSpec object
+    # rather than a legacy dict in version 2.0 of the RPC API.
     def migrate_server(self, context, instance, scheduler_hint, live, rebuild,
                   flavor, block_migration, disk_over_commit,
                   reservations=None, clean_shutdown=True, request_spec=None,
@@ -414,7 +416,7 @@ class ComputeTaskAPI(object):
     def rebuild_instance(self, ctxt, instance, new_pass, injected_files,
             image_ref, orig_image_ref, orig_sys_metadata, bdms,
             recreate=False, on_shared_storage=False, host=None,
-            preserve_ephemeral=False, request_spec=None, kwargs=None):
+            preserve_ephemeral=False, request_spec=None):
         version = '1.12'
         kw = {'instance': instance,
               'new_pass': new_pass,

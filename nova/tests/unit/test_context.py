@@ -216,8 +216,7 @@ class ContextTestCase(test.NoDBTestCase):
 
         self.assertTrue(result)
         mock_authorize.assert_called_once_with(
-          ctxt, mock.sentinel.rule,
-          {'project_id': ctxt.project_id, 'user_id': ctxt.user_id})
+          ctxt, mock.sentinel.rule, None)
 
     @mock.patch.object(context.policy, 'authorize')
     def test_can_fatal(self, mock_authorize):
@@ -346,35 +345,21 @@ class ContextTestCase(test.NoDBTestCase):
     @mock.patch('nova.context.target_cell')
     @mock.patch('nova.objects.InstanceList.get_by_filters')
     def test_scatter_gather_cells(self, mock_get_inst, mock_target_cell):
+        self.useFixture(nova_fixtures.SpawnIsSynchronousFixture())
         ctxt = context.get_context()
         mapping = objects.CellMapping(database_connection='fake://db',
                                       transport_url='fake://mq',
                                       uuid=uuids.cell)
         mappings = objects.CellMappingList(objects=[mapping])
 
-        # Use a mock manager to assert call order across mocks.
-        manager = mock.Mock()
-        manager.attach_mock(mock_get_inst, 'get_inst')
-        manager.attach_mock(mock_target_cell, 'target_cell')
-
         filters = {'deleted': False}
         context.scatter_gather_cells(
             ctxt, mappings, 60, objects.InstanceList.get_by_filters, filters,
             sort_dir='foo')
 
-        # NOTE(melwitt): This only works without the SpawnIsSynchronous fixture
-        # because when the spawn is treated as synchronous and the thread
-        # function is called immediately, it will occur inside the target_cell
-        # context manager scope when it wouldn't with a real spawn.
-
-        # Assert that InstanceList.get_by_filters was called before the
-        # target_cell context manager exited.
-        get_inst_call = mock.call.get_inst(
+        mock_get_inst.assert_called_once_with(
             mock_target_cell.return_value.__enter__.return_value, filters,
             sort_dir='foo')
-        expected_calls = [get_inst_call,
-                          mock.call.target_cell().__exit__(None, None, None)]
-        manager.assert_has_calls(expected_calls)
 
     @mock.patch('nova.context.LOG.warning')
     @mock.patch('eventlet.timeout.Timeout')
@@ -426,8 +411,9 @@ class ContextTestCase(test.NoDBTestCase):
         mock_get_inst.side_effect = [mock.sentinel.instances,
                                      test.TestingException()]
 
+        filters = {'deleted': False}
         results = context.scatter_gather_cells(
-            ctxt, mappings, 30, objects.InstanceList.get_by_filters)
+            ctxt, mappings, 30, objects.InstanceList.get_by_filters, filters)
         self.assertEqual(2, len(results))
         self.assertIn(mock.sentinel.instances, results.values())
         self.assertIsInstance(results[mapping1.uuid], Exception)
@@ -440,7 +426,7 @@ class ContextTestCase(test.NoDBTestCase):
                                      exception.NotFound()]
 
         results = context.scatter_gather_cells(
-            ctxt, mappings, 30, objects.InstanceList.get_by_filters)
+            ctxt, mappings, 30, objects.InstanceList.get_by_filters, filters)
         self.assertEqual(2, len(results))
         self.assertIn(mock.sentinel.instances, results.values())
         self.assertIsInstance(results[mapping1.uuid], exception.NovaException)

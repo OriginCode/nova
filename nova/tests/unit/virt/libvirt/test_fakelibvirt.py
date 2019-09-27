@@ -107,9 +107,9 @@ class FakeLibvirtTests(test.NoDBTestCase):
         self.assertGreaterEqual(32, res[2], "Active CPU count unusually low.")
         self.assertLessEqual(800, res[3], "CPU speed unusually high.")
         self.assertGreaterEqual(4500, res[3], "CPU speed unusually low.")
-        self.assertLessEqual(res[2], (res[5] * res[6]),
-                             "More active CPUs than "
-                             "num_sockets*cores_per_socket")
+        self.assertEqual(res[2], (res[4] * res[5] * res[6] * res[7]),
+                         "More active CPUs than num_nodes * num_sockets * "
+                         "cores_per_socket * threads_per_core")
 
     def test_createXML_detects_invalid_xml(self):
         self._test_XML_func_detects_invalid_xml('createXML', [0])
@@ -277,6 +277,11 @@ class FakeLibvirtTests(test.NoDBTestCase):
         conn = self.get_openAuth_curry_func()('qemu:///system')
         etree.fromstring(conn.getCapabilities())
 
+    def test_getDomainCapabilities(self):
+        conn = self.get_openAuth_curry_func()('qemu:///system')
+        etree.fromstring(conn.getDomainCapabilities(
+            '/usr/bin/qemu-kvm', 'x86_64', 'q35', 'kvm', 0))
+
     def test_nwfilter_define_undefine(self):
         conn = self.get_openAuth_curry_func()('qemu:///system')
         # Will raise an exception if it's not valid XML
@@ -361,8 +366,7 @@ class FakeLibvirtTests(test.NoDBTestCase):
                               conn.host_info.cpu_sockets,
                               conn.host_info.cpu_cores,
                               conn.host_info.cpu_threads)
-        self.assertEqual(conn.compareCPU(xml, 0),
-                         libvirt.VIR_CPU_COMPARE_INCOMPATIBLE)
+        self.assertRaises(libvirt.libvirtError, conn.compareCPU, xml, 0)
 
     def test_compareCPU_compatible_unspecified_model(self):
         conn = self.get_openAuth_curry_func()('qemu:///system')

@@ -109,7 +109,19 @@ CAPABILITY_TRAITS_MAP = {
     "supports_extend_volume": os_traits.COMPUTE_VOLUME_EXTEND,
     "supports_multiattach": os_traits.COMPUTE_VOLUME_MULTI_ATTACH,
     # Added in os-traits 0.8.0.
-    "supports_trusted_certs": os_traits.COMPUTE_TRUSTED_CERTS
+    "supports_trusted_certs": os_traits.COMPUTE_TRUSTED_CERTS,
+
+    # Image type support flags, added in os-traits 0.12.0
+    "supports_image_type_aki": os_traits.COMPUTE_IMAGE_TYPE_AKI,
+    "supports_image_type_ami": os_traits.COMPUTE_IMAGE_TYPE_AMI,
+    "supports_image_type_ari": os_traits.COMPUTE_IMAGE_TYPE_ARI,
+    "supports_image_type_iso": os_traits.COMPUTE_IMAGE_TYPE_ISO,
+    "supports_image_type_qcow2": os_traits.COMPUTE_IMAGE_TYPE_QCOW2,
+    "supports_image_type_raw": os_traits.COMPUTE_IMAGE_TYPE_RAW,
+    "supports_image_type_vdi": os_traits.COMPUTE_IMAGE_TYPE_VDI,
+    "supports_image_type_vhd": os_traits.COMPUTE_IMAGE_TYPE_VHD,
+    "supports_image_type_vhdx": os_traits.COMPUTE_IMAGE_TYPE_VHDX,
+    "supports_image_type_vmdk": os_traits.COMPUTE_IMAGE_TYPE_VMDK,
 }
 
 
@@ -158,6 +170,19 @@ class ComputeDriver(object):
         "supports_extend_volume": False,
         "supports_multiattach": False,
         "supports_trusted_certs": False,
+        "supports_pcpus": False,
+
+        # Image type support flags
+        "supports_image_type_aki": False,
+        "supports_image_type_ami": False,
+        "supports_image_type_ari": False,
+        "supports_image_type_iso": False,
+        "supports_image_type_qcow2": False,
+        "supports_image_type_raw": False,
+        "supports_image_type_vdi": False,
+        "supports_image_type_vhd": False,
+        "supports_image_type_vhdx": False,
+        "supports_image_type_vmdk": False,
     }
 
     # Indicates if this driver will rebalance nodes among compute service
@@ -230,20 +255,6 @@ class ComputeDriver(object):
             return instance.uuid in self.list_instance_uuids()
         except NotImplementedError:
             return instance.name in self.list_instances()
-
-    def estimate_instance_overhead(self, instance_info):
-        """Estimate the virtualization overhead required to build an instance
-        of the given flavor.
-
-        Defaults to zero, drivers should override if per-instance overhead
-        calculations are desired.
-
-        :param instance_info: Instance/flavor to calculate overhead for.
-        :returns: Dict of estimated overhead values.
-        """
-        return {'memory_mb': 0,
-                'disk_gb': 0,
-                'vcpus': 0}
 
     def list_instances(self):
         """Return the names of all the instances known to the virtualization
@@ -332,11 +343,12 @@ class ComputeDriver(object):
 
     def spawn(self, context, instance, image_meta, injected_files,
               admin_password, allocations, network_info=None,
-              block_device_info=None):
+              block_device_info=None, power_on=True):
         """Create a new instance/VM/domain on the virtualization platform.
 
         Once this successfully completes, the instance should be
-        running (power_state.RUNNING).
+        running (power_state.RUNNING) if ``power_on`` is True, else the
+        instance should be stopped (power_state.SHUTDOWN).
 
         If this fails, any partial instance should be completely
         cleaned up, and the virtualization platform should be in the state
@@ -356,6 +368,8 @@ class ComputeDriver(object):
         :param network_info: instance network information
         :param block_device_info: Information about block devices to be
                                   attached to the instance.
+        :param power_on: True if the instance should be powered on, False
+                         otherwise
         """
         raise NotImplementedError()
 
@@ -713,12 +727,14 @@ class ComputeDriver(object):
         raise NotImplementedError()
 
     def finish_revert_migration(self, context, instance, network_info,
-                                block_device_info=None, power_on=True):
+                                migration, block_device_info=None,
+                                power_on=True):
         """Finish reverting a resize/migration.
 
         :param context: the context for the finish_revert_migration
         :param instance: nova.objects.instance.Instance being migrated/resized
         :param network_info: instance network information
+        :param migration: nova.objects.Migration for the migration
         :param block_device_info: instance volume block device info
         :param power_on: True if the instance should be powered on, False
                          otherwise
@@ -850,6 +866,19 @@ class ComputeDriver(object):
         """Power on the specified instance.
 
         :param instance: nova.objects.instance.Instance
+        """
+        raise NotImplementedError()
+
+    def power_update_event(self, instance, target_power_state):
+        """Update power, vm and task states of the specified instance.
+
+        Note that the driver is expected to set the task_state of the
+        instance back to None.
+
+        :param instance: nova.objects.instance.Instance
+        :param target_power_state: The desired target power state for the
+                                   instance; possible values are "POWER_ON"
+                                   and "POWER_OFF".
         """
         raise NotImplementedError()
 
@@ -1109,6 +1138,16 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
+    def rollback_live_migration_at_source(self, context, instance,
+                                          migrate_data):
+        """Clean up source node after a failed live migration.
+
+        :param context: security context
+        :param instance: instance object that was being migrated
+        :param migrate_data: a LiveMigrateData object
+        """
+        pass
+
     def rollback_live_migration_at_destination(self, context, instance,
                                                network_info,
                                                block_device_info,
@@ -1206,6 +1245,22 @@ class ComputeDriver(object):
         :returns: a LiveMigrateData object (hypervisor-dependent)
         """
         raise NotImplementedError()
+
+    def post_claim_migrate_data(self, context, instance, migrate_data, claim):
+        """Returns migrate_data augmented with any information obtained from
+        the claim. Intended to run on the destination of a live-migration
+        operation, after resources have been claimed on it.
+
+        :param context: The request context.
+        :param instance: The instance being live-migrated.
+        :param migrate_data: The existing LiveMigrateData object for this live
+                             migration.
+        :param claim: The MoveClaim that was made on the destination for this
+                      live migration.
+        :returns: A LiveMigrateData object augmented with information obtained
+                  from the Claim.
+        """
+        return migrate_data
 
     def cleanup_live_migration_destination_check(self, context,
                                                  dest_check_data):
@@ -1514,37 +1569,6 @@ class ComputeDriver(object):
     def deallocate_networks_on_reschedule(self, instance):
         """Does the driver want networks deallocated on reschedule?"""
         return False
-
-    # NOTE(vsaienko) This method is deprecated, don't use it!
-    # TODO(vsaienko) Remove this function in Ocata.
-    def macs_for_instance(self, instance):
-        """What MAC addresses must this instance have?
-
-        Some hypervisors (such as bare metal) cannot do freeform virtualization
-        of MAC addresses. This method allows drivers to return a set of MAC
-        addresses that the instance is to have. allocate_for_instance will take
-        this into consideration when provisioning networking for the instance.
-
-        Mapping of MAC addresses to actual networks (or permitting them to be
-        freeform) is up to the network implementation layer. For instance,
-        with openflow switches, fixed MAC addresses can still be virtualized
-        onto any L2 domain, with arbitrary VLANs etc, but regular switches
-        require pre-configured MAC->network mappings that will match the
-        actual configuration.
-
-        Most hypervisors can use the default implementation which returns None.
-        Hypervisors with MAC limits should return a set of MAC addresses, which
-        will be supplied to the allocate_for_instance call by the compute
-        manager, and it is up to that call to ensure that all assigned network
-        details are compatible with the set of MAC addresses.
-
-        This is called during spawn_instance by the compute manager.
-
-        :return: None, or a set of MAC ids (e.g. set(['12:34:56:78:90:ab'])).
-            None means 'no constraints', a set means 'these and only these
-            MAC addresses'.
-        """
-        return None
 
     def manage_image_cache(self, context, all_instances):
         """Manage the driver's local image cache.

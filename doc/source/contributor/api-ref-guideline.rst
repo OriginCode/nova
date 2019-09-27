@@ -9,7 +9,7 @@ This page describes the guideline for updating the API reference.
 API reference
 =============
 
-* `Compute API reference <https://developer.openstack.org/api-ref/compute/>`_
+* `Compute API reference <https://docs.openstack.org/api-ref/compute/>`_
 
 The guideline to write the API reference
 ========================================
@@ -159,6 +159,12 @@ Or links to the pages describing them should be added.
   - Scheduler
 
     - Whether the scheduler choose a destination host or not
+
+* Sort order of response results
+
+  - Describe sorting order of response results if the API implements the order
+    (e.g. The response is sorted by ``created_at`` and ``id``
+    in descending order by default)
 
 * Policy
 

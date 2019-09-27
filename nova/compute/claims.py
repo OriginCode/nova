@@ -35,18 +35,6 @@ class NopClaim(object):
         self.migration = kwargs.pop('migration', None)
         self.claimed_numa_topology = None
 
-    @property
-    def disk_gb(self):
-        return 0
-
-    @property
-    def memory_mb(self):
-        return 0
-
-    @property
-    def vcpus(self):
-        return 0
-
     def __enter__(self):
         return self
 
@@ -56,10 +44,6 @@ class NopClaim(object):
 
     def abort(self):
         pass
-
-    def __str__(self):
-        return "[Claim: %d MB memory, %d GB disk]" % (self.memory_mb,
-                self.disk_gb)
 
 
 class Claim(NopClaim):
@@ -74,20 +58,13 @@ class Claim(NopClaim):
     """
 
     def __init__(self, context, instance, nodename, tracker, resources,
-                 pci_requests, overhead=None, limits=None):
-        super(Claim, self).__init__()
+                 pci_requests, migration=None, limits=None):
+        super(Claim, self).__init__(migration=migration)
         # Stash a copy of the instance at the current point of time
         self.instance = instance.obj_clone()
         self.nodename = nodename
-        self._numa_topology_loaded = False
         self.tracker = tracker
         self._pci_requests = pci_requests
-
-        if not overhead:
-            overhead = {'memory_mb': 0,
-                        'disk_gb': 0}
-
-        self.overhead = overhead
         self.context = context
 
         # Check claim at constructor to avoid mess code
@@ -95,26 +72,8 @@ class Claim(NopClaim):
         self._claim_test(resources, limits)
 
     @property
-    def disk_gb(self):
-        return (self.instance.flavor.root_gb +
-                self.instance.flavor.ephemeral_gb +
-                self.overhead.get('disk_gb', 0))
-
-    @property
-    def memory_mb(self):
-        return self.instance.flavor.memory_mb + self.overhead['memory_mb']
-
-    @property
-    def vcpus(self):
-        return self.instance.flavor.vcpus
-
-    @property
     def numa_topology(self):
-        if self._numa_topology_loaded:
-            return self._numa_topology
-        else:
-            self._numa_topology = self.instance.numa_topology
-            return self._numa_topology
+        return self.instance.numa_topology
 
     def abort(self):
         """Compute operation requiring claimed resources has failed or
@@ -145,22 +104,9 @@ class Claim(NopClaim):
 
         # If an individual limit is None, the resource will be considered
         # unlimited:
-        memory_mb_limit = limits.get('memory_mb')
-        disk_gb_limit = limits.get('disk_gb')
-        vcpus_limit = limits.get('vcpu')
         numa_topology_limit = limits.get('numa_topology')
 
-        LOG.info("Attempting claim on node %(node)s: "
-                 "memory %(memory_mb)d MB, "
-                 "disk %(disk_gb)d GB, vcpus %(vcpus)d CPU",
-                 {'node': self.nodename, 'memory_mb': self.memory_mb,
-                  'disk_gb': self.disk_gb, 'vcpus': self.vcpus},
-                 instance=self.instance)
-
-        reasons = [self._test_memory(resources, memory_mb_limit),
-                   self._test_disk(resources, disk_gb_limit),
-                   self._test_vcpus(resources, vcpus_limit),
-                   self._test_numa_topology(resources, numa_topology_limit),
+        reasons = [self._test_numa_topology(resources, numa_topology_limit),
                    self._test_pci()]
         reasons = [r for r in reasons if r is not None]
         if len(reasons) > 0:
@@ -169,33 +115,6 @@ class Claim(NopClaim):
 
         LOG.info('Claim successful on node %s', self.nodename,
                  instance=self.instance)
-
-    def _test_memory(self, resources, limit):
-        type_ = _("memory")
-        unit = "MB"
-        total = resources.memory_mb
-        used = resources.memory_mb_used
-        requested = self.memory_mb
-
-        return self._test(type_, unit, total, used, requested, limit)
-
-    def _test_disk(self, resources, limit):
-        type_ = _("disk")
-        unit = "GB"
-        total = resources.local_gb
-        used = resources.local_gb_used
-        requested = self.disk_gb
-
-        return self._test(type_, unit, total, used, requested, limit)
-
-    def _test_vcpus(self, resources, limit):
-        type_ = _("vcpu")
-        unit = "VCPU"
-        total = resources.vcpus
-        used = resources.vcpus_used
-        requested = self.vcpus
-
-        return self._test(type_, unit, total, used, requested, limit)
 
     def _test_pci(self):
         pci_requests = self._pci_requests
@@ -234,35 +153,6 @@ class Claim(NopClaim):
             elif instance_topology:
                 self.claimed_numa_topology = instance_topology
 
-    def _test(self, type_, unit, total, used, requested, limit):
-        """Test if the given type of resource needed for a claim can be safely
-        allocated.
-        """
-        LOG.info('Total %(type)s: %(total)d %(unit)s, used: %(used).02f '
-                 '%(unit)s',
-                  {'type': type_, 'total': total, 'unit': unit, 'used': used},
-                  instance=self.instance)
-
-        if limit is None:
-            # treat resource as unlimited:
-            LOG.info('%(type)s limit not specified, defaulting to unlimited',
-                     {'type': type_}, instance=self.instance)
-            return
-
-        free = limit - used
-
-        # Oversubscribed resource policy info:
-        LOG.info('%(type)s limit: %(limit).02f %(unit)s, '
-                 'free: %(free).02f %(unit)s',
-                  {'type': type_, 'limit': limit, 'free': free, 'unit': unit},
-                  instance=self.instance)
-
-        if requested > free:
-            return (_('Free %(type)s %(free).02f '
-                      '%(unit)s < requested %(requested)d %(unit)s') %
-                      {'type': type_, 'free': free, 'unit': unit,
-                       'requested': requested})
-
 
 class MoveClaim(Claim):
     """Claim used for holding resources for an incoming move operation.
@@ -270,7 +160,7 @@ class MoveClaim(Claim):
     Move can be either a migrate/resize, live-migrate or an evacuate operation.
     """
     def __init__(self, context, instance, nodename, instance_type, image_meta,
-                 tracker, resources, pci_requests, overhead=None, limits=None):
+                 tracker, resources, pci_requests, migration, limits=None):
         self.context = context
         self.instance_type = instance_type
         if isinstance(image_meta, dict):
@@ -278,22 +168,7 @@ class MoveClaim(Claim):
         self.image_meta = image_meta
         super(MoveClaim, self).__init__(context, instance, nodename, tracker,
                                         resources, pci_requests,
-                                        overhead=overhead, limits=limits)
-        self.migration = None
-
-    @property
-    def disk_gb(self):
-        return (self.instance_type.root_gb +
-                self.instance_type.ephemeral_gb +
-                self.overhead.get('disk_gb', 0))
-
-    @property
-    def memory_mb(self):
-        return self.instance_type.memory_mb + self.overhead['memory_mb']
-
-    @property
-    def vcpus(self):
-        return self.instance_type.vcpus
+                                        migration=migration, limits=limits)
 
     @property
     def numa_topology(self):
@@ -310,3 +185,64 @@ class MoveClaim(Claim):
             self.instance, self.nodename,
             instance_type=self.instance_type)
         self.instance.drop_migration_context()
+
+    def _test_pci(self):
+        """Test whether this host can accept this claim's PCI requests. For
+        live migration, only Neutron SRIOV PCI requests are supported. Any
+        other type of PCI device would need to be removed and re-added for live
+        migration to work, and there is currently no support for that. For cold
+        migration, all types of PCI requests are supported, so we just call up
+        to normal Claim's _test_pci().
+        """
+        if self.migration.migration_type != 'live-migration':
+            return super(MoveClaim, self)._test_pci()
+        elif self._pci_requests.requests:
+            for pci_request in self._pci_requests.requests:
+                if (pci_request.source !=
+                        objects.InstancePCIRequest.NEUTRON_PORT):
+                    return (_('Non-VIF related PCI requests are not '
+                              'supported for live migration.'))
+            # TODO(artom) At this point, once we've made sure we only have
+            # NEUTRON_PORT (aka SRIOV) PCI requests, we should check whether
+            # the host can support them, like Claim._test_pci() does. However,
+            # SRIOV live migration is currently being handled separately - see
+            # for example _claim_pci_for_instance_vifs() in the compute
+            # manager. So we do nothing here to avoid stepping on that code's
+            # toes, but ideally MoveClaim would be used for all live migration
+            # resource claims.
+
+    def _test_live_migration_page_size(self):
+        """Tests that the current page size and the requested page size are the
+        same.
+
+        Must be called after _test_numa_topology() to make sure
+        self.claimed_numa_topology is set.
+
+        This only applies for live migrations when the hw:mem_page_size
+        extra spec has been set to a non-numeric value (like 'large'). That
+        would in theory allow an instance to live migrate from a host with a 1M
+        page size to a host with a 2M page size, for example. This is not
+        something we want to support, so fail the claim if the page sizes are
+        different.
+        """
+        if (self.migration.migration_type == 'live-migration' and
+                self.instance.numa_topology and
+                # NOTE(artom) We only support a single page size across all
+                # cells, checking cell 0 is sufficient.
+                self.claimed_numa_topology.cells[0].pagesize !=
+                self.instance.numa_topology.cells[0].pagesize):
+            return (_('Requested page size is different from current '
+                      'page size.'))
+
+    def _test_numa_topology(self, resources, limit):
+        """Test whether this host can accept the instance's NUMA topology. The
+        _test methods return None on success, and a string-like Message _()
+        object explaining the reason on failure. So we call up to the normal
+        Claim's _test_numa_topology(), and if we get nothing back we test the
+        page size.
+        """
+        numa_test_failure = super(MoveClaim,
+                                  self)._test_numa_topology(resources, limit)
+        if numa_test_failure:
+            return numa_test_failure
+        return self._test_live_migration_page_size()

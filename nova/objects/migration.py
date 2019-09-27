@@ -41,7 +41,9 @@ class Migration(base.NovaPersistentObject, base.NovaObject,
     # Version 1.3: Added get_by_id_and_instance()
     # Version 1.4: Added migration progress detail
     # Version 1.5: Added uuid
-    VERSION = '1.5'
+    # Version 1.6: Added cross_cell_move and get_by_uuid().
+    # Version 1.7: Added user_id and project_id
+    VERSION = '1.7'
 
     fields = {
         'id': fields.IntegerField(),
@@ -65,6 +67,11 @@ class Migration(base.NovaPersistentObject, base.NovaObject,
         'disk_total': fields.IntegerField(nullable=True),
         'disk_processed': fields.IntegerField(nullable=True),
         'disk_remaining': fields.IntegerField(nullable=True),
+        'cross_cell_move': fields.BooleanField(default=False),
+        # request context user id
+        'user_id': fields.StringField(nullable=True),
+        # request context project id
+        'project_id': fields.StringField(nullable=True),
         }
 
     @staticmethod
@@ -100,14 +107,21 @@ class Migration(base.NovaPersistentObject, base.NovaObject,
         if target_version < (1, 5):
             if 'uuid' in primitive:
                 del primitive['uuid']
+        if target_version < (1, 6) and 'cross_cell_move' in primitive:
+            del primitive['cross_cell_move']
+        if target_version < (1, 7):
+            if 'user_id' in primitive:
+                del primitive['user_id']
+            if 'project_id' in primitive:
+                del primitive['project_id']
 
     def obj_load_attr(self, attrname):
         if attrname == 'migration_type':
             # NOTE(danms): The only reason we'd need to load this is if
             # some older node sent us one. So, guess the type.
             self.migration_type = determine_migration_type(self)
-        elif attrname == 'hidden':
-            self.hidden = False
+        elif attrname in ['hidden', 'cross_cell_move']:
+            self.obj_set_defaults(attrname)
         else:
             super(Migration, self).obj_load_attr(attrname)
 
@@ -123,6 +137,11 @@ class Migration(base.NovaPersistentObject, base.NovaObject,
             # so fetch the winner and use that uuid
             fresh = self.__class__.get_by_id(self.context, self.id)
             self.uuid = fresh.uuid
+
+    @base.remotable_classmethod
+    def get_by_uuid(cls, context, migration_uuid):
+        db_migration = db.migration_get_by_uuid(context, migration_uuid)
+        return cls._from_db_object(context, cls(), db_migration)
 
     @base.remotable_classmethod
     def get_by_id(cls, context, migration_id):
@@ -148,6 +167,12 @@ class Migration(base.NovaPersistentObject, base.NovaObject,
                                               reason='already created')
         if 'uuid' not in self:
             self.uuid = uuidutils.generate_uuid()
+        # Record who is initiating the migration which is
+        # not necessarily the owner of the instance.
+        if 'user_id' not in self:
+            self.user_id = self._context.user_id
+        if 'project_id' not in self:
+            self.project_id = self._context.project_id
         updates = self.obj_get_changes()
         if 'migration_type' not in updates:
             raise exception.ObjectActionError(

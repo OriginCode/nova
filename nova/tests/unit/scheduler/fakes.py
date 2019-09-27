@@ -25,46 +25,88 @@ from nova.scheduler import driver
 from nova.scheduler import host_manager
 
 
+# TODO(stephenfin): Rework these so they're functions instead of global
+# variables that can be mutated
 NUMA_TOPOLOGY = objects.NUMATopology(cells=[
     objects.NUMACell(
-        id=0, cpuset=set([1, 2]), memory=512,
-        cpu_usage=0, memory_usage=0, mempages=[
+        id=0,
+        cpuset=set([0, 1]),
+        pcpuset=set([2, 3]),
+        memory=512,
+        cpu_usage=0,
+        memory_usage=0,
+        pinned_cpus=set(),
+        mempages=[
             objects.NUMAPagesTopology(size_kb=16, total=387184, used=0),
             objects.NUMAPagesTopology(size_kb=2048, total=512, used=0)],
-        pinned_cpus=set([]),
-        siblings=[set([1]), set([2])]),
+        siblings=[set([0]), set([1]), set([2]), set([3])]),
     objects.NUMACell(
-        id=1, cpuset=set([3, 4]), memory=512,
-        cpu_usage=0, memory_usage=0, mempages=[
+        id=1,
+        cpuset=set([4, 5]),
+        pcpuset=set([6, 7]),
+        memory=512,
+        cpu_usage=0,
+        memory_usage=0,
+        pinned_cpus=set(),
+        mempages=[
             objects.NUMAPagesTopology(size_kb=4, total=1548736, used=0),
             objects.NUMAPagesTopology(size_kb=2048, total=512, used=0)],
-        pinned_cpus=set([]),
-        siblings=[set([3]), set([4])])])
+        siblings=[set([4]), set([5]), set([6]), set([7])])])
 
 NUMA_TOPOLOGIES_W_HT = [
     objects.NUMATopology(cells=[
         objects.NUMACell(
-            id=0, cpuset=set([1, 2, 5, 6]), memory=512,
-            cpu_usage=0, memory_usage=0, mempages=[],
-            siblings=[set([1, 5]), set([2, 6])], pinned_cpus=set([])),
+            id=0,
+            cpuset=set(),
+            pcpuset=set([1, 2, 5, 6]),
+            memory=512,
+            cpu_usage=0,
+            memory_usage=0,
+            pinned_cpus=set(),
+            mempages=[],
+            siblings=[set([1, 5]), set([2, 6])]),
         objects.NUMACell(
-            id=1, cpuset=set([3, 4, 7, 8]), memory=512,
-            cpu_usage=0, memory_usage=0, mempages=[],
-            siblings=[set([3, 4]), set([7, 8])], pinned_cpus=set([]))
+            id=1,
+            cpuset=set(),
+            pcpuset=set([3, 4, 7, 8]),
+            memory=512,
+            cpu_usage=0,
+            memory_usage=0,
+            pinned_cpus=set(),
+            mempages=[],
+            siblings=[set([3, 4]), set([7, 8])])
     ]),
     objects.NUMATopology(cells=[
         objects.NUMACell(
-            id=0, cpuset=set([]), memory=512,
-            cpu_usage=0, memory_usage=0, mempages=[],
-            siblings=[], pinned_cpus=set([])),
+            id=0,
+            cpuset=set(),
+            pcpuset=set(),
+            memory=512,
+            cpu_usage=0,
+            memory_usage=0,
+            pinned_cpus=set(),
+            mempages=[],
+            siblings=[]),
         objects.NUMACell(
-            id=1, cpuset=set([1, 2, 5, 6]), memory=512,
-            cpu_usage=0, memory_usage=0, mempages=[],
-            siblings=[set([1, 5]), set([2, 6])], pinned_cpus=set([])),
+            id=1,
+            cpuset=set(),
+            pcpuset=set([1, 2, 5, 6]),
+            memory=512,
+            cpu_usage=0,
+            memory_usage=0,
+            pinned_cpus=set(),
+            mempages=[],
+            siblings=[set([1, 5]), set([2, 6])]),
         objects.NUMACell(
-            id=2, cpuset=set([3, 4, 7, 8]), memory=512,
-            cpu_usage=0, memory_usage=0, mempages=[],
-            siblings=[set([3, 4]), set([7, 8])], pinned_cpus=set([])),
+            id=2,
+            cpuset=set(),
+            pcpuset=set([3, 4, 7, 8]),
+            memory=512,
+            cpu_usage=0,
+            memory_usage=0,
+            pinned_cpus=set(),
+            mempages=[],
+            siblings=[set([3, 4]), set([7, 8])]),
     ]),
 ]
 
@@ -124,19 +166,22 @@ COMPUTE_NODES = [
             host='fake', hypervisor_hostname='fake-hyp'),
 ]
 
-ALLOC_REQS = [
-    {
-        'allocations': {
-            cn.uuid: {
-                'resources': {
-                    'VCPU': 1,
-                    'MEMORY_MB': 512,
-                    'DISK_GB': 512,
-                },
+
+def get_fake_alloc_reqs():
+    return [
+        {
+            'allocations': {
+                cn.uuid: {
+                    'resources': {
+                        'VCPU': 1,
+                        'MEMORY_MB': 512,
+                        'DISK_GB': 512,
+                    },
+                }
             }
-        }
-    } for cn in COMPUTE_NODES
-]
+        } for cn in COMPUTE_NODES
+    ]
+
 
 RESOURCE_PROVIDERS = [
     dict(
@@ -183,5 +228,7 @@ class FakeHostState(host_manager.HostState):
 
 class FakeScheduler(driver.Scheduler):
 
-    def select_destinations(self, context, spec_obj, instance_uuids):
+    def select_destinations(self, context, spec_obj, instance_uuids,
+            alloc_reqs_by_rp_uuid, provider_summaries,
+            allocation_request_version=None, return_alternates=False):
         return []

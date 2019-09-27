@@ -19,7 +19,6 @@ from oslo_serialization import jsonutils
 from oslo_utils import versionutils
 
 from nova import exception
-from nova import objects
 from nova.objects import base as obj_base
 from nova.objects import fields
 
@@ -54,7 +53,7 @@ class VIFMigrateData(obj_base.NovaObject):
         # configuration reference for the destination host.
         # NOTE(mriedem): This might not be sufficient based on how the
         # destination host is configured for all vif types. See the note in
-        # the libvirt driver here: https://review.openstack.org/#/c/551370/
+        # the libvirt driver here: https://review.opendev.org/#/c/551370/
         # 29/nova/virt/libvirt/driver.py@7036
         'source_vif': fields.Field(fields.NetworkVIFModel()),
     }
@@ -94,6 +93,41 @@ class VIFMigrateData(obj_base.NovaObject):
         vif['details'] = self.vif_details
         return vif
 
+    @classmethod
+    def create_skeleton_migrate_vifs(cls, vifs):
+        """Create migrate vifs for live migration.
+
+        :param vifs: a list of VIFs.
+        :return: list of VIFMigrateData object corresponding to the provided
+                 VIFs.
+        """
+        vif_mig_data = []
+
+        for vif in vifs:
+            mig_vif = cls(port_id=vif['id'], source_vif=vif)
+            vif_mig_data.append(mig_vif)
+        return vif_mig_data
+
+
+@obj_base.NovaObjectRegistry.register
+class LibvirtLiveMigrateNUMAInfo(obj_base.NovaObject):
+    # Version 1.0: Initial version
+    VERSION = '1.0'
+
+    fields = {
+        # NOTE(artom) We need a 1:many cardinality here, so DictOfIntegers with
+        # its 1:1 cardinality cannot work here. cpu_pins can have a single
+        # guest CPU pinned to multiple host CPUs.
+        'cpu_pins': fields.DictOfSetOfIntegersField(),
+        # NOTE(artom) Currently we never pin a guest cell to more than a single
+        # host cell, so cell_pins could be a DictOfIntegers, but
+        # DictOfSetOfIntegers is more future-proof.
+        'cell_pins': fields.DictOfSetOfIntegersField(),
+        'emulator_pins': fields.SetOfIntegersField(),
+        'sched_vcpus': fields.SetOfIntegersField(),
+        'sched_priority': fields.IntegerField(),
+    }
+
 
 @obj_base.NovaObjectRegistry.register_if(False)
 class LiveMigrateData(obj_base.NovaObject):
@@ -109,7 +143,7 @@ class LiveMigrateData(obj_base.NovaObject):
         # old_vol_attachment_ids is a dict used to store the old attachment_ids
         # for each volume so they can be restored on a migration rollback. The
         # key is the volume_id, and the value is the attachment_id.
-        # TODO(mdbooth): This field was made redundant by change I0390c9ff. We
+        # TODO(mdbooth): This field was made redundant by change Ibe9215c0. We
         # should eventually remove it.
         'old_vol_attachment_ids': fields.DictOfStringsField(),
         # wait_for_vif_plugged is set in pre_live_migration on the destination
@@ -186,7 +220,9 @@ class LibvirtLiveMigrateData(LiveMigrateData):
     # Version 1.7: Added dst_wants_file_backed_memory
     # Version 1.8: Added file_backed_memory_discard
     # Version 1.9: Inherited vifs from LiveMigrateData
-    VERSION = '1.9'
+    # Version 1.10: Added dst_numa_info, src_supports_numa_live_migration, and
+    #               dst_supports_numa_live_migration fields
+    VERSION = '1.10'
 
     fields = {
         'filename': fields.StringField(),
@@ -210,12 +246,23 @@ class LibvirtLiveMigrateData(LiveMigrateData):
         # file_backed_memory_discard is ignored unless
         # dst_wants_file_backed_memory is set
         'file_backed_memory_discard': fields.BooleanField(),
+        # TODO(artom) (src|dst)_supports_numa_live_migration are only used as
+        # flags to indicate that the compute host is new enough to perform a
+        # NUMA-aware live migration. Remove in version 2.0.
+        'src_supports_numa_live_migration': fields.BooleanField(),
+        'dst_supports_numa_live_migration': fields.BooleanField(),
+        'dst_numa_info': fields.ObjectField('LibvirtLiveMigrateNUMAInfo'),
     }
 
     def obj_make_compatible(self, primitive, target_version):
         super(LibvirtLiveMigrateData, self).obj_make_compatible(
             primitive, target_version)
         target_version = versionutils.convert_version_to_tuple(target_version)
+        if (target_version < (1, 10) and
+                'src_supports_numa_live_migration' in primitive):
+            del primitive['src_supports_numa_live_migration']
+        if target_version < (1, 10) and 'dst_numa_info' in primitive:
+            del primitive['dst_numa_info']
         if target_version < (1, 9) and 'vifs' in primitive:
             del primitive['vifs']
         if target_version < (1, 8):
@@ -240,31 +287,6 @@ class LibvirtLiveMigrateData(LiveMigrateData):
                 del primitive['serial_listen_ports']
         if target_version < (1, 1) and 'target_connect_addr' in primitive:
             del primitive['target_connect_addr']
-
-    def _bdms_to_legacy(self, legacy):
-        if not self.obj_attr_is_set('bdms'):
-            return
-        legacy['volume'] = {}
-        for bdmi in self.bdms:
-            legacy['volume'][bdmi.serial] = {
-                'disk_info': bdmi.as_disk_info(),
-                'connection_info': bdmi.connection_info}
-
-    def _bdms_from_legacy(self, legacy_pre_result):
-        self.bdms = []
-        volume = legacy_pre_result.get('volume', {})
-        for serial in volume:
-            vol = volume[serial]
-            bdmi = objects.LibvirtLiveMigrateBDMInfo(serial=serial)
-            bdmi.connection_info = vol['connection_info']
-            bdmi.bus = vol['disk_info']['bus']
-            bdmi.dev = vol['disk_info']['dev']
-            bdmi.type = vol['disk_info']['type']
-            if 'format' in vol:
-                bdmi.format = vol['disk_info']['format']
-            if 'boot_index' in vol:
-                bdmi.boot_index = int(vol['disk_info']['boot_index'])
-            self.bdms.append(bdmi)
 
     def is_on_shared_storage(self):
         return self.is_shared_block_storage or self.is_shared_instance_path

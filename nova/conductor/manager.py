@@ -300,31 +300,49 @@ class ComputeTaskManager(base.Base):
         else:
             raise NotImplementedError()
 
-    def _cold_migrate(self, context, instance, flavor, filter_properties,
-                      clean_shutdown, request_spec, host_list):
-        image = utils.get_image_from_system_metadata(
-            instance.system_metadata)
-
+    @staticmethod
+    def _get_request_spec_for_cold_migrate(context, instance, flavor,
+                                           filter_properties, request_spec):
         # NOTE(sbauza): If a reschedule occurs when prep_resize(), then
         # it only provides filter_properties legacy dict back to the
         # conductor with no RequestSpec part of the payload for <Stein
         # computes.
-        # TODO(mriedem): We should be able to remove this in Train when we
-        # only support >=Stein computes and request_spec is passed back to
-        # conductor on reschedule.
+        # TODO(mriedem): We can remove this compat code for no request spec
+        # coming to conductor in ComputeTaskAPI RPC API version 2.0
         if not request_spec:
+            image_meta = utils.get_image_from_system_metadata(
+                instance.system_metadata)
             # Make sure we hydrate a new RequestSpec object with the new flavor
             # and not the nested one from the instance
             request_spec = objects.RequestSpec.from_components(
-                context, instance.uuid, image,
+                context, instance.uuid, image_meta,
                 flavor, instance.numa_topology, instance.pci_requests,
                 filter_properties, None, instance.availability_zone,
                 project_id=instance.project_id, user_id=instance.user_id)
+        elif not isinstance(request_spec, objects.RequestSpec):
+            # Prior to compute RPC API 5.1 conductor would pass a legacy dict
+            # version of the request spec to compute and Stein compute
+            # could be sending that back to conductor on reschedule, so if we
+            # got a dict convert it to an object.
+            # TODO(mriedem): We can drop this compat code when we only support
+            # compute RPC API >=6.0.
+            request_spec = objects.RequestSpec.from_primitives(
+                context, request_spec, filter_properties)
+            # We don't have to set the new flavor on the request spec because
+            # if we got here it was due to a reschedule from the compute and
+            # the request spec would already have the new flavor in it from the
+            # else block below.
         else:
             # NOTE(sbauza): Resizes means new flavor, so we need to update the
             # original RequestSpec object for make sure the scheduler verifies
             # the right one and not the original flavor
             request_spec.flavor = flavor
+        return request_spec
+
+    def _cold_migrate(self, context, instance, flavor, filter_properties,
+                      clean_shutdown, request_spec, host_list):
+        request_spec = self._get_request_spec_for_cold_migrate(
+            context, instance, flavor, filter_properties, request_spec)
 
         task = self._build_cold_migrate_task(context, instance, flavor,
                 request_spec, clean_shutdown, host_list)
@@ -485,7 +503,7 @@ class ComputeTaskManager(base.Base):
                                      request_spec, clean_shutdown,
                                      self.compute_rpcapi,
                                      self.query_client, self.report_client,
-                                     host_list)
+                                     host_list, self.network_api)
 
     def _destroy_build_request(self, context, instance):
         # The BuildRequest needs to be stored until the instance is mapped to
@@ -697,8 +715,9 @@ class ComputeTaskManager(base.Base):
                                 # provider mapping as the above claim call
                                 # moves the allocation of the instance to
                                 # another host
-                                self._fill_provider_mapping(
-                                    context, instance.uuid, request_spec, host)
+                                scheduler_utils.fill_provider_mapping(
+                                    context, self.report_client, request_spec,
+                                    host)
                         except Exception as exc:
                             self._cleanup_when_reschedule_fails(
                                 context, instance, exc, legacy_request_spec,
@@ -901,8 +920,8 @@ class ComputeTaskManager(base.Base):
                         availability_zones.get_host_availability_zone(
                             context, host))
                     self.compute_rpcapi.unshelve_instance(
-                            context, instance, host, image=image,
-                            filter_properties=filter_properties, node=node)
+                        context, instance, host, request_spec, image=image,
+                        filter_properties=filter_properties, node=node)
             except (exception.NoValidHost,
                     exception.UnsupportedPolicyException):
                 instance.task_state = None
@@ -952,7 +971,7 @@ class ComputeTaskManager(base.Base):
                                 'not found.', instance.host, instance.node,
                                 instance=instance)
 
-        # TODO(mriedem): In Queens, call select_destinations() with a
+        # TODO(mriedem): Call select_destinations() with a
         # skip_filters=True flag so the scheduler does the work of
         # claiming resources on the destination in Placement but still
         # bypass the scheduler filters, which honors the 'force' flag
@@ -1147,7 +1166,6 @@ class ComputeTaskManager(base.Base):
                          "Either specify a different image during rebuild "
                          "or create a new server with the specified image "
                          "and a compatible flavor."))
-            return
 
         # If image traits are present, then validate against allocations.
         allocations = self.report_client.get_allocations_for_consumer(
@@ -1293,57 +1311,6 @@ class ComputeTaskManager(base.Base):
                 with obj_target_cell(inst, cell0):
                     inst.destroy()
 
-    def _fill_provider_mapping(
-            self, context, instance_uuid, request_spec, host_selection):
-        """Fills out the request group - resource provider mapping in the
-        request spec.
-
-        This is a workaround as placement does not return which RP
-        fulfills which granular request group in the allocation candidate
-        request. There is a spec proposing a solution in placement:
-        https://review.openstack.org/#/c/597601/
-        When that spec is implemented then this function can be
-        replaced with a simpler code that copies the group - RP
-        mapping out from the Selection object returned by the scheduler's
-        select_destinations call.
-
-        :param context: The security context
-        :param instance_uuid: The UUID of the instance for which the provider
-            mapping is filled
-        :param request_spec: The RequestSpec object associated with the
-            operation
-        :param host_selection: The Selection object returned by the scheduler
-            for this operation
-        """
-        # Exit early if this request spec does not require mappings.
-        if not request_spec.maps_requested_resources:
-            return
-
-        # Technically out-of-tree scheduler drivers can still not create
-        # allocations in placement but if request_spec.maps_requested_resources
-        # is not empty and the scheduling succeeded then placement has to be
-        # involved
-        ar = jsonutils.loads(host_selection.allocation_request)
-        allocs = ar['allocations']
-
-        # TODO(mriedem): Short-term we can optimize this by passing a cache by
-        # reference of the RP->traits mapping because if we are processing
-        # a multi-create request we could have the same RPs being used for
-        # multiple instances and avoid duplicate calls. Long-term we could
-        # stash the RP->traits mapping on the Selection object since we can
-        # pull the traits for each provider from the GET /allocation_candidates
-        # response in the scheduler (or leverage the change from the spec
-        # mentioned in the docstring above).
-        provider_traits = {
-            rp_uuid: self.report_client.get_provider_traits(
-                context, rp_uuid).traits
-            for rp_uuid in allocs}
-        # NOTE(gibi): The allocs dict is in the format of the PUT /allocations
-        # and that format can change. The current format can be detected from
-        # host_selection.allocation_request_version
-        request_spec.map_requested_resources_to_providers(
-            allocs, provider_traits)
-
     def schedule_and_build_instances(self, context, build_requests,
                                      request_specs, image,
                                      admin_password, injected_files,
@@ -1408,6 +1375,15 @@ class ComputeTaskManager(base.Base):
                           'was already deleted.', instance=instance)
                 # This is a placeholder in case the quota recheck fails.
                 instances.append(None)
+                # If the build request was deleted and the instance is not
+                # going to be created, there is on point in leaving an orphan
+                # instance mapping so delete it.
+                try:
+                    im = objects.InstanceMapping.get_by_instance_uuid(
+                        context, instance.uuid)
+                    im.destroy()
+                except exception.InstanceMappingNotFound:
+                    pass
                 self.report_client.delete_allocation_for_instance(
                     context, instance.uuid)
                 continue
@@ -1463,8 +1439,8 @@ class ComputeTaskManager(base.Base):
             # allocations in the scheduler) for this instance, we may need to
             # map allocations to resource providers in the request spec.
             try:
-                self._fill_provider_mapping(
-                    context, instance.uuid, request_spec, host)
+                scheduler_utils.fill_provider_mapping(
+                    context, self.report_client, request_spec, host)
             except Exception as exc:
                 # If anything failed here we need to cleanup and bail out.
                 with excutils.save_and_reraise_exception():

@@ -19,6 +19,7 @@ import tempfile
 
 import ddt
 import mock
+import os_traits
 from oslo_concurrency import processutils
 from oslo_config import cfg
 from oslo_utils import fileutils
@@ -505,20 +506,6 @@ disk size: 4.4M
         finally:
             os.unlink(dst_path)
 
-    def test_write_to_file_with_umask(self):
-        dst_fd, dst_path = tempfile.mkstemp()
-        try:
-            os.close(dst_fd)
-            os.unlink(dst_path)
-
-            libvirt_utils.write_to_file(dst_path, 'hello', umask=0o277)
-            with open(dst_path, 'r') as fp:
-                self.assertEqual(fp.read(), 'hello')
-            mode = os.stat(dst_path).st_mode
-            self.assertEqual(mode & 0o277, 0)
-        finally:
-            os.unlink(dst_path)
-
     @mock.patch.object(compute_utils, 'disk_ops_semaphore')
     @mock.patch('nova.privsep.utils.supports_direct_io', return_value=False)
     @mock.patch('oslo_concurrency.processutils.execute')
@@ -971,28 +958,60 @@ sunrpc /var/lib/nfs/rpc_pipefs rpc_pipefs rw,relatime 0 0
         self.assertEqual('/test/disk', disk_path)
         self.assertEqual('ploop', format)
 
-    def test_machine_type_mappings(self):
-        self.useFixture(nova_fixtures.ConfPatcher(
-            group="libvirt", hw_machine_type=['x86_64=q35', 'i686=legacy']))
-        self.assertDictEqual({'x86_64': 'q35', 'i686': 'legacy'},
-                             libvirt_utils.machine_type_mappings())
+    @mock.patch('nova.virt.libvirt.utils.get_arch')
+    def test_get_machine_type_from_fallbacks(self, mock_get_arch):
+        """Test hardcoded arch-specific fallbacks for default machine type"""
+        image_meta = objects.ImageMeta.from_dict({"disk_format": "raw"})
+        host_cpu_archs = {
+            obj_fields.Architecture.ARMV7: "virt",
+            obj_fields.Architecture.AARCH64: "virt",
+            obj_fields.Architecture.S390: "s390-ccw-virtio",
+            obj_fields.Architecture.S390X: "s390-ccw-virtio",
+            obj_fields.Architecture.I686: "pc",
+            obj_fields.Architecture.X86_64: "pc",
+        }
+        for arch, expected_mtype in host_cpu_archs.items():
+            mock_get_arch.return_value = arch
+            mtype = libvirt_utils.get_machine_type(image_meta)
+            self.assertEqual(expected_mtype, mtype)
 
-    def test_invalid_machine_type_mappings(self):
-        self.useFixture(nova_fixtures.ConfPatcher(
-            group="libvirt", hw_machine_type=['x86_64=q35', 'foo']))
-        self.assertDictEqual({'x86_64': 'q35'},
-                             libvirt_utils.machine_type_mappings())
-
-    def test_get_default_machine_type(self):
+    def test_get_machine_type_from_conf(self):
         self.useFixture(nova_fixtures.ConfPatcher(
             group="libvirt", hw_machine_type=['x86_64=q35', 'i686=legacy']))
         self.assertEqual('q35',
                          libvirt_utils.get_default_machine_type('x86_64'))
 
-    def test_get_default_machine_type_empty(self):
+    def test_get_machine_type_no_conf_or_fallback(self):
         self.assertIsNone(libvirt_utils.get_default_machine_type('sparc'))
 
-    def test_get_default_machine_type_missing(self):
+    def test_get_machine_type_missing_conf_and_fallback(self):
         self.useFixture(nova_fixtures.ConfPatcher(
             group="libvirt", hw_machine_type=['x86_64=q35', 'i686=legacy']))
         self.assertIsNone(libvirt_utils.get_default_machine_type('sparc'))
+
+    def test_get_machine_type_survives_invalid_conf(self):
+        self.useFixture(nova_fixtures.ConfPatcher(
+            group="libvirt", hw_machine_type=['x86_64=q35', 'foo']))
+        self.assertEqual('q35',
+                         libvirt_utils.get_default_machine_type('x86_64'))
+
+    def test_get_machine_type_from_image(self):
+        image_meta = objects.ImageMeta.from_dict({
+            "disk_format": "raw", "properties": {"hw_machine_type": "q35"}
+        })
+        os_mach_type = libvirt_utils.get_machine_type(image_meta)
+        self.assertEqual('q35', os_mach_type)
+
+    def test_get_flags_by_flavor_specs(self):
+        flavor = objects.Flavor(
+            id=1, flavorid='fakeid-1', name='fake1.small', memory_mb=128,
+            vcpus=1, root_gb=1, ephemeral_gb=0, swap=0, rxtx_factor=0,
+            deleted=False, extra_specs={
+                'trait:%s' % os_traits.HW_CPU_X86_3DNOW: 'required',
+                'trait:%s' % os_traits.HW_CPU_X86_SSE2: 'required',
+                'trait:%s' % os_traits.HW_CPU_HYPERTHREADING: 'required',
+            })
+        traits = libvirt_utils.get_flags_by_flavor_specs(flavor)
+        # we shouldn't see the hyperthreading trait since that's a valid trait
+        # but not a CPU flag
+        self.assertEqual(set(['3dnow', 'sse2']), traits)

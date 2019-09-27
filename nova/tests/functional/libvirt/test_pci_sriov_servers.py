@@ -13,8 +13,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import fixtures
 import mock
-from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
 
@@ -23,11 +23,12 @@ from nova.tests.functional.libvirt import base
 from nova.tests.unit.virt.libvirt import fakelibvirt
 
 
-CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
 
 
 class _PCIServersTestBase(base.ServersTestBase):
+
+    ADDITIONAL_FILTERS = ['NUMATopologyFilter', 'PciPassthroughFilter']
 
     def setUp(self):
         self.flags(passthrough_whitelist=self.PCI_PASSTHROUGH_WHITELIST,
@@ -43,21 +44,10 @@ class _PCIServersTestBase(base.ServersTestBase):
         host_manager = self.scheduler.manager.driver.host_manager
         pci_filter_class = host_manager.filter_cls_map['PciPassthroughFilter']
         host_pass_mock = mock.Mock(wraps=pci_filter_class().host_passes)
-        _p = mock.patch('nova.scheduler.filters.pci_passthrough_filter'
-                        '.PciPassthroughFilter.host_passes',
-                        side_effect=host_pass_mock)
-        self.mock_filter = _p.start()
-        self.addCleanup(_p.stop)
-
-    def _setup_scheduler_service(self):
-        # Enable the 'NUMATopologyFilter', 'PciPassthroughFilter'
-        enabled_filters = CONF.filter_scheduler.enabled_filters + [
-            'NUMATopologyFilter', 'PciPassthroughFilter']
-
-        self.flags(driver='filter_scheduler', group='scheduler')
-        self.flags(enabled_filters=enabled_filters, group='filter_scheduler')
-
-        return self.start_service('scheduler')
+        self.mock_filter = self.useFixture(fixtures.MockPatch(
+            'nova.scheduler.filters.pci_passthrough_filter'
+            '.PciPassthroughFilter.host_passes',
+            side_effect=host_pass_mock)).mock
 
     def _run_build_test(self, flavor_id, end_status='ACTIVE'):
 
@@ -126,12 +116,11 @@ class SRIOVServersTest(_PCIServersTestBase):
         },
     )]
 
-    @mock.patch('nova.virt.libvirt.LibvirtDriver._create_image')
-    def test_create_server_with_VF(self, img_mock):
+    def test_create_server_with_VF(self):
 
-        host_info = fakelibvirt.NUMAHostInfo(cpu_nodes=2, cpu_sockets=1,
-                                             cpu_cores=2, cpu_threads=2,
-                                             kB_mem=15740000)
+        host_info = fakelibvirt.HostInfo(cpu_nodes=2, cpu_sockets=1,
+                                         cpu_cores=2, cpu_threads=2,
+                                         kB_mem=15740000)
         pci_info = fakelibvirt.HostPCIDevicesInfo()
         fake_connection = self._get_connection(host_info, pci_info)
         self.mock_conn.return_value = fake_connection
@@ -142,12 +131,11 @@ class SRIOVServersTest(_PCIServersTestBase):
 
         self._run_build_test(flavor_id)
 
-    @mock.patch('nova.virt.libvirt.LibvirtDriver._create_image')
-    def test_create_server_with_PF(self, img_mock):
+    def test_create_server_with_PF(self):
 
-        host_info = fakelibvirt.NUMAHostInfo(cpu_nodes=2, cpu_sockets=1,
-                                             cpu_cores=2, cpu_threads=2,
-                                             kB_mem=15740000)
+        host_info = fakelibvirt.HostInfo(cpu_nodes=2, cpu_sockets=1,
+                                         cpu_cores=2, cpu_threads=2,
+                                         kB_mem=15740000)
         pci_info = fakelibvirt.HostPCIDevicesInfo()
         fake_connection = self._get_connection(host_info, pci_info)
         self.mock_conn.return_value = fake_connection
@@ -158,12 +146,11 @@ class SRIOVServersTest(_PCIServersTestBase):
 
         self._run_build_test(flavor_id)
 
-    @mock.patch('nova.virt.libvirt.LibvirtDriver._create_image')
-    def test_create_server_with_PF_no_VF(self, img_mock):
+    def test_create_server_with_PF_no_VF(self):
 
-        host_info = fakelibvirt.NUMAHostInfo(cpu_nodes=2, cpu_sockets=1,
-                                             cpu_cores=2, cpu_threads=2,
-                                             kB_mem=15740000)
+        host_info = fakelibvirt.HostInfo(cpu_nodes=2, cpu_sockets=1,
+                                         cpu_cores=2, cpu_threads=2,
+                                         kB_mem=15740000)
         pci_info = fakelibvirt.HostPCIDevicesInfo(num_pfs=1, num_vfs=4)
         fake_connection = self._get_connection(host_info, pci_info)
         self.mock_conn.return_value = fake_connection
@@ -179,12 +166,11 @@ class SRIOVServersTest(_PCIServersTestBase):
         self._run_build_test(flavor_id_pfs)
         self._run_build_test(flavor_id_vfs, end_status='ERROR')
 
-    @mock.patch('nova.virt.libvirt.LibvirtDriver._create_image')
-    def test_create_server_with_VF_no_PF(self, img_mock):
+    def test_create_server_with_VF_no_PF(self):
 
-        host_info = fakelibvirt.NUMAHostInfo(cpu_nodes=2, cpu_sockets=1,
-                                             cpu_cores=2, cpu_threads=2,
-                                             kB_mem=15740000)
+        host_info = fakelibvirt.HostInfo(cpu_nodes=2, cpu_sockets=1,
+                                         cpu_cores=2, cpu_threads=2,
+                                         kB_mem=15740000)
         pci_info = fakelibvirt.HostPCIDevicesInfo(num_pfs=1, num_vfs=4)
         fake_connection = self._get_connection(host_info, pci_info)
         self.mock_conn.return_value = fake_connection
@@ -235,9 +221,9 @@ class GetServerDiagnosticsServerWithVfTestV21(_PCIServersTestBase):
 
     def test_get_server_diagnostics_server_with_VF(self):
 
-        host_info = fakelibvirt.NUMAHostInfo(cpu_nodes=2, cpu_sockets=1,
-                                             cpu_cores=2, cpu_threads=2,
-                                             kB_mem=15740000)
+        host_info = fakelibvirt.HostInfo(cpu_nodes=2, cpu_sockets=1,
+                                         cpu_cores=2, cpu_threads=2,
+                                         kB_mem=15740000)
         pci_info = fakelibvirt.HostPCIDevicesInfo()
         fake_connection = self._get_connection(host_info, pci_info)
         self.mock_conn.return_value = fake_connection
@@ -294,15 +280,16 @@ class PCIServersTest(_PCIServersTestBase):
         }
     )]
 
-    @mock.patch('nova.virt.libvirt.LibvirtDriver._create_image')
-    def test_create_server_with_pci_dev_and_numa(self, img_mock):
+    def test_create_server_with_pci_dev_and_numa(self):
         """Verifies that an instance can be booted with cpu pinning and with an
            assigned pci device.
         """
 
-        host_info = fakelibvirt.NUMAHostInfo(cpu_nodes=2, cpu_sockets=1,
-                                             cpu_cores=2, cpu_threads=2,
-                                             kB_mem=15740000)
+        self.flags(cpu_dedicated_set='0-7', group='compute')
+
+        host_info = fakelibvirt.HostInfo(cpu_nodes=2, cpu_sockets=1,
+                                         cpu_cores=2, cpu_threads=2,
+                                         kB_mem=15740000)
         pci_info = fakelibvirt.HostPCIDevicesInfo(num_pci=1, numa_node=1)
         fake_connection = self._get_connection(host_info, pci_info)
         self.mock_conn.return_value = fake_connection
@@ -316,15 +303,16 @@ class PCIServersTest(_PCIServersTestBase):
 
         self._run_build_test(flavor_id)
 
-    @mock.patch('nova.virt.libvirt.LibvirtDriver._create_image')
-    def test_create_server_with_pci_dev_and_numa_fails(self, img_mock):
+    def test_create_server_with_pci_dev_and_numa_fails(self):
         """This test ensures that it is not possible to allocated CPU and
            memory resources from one NUMA node and a PCI device from another.
         """
 
-        host_info = fakelibvirt.NUMAHostInfo(cpu_nodes=2, cpu_sockets=1,
-                                             cpu_cores=2, cpu_threads=2,
-                                             kB_mem=15740000)
+        self.flags(cpu_dedicated_set='0-7', group='compute')
+
+        host_info = fakelibvirt.HostInfo(cpu_nodes=2, cpu_sockets=1,
+                                         cpu_cores=2, cpu_threads=2,
+                                         kB_mem=15740000)
         pci_info = fakelibvirt.HostPCIDevicesInfo(num_pci=1, numa_node=0)
         fake_connection = self._get_connection(host_info, pci_info)
         self.mock_conn.return_value = fake_connection
@@ -363,8 +351,7 @@ class PCIServersWithNUMAPoliciesTest(_PCIServersTestBase):
         }
     )]
 
-    @mock.patch('nova.virt.libvirt.LibvirtDriver._create_image')
-    def test_create_server_with_pci_dev_and_numa(self, img_mock):
+    def test_create_server_with_pci_dev_and_numa(self):
         """Validate behavior of 'preferred' PCI NUMA policy.
 
         This test ensures that it *is* possible to allocate CPU and memory
@@ -372,9 +359,11 @@ class PCIServersWithNUMAPoliciesTest(_PCIServersTestBase):
         NUMA policies are in use.
         """
 
-        host_info = fakelibvirt.NUMAHostInfo(cpu_nodes=2, cpu_sockets=1,
-                                             cpu_cores=2, cpu_threads=2,
-                                             kB_mem=15740000)
+        self.flags(cpu_dedicated_set='0-7', group='compute')
+
+        host_info = fakelibvirt.HostInfo(cpu_nodes=2, cpu_sockets=1,
+                                         cpu_cores=2, cpu_threads=2,
+                                         kB_mem=15740000)
         pci_info = fakelibvirt.HostPCIDevicesInfo(num_pci=1, numa_node=0)
         fake_connection = self._get_connection(host_info, pci_info)
         self.mock_conn.return_value = fake_connection

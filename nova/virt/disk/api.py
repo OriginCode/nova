@@ -27,9 +27,6 @@ import os
 import random
 import tempfile
 
-if os.name != 'nt':
-    import crypt
-
 from oslo_concurrency import processutils
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
@@ -43,6 +40,9 @@ from nova.virt.disk.mount import api as mount
 from nova.virt.disk.vfs import api as vfs
 from nova.virt.image import model as imgmodel
 from nova.virt import images
+
+if os.name != 'nt':
+    import crypt
 
 
 LOG = logging.getLogger(__name__)
@@ -105,16 +105,6 @@ def get_disk_size(path):
               by a virtual machine.
     """
     return images.qemu_img_info(path).virtual_size
-
-
-def get_allocated_disk_size(path):
-    """Get the allocated size of a disk image
-
-    :param path: Path to the disk image
-    :returns: Size (in bytes) of the given disk image as allocated on the
-              filesystem
-    """
-    return images.qemu_img_info(path).disk_size
 
 
 def extend(image, size):
@@ -482,8 +472,8 @@ def _inject_files_into_fs(files, fs):
     for (path, contents) in files:
         # NOTE(wangpan): Ensure the parent dir of injecting file exists
         parent_dir = os.path.dirname(path)
-        if (len(parent_dir) > 0 and parent_dir != "/"
-                and not fs.has_file(parent_dir)):
+        if (len(parent_dir) > 0 and parent_dir != "/" and
+                not fs.has_file(parent_dir)):
             fs.make_path(parent_dir)
             fs.set_ownership(parent_dir, "root", "root")
             fs.set_permissions(parent_dir, 0o744)

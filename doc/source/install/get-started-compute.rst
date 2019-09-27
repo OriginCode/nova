@@ -55,19 +55,6 @@ OpenStack Compute consists of the following areas and their components:
   For more information, see the ``conductor`` section in the
   :doc:`/configuration/config`.
 
-``nova-consoleauth`` daemon
-  Authorizes tokens for users that console proxies provide. See
-  ``nova-novncproxy`` and ``nova-xvpvncproxy``. This service must be running
-  for console proxies to work. You can run proxies of either type against a
-  single nova-consoleauth service in a cluster configuration. For information,
-  see :ref:`about-nova-consoleauth`.
-
-  .. deprecated:: 18.0.0
-
-    ``nova-consoleauth`` is deprecated since 18.0.0 (Rocky) and will be removed
-    in an upcoming release. See
-    :oslo.config:option:`workarounds.enable_consoleauth` for details.
-
 ``nova-novncproxy`` daemon
   Provides a proxy for accessing running instances through a VNC connection.
   Supports browser-based novnc clients.
@@ -87,8 +74,8 @@ OpenStack Compute consists of the following areas and their components:
 
 The queue
   A central hub for passing messages between daemons. Usually implemented with
-  `RabbitMQ <https://www.rabbitmq.com/>`__, also can be implemented with
-  another AMQP message queue, such as `ZeroMQ <http://www.zeromq.org/>`__.
+  `RabbitMQ <https://www.rabbitmq.com/>`__ but
+  :oslo.messaging-doc:`other options are available <admin/drivers>`.
 
 SQL database
   Stores most build-time and run-time states for a cloud infrastructure,

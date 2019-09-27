@@ -15,9 +15,11 @@
 Client side of the compute RPC API.
 """
 
+from oslo_concurrency import lockutils
 from oslo_log import log as logging
 import oslo_messaging as messaging
 from oslo_serialization import jsonutils
+from oslo_utils import excutils
 
 import nova.conf
 from nova import context
@@ -35,6 +37,18 @@ RPC_TOPIC = "compute"
 LOG = logging.getLogger(__name__)
 LAST_VERSION = None
 NO_COMPUTES_WARNING = False
+# Global for ComputeAPI.router.
+_ROUTER = None
+
+
+def reset_globals():
+    global NO_COMPUTES_WARNING
+    global LAST_VERSION
+    global _ROUTER
+
+    NO_COMPUTES_WARNING = False
+    LAST_VERSION = None
+    _ROUTER = None
 
 
 def _compute_host(host, instance):
@@ -350,6 +364,12 @@ class ComputeAPI(object):
         * 5.0 - Remove 4.x compatibility
         * 5.1 - Make prep_resize() take a RequestSpec object rather than a
                 legacy dict.
+        * 5.2 - Add request_spec parameter for the following: resize_instance,
+                finish_resize, revert_resize, finish_revert_resize,
+                unshelve_instance
+        * 5.3 - Add migration and limits parameters to
+                check_can_live_migrate_destination(), and a new
+                drop_move_claim_at_destination() method
     '''
 
     VERSION_ALIASES = {
@@ -366,25 +386,38 @@ class ComputeAPI(object):
         'stein': '5.1',
     }
 
-    def __init__(self):
-        super(ComputeAPI, self).__init__()
-        target = messaging.Target(topic=RPC_TOPIC, version='5.0')
-        upgrade_level = CONF.upgrade_levels.compute
-        if upgrade_level == 'auto':
-            version_cap = self._determine_version_cap(target)
-        else:
-            version_cap = self.VERSION_ALIASES.get(upgrade_level,
-                                                   upgrade_level)
-        serializer = objects_base.NovaObjectSerializer()
+    @property
+    def router(self):
+        """Provides singleton access to nova.rpc.ClientRouter for this API
 
-        # NOTE(danms): We need to poke this path to register CONF options
-        # that we use in self.get_client()
-        rpc.get_client(target, version_cap, serializer)
+        The ClientRouter is constructed and accessed as a singleton to avoid
+        querying all cells for a minimum nova-compute service version when
+        [upgrade_levels]/compute=auto and we have access to the API DB.
+        """
+        global _ROUTER
+        if _ROUTER is None:
+            with lockutils.lock('compute-rpcapi-router'):
+                if _ROUTER is None:
+                    target = messaging.Target(topic=RPC_TOPIC, version='5.0')
+                    upgrade_level = CONF.upgrade_levels.compute
+                    if upgrade_level == 'auto':
+                        version_cap = self._determine_version_cap(target)
+                    else:
+                        version_cap = self.VERSION_ALIASES.get(upgrade_level,
+                                                               upgrade_level)
+                    serializer = objects_base.NovaObjectSerializer()
 
-        default_client = self.get_client(target, version_cap, serializer)
-        self.router = rpc.ClientRouter(default_client)
+                    # NOTE(danms): We need to poke this path to register CONF
+                    # options that we use in self.get_client()
+                    rpc.get_client(target, version_cap, serializer)
 
-    def _determine_version_cap(self, target):
+                    default_client = self.get_client(target, version_cap,
+                                                     serializer)
+                    _ROUTER = rpc.ClientRouter(default_client)
+        return _ROUTER
+
+    @staticmethod
+    def _determine_version_cap(target):
         global LAST_VERSION
         global NO_COMPUTES_WARNING
         if LAST_VERSION:
@@ -393,8 +426,22 @@ class ComputeAPI(object):
         # NOTE(danms): If we have a connection to the api database,
         # we should iterate all cells. If not, we must only look locally.
         if CONF.api_database.connection:
-            service_version = service_obj.get_minimum_version_all_cells(
-                context.get_admin_context(), ['nova-compute'])
+            try:
+                service_version = service_obj.get_minimum_version_all_cells(
+                    context.get_admin_context(), ['nova-compute'])
+            except exception.DBNotAllowed:
+                # This most likely means we are in a nova-compute service
+                # configured with [upgrade_levels]/compute=auto and a
+                # connection to the API database. We should not be attempting
+                # to "get out" of our cell to look at the minimum versions of
+                # nova-compute services in other cells, so DBNotAllowed was
+                # raised. Log a user-friendly message and re-raise the error.
+                with excutils.save_and_reraise_exception():
+                    LOG.error('This service is configured for access to the '
+                              'API database but is not allowed to directly '
+                              'access the database. You should run this '
+                              'service without the [api_database]/connection '
+                              'config option.')
         else:
             service_version = objects.Service.get_minimum_version(
                 context.get_admin_context(), 'nova-compute')
@@ -436,7 +483,6 @@ class ComputeAPI(object):
                   'service': service_version})
         return version_cap
 
-    # Cells overrides this
     def get_client(self, target, version_cap, serializer):
         if CONF.rpc_response_timeout > rpc.HEARTBEAT_THRESHOLD:
             # NOTE(danms): If the operator has overridden RPC timeout
@@ -502,16 +548,25 @@ class ComputeAPI(object):
                    instance=instance, diff=diff)
 
     def check_can_live_migrate_destination(self, ctxt, instance, destination,
-                                           block_migration, disk_over_commit):
-        version = '5.0'
+                                           block_migration, disk_over_commit,
+                                           migration, limits):
         client = self.router.client(ctxt)
+        version = '5.3'
+        kwargs = {
+            'instance': instance,
+            'block_migration': block_migration,
+            'disk_over_commit': disk_over_commit,
+            'migration': migration,
+            'limits': limits
+        }
+        if not client.can_send_version(version):
+            kwargs.pop('migration')
+            kwargs.pop('limits')
+            version = '5.0'
         cctxt = client.prepare(server=destination, version=version,
                                call_monitor_timeout=CONF.rpc_response_timeout,
                                timeout=CONF.long_rpc_timeout)
-        return cctxt.call(ctxt, 'check_can_live_migrate_destination',
-                          instance=instance,
-                          block_migration=block_migration,
-                          disk_over_commit=disk_over_commit)
+        return cctxt.call(ctxt, 'check_can_live_migrate_destination', **kwargs)
 
     def check_can_live_migrate_source(self, ctxt, instance, dest_check_data):
         version = '5.0'
@@ -556,22 +611,45 @@ class ComputeAPI(object):
                    instance=instance, volume_id=volume_id,
                    attachment_id=attachment_id)
 
-    def finish_resize(self, ctxt, instance, migration, image, disk_info, host):
-        client = self.router.client(ctxt)
-        version = '5.0'
-        cctxt = client.prepare(
-                server=host, version=version)
-        cctxt.cast(ctxt, 'finish_resize',
-                   instance=instance, migration=migration,
-                   image=image, disk_info=disk_info)
+    def finish_resize(self, ctxt, instance, migration, image, disk_info, host,
+                      request_spec):
+        msg_args = {
+            'instance': instance,
+            'migration': migration,
+            'image': image,
+            'disk_info': disk_info,
+            'request_spec': request_spec,
+        }
 
-    def finish_revert_resize(self, ctxt, instance, migration, host):
         client = self.router.client(ctxt)
-        version = '5.0'
+        version = '5.2'
+
+        if not client.can_send_version(version):
+            msg_args.pop('request_spec')
+            version = '5.0'
+
         cctxt = client.prepare(
                 server=host, version=version)
-        cctxt.cast(ctxt, 'finish_revert_resize',
-                   instance=instance, migration=migration)
+        cctxt.cast(ctxt, 'finish_resize', **msg_args)
+
+    def finish_revert_resize(self, ctxt, instance, migration, host,
+                             request_spec):
+        msg_args = {
+            'instance': instance,
+            'migration': migration,
+            'request_spec': request_spec,
+        }
+
+        client = self.router.client(ctxt)
+        version = '5.2'
+
+        if not client.can_send_version(version):
+            msg_args.pop('request_spec')
+            version = '5.0'
+
+        cctxt = client.prepare(
+                server=host, version=version)
+        cctxt.cast(ctxt, 'finish_revert_resize', **msg_args)
 
     def get_console_output(self, ctxt, instance, tail_length):
         version = '5.0'
@@ -728,6 +806,14 @@ class ComputeAPI(object):
                           block_migration=block_migration,
                           disk=disk, migrate_data=migrate_data)
 
+    def supports_resize_with_qos_port(self, ctxt):
+        """Returns whether we can send 5.2, needed for migrating and resizing
+        servers with ports having resource request.
+        """
+        client = self.router.client(ctxt)
+        return client.can_send_version('5.2')
+
+    # TODO(mriedem): Drop compat for request_spec being a legacy dict in v6.0.
     def prep_resize(self, ctxt, instance, image, instance_type, host,
                     migration, request_spec, filter_properties, node,
                     clean_shutdown, host_list):
@@ -771,13 +857,10 @@ class ComputeAPI(object):
     def rebuild_instance(self, ctxt, instance, new_pass, injected_files,
             image_ref, orig_image_ref, orig_sys_metadata, bdms,
             recreate, on_shared_storage, host, node,
-            preserve_ephemeral, migration, limits,
-            request_spec, kwargs=None):
+            preserve_ephemeral, migration, limits, request_spec):
         # NOTE(edleafe): compute nodes can only use the dict form of limits.
         if isinstance(limits, objects.SchedulerLimits):
             limits = limits.to_dict()
-        # NOTE(danms): kwargs is only here for cells compatibility, don't
-        # actually send it to compute
         msg_args = {'preserve_ephemeral': preserve_ephemeral,
                     'migration': migration,
                     'scheduled_node': node,
@@ -845,14 +928,20 @@ class ComputeAPI(object):
         cctxt.cast(ctxt, 'reset_network', instance=instance)
 
     def resize_instance(self, ctxt, instance, migration, image, instance_type,
-                        clean_shutdown=True):
+                        request_spec, clean_shutdown=True):
         msg_args = {'instance': instance, 'migration': migration,
                     'image': image,
                     'instance_type': instance_type,
                     'clean_shutdown': clean_shutdown,
+                    'request_spec': request_spec,
         }
-        version = '5.0'
+        version = '5.2'
         client = self.router.client(ctxt)
+
+        if not client.can_send_version(version):
+            msg_args.pop('request_spec')
+            version = '5.0'
+
         cctxt = client.prepare(server=_compute_host(None, instance),
                 version=version)
         cctxt.cast(ctxt, 'resize_instance', **msg_args)
@@ -863,13 +952,24 @@ class ComputeAPI(object):
                 server=_compute_host(None, instance), version=version)
         cctxt.cast(ctxt, 'resume_instance', instance=instance)
 
-    def revert_resize(self, ctxt, instance, migration, host):
+    def revert_resize(self, ctxt, instance, migration, host, request_spec):
+
+        msg_args = {
+            'instance': instance,
+            'migration': migration,
+            'request_spec': request_spec,
+        }
+
         client = self.router.client(ctxt)
-        version = '5.0'
+        version = '5.2'
+
+        if not client.can_send_version(version):
+            msg_args.pop('request_spec')
+            version = '5.0'
+
         cctxt = client.prepare(
                 server=_compute_host(host, instance), version=version)
-        cctxt.cast(ctxt, 'revert_resize',
-                   instance=instance, migration=migration)
+        cctxt.cast(ctxt, 'revert_resize', **msg_args)
 
     def rollback_live_migration_at_destination(self, ctxt, instance, host,
                                                destroy_disks,
@@ -881,6 +981,26 @@ class ComputeAPI(object):
                    instance=instance, destroy_disks=destroy_disks,
                    migrate_data=migrate_data)
 
+    def supports_numa_live_migration(self, ctxt):
+        """Returns whether we can send 5.3, needed for NUMA live migration.
+        """
+        client = self.router.client(ctxt)
+        return client.can_send_version('5.3')
+
+    def drop_move_claim_at_destination(self, ctxt, instance, host):
+        """Called by the source of a live migration that's being rolled back.
+        This is a call not because we care about the return value, but because
+        dropping the move claim depends on instance.migration_context being
+        set, and we drop the migration context on the source. Thus, to avoid
+        races, we call the destination synchronously to make sure it's done
+        dropping the move claim before we drop the migration context from the
+        instance.
+        """
+        version = '5.3'
+        client = self.router.client(ctxt)
+        cctxt = client.prepare(server=host, version=version)
+        cctxt.call(ctxt, 'drop_move_claim_at_destination', instance=instance)
+
     def set_admin_password(self, ctxt, instance, new_pass):
         version = '5.0'
         cctxt = self.router.client(ctxt).prepare(
@@ -891,7 +1011,9 @@ class ComputeAPI(object):
     def set_host_enabled(self, ctxt, host, enabled):
         version = '5.0'
         cctxt = self.router.client(ctxt).prepare(
-                server=host, version=version)
+                server=host, version=version,
+                call_monitor_timeout=CONF.rpc_response_timeout,
+                timeout=CONF.long_rpc_timeout)
         return cctxt.call(ctxt, 'set_host_enabled', enabled=enabled)
 
     def swap_volume(self, ctxt, instance, old_volume_id, new_volume_id,
@@ -965,16 +1087,12 @@ class ComputeAPI(object):
                 server=_compute_host(None, instance), version=version)
         cctxt.cast(ctxt, 'suspend_instance', instance=instance)
 
-    def terminate_instance(self, ctxt, instance, bdms, delete_type=None):
-        # NOTE(rajesht): The `delete_type` parameter is passed because
-        # the method signature has to match with `terminate_instance()`
-        # method of cells rpcapi.
+    def terminate_instance(self, ctxt, instance, bdms):
         client = self.router.client(ctxt)
         version = '5.0'
         cctxt = client.prepare(
                 server=_compute_host(None, instance), version=version)
-        cctxt.cast(ctxt, 'terminate_instance',
-                   instance=instance, bdms=bdms)
+        cctxt.cast(ctxt, 'terminate_instance', instance=instance, bdms=bdms)
 
     def unpause_instance(self, ctxt, instance):
         version = '5.0'
@@ -1017,16 +1135,24 @@ class ComputeAPI(object):
         cctxt.cast(ctxt, 'shelve_offload_instance', instance=instance,
                    clean_shutdown=clean_shutdown)
 
-    def unshelve_instance(self, ctxt, instance, host, image=None,
+    def unshelve_instance(self, ctxt, instance, host, request_spec, image=None,
                           filter_properties=None, node=None):
-        version = '5.0'
+        version = '5.2'
         msg_kwargs = {
             'instance': instance,
             'image': image,
             'filter_properties': filter_properties,
             'node': node,
+            'request_spec': request_spec,
         }
-        cctxt = self.router.client(ctxt).prepare(
+
+        client = self.router.client(ctxt)
+
+        if not client.can_send_version(version):
+            msg_kwargs.pop('request_spec')
+            version = '5.0'
+
+        cctxt = client.prepare(
                 server=host, version=version)
         cctxt.cast(ctxt, 'unshelve_instance', **msg_kwargs)
 

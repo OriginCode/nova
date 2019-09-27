@@ -30,11 +30,14 @@ from oslo_serialization import jsonutils
 from oslo_service import loopingcall
 from oslo_utils import encodeutils
 from oslo_utils import excutils
-from oslo_utils import units
 
+import nova.conf
 from nova import exception
 from nova.i18n import _
 from nova.virt.libvirt import utils as libvirt_utils
+
+
+CONF = nova.conf.CONF
 
 LOG = logging.getLogger(__name__)
 
@@ -118,20 +121,20 @@ class RADOSClient(object):
 
 class RBDDriver(object):
 
-    def __init__(self, pool, ceph_conf, rbd_user):
-        self.pool = pool
-        # NOTE(angdraug): rados.Rados fails to connect if ceph_conf is None:
-        # https://github.com/ceph/ceph/pull/1787
-        self.ceph_conf = ceph_conf or ''
-        self.rbd_user = rbd_user or None
+    def __init__(self):
         if rbd is None:
             raise RuntimeError(_('rbd python libraries not found'))
+
+        self.pool = CONF.libvirt.images_rbd_pool
+        self.rbd_user = CONF.libvirt.rbd_user
+        self.rbd_connect_timeout = CONF.libvirt.rbd_connect_timeout
+        self.ceph_conf = CONF.libvirt.images_rbd_ceph_conf
 
     def _connect_to_rados(self, pool=None):
         client = rados.Rados(rados_id=self.rbd_user,
                                   conffile=self.ceph_conf)
         try:
-            client.connect()
+            client.connect(timeout=self.rbd_connect_timeout)
             pool_to_open = pool or self.pool
             # NOTE(luogangyi): open_ioctx >= 10.1.0 could handle unicode
             # arguments perfectly as part of Python 3 support.
@@ -366,11 +369,32 @@ class RBDDriver(object):
                 self._destroy_volume(client, volume)
 
     def get_pool_info(self):
-        with RADOSClient(self) as client:
-            stats = client.cluster.get_cluster_stats()
-            return {'total': stats['kb'] * units.Ki,
-                    'free': stats['kb_avail'] * units.Ki,
-                    'used': stats['kb_used'] * units.Ki}
+        # NOTE(melwitt): We're executing 'ceph df' here instead of calling
+        # the RADOSClient.get_cluster_stats python API because we need
+        # access to the MAX_AVAIL stat, which reports the available bytes
+        # taking replication into consideration. The global available stat
+        # from the RADOSClient.get_cluster_stats python API does not take
+        # replication size into consideration and will simply return the
+        # available storage per OSD, added together across all OSDs. The
+        # MAX_AVAIL stat will divide by the replication size when doing the
+        # calculation.
+        args = ['ceph', 'df', '--format=json'] + self.ceph_args()
+        out, _ = processutils.execute(*args)
+        stats = jsonutils.loads(out)
+
+        # Find the pool for which we are configured.
+        pool_stats = None
+        for pool in stats['pools']:
+            if pool['name'] == self.pool:
+                pool_stats = pool['stats']
+                break
+
+        if pool_stats is None:
+            raise exception.NotFound('Pool %s could not be found.' % self.pool)
+
+        return {'total': stats['stats']['total_bytes'],
+                'free': pool_stats['max_avail'],
+                'used': pool_stats['bytes_used']}
 
     def create_snap(self, volume, name, pool=None, protect=False):
         """Create a snapshot of an RBD volume.

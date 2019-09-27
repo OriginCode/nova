@@ -23,7 +23,6 @@ from nova.tests.unit import cast_as_call
 from nova.tests.unit import fake_network
 import nova.tests.unit.image.fake
 from nova.tests.unit import policy_fixture
-from nova.virt import fake
 
 
 class TestRetryBetweenComputeNodeBuilds(test.TestCase):
@@ -63,20 +62,10 @@ class TestRetryBetweenComputeNodeBuilds(test.TestCase):
         nova.tests.unit.image.fake.stub_out_image_service(self)
 
         self.start_service('conductor')
-        self.start_service('consoleauth')
 
         # We start two compute services because we're going to fake one
         # of them to fail the build so we can trigger the retry code.
-        # set_nodes() is needed to have each compute service return a
-        # different nodename, so we get two hosts in the list of candidates
-        # for scheduling. Otherwise both hosts will have the same default
-        # nodename "fake-mini". The host passed to start_service controls the
-        # "host" attribute and set_nodes() sets the "nodename" attribute.
-        # We set_nodes() to make host and nodename the same for each compute.
-        fake.set_nodes(['host1'])
-        self.addCleanup(fake.restore_nodes)
         self.start_service('compute', host='host1')
-        fake.set_nodes(['host2'])
         self.start_service('compute', host='host2')
 
         self.scheduler_service = self.start_service('scheduler')
@@ -94,8 +83,9 @@ class TestRetryBetweenComputeNodeBuilds(test.TestCase):
         # We can't stub nova.compute.claims.Claims.__init__ because there is
         # a race where nova.compute.claims.NopClaim will be used instead,
         # see for details:
-        #   https://github.com/openstack/nova/blob/bb02d11/nova/compute/
-        #   resource_tracker.py#L121-L130
+        #   https://opendev.org/openstack/nova/src/commit/
+        #   bb02d1110a9529217a5e9b1e1fe8ca25873cac59/
+        #   nova/compute/resource_tracker.py#L121-L130
         real_instance_claim =\
                 nova.compute.resource_tracker.ResourceTracker.instance_claim
 

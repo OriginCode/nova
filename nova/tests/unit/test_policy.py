@@ -16,7 +16,6 @@
 """Test of Policy Engine For Nova."""
 
 import os.path
-import subprocess
 
 import mock
 from oslo_policy import policy as oslo_policy
@@ -135,6 +134,10 @@ class PolicyTestCase(test.NoDBTestCase):
         target_not_mine = {'project_id': 'another'}
         action = "example:my_file"
         policy.authorize(self.context, action, target_mine)
+        # check we fallback to context.project_id
+        # TODO(johngarbutt): longer term we need to remove this and make
+        #  the target a required param.
+        policy.authorize(self.context, action)
         self.assertRaises(exception.PolicyNotAuthorized, policy.authorize,
                           self.context, action, target_not_mine)
 
@@ -285,10 +288,10 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
         self.fake_policy = jsonutils.loads(fake_policy.policy_data)
 
         self.admin_only_rules = (
-"cells_scheduler_filter:DifferentCellFilter",
-"cells_scheduler_filter:TargetCellFilter",
+"compute:server:topology:host:index",
 "network:attach_external_network",
 "os_compute_api:servers:create:forced_host",
+"compute:servers:create:requested_destination",
 "os_compute_api:servers:detail:get_all_tenants",
 "os_compute_api:servers:index:get_all_tenants",
 "os_compute_api:servers:allow_all_filters",
@@ -308,11 +311,6 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-aggregates:set_metadata",
 "os_compute_api:os-agents",
 "os_compute_api:os-baremetal-nodes",
-"os_compute_api:os-cells",
-"os_compute_api:os-cells:create",
-"os_compute_api:os-cells:delete",
-"os_compute_api:os-cells:update",
-"os_compute_api:os-cells:sync_instances",
 "os_compute_api:os-evacuate",
 "os_compute_api:os-extended-server-attributes",
 "os_compute_api:os-flavor-access:remove_tenant_access",
@@ -354,6 +352,7 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 )
 
         self.admin_or_owner_rules = (
+"compute:server:topology:index",
 "os_compute_api:servers:start",
 "os_compute_api:servers:stop",
 "os_compute_api:servers:trigger_crash_dump",
@@ -481,18 +480,3 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
             self.admin_or_owner_rules +
             self.allow_all_rules + special_rules)
         self.assertEqual(set([]), result)
-
-
-class GeneratePolicyFileTestCase(test.NoDBTestCase):
-
-    def test_policy_generator_from_command_line(self):
-        # This test ensures nova.policy:get_enforcer ignores unexpected
-        # arguments before handing them off to oslo.config, which will fail and
-        # prevent users from generating policy files.
-        ret_val = subprocess.Popen(
-            ['oslopolicy-policy-generator', '--namespace', 'nova'],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        ret_val.communicate()
-        self.assertEqual(0, ret_val.returncode)

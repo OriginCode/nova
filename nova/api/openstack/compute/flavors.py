@@ -29,22 +29,22 @@ from nova import objects
 from nova.policies import flavor_extra_specs as fes_policies
 from nova import utils
 
-ALIAS = 'flavors'
-
 
 class FlavorsController(wsgi.Controller):
     """Flavor controller for the OpenStack API."""
 
     _view_builder_class = flavors_view.ViewBuilder
 
-    @validation.query_schema(schema.index_query)
+    @validation.query_schema(schema.index_query_275, '2.75')
+    @validation.query_schema(schema.index_query, '2.0', '2.74')
     @wsgi.expected_errors(400)
     def index(self, req):
         """Return all flavors in brief."""
         limited_flavors = self._get_flavors(req)
         return self._view_builder.index(req, limited_flavors)
 
-    @validation.query_schema(schema.index_query)
+    @validation.query_schema(schema.index_query_275, '2.75')
+    @validation.query_schema(schema.index_query, '2.0', '2.74')
     @wsgi.expected_errors(400)
     def detail(self, req):
         """Return all flavors in detail."""

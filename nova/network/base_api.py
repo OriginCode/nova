@@ -31,8 +31,7 @@ LOG = logging.getLogger(__name__)
 
 
 @hooks.add_hook('instance_network_info')
-def update_instance_cache_with_nw_info(impl, context, instance,
-                                       nw_info=None, update_cells=True):
+def update_instance_cache_with_nw_info(impl, context, instance, nw_info=None):
     if instance.deleted:
         LOG.debug('Instance is deleted, no further info cache update',
                   instance=instance)
@@ -52,7 +51,7 @@ def update_instance_cache_with_nw_info(impl, context, instance,
         # from the DB first.
         ic = objects.InstanceInfoCache.new(context, instance.uuid)
         ic.network_info = nw_info
-        ic.save(update_cells=update_cells)
+        ic.save()
         instance.info_cache = ic
     except Exception:
         with excutils.save_and_reraise_exception():
@@ -184,7 +183,7 @@ class NetworkAPI(base.Base):
         raise NotImplementedError()
 
     def allocate_for_instance(self, context, instance, vpn,
-                              requested_networks, macs=None,
+                              requested_networks,
                               security_groups=None, bind_host_id=None,
                               attach=False, resource_provider_mapping=None):
         """Allocates all network structures for an instance.
@@ -194,9 +193,6 @@ class NetworkAPI(base.Base):
         :param vpn: A boolean, if True, indicate a vpn to access the instance.
         :param requested_networks: A list of requested_networks,
             Optional value containing network_id, fixed_ip, and port_id.
-        :param macs: None or a set of MAC addresses that the instance
-            should use. macs is supplied by the hypervisor driver (contrast
-            with requested_networks which is user supplied).
         :param security_groups: None or security groups to allocate for
             instance.
         :param bind_host_id: the host ID to attach to the ports being created.
@@ -254,18 +250,21 @@ class NetworkAPI(base.Base):
         """Returns all network info related to an instance."""
         with lockutils.lock('refresh_cache-%s' % instance.uuid):
             result = self._get_instance_nw_info(context, instance, **kwargs)
-            # NOTE(comstud): Don't update API cell with new info_cache every
-            # time we pull network info for an instance.  The periodic healing
-            # of info_cache causes too many cells messages.  Healing the API
-            # will happen separately.
-            update_cells = kwargs.get('update_cells', False)
             update_instance_cache_with_nw_info(self, context, instance,
-                                               nw_info=result,
-                                               update_cells=update_cells)
+                                               nw_info=result)
         return result
 
     def _get_instance_nw_info(self, context, instance, **kwargs):
         """Template method, so a subclass can implement for neutron/network."""
+        raise NotImplementedError()
+
+    def get_requested_resource_for_instance(self, context, instance_uuid):
+        """Collect resource requests from the ports associated to the instance
+
+        :param context: nova request context
+        :param instance_uuid: The UUID of the instance
+        :return: A list of RequestGroup objects
+        """
         raise NotImplementedError()
 
     def validate_networks(self, context, requested_networks, num_instances):
@@ -344,8 +343,16 @@ class NetworkAPI(base.Base):
         """Start to migrate the network of an instance."""
         raise NotImplementedError()
 
-    def migrate_instance_finish(self, context, instance, migration):
-        """Finish migrating the network of an instance."""
+    def migrate_instance_finish(
+            self, context, instance, migration, provider_mappings):
+        """Finish migrating the network of an instance.
+
+        :param context: The request context.
+        :param instance: nova.objects.instance.Instance object.
+        :param migration: nova.objects.migration.Migration object.
+        :param provider_mappings: a dict of list of resource provider uuids
+            keyed by port uuid
+        """
         raise NotImplementedError()
 
     def setup_instance_network_on_host(self, context, instance, host,

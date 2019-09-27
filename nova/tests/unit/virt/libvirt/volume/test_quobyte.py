@@ -17,6 +17,7 @@
 import os
 import traceback
 
+import ddt
 import mock
 from oslo_concurrency import processutils
 from oslo_utils import fileutils
@@ -31,6 +32,8 @@ from nova.virt.libvirt import utils as libvirt_utils
 from nova.virt.libvirt.volume import quobyte
 
 
+@ddt.ddt
+@mock.patch.object(quobyte, '_is_systemd', None)
 class QuobyteTestCase(test.NoDBTestCase):
     """Tests the nova.virt.libvirt.volume.quobyte module utilities."""
 
@@ -59,117 +62,126 @@ class QuobyteTestCase(test.NoDBTestCase):
         mypart.mountpoint = self.TEST_MNT_POINT
         return [mypart]
 
+    @ddt.data(u"starting", u"running", u"degraded")
+    @mock.patch.object(psutil.Process, "name", return_value="systemd")
+    @mock.patch.object(processutils, "execute")
+    def test_quobyte_is_systemd_ok(self, value, mock_execute, mock_proc):
+        mock_execute.return_value = [value, "fake stderr"]
+
+        self.assertTrue(quobyte.is_systemd())
+        mock_execute.assert_called_once_with("systemctl",
+                                             "is-system-running",
+                                             check_exit_code=[0, 1])
+        mock_proc.assert_called_once()
+        self.assertTrue(quobyte.is_systemd())
+
+    @mock.patch.object(psutil.Process, "name", return_value="NOT_systemd")
     @mock.patch.object(os.path, "exists", return_value=False)
-    @mock.patch.object(fileutils, "ensure_tree")
-    @mock.patch('oslo_concurrency.processutils.execute')
-    def test_quobyte_mount_volume_not_systemd(self, mock_execute,
-                                              mock_ensure_tree,
-                                              mock_exists):
-        mnt_base = '/mnt'
-        quobyte_volume = '192.168.1.1/volume-00001'
-        export_mnt_base = os.path.join(mnt_base,
-                                       utils.get_hash_str(quobyte_volume))
+    def test_quobyte_is_systemd_not(self, mock_exists, mock_proc):
+        self.assertFalse(quobyte.is_systemd())
+        mock_exists.assert_called_once_with(quobyte.SYSTEMCTL_CHECK_PATH)
+        mock_proc.assert_called_once_with()
+        self.assertFalse(quobyte.is_systemd())
 
-        quobyte.mount_volume(quobyte_volume, export_mnt_base)
-
-        mock_ensure_tree.assert_called_once_with(export_mnt_base)
-        expected_commands = [mock.call('mount.quobyte',
-                                       '--disable-xattrs',
-                                       quobyte_volume,
-                                       export_mnt_base)
-                             ]
-        mock_execute.assert_has_calls(expected_commands)
-        mock_exists.assert_called_once_with(" /run/systemd/system")
-
+    @mock.patch.object(psutil.Process, "name", return_value="NOT_systemd")
+    @mock.patch.object(processutils, "execute")
     @mock.patch.object(os.path, "exists", return_value=True)
+    def test_quobyte_is_systemd_invalid_state(self, mock_exists, mock_execute,
+                                              mock_proc):
+        mock_execute.return_value = ["FAKE_UNACCEPTABLE_STATE", "fake stderr"]
+
+        self.assertFalse(quobyte.is_systemd())
+
+        mock_exists.assert_called_once_with(quobyte.SYSTEMCTL_CHECK_PATH)
+        mock_execute.assert_called_once_with("systemctl",
+                                             "is-system-running",
+                                             check_exit_code=[0, 1])
+        mock_proc.assert_called_once_with()
+        self.assertFalse(quobyte.is_systemd())
+
+    @ddt.data(None, '/some/arbitrary/path')
     @mock.patch.object(fileutils, "ensure_tree")
-    @mock.patch('oslo_concurrency.processutils.execute')
-    def test_quobyte_mount_volume_systemd(self, mock_execute,
-                                          mock_ensure_tree,
-                                          mock_exists):
+    @mock.patch('nova.privsep.libvirt.unprivileged_qb_mount')
+    def test_quobyte_mount_volume_not_systemd(self, cfg_file, mock_mount,
+                                              mock_ensure_tree):
         mnt_base = '/mnt'
         quobyte_volume = '192.168.1.1/volume-00001'
         export_mnt_base = os.path.join(mnt_base,
                                        utils.get_hash_str(quobyte_volume))
 
-        quobyte.mount_volume(quobyte_volume, export_mnt_base)
+        quobyte._is_systemd = False
+        quobyte.mount_volume(quobyte_volume, export_mnt_base, cfg_file)
 
         mock_ensure_tree.assert_called_once_with(export_mnt_base)
-        expected_commands = [mock.call('systemd-run',
-                                       '--scope',
-                                       '--user',
-                                       'mount.quobyte',
-                                       '--disable-xattrs',
-                                       quobyte_volume,
-                                       export_mnt_base)
-                             ]
-        mock_execute.assert_has_calls(expected_commands)
-        mock_exists.assert_called_once_with(" /run/systemd/system")
+        expected_commands = [mock.call(quobyte_volume, export_mnt_base,
+                                       cfg_file=cfg_file)]
+        mock_mount.assert_has_calls(expected_commands)
 
-    @mock.patch.object(os.path, "exists", return_value=False)
+    @ddt.data(None, '/some/arbitrary/path')
+    @mock.patch('nova.privsep.libvirt.systemd_run_qb_mount')
     @mock.patch.object(fileutils, "ensure_tree")
-    @mock.patch('oslo_concurrency.processutils.execute')
-    def test_quobyte_mount_volume_with_config(self,
-                                              mock_execute,
-                                              mock_ensure_tree,
-                                              mock_exists):
+    def test_quobyte_mount_volume_systemd(self, cfg_file, mock_ensure_tree,
+                                          mock_privsep_sysdr):
         mnt_base = '/mnt'
         quobyte_volume = '192.168.1.1/volume-00001'
         export_mnt_base = os.path.join(mnt_base,
                                        utils.get_hash_str(quobyte_volume))
-        config_file_dummy = "/etc/quobyte/dummy.conf"
+        quobyte._is_systemd = True
 
-        quobyte.mount_volume(quobyte_volume,
-                             export_mnt_base,
-                             config_file_dummy)
+        quobyte.mount_volume(quobyte_volume, export_mnt_base, cfg_file)
 
         mock_ensure_tree.assert_called_once_with(export_mnt_base)
-        expected_commands = [mock.call('mount.quobyte',
-                                       '--disable-xattrs',
-                                       quobyte_volume,
-                                       export_mnt_base,
-                                       '-c',
-                                       config_file_dummy)
-                             ]
-        mock_execute.assert_has_calls(expected_commands)
-        mock_exists.assert_called_once_with(" /run/systemd/system")
+        mock_privsep_sysdr.assert_called_once_with(quobyte_volume,
+                                                   export_mnt_base,
+                                                   cfg_file=cfg_file)
 
     @mock.patch.object(fileutils, "ensure_tree")
-    @mock.patch('oslo_concurrency.processutils.execute',
-                side_effect=(processutils.
-                             ProcessExecutionError))
-    def test_quobyte_mount_volume_fails(self, mock_execute, mock_ensure_tree):
+    @mock.patch('nova.privsep.libvirt.unprivileged_qb_mount',
+                side_effect=processutils.ProcessExecutionError)
+    def test_quobyte_mount_volume_fails(self, mock_mount, mock_ensure_tree):
         mnt_base = '/mnt'
         quobyte_volume = '192.168.1.1/volume-00001'
         export_mnt_base = os.path.join(mnt_base,
                                        utils.get_hash_str(quobyte_volume))
-
+        quobyte._is_systemd = False
         self.assertRaises(processutils.ProcessExecutionError,
                           quobyte.mount_volume,
                           quobyte_volume,
                           export_mnt_base)
+        mock_ensure_tree.assert_called_once_with(export_mnt_base)
 
-    @mock.patch('oslo_concurrency.processutils.execute')
-    def test_quobyte_umount_volume(self, mock_execute):
+    @mock.patch('nova.privsep.libvirt.unprivileged_umount')
+    def test_quobyte_umount_volume_non_sysd(self, mock_lv_umount):
         mnt_base = '/mnt'
         quobyte_volume = '192.168.1.1/volume-00001'
         export_mnt_base = os.path.join(mnt_base,
                                        utils.get_hash_str(quobyte_volume))
+
+        quobyte._is_systemd = False
+        quobyte.umount_volume(export_mnt_base)
+
+        mock_lv_umount.assert_called_once_with(export_mnt_base)
+
+    @mock.patch('nova.privsep.libvirt.umount')
+    def test_quobyte_umount_volume_sysd(self, mock_lv_umount):
+        mnt_base = '/mnt'
+        quobyte_volume = '192.168.1.1/volume-00001'
+        export_mnt_base = os.path.join(mnt_base,
+                                       utils.get_hash_str(quobyte_volume))
+        quobyte._is_systemd = True
 
         quobyte.umount_volume(export_mnt_base)
 
-        mock_execute.assert_called_once_with('umount.quobyte',
-                                             export_mnt_base)
+        mock_lv_umount.assert_called_once_with(export_mnt_base)
 
     @mock.patch.object(quobyte.LOG, "error")
-    @mock.patch('oslo_concurrency.processutils.execute')
-    def test_quobyte_umount_volume_warns(self,
-                                         mock_execute,
-                                         mock_debug):
+    @mock.patch('nova.privsep.libvirt.umount')
+    def test_quobyte_umount_volume_warns(self, mock_execute, mock_debug):
         mnt_base = '/mnt'
         quobyte_volume = '192.168.1.1/volume-00001'
         export_mnt_base = os.path.join(mnt_base,
                                        utils.get_hash_str(quobyte_volume))
+        quobyte._is_systemd = True
 
         def exec_side_effect(*cmd, **kwargs):
             exerror = processutils.ProcessExecutionError(
@@ -184,18 +196,18 @@ class QuobyteTestCase(test.NoDBTestCase):
                                  export_mnt_base))
 
     @mock.patch.object(quobyte.LOG, "exception")
-    @mock.patch('oslo_concurrency.processutils.execute',
-                side_effect=(processutils.ProcessExecutionError))
-    def test_quobyte_umount_volume_fails(self,
-                                         mock_execute,
-                                         mock_exception):
+    @mock.patch('nova.privsep.libvirt.umount',
+                side_effect=processutils.ProcessExecutionError)
+    def test_quobyte_umount_volume_fails(self, mock_unmount, mock_exception):
         mnt_base = '/mnt'
         quobyte_volume = '192.168.1.1/volume-00001'
         export_mnt_base = os.path.join(mnt_base,
                                        utils.get_hash_str(quobyte_volume))
+        quobyte._is_systemd = True
 
         quobyte.umount_volume(export_mnt_base)
 
+        mock_unmount.assert_called_once_with(export_mnt_base)
         (mock_exception.
          assert_called_once_with("Couldn't unmount "
                                  "the Quobyte Volume at %s",
@@ -203,8 +215,29 @@ class QuobyteTestCase(test.NoDBTestCase):
 
     @mock.patch.object(psutil, "disk_partitions")
     @mock.patch.object(os, "stat")
-    def test_validate_volume_all_good(self, stat_mock, part_mock):
+    def test_validate_volume_all_good_prefix_val(self, stat_mock, part_mock):
         part_mock.return_value = self.get_mock_partitions()
+        drv = quobyte
+
+        def statMockCall(*args):
+            if args[0] == self.TEST_MNT_POINT:
+                stat_result = mock.Mock()
+                stat_result.st_size = 0
+                return stat_result
+            return os.stat(args)
+        stat_mock.side_effect = statMockCall
+
+        drv.validate_volume(self.TEST_MNT_POINT)
+
+        stat_mock.assert_called_once_with(self.TEST_MNT_POINT)
+        part_mock.assert_called_once_with(all=True)
+
+    @mock.patch.object(psutil, "disk_partitions")
+    @mock.patch.object(os, "stat")
+    def test_validate_volume_all_good_fs_type(self, stat_mock, part_mock):
+        part_mock.return_value = self.get_mock_partitions()
+        part_mock.return_value[0].device = "not_quobyte"
+        part_mock.return_value[0].fstype = "fuse.quobyte"
         drv = quobyte
 
         def statMockCall(*args):

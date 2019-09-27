@@ -23,6 +23,7 @@ operating system, and exposes functionality over a web-based API.
    arch.rst
    availability-zones.rst
    cells.rst
+   config-drive.rst
    configuration/index.rst
    configuring-migrations.rst
    cpu-topologies.rst
@@ -35,6 +36,7 @@ operating system, and exposes functionality over a web-based API.
    manage-the-cloud.rst
    manage-users.rst
    manage-volumes.rst
+   metadata-service.rst
    migration.rst
    migrate-instance-with-snapshot.rst
    networking-nova.rst
@@ -53,3 +55,5 @@ operating system, and exposes functionality over a web-based API.
    support-compute.rst
    system-admin.rst
    secure-live-migration-with-qemu-native-tls.rst
+   mitigation-for-Intel-MDS-security-flaws.rst
+   vendordata.rst

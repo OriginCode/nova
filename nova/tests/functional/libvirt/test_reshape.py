@@ -10,9 +10,11 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+
+import io
+import mock
 import time
 
-import mock
 from oslo_config import cfg
 from oslo_log import log as logging
 
@@ -40,7 +42,17 @@ class VGPUReshapeTests(base.ServersTestBase):
         self.assertEqual(expected_status, server['status'])
         return server
 
-    def test_create_servers_with_vgpu(self):
+    @mock.patch('nova.virt.libvirt.LibvirtDriver._get_local_gb_info',
+                return_value={'total': 128,
+                              'used': 44,
+                              'free': 84})
+    @mock.patch('nova.virt.libvirt.driver.libvirt_utils.is_valid_hostname',
+                return_value=True)
+    @mock.patch('nova.virt.libvirt.driver.libvirt_utils.file_open',
+                side_effect=[io.BytesIO(b''), io.BytesIO(b''),
+                             io.BytesIO(b'')])
+    def test_create_servers_with_vgpu(
+            self, mock_file_open, mock_valid_hostname, mock_get_fs_info):
         """Verify that vgpu reshape works with libvirt driver
 
         1) create two servers with an old tree where the VGPU resource is on
@@ -145,7 +157,7 @@ class VGPUReshapeTests(base.ServersTestBase):
             enabled_vgpu_types=fakelibvirt.NVIDIA_11_VGPU_TYPE,
             group='devices')
         # restart compute which will trigger a reshape
-        self.restart_compute_service(self.compute)
+        self.compute = self.restart_compute_service(self.compute)
 
         # verify that the inventory, usages and allocation are correct after
         # the reshape

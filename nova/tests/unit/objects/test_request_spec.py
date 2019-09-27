@@ -152,15 +152,14 @@ class _TestRequestSpecObject(object):
             user_id=fakes.FAKE_USER_ID,
             availability_zone='nova',
             pci_requests=None,
-            numa_topology={'cells': [{'id': 1, 'cpuset': ['1'], 'memory': 8192,
-                                      'pagesize': None, 'cpu_topology': None,
-                                      'cpu_pinning_raw': None}]})
+            numa_topology=fake_request_spec.INSTANCE_NUMA_TOPOLOGY,
+        )
         spec = objects.RequestSpec()
 
         spec._from_instance(instance)
         self.assertIsInstance(spec.numa_topology, objects.InstanceNUMATopology)
         cells = spec.numa_topology.cells
-        self.assertEqual(1, len(cells))
+        self.assertEqual(2, len(cells))
         self.assertIsInstance(cells[0], objects.InstanceNUMACell)
 
     def test_from_flavor_as_object(self):
@@ -232,13 +231,18 @@ class _TestRequestSpecObject(object):
         filt_props['group_policies'] = set(['affinity'])
         filt_props['group_hosts'] = set(['fake1'])
         filt_props['group_members'] = set(['fake-instance1'])
-
-        spec = objects.RequestSpec()
-        spec._populate_group_info(filt_props)
-        self.assertIsInstance(spec.instance_group, objects.InstanceGroup)
-        self.assertEqual('affinity', spec.instance_group.policy)
-        self.assertEqual(['fake1'], spec.instance_group.hosts)
-        self.assertEqual(['fake-instance1'], spec.instance_group.members)
+        # Make sure it can handle group uuid not being present.
+        for group_uuid in (None, uuids.group_uuid):
+            if group_uuid:
+                filt_props['group_uuid'] = group_uuid
+            spec = objects.RequestSpec()
+            spec._populate_group_info(filt_props)
+            self.assertIsInstance(spec.instance_group, objects.InstanceGroup)
+            self.assertEqual('affinity', spec.instance_group.policy)
+            self.assertEqual(['fake1'], spec.instance_group.hosts)
+            self.assertEqual(['fake-instance1'], spec.instance_group.members)
+            if group_uuid:
+                self.assertEqual(uuids.group_uuid, spec.instance_group.uuid)
 
     def test_populate_group_info_missing_values(self):
         filt_props = {}
@@ -321,6 +325,7 @@ class _TestRequestSpecObject(object):
     def test_from_components(self):
         ctxt = context.RequestContext('fake-user', 'fake-project')
         destination = objects.Destination(host='foo')
+        self.assertFalse(destination.allow_cross_cell_move)
         instance = fake_instance.fake_instance_obj(ctxt)
         image = {'id': uuids.image_id, 'properties': {'mappings': []},
                  'status': 'fake-status', 'location': 'far-away'}
@@ -340,6 +345,7 @@ class _TestRequestSpecObject(object):
         # just making sure that the context is set by the method
         self.assertEqual(ctxt, spec._context)
         self.assertEqual(destination, spec.requested_destination)
+        self.assertFalse(spec.requested_destination.allow_cross_cell_move)
 
     @mock.patch('nova.objects.RequestSpec._populate_group_info')
     def test_from_components_with_instance_group(self, mock_pgi):
@@ -489,7 +495,8 @@ class _TestRequestSpecObject(object):
                                            memory_mb=8192.0),
             instance_group=objects.InstanceGroup(hosts=['fake1'],
                                                  policy='affinity',
-                                                 members=['inst1', 'inst2']),
+                                                 members=['inst1', 'inst2'],
+                                                 uuid=uuids.group_uuid),
             scheduler_hints={'foo': ['bar']},
             requested_destination=fake_dest)
         expected = {'ignore_hosts': ['ignoredhost'],
@@ -505,6 +512,7 @@ class _TestRequestSpecObject(object):
                     'group_hosts': set(['fake1']),
                     'group_policies': set(['affinity']),
                     'group_members': set(['inst1', 'inst2']),
+                    'group_uuid': uuids.group_uuid,
                     'scheduler_hints': {'foo': 'bar'},
                     'requested_destination': fake_dest}
         self.assertEqual(expected, spec.to_legacy_filter_properties_dict())
@@ -890,10 +898,18 @@ class _TestRequestSpecObject(object):
         destination.require_aggregates(['baz'])
         self.assertEqual(['foo,bar', 'baz'], destination.aggregates)
 
-    def test_destination_1dotoh(self):
-        destination = objects.Destination(aggregates=['foo'])
-        primitive = destination.obj_to_primitive(target_version='1.0')
-        self.assertNotIn('aggregates', primitive['nova_object.data'])
+    def test_destination_obj_make_compatible(self):
+        destination = objects.Destination(
+            aggregates=['foo'], host='fake-host', allow_cross_cell_move=False)
+        primitive = destination.obj_to_primitive(
+            target_version='1.2')['nova_object.data']
+        self.assertIn('aggregates', primitive)
+        self.assertNotIn('allow_cross_cell_move', primitive)
+
+        primitive = destination.obj_to_primitive(
+            target_version='1.0')['nova_object.data']
+        self.assertNotIn('aggregates', primitive)
+        self.assertEqual('fake-host', primitive['host'])
 
     def test_create_raises_on_unchanged_object(self):
         ctxt = context.RequestContext(uuids.user_id, uuids.project_id)
@@ -904,6 +920,25 @@ class _TestRequestSpecObject(object):
         req_obj = fake_request_spec.fake_spec_obj(remove_id=True)
         req_obj.create()
         req_obj.save()
+
+    def test_destination_forbidden_aggregates_default(self):
+        destination = objects.Destination()
+        self.assertIsNone(destination.forbidden_aggregates)
+
+    def test_destination_append_forbidden_aggregates(self):
+        destination = objects.Destination()
+        destination.append_forbidden_aggregates(set(['foo', 'bar']))
+        self.assertEqual(
+            set(['foo', 'bar']), destination.forbidden_aggregates)
+        destination.append_forbidden_aggregates(set(['bar', 'baz']))
+        self.assertEqual(
+            set(['foo', 'bar', 'baz']), destination.forbidden_aggregates)
+
+    def test_destination_delete_forbidden_aggregates(self):
+        destination = objects.Destination()
+        destination.append_forbidden_aggregates(set(['foo']))
+        primitive = destination.obj_to_primitive(target_version='1.0')
+        self.assertNotIn('forbidden_aggregates', primitive['nova_object.data'])
 
 
 class TestRequestSpecObject(test_objects._LocalTest,
@@ -916,7 +951,7 @@ class TestRemoteRequestSpecObject(test_objects._RemoteTest,
     pass
 
 
-class TestRequestGroupObject(test.TestCase):
+class TestRequestGroupObject(test.NoDBTestCase):
     def setUp(self):
         super(TestRequestGroupObject, self).setUp()
         self.user_id = uuids.user_id
@@ -930,8 +965,9 @@ class TestRequestGroupObject(test.TestCase):
         self.assertEqual(set(), rg.required_traits)
         self.assertEqual(set(), rg.forbidden_traits)
         self.assertEqual([], rg.aggregates)
-        self.assertIsNone(None, rg.requester_id)
+        self.assertIsNone(rg.requester_id)
         self.assertEqual([], rg.provider_uuids)
+        self.assertIsNone(rg.in_tree)
 
     def test_from_port_request(self):
         port_resource_request = {
@@ -980,14 +1016,77 @@ class TestRequestGroupObject(test.TestCase):
     def test_compat_requester_and_provider(self):
         req_obj = objects.RequestGroup(
             requester_id=uuids.requester, provider_uuids=[uuids.rp1],
-            required_traits=set(['CUSTOM_PHYSNET_2']))
+            required_traits=set(['CUSTOM_PHYSNET_2']),
+            forbidden_aggregates=set(['agg3', 'agg4']))
         versions = ovo_base.obj_tree_get_versions('RequestGroup')
+        primitive = req_obj.obj_to_primitive(
+            target_version='1.3',
+            version_manifest=versions)['nova_object.data']
+        self.assertIn('forbidden_aggregates', primitive)
+        self.assertIn('in_tree', primitive)
+        self.assertIn('requester_id', primitive)
+        self.assertIn('provider_uuids', primitive)
+        self.assertIn('required_traits', primitive)
+        self.assertItemsEqual(
+                primitive['forbidden_aggregates'], set(['agg3', 'agg4']))
+        primitive = req_obj.obj_to_primitive(
+            target_version='1.2',
+            version_manifest=versions)['nova_object.data']
+        self.assertNotIn('forbidden_aggregates', primitive)
+        self.assertIn('in_tree', primitive)
+        self.assertIn('requester_id', primitive)
+        self.assertIn('provider_uuids', primitive)
+        self.assertIn('required_traits', primitive)
+        primitive = req_obj.obj_to_primitive(
+            target_version='1.1',
+            version_manifest=versions)['nova_object.data']
+        self.assertNotIn('forbidden_aggregates', primitive)
+        self.assertNotIn('in_tree', primitive)
+        self.assertIn('requester_id', primitive)
+        self.assertIn('provider_uuids', primitive)
+        self.assertIn('required_traits', primitive)
         primitive = req_obj.obj_to_primitive(
             target_version='1.0',
             version_manifest=versions)['nova_object.data']
+        self.assertNotIn('forbidden_aggregates', primitive)
+        self.assertNotIn('in_tree', primitive)
         self.assertNotIn('requester_id', primitive)
         self.assertNotIn('provider_uuids', primitive)
         self.assertIn('required_traits', primitive)
+
+
+class TestDestinationObject(test.NoDBTestCase):
+    def setUp(self):
+        super(TestDestinationObject, self).setUp()
+        self.user_id = uuids.user_id
+        self.project_id = uuids.project_id
+        self.context = context.RequestContext(uuids.user_id, uuids.project_id)
+
+    def test_obj_make_compatible_destination(self):
+        values = {
+            'host': 'fake_host',
+            'node': 'fake_node',
+            'aggregates': ['agg1', 'agg2'],
+            'forbidden_aggregates': set(['agg3', 'agg4'])}
+        obj = objects.Destination(self.context, **values)
+        data = lambda x: x['nova_object.data']
+        obj_primitive = data(obj.obj_to_primitive(target_version='1.3'))
+        self.assertNotIn('forbidden_aggregates', obj_primitive)
+        self.assertIn('aggregates', obj_primitive)
+
+    def test_obj_make_compatible_destination_with_forbidden_aggregates(self):
+        values = {
+            'host': 'fake_host',
+            'node': 'fake_node',
+            'aggregates': ['agg1', 'agg2'],
+            'forbidden_aggregates': set(['agg3', 'agg4'])}
+        obj = objects.Destination(self.context, **values)
+        data = lambda x: x['nova_object.data']
+        obj_primitive = data(obj.obj_to_primitive(target_version='1.4'))
+        self.assertIn('forbidden_aggregates', obj_primitive)
+        self.assertItemsEqual(obj_primitive['forbidden_aggregates'],
+                              set(['agg3', 'agg4']))
+        self.assertIn('aggregates', obj_primitive)
 
 
 class TestMappingRequestGroupsToProviders(test.NoDBTestCase):

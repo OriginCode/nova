@@ -39,6 +39,7 @@ from oslo_db.sqlalchemy import utils as db_utils
 from oslo_serialization import jsonutils
 import sqlalchemy
 from sqlalchemy.engine import reflection
+import testtools
 
 from nova.db import migration
 from nova.db.sqlalchemy.api_migrations import migrate_repo
@@ -128,18 +129,18 @@ class NovaAPIModelsSync(test_migrations.ModelsMigrationsSync):
 
 class TestNovaAPIMigrationsSQLite(NovaAPIModelsSync,
                                   test_fixtures.OpportunisticDBTestMixin,
-                                  test.NoDBTestCase):
+                                  testtools.TestCase):
     pass
 
 
 class TestNovaAPIMigrationsMySQL(NovaAPIModelsSync,
                                  test_fixtures.OpportunisticDBTestMixin,
-                                 test.NoDBTestCase):
+                                 testtools.TestCase):
     FIXTURE = test_fixtures.MySQLOpportunisticFixture
 
 
 class TestNovaAPIMigrationsPostgreSQL(NovaAPIModelsSync,
-        test_fixtures.OpportunisticDBTestMixin, test.NoDBTestCase):
+        test_fixtures.OpportunisticDBTestMixin, testtools.TestCase):
     FIXTURE = test_fixtures.PostgresqlOpportunisticFixture
 
 
@@ -176,6 +177,8 @@ class NovaAPIMigrationsWalk(test_migrations.WalkVersionsMixin):
         ocata_placeholders = list(range(31, 41))
         pike_placeholders = list(range(45, 50))
         queens_placeholders = list(range(53, 58))
+        # We forgot to add the rocky placeholders
+        stein_placeholders = list(range(63, 68))
         special_cases = [
             30,  # Enforcement migration, no changes to test
         ]
@@ -184,6 +187,7 @@ class NovaAPIMigrationsWalk(test_migrations.WalkVersionsMixin):
                 ocata_placeholders +
                 pike_placeholders +
                 queens_placeholders +
+                stein_placeholders +
                 special_cases)
 
     def migrate_up(self, version, with_data=False):

@@ -14,12 +14,12 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import ddt
 import mock
 from oslo_db.sqlalchemy import enginefacade
 from six.moves import range
 
-from nova import compute
-from nova.compute import flavors
+from nova.compute import api as compute
 import nova.conf
 from nova import context
 from nova.db import api as db
@@ -68,6 +68,7 @@ class QuotaIntegrationTestCase(test.TestCase):
         self.context = context.RequestContext(self.user_id,
                                               self.project_id,
                                               is_admin=True)
+        self.inst_type = objects.Flavor.get_by_name(self.context, 'm1.small')
 
         nova.tests.unit.image.fake.stub_out_image_service(self)
 
@@ -94,7 +95,7 @@ class QuotaIntegrationTestCase(test.TestCase):
             inst.reservation_id = 'r-fakeres'
             inst.user_id = self.user_id
             inst.project_id = self.project_id
-            inst.flavor = flavors.get_flavor_by_name(flavor_name)
+            inst.flavor = objects.Flavor.get_by_name(cctxt, flavor_name)
             # This is needed for instance quota counting until we have the
             # ability to count allocations in placement.
             inst.vcpus = inst.flavor.vcpus
@@ -111,11 +112,10 @@ class QuotaIntegrationTestCase(test.TestCase):
     def test_too_many_instances(self):
         for i in range(CONF.quota.instances):
             self._create_instance()
-        inst_type = flavors.get_flavor_by_name('m1.small')
         image_uuid = 'cedef40a-ed67-4d10-800e-17455edce175'
         try:
             self.compute_api.create(self.context, min_count=1, max_count=1,
-                                    instance_type=inst_type,
+                                    instance_type=self.inst_type,
                                     image_href=image_uuid)
         except exception.QuotaError as e:
             expected_kwargs = {'code': 413,
@@ -129,11 +129,10 @@ class QuotaIntegrationTestCase(test.TestCase):
 
     def test_too_many_cores(self):
         self._create_instance()
-        inst_type = flavors.get_flavor_by_name('m1.small')
         image_uuid = 'cedef40a-ed67-4d10-800e-17455edce175'
         try:
             self.compute_api.create(self.context, min_count=1, max_count=1,
-                                    instance_type=inst_type,
+                                    instance_type=self.inst_type,
                                     image_href=image_uuid)
         except exception.QuotaError as e:
             expected_kwargs = {'code': 413,
@@ -154,7 +153,12 @@ class QuotaIntegrationTestCase(test.TestCase):
             self._create_instance(flavor_name='m1.xlarge')
 
     @mock.patch('nova.privsep.linux_net.bind_ip')
-    def test_too_many_addresses(self, mock_bind_ip):
+    @mock.patch('nova.privsep.linux_net.iptables_get_rules',
+                return_value=('', ''))
+    @mock.patch('nova.privsep.linux_net.iptables_set_rules',
+                return_value=('', ''))
+    def test_too_many_addresses(self, mock_iptables_set_rules,
+                                mock_iptables_get_rules, mock_bind_ip):
         # This test is specifically relying on nova-network.
         self.flags(use_neutron=False,
                    network_manager='nova.network.manager.FlatDHCPManager')
@@ -174,7 +178,12 @@ class QuotaIntegrationTestCase(test.TestCase):
         db.floating_ip_destroy(context.get_admin_context(), address)
 
     @mock.patch('nova.privsep.linux_net.bind_ip')
-    def test_auto_assigned(self, mock_bind_ip):
+    @mock.patch('nova.privsep.linux_net.iptables_get_rules',
+                return_value=('', ''))
+    @mock.patch('nova.privsep.linux_net.iptables_set_rules',
+                return_value=('', ''))
+    def test_auto_assigned(self, mock_iptables_set_rules,
+                                mock_iptables_get_rules, mock_bind_ip):
         # This test is specifically relying on nova-network.
         self.flags(use_neutron=False,
                    network_manager='nova.network.manager.FlatDHCPManager')
@@ -199,30 +208,27 @@ class QuotaIntegrationTestCase(test.TestCase):
         metadata = {}
         for i in range(CONF.quota.metadata_items + 1):
             metadata['key%s' % i] = 'value%s' % i
-        inst_type = flavors.get_flavor_by_name('m1.small')
         image_uuid = 'cedef40a-ed67-4d10-800e-17455edce175'
         self.assertRaises(exception.QuotaError, self.compute_api.create,
                                             self.context,
                                             min_count=1,
                                             max_count=1,
-                                            instance_type=inst_type,
+                                            instance_type=self.inst_type,
                                             image_href=image_uuid,
                                             metadata=metadata)
 
     def _create_with_injected_files(self, files):
         api = self.compute_api
-        inst_type = flavors.get_flavor_by_name('m1.small')
         image_uuid = 'cedef40a-ed67-4d10-800e-17455edce175'
         api.create(self.context, min_count=1, max_count=1,
-                instance_type=inst_type, image_href=image_uuid,
+                instance_type=self.inst_type, image_href=image_uuid,
                 injected_files=files)
 
     def test_no_injected_files(self):
         api = self.compute_api
-        inst_type = flavors.get_flavor_by_name('m1.small')
         image_uuid = 'cedef40a-ed67-4d10-800e-17455edce175'
         api.create(self.context,
-                   instance_type=inst_type,
+                   instance_type=self.inst_type,
                    image_href=image_uuid)
 
     def test_max_injected_files(self):
@@ -1961,3 +1967,189 @@ class NoopQuotaDriverTestCase(test.TestCase):
                                                  quota.QUOTAS._resources,
                                                  'test_project')
         self.assertEqual(self.expected_settable_quotas, result)
+
+
+@ddt.ddt
+class QuotaCountTestCase(test.NoDBTestCase):
+    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.'
+                'get_usages_counts_for_quota')
+    def test_cores_ram_count_placement(self, mock_get_usages):
+        usages = quota._cores_ram_count_placement(
+            mock.sentinel.context, mock.sentinel.project_id,
+            user_id=mock.sentinel.user_id)
+        mock_get_usages.assert_called_once_with(
+            mock.sentinel.context, mock.sentinel.project_id,
+            user_id=mock.sentinel.user_id)
+        self.assertEqual(mock_get_usages.return_value, usages)
+
+    @mock.patch('nova.objects.InstanceMappingList.get_counts')
+    @mock.patch('nova.quota._cores_ram_count_placement')
+    def test_instances_cores_ram_count_api_db_placement(
+            self, mock_placement_count, mock_get_im_count):
+        # Fake response from placement with project and user usages of cores
+        # and ram.
+        mock_placement_count.return_value = {'project': {'cores': 2, 'ram': 4},
+                                             'user': {'cores': 1, 'ram': 2}}
+        # Fake count of instances based on instance mappings in the API DB.
+        mock_get_im_count.return_value = {'project': {'instances': 2},
+                                          'user': {'instances': 1}}
+
+        counts = quota._instances_cores_ram_count_api_db_placement(
+            mock.sentinel.context, mock.sentinel.project_id,
+            user_id=mock.sentinel.user_id)
+
+        mock_get_im_count.assert_called_once_with(
+            mock.sentinel.context, mock.sentinel.project_id,
+            user_id=mock.sentinel.user_id)
+        mock_placement_count.assert_called_once_with(
+            mock.sentinel.context, mock.sentinel.project_id,
+            user_id=mock.sentinel.user_id)
+        expected = {'project': {'instances': 2, 'cores': 2, 'ram': 4},
+                    'user': {'instances': 1, 'cores': 1, 'ram': 2}}
+        self.assertDictEqual(expected, counts)
+
+    @ddt.data((True, True),
+              (True, False),
+              (False, True),
+              (False, False))
+    @ddt.unpack
+    @mock.patch('nova.quota.LOG.warning')
+    @mock.patch('nova.quota._user_id_queued_for_delete_populated')
+    @mock.patch('nova.quota._instances_cores_ram_count_legacy')
+    @mock.patch('nova.quota._instances_cores_ram_count_api_db_placement')
+    def test_instances_cores_ram_count(self, quota_from_placement,
+                                       uid_qfd_populated,
+                                       mock_api_db_placement_count,
+                                       mock_legacy_count,
+                                       mock_uid_qfd_populated, mock_warn_log):
+        # Check that all the combinations of
+        # [quota]count_usage_from_placement (True/False) and
+        # user_id_queued_for_delete_populated (True/False) do the right things.
+
+        # Fake count of instances, cores, and ram.
+        expected = {'project': {'instances': 2, 'cores': 2, 'ram': 4},
+                    'user': {'instances': 1, 'cores': 1, 'ram': 2}}
+        mock_api_db_placement_count.return_value = expected
+        mock_legacy_count.return_value = expected
+        # user_id and queued_for_delete populated/migrated (True/False)
+        mock_uid_qfd_populated.return_value = uid_qfd_populated
+        # Counting quota usage from placement enabled (True/False)
+        self.flags(count_usage_from_placement=quota_from_placement,
+                   group='quota')
+
+        counts = quota._instances_cores_ram_count(
+            mock.sentinel.context, mock.sentinel.project_id,
+            user_id=mock.sentinel.user_id)
+
+        if quota_from_placement and uid_qfd_populated:
+            # If we are counting quota usage from placement and user_id and
+            # queued_for_delete data has all been migrated, we should count
+            # instances from the API DB using instance mappings and count
+            # cores and ram from placement.
+            mock_api_db_placement_count.assert_called_once_with(
+                mock.sentinel.context, mock.sentinel.project_id,
+                user_id=mock.sentinel.user_id)
+            # We should not have called the legacy counting method.
+            mock_legacy_count.assert_not_called()
+            # We should not have logged a warn message saying we were falling
+            # back to the legacy counting method.
+            mock_warn_log.assert_not_called()
+        else:
+            # If counting quota usage from placement is not enabled or if
+            # user_id or queued_for_delete data has not all been migrated yet,
+            # we should use the legacy counting method.
+            mock_legacy_count.assert_called_once_with(
+                mock.sentinel.context, mock.sentinel.project_id,
+                user_id=mock.sentinel.user_id)
+            # We should have logged a warn message saying we were falling back
+            # to the legacy counting method.
+            if quota_from_placement:
+                # We only log the message if someone has opted in to counting
+                # from placement.
+                mock_warn_log.assert_called_once()
+            else:
+                mock_warn_log.assert_not_called()
+            # We should not have called the API DB and placement counting
+            # method.
+            mock_api_db_placement_count.assert_not_called()
+
+        self.assertDictEqual(expected, counts)
+
+    @mock.patch('nova.quota._user_id_queued_for_delete_populated')
+    @mock.patch('nova.quota._instances_cores_ram_count_legacy')
+    @mock.patch('nova.quota._instances_cores_ram_count_api_db_placement')
+    def test_user_id_queued_for_delete_populated_cache_by_project(
+            self, mock_api_db_placement_count, mock_legacy_count,
+            mock_uid_qfd_populated):
+        # We need quota usage from placement enabled to test this. For legacy
+        # counting, the cache is not used.
+        self.flags(count_usage_from_placement=True, group='quota')
+        # Fake count of instances, cores, and ram.
+        fake_counts = {'project': {'instances': 2, 'cores': 2, 'ram': 4},
+                       'user': {'instances': 1, 'cores': 1, 'ram': 2}}
+        mock_api_db_placement_count.return_value = fake_counts
+        mock_legacy_count.return_value = fake_counts
+
+        # First, check the case where user_id and queued_for_delete are found
+        # not to be migrated.
+        mock_uid_qfd_populated.return_value = False
+        quota._instances_cores_ram_count(mock.sentinel.context,
+                                         mock.sentinel.project_id,
+                                         user_id=mock.sentinel.user_id)
+        mock_uid_qfd_populated.assert_called_once()
+        # The second call should check for unmigrated records again, since the
+        # project was found not to be completely migrated last time.
+        quota._instances_cores_ram_count(mock.sentinel.context,
+                                         mock.sentinel.project_id,
+                                         user_id=mock.sentinel.user_id)
+        self.assertEqual(2, mock_uid_qfd_populated.call_count)
+
+        # Now check the case where the data migration was found to be complete.
+        mock_uid_qfd_populated.reset_mock()
+        mock_uid_qfd_populated.return_value = True
+        # The first call will check whether there are any unmigrated records.
+        quota._instances_cores_ram_count(mock.sentinel.context,
+                                         mock.sentinel.project_id,
+                                         user_id=mock.sentinel.user_id)
+        mock_uid_qfd_populated.assert_called_once()
+        # Second call should skip the check for user_id and queued_for_delete
+        # migrated because the result was cached.
+        mock_uid_qfd_populated.reset_mock()
+        quota._instances_cores_ram_count(mock.sentinel.context,
+                                         mock.sentinel.project_id,
+                                         user_id=mock.sentinel.user_id)
+        mock_uid_qfd_populated.assert_not_called()
+
+    @mock.patch('nova.quota._user_id_queued_for_delete_populated')
+    @mock.patch('nova.quota._server_group_count_members_by_user_legacy')
+    @mock.patch('nova.objects.InstanceMappingList.get_count_by_uuids_and_user')
+    @mock.patch('nova.quota._instances_cores_ram_count_legacy')
+    @mock.patch('nova.quota._instances_cores_ram_count_api_db_placement')
+    def test_user_id_queued_for_delete_populated_cache_all(
+            self, mock_api_db_placement_count, mock_legacy_icr_count,
+            mock_api_db_sgm_count, mock_legacy_sgm_count,
+            mock_uid_qfd_populated):
+        # Check the case where the data migration was found to be complete by a
+        # server group members count not scoped to a project.
+        mock_uid_qfd_populated.return_value = True
+        # Server group members call will check whether there are any unmigrated
+        # records.
+        fake_group = mock.Mock()
+        quota._server_group_count_members_by_user(mock.sentinel.context,
+                                                  fake_group,
+                                                  mock.sentinel.user_id)
+        mock_uid_qfd_populated.assert_called_once()
+        # Second server group members call should skip the check for user_id
+        # and queued_for_delete migrated because the result was cached.
+        mock_uid_qfd_populated.reset_mock()
+        quota._server_group_count_members_by_user(mock.sentinel.context,
+                                                  fake_group,
+                                                  mock.sentinel.user_id)
+        mock_uid_qfd_populated.assert_not_called()
+        # A call to count instances, cores, and ram should skip the check for
+        # user_id and queued_for_delete migrated because the result was cached
+        # during the call to count server group members.
+        mock_uid_qfd_populated.reset_mock()
+        quota._instances_cores_ram_count(mock.sentinel.context,
+                                         mock.sentinel.project_id)
+        mock_uid_qfd_populated.assert_not_called()

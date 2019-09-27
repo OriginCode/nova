@@ -209,6 +209,30 @@ running nova-metadata API service per cell, you should also configure each
 Neutron metadata-agent to point to the corresponding nova-metadata API
 service.
 """),
+    cfg.StrOpt("dhcp_domain",
+        deprecated_group="DEFAULT",
+        default="novalocal",
+        help="""
+Domain name used to configure FQDN for instances.
+
+This option has two purposes:
+
+#. For *neutron* and *nova-network* users, it is used to configure a
+   fully-qualified domain name for instance hostnames. If unset, only the
+   hostname without a domain will be configured.
+#. (Deprecated) For *nova-network* users, this option configures the DNS
+   domains used for the DHCP server. Refer to the ``--domain`` option of the
+   ``dnsmasq`` utility for more information. Like *nova-network* itself, this
+   purpose is deprecated.
+
+Possible values:
+
+* Any string that is a valid domain name.
+
+Related options:
+
+* ``use_neutron``
+"""),
 ]
 
 file_opts = [
@@ -341,7 +365,7 @@ Note that from API microversion 2.69 there could be transient conditions in the
 deployment where certain records are not available and the results could be
 partial for certain requests containing those records. In those cases this
 option will be ignored. See "Handling Down Cells" section of the Compute API
-guide (https://developer.openstack.org/api-guide/compute/down_cells.html) for
+guide (https://docs.openstack.org/api-guide/compute/down_cells.html) for
 more information.
 """),
 ]

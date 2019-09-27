@@ -27,6 +27,8 @@ import os_traits
 from oslo_log import log as logging
 from oslo_utils.fixture import uuidsentinel as uuids
 
+from nova.compute import instance_actions
+from nova.compute import utils as compute_utils
 import nova.conf
 from nova import context
 from nova.db import api as db
@@ -41,7 +43,6 @@ from nova.tests.unit import fake_notifier
 import nova.tests.unit.image.fake
 from nova.tests.unit import policy_fixture
 from nova import utils
-from nova.virt import fake
 
 
 CONF = nova.conf.CONF
@@ -115,7 +116,6 @@ class _IntegratedTestBase(test.TestCase):
         if 'cell1' in self.cell_mappings:
             self.flags(transport_url=self.cell_mappings['cell1'].transport_url)
         self.conductor = self.start_service('conductor')
-        self.consoleauth = self.start_service('consoleauth')
 
         if self.USE_NEUTRON:
             self.neutron = self.useFixture(nova_fixtures.NeutronFixture(self))
@@ -208,7 +208,9 @@ class _IntegratedTestBase(test.TestCase):
     def _build_server(self, flavor_id, image=None):
         server = {}
         if image is None:
-            image = self.api.get_images()[0]
+            # TODO(stephenfin): We need to stop relying on this API
+            with utils.temporary_mutation(self.api, microversion='2.35'):
+                image = self.api.get_images()[0]
             LOG.debug("Image: %s", image)
 
             # We now have a valid imageId
@@ -254,9 +256,9 @@ class InstanceHelperMixin(object):
                 break
             retry_count += 1
             if retry_count == max_retries:
-                    self.fail('Wait for state change failed, '
-                              'expected_params=%s, server=%s'
-                              % (expected_params, server))
+                self.fail('Wait for state change failed, '
+                          'expected_params=%s, server=%s' % (
+                              expected_params, server))
             time.sleep(0.5)
 
         return server
@@ -268,7 +270,7 @@ class InstanceHelperMixin(object):
 
     def _build_minimal_create_server_request(self, api, name, image_uuid=None,
                                              flavor_id=None, networks=None,
-                                             az=None):
+                                             az=None, host=None):
         server = {}
 
         # We now have a valid imageId
@@ -283,6 +285,9 @@ class InstanceHelperMixin(object):
             server['networks'] = networks
         if az is not None:
             server['availability_zone'] = az
+        # This requires at least microversion 2.74 to work
+        if host is not None:
+            server['host'] = host
         return server
 
     def _wait_until_deleted(self, server):
@@ -307,12 +312,21 @@ class InstanceHelperMixin(object):
         """
         if api is None:
             api = self.api
-        completion_event = None
+        return self._wait_for_instance_action_event(
+            api, server, expected_action, event_name, event_result='error')
+
+    def _wait_for_instance_action_event(
+            self, api, server, action_name, event_name, event_result):
+        """Polls the instance action events for the given instance, action,
+        event, and event result until it finds the event.
+        """
+        actions = []
+        events = []
         for attempt in range(10):
             actions = api.get_instance_actions(server['id'])
-            # Look for the migrate action.
+            # The API returns the newest event first
             for action in actions:
-                if action['action'] == expected_action:
+                if action['action'] == action_name:
                     events = (
                         api.api_get(
                             '/servers/%s/os-instance-actions/%s' %
@@ -320,21 +334,18 @@ class InstanceHelperMixin(object):
                         ).body['instanceAction']['events'])
                     # Look for the action event being in error state.
                     for event in events:
+                        result = event['result']
                         if (event['event'] == event_name and
-                                event['result'] is not None and
-                                event['result'].lower() == 'error'):
-                            completion_event = event
-                            # Break out of the events loop.
-                            break
-                    if completion_event:
-                        # Break out of the actions loop.
-                        break
+                                result is not None and
+                                result.lower() == event_result.lower()):
+                            return event
             # We didn't find the completion event yet, so wait a bit.
             time.sleep(0.5)
 
-        if completion_event is None:
-            self.fail('Timed out waiting for %s failure event. Current '
-                      'instance actions: %s' % (event_name, actions))
+        self.fail(
+            'Timed out waiting for %s instance action event. Current instance '
+            'actions: %s. Events in the last matching action: %s'
+            % (event_name, actions, events))
 
     def _wait_for_migration_status(self, server, expected_statuses):
         """Waits for a migration record with the given statuses to be found
@@ -388,6 +399,12 @@ class ProviderUsageBaseTestCase(test.TestCase, InstanceHelperMixin):
             os_traits.COMPUTE_VOLUME_ATTACH_WITH_TAG,
             os_traits.COMPUTE_VOLUME_EXTEND,
             os_traits.COMPUTE_TRUSTED_CERTS,
+            os_traits.COMPUTE_IMAGE_TYPE_AKI,
+            os_traits.COMPUTE_IMAGE_TYPE_AMI,
+            os_traits.COMPUTE_IMAGE_TYPE_ARI,
+            os_traits.COMPUTE_IMAGE_TYPE_ISO,
+            os_traits.COMPUTE_IMAGE_TYPE_QCOW2,
+            os_traits.COMPUTE_IMAGE_TYPE_RAW,
         ]
     ])
 
@@ -395,6 +412,7 @@ class ProviderUsageBaseTestCase(test.TestCase, InstanceHelperMixin):
     # nova.virt.fake.FakeDriver.capabilities
     expected_fake_driver_capability_traits = set([
         six.u(trait) for trait in [
+            os_traits.COMPUTE_IMAGE_TYPE_RAW,
             os_traits.COMPUTE_NET_ATTACH_INTERFACE,
             os_traits.COMPUTE_NET_ATTACH_INTERFACE_WITH_TAG,
             os_traits.COMPUTE_VOLUME_ATTACH_WITH_TAG,
@@ -417,10 +435,10 @@ class ProviderUsageBaseTestCase(test.TestCase, InstanceHelperMixin):
 
         placement = self.useFixture(func_fixtures.PlacementFixture())
         self.placement_api = placement.api
-        api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
+        self.api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
             api_version='v2.1'))
 
-        self.admin_api = api_fixture.admin_api
+        self.admin_api = self.api_fixture.admin_api
         self.admin_api.microversion = self.microversion
         self.api = self.admin_api
 
@@ -443,8 +461,6 @@ class ProviderUsageBaseTestCase(test.TestCase, InstanceHelperMixin):
                           compute service (defaults to cell1)
         :return: the nova compute service object
         """
-        fake.set_nodes([host])
-        self.addCleanup(fake.restore_nodes)
         compute = self.start_service('compute', host=host, cell=cell_name)
         self.computes[host] = compute
         return compute
@@ -776,10 +792,13 @@ class ProviderUsageBaseTestCase(test.TestCase, InstanceHelperMixin):
         """
 
         ctx = context.get_admin_context()
-        for compute in self.computes.values():
-            LOG.info('Running periodic for compute (%s)',
-                compute.manager.host)
-            compute.manager.update_available_resource(ctx)
+        for host, compute in self.computes.items():
+            LOG.info('Running periodic for compute (%s)', host)
+            # Make sure the context is targeted to the proper cell database
+            # for multi-cell tests.
+            with context.target_cell(
+                    ctx, self.host_mappings[host].cell_mapping) as cctxt:
+                compute.manager.update_available_resource(cctxt)
         LOG.info('Finished with periodics')
 
     def _move_and_check_allocations(self, server, request, old_flavor,
@@ -873,3 +892,40 @@ class ProviderUsageBaseTestCase(test.TestCase, InstanceHelperMixin):
         self.assertEqual(2, len(allocations))
         self.assertFlavorMatchesUsage(source_root_rp_uuid, flavor)
         self.assertFlavorMatchesUsage(dest_root_rp_uuid, flavor)
+
+    def assert_hypervisor_usage(self, compute_node_uuid, flavor,
+                                volume_backed):
+        """Asserts the given hypervisor's resource usage matches the
+        given flavor (assumes a single instance on the hypervisor).
+
+        :param compute_node_uuid: UUID of the ComputeNode to check.
+        :param flavor: "flavor" entry dict from from GET /flavors/{flavor_id}
+        :param volume_backed: True if the flavor is used with a volume-backed
+            server, False otherwise.
+        """
+        # GET /os-hypervisors/{uuid} requires at least 2.53
+        with utils.temporary_mutation(self.admin_api, microversion='2.53'):
+            hypervisor = self.admin_api.api_get(
+                '/os-hypervisors/%s' % compute_node_uuid).body['hypervisor']
+        if volume_backed:
+            expected_disk_usage = 0
+        else:
+            expected_disk_usage = flavor['disk']
+        # Account for reserved_host_disk_mb.
+        expected_disk_usage += compute_utils.convert_mb_to_ceil_gb(
+            CONF.reserved_host_disk_mb)
+        self.assertEqual(expected_disk_usage, hypervisor['local_gb_used'])
+        # Account for reserved_host_memory_mb.
+        expected_ram_usage = CONF.reserved_host_memory_mb + flavor['ram']
+        self.assertEqual(expected_ram_usage, hypervisor['memory_mb_used'])
+        # Account for reserved_host_cpus.
+        expected_vcpu_usage = CONF.reserved_host_cpus + flavor['vcpus']
+        self.assertEqual(expected_vcpu_usage, hypervisor['vcpus_used'])
+
+    def _confirm_resize(self, server):
+        self.api.post_server_action(server['id'], {'confirmResize': None})
+        server = self._wait_for_state_change(self.api, server, 'ACTIVE')
+        self._wait_for_instance_action_event(
+            self.api, server, instance_actions.CONFIRM_RESIZE,
+            'compute_confirm_resize', 'success')
+        return server

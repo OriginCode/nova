@@ -42,6 +42,8 @@ while keeping users happy and keeping developers productive.
 
 * :doc:`/contributor/blueprints`: An overview of our tracking artifacts.
 
+* :doc:`/contributor/ptl-guide`: A chronological PTL reference guide
+
 Reviewing
 =========
 
@@ -76,6 +78,12 @@ be Python code. All new code needs to be validated somehow.
 
   * :doc:`/contributor/testing/zero-downtime-upgrade`
 
+  * :doc:`/contributor/testing/down-cell`
+
+* **Profiling Guides**: These are guides to profiling nova.
+
+  * :doc:`/contributor/testing/eventlet-profiling`
+
 The Nova API
 ============
 
@@ -96,8 +104,12 @@ changes done to the API, as the impact can be very wide.
 Nova Major Subsystems
 =====================
 
-Major subsystems in nova have different needs; some of those are documented
-here. If you are contributing to one of these please read the subsystem guide
-before diving in.
+Major subsystems in nova have different needs. If you are contributing to one
+of these please read the :ref:`reference guide <reference-internals>` before
+diving in.
 
-* :doc:`/user/conductor`
+Move operations
+~~~~~~~~~~~~~~~
+
+* :doc:`/contributor/evacuate-vs-rebuild`: Describes the differences between
+  the often-confused evacuate and rebuild operations.

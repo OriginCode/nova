@@ -130,6 +130,16 @@ Upgrade
   * The "API Service Version" upgrade check was removed since the corresponding
     code for that check was removed in Stein.
 
+  **20.0.0 (Train)**
+
+  * Checks for the Placement API are modified to require version 1.32.
+  * Checks to ensure block-storage (cinder) API version 3.44 is
+    available in order to support multi-attach volumes.
+    If ``[cinder]/auth_type`` is not configured this is a no-op check.
+  * The "**nova-consoleauth** service" upgrade check was removed since the
+    service was removed in Train.
+  * The ``Request Spec Migration`` check was removed.
+
 See Also
 ========
 

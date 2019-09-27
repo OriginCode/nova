@@ -178,6 +178,23 @@ be the same as not finding any suitable hosts.
 Note that if you enable this flag, you can disable the (less efficient)
 AvailabilityZoneFilter in the scheduler.
 """),
+    cfg.BoolOpt("query_placement_for_image_type_support",
+                default=False,
+                help="""
+This setting causes the scheduler to ask placement only for compute
+hosts that support the ``disk_format`` of the image used in the request.
+"""),
+    cfg.BoolOpt("enable_isolated_aggregate_filtering",
+                default=False,
+                help="""
+This setting allows the scheduler to restrict hosts in aggregates based on
+matching required traits in the aggregate metadata and the instance
+flavor/image. If an aggregate is configured with a property with key
+``trait:$TRAIT_NAME`` and value ``required``, the instance flavor extra_specs
+and/or image metadata must also contain ``trait:$TRAIT_NAME=required`` to be
+eligible to be scheduled to hosts in that aggregate. More technical details
+at https://docs.openstack.org/nova/latest/reference/isolate-aggregates.html
+""")
 ]
 
 filter_scheduler_group = cfg.OptGroup(name="filter_scheduler",
@@ -233,7 +250,7 @@ Possible values:
         min=1,
         deprecated_group="DEFAULT",
         help="""
-Maximum number of instances that be active on a host.
+Maximum number of instances that can exist on a host.
 
 If you need to limit the number of instances on any given host, set this option
 to the maximum number of instances you want to allow. The NumInstancesFilter
@@ -242,8 +259,8 @@ instances as this option's value.
 
 This option is only used by the FilterScheduler and its subclasses; if you use
 a different scheduler, this option has no effect. Also note that this setting
-only affects scheduling if the 'NumInstancesFilter' or
-'AggregateNumInstancesFilter' filter is enabled.
+only affects scheduling if the ``NumInstancesFilter`` or
+``AggregateNumInstancesFilter`` filter is enabled.
 
 Possible values:
 
@@ -305,7 +322,6 @@ Related options:
         # Tempest's scheduler_enabled_filters to keep the default values in
         # sync.
         default=[
-          "RetryFilter",
           "AvailabilityZoneFilter",
           "ComputeFilter",
           "ComputeCapabilitiesFilter",

@@ -24,6 +24,7 @@ import six
 import nova.conf
 from nova import exception as nova_exception
 from nova.i18n import _
+import nova.privsep.libvirt
 from nova import utils
 from nova.virt.libvirt.volume import fs
 
@@ -35,35 +36,66 @@ SOURCE_PROTOCOL = 'quobyte'
 SOURCE_TYPE = 'file'
 DRIVER_CACHE = 'none'
 DRIVER_IO = 'native'
+VALID_SYSD_STATES = ["starting", "running", "degraded"]
+SYSTEMCTL_CHECK_PATH = "/run/systemd/system"
+
+
+_is_systemd = None
+
+
+def is_systemd():
+    """Checks if the host is running systemd"""
+    global _is_systemd
+
+    if _is_systemd is not None:
+        return _is_systemd
+
+    tmp_is_systemd = False
+
+    if psutil.Process(1).name() == "systemd" or os.path.exists(
+            SYSTEMCTL_CHECK_PATH):
+        # NOTE(kaisers): exit code might be >1 in theory but in practice this
+        # is hard coded to 1. Due to backwards compatibility and systemd
+        # CODING_STYLE this is unlikely to change.
+        sysdout, sysderr = processutils.execute("systemctl",
+                                                "is-system-running",
+                                                check_exit_code=[0, 1])
+        for state in VALID_SYSD_STATES:
+            if state == sysdout.strip():
+                tmp_is_systemd = True
+                break
+
+    _is_systemd = tmp_is_systemd
+    return _is_systemd
 
 
 def mount_volume(volume, mnt_base, configfile=None):
     """Wraps execute calls for mounting a Quobyte volume"""
     fileutils.ensure_tree(mnt_base)
 
-    # NOTE(kaisers): disable xattrs to speed up io as this omits
-    # additional metadata requests in the backend. xattrs can be
-    # enabled without issues but will reduce performance.
-    command = ['mount.quobyte', '--disable-xattrs', volume, mnt_base]
-    if os.path.exists(" /run/systemd/system"):
-        # Note(kaisers): with systemd this requires a separate CGROUP to
-        # prevent Nova service stop/restarts from killing the mount.
-        command = ['systemd-run', '--scope', '--user', 'mount.quobyte',
-                   '--disable-xattrs', volume, mnt_base]
-    if configfile:
-        command.extend(['-c', configfile])
+    # Note(kaisers): with systemd this requires a separate CGROUP to
+    # prevent Nova service stop/restarts from killing the mount.
+    if is_systemd():
+        LOG.debug('Mounting volume %s at mount point %s via systemd-run',
+                  volume, mnt_base)
+        nova.privsep.libvirt.systemd_run_qb_mount(volume, mnt_base,
+                                                  cfg_file=configfile)
+    else:
+        LOG.debug('Mounting volume %s at mount point %s via mount.quobyte',
+                  volume, mnt_base, cfg_file=configfile)
 
-    LOG.debug('Mounting volume %s at mount point %s ...',
-              volume,
-              mnt_base)
-    processutils.execute(*command)
+        nova.privsep.libvirt.unprivileged_qb_mount(volume, mnt_base,
+                                                   cfg_file=configfile)
     LOG.info('Mounted volume: %s', volume)
 
 
 def umount_volume(mnt_base):
     """Wraps execute calls for unmouting a Quobyte volume"""
     try:
-        processutils.execute('umount.quobyte', mnt_base)
+        if is_systemd():
+            nova.privsep.libvirt.umount(mnt_base)
+        else:
+            nova.privsep.libvirt.unprivileged_umount(mnt_base)
     except processutils.ProcessExecutionError as exc:
         if 'Device or resource busy' in six.text_type(exc):
             LOG.error("The Quobyte volume at %s is still in use.", mnt_base)
@@ -81,7 +113,7 @@ def validate_volume(mount_path):
     for p in partitions:
         if mount_path != p.mountpoint:
             continue
-        if p.device.startswith("quobyte@"):
+        if p.device.startswith("quobyte@") or p.fstype == "fuse.quobyte":
             statresult = os.stat(mount_path)
             # Note(kaisers): Quobyte always shows mount points with size 0
             if statresult.st_size == 0:
@@ -126,6 +158,11 @@ class LibvirtQuobyteVolumeDriver(fs.LibvirtBaseFileSystemVolumeDriver):
     @utils.synchronized('connect_qb_volume')
     def connect_volume(self, connection_info, instance):
         """Connect the volume."""
+        if is_systemd():
+            LOG.debug("systemd detected.")
+        else:
+            LOG.debug("No systemd detected.")
+
         data = connection_info['data']
         quobyte_volume = self._normalize_export(data['export'])
         mount_path = self._get_mount_path(connection_info)

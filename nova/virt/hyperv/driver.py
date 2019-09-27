@@ -100,6 +100,11 @@ class HyperVDriver(driver.ComputeDriver):
         "supports_device_tagging": True,
         "supports_multiattach": False,
         "supports_trusted_certs": False,
+        "supports_pcpus": False,
+
+        # Supported image types
+        "supports_image_type_vhd": True,
+        "supports_image_type_vhdx": True,
     }
 
     def __init__(self, virtapi):
@@ -153,12 +158,9 @@ class HyperVDriver(driver.ComputeDriver):
     def list_instances(self):
         return self._vmops.list_instances()
 
-    def estimate_instance_overhead(self, instance_info):
-        return self._vmops.estimate_instance_overhead(instance_info)
-
     def spawn(self, context, instance, image_meta, injected_files,
               admin_password, allocations, network_info=None,
-              block_device_info=None):
+              block_device_info=None, power_on=True):
         self._vmops.spawn(context, instance, image_meta, injected_files,
                           admin_password, network_info, block_device_info)
 
@@ -321,7 +323,8 @@ class HyperVDriver(driver.ComputeDriver):
                                              instance, network_info)
 
     def finish_revert_migration(self, context, instance, network_info,
-                                block_device_info=None, power_on=True):
+                                migration, block_device_info=None,
+                                power_on=True):
         self._migrationops.finish_revert_migration(context, instance,
                                                    network_info,
                                                    block_device_info, power_on)
@@ -365,3 +368,10 @@ class HyperVDriver(driver.ComputeDriver):
 
     def unrescue(self, instance, network_info):
         self._vmops.unrescue_instance(instance)
+
+    def update_provider_tree(self, provider_tree, nodename, allocations=None):
+        inventory = provider_tree.data(nodename).inventory
+        alloc_ratios = self._get_allocation_ratios(inventory)
+
+        self._hostops.update_provider_tree(
+            provider_tree, nodename, alloc_ratios, allocations)

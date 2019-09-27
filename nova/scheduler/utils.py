@@ -20,6 +20,7 @@ import sys
 import traceback
 
 import os_resource_classes as orc
+import os_traits
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from six.moves.urllib import parse
@@ -32,9 +33,11 @@ from nova import exception
 from nova.i18n import _
 from nova import objects
 from nova.objects import base as obj_base
+from nova.objects import fields as obj_fields
 from nova.objects import instance as obj_instance
 from nova import rpc
 from nova.scheduler.filters import utils as filters_utils
+from nova.virt import hardware
 
 
 LOG = logging.getLogger(__name__)
@@ -54,7 +57,34 @@ class ResourceRequest(object):
     XS_KEYPAT = re.compile(r"^(%s)([1-9][0-9]*)?:(.*)$" %
                            '|'.join((XS_RES_PREFIX, XS_TRAIT_PREFIX)))
 
-    def __init__(self):
+    def __init__(self, request_spec, enable_pinning_translate=True):
+        """Create a new instance of ResourceRequest from a RequestSpec.
+
+        Examines the flavor, flavor extra specs, and (optional) image metadata
+        of the provided ``request_spec``.
+
+        For extra specs, items of the following form are examined:
+
+        - ``resources:$RESOURCE_CLASS``: $AMOUNT
+        - ``resources$N:$RESOURCE_CLASS``: $AMOUNT
+        - ``trait:$TRAIT_NAME``: "required"
+        - ``trait$N:$TRAIT_NAME``: "required"
+
+        .. note::
+
+            This does *not* yet handle ``member_of[$N]``.
+
+        For image metadata, traits are extracted from the ``traits_required``
+        property, if present.
+
+        For the flavor, ``VCPU``, ``MEMORY_MB`` and ``DISK_GB`` are calculated
+        from Flavor properties, though these are only used if they aren't
+        overridden by flavor extra specs.
+
+        :param request_spec: An instance of ``objects.RequestSpec``.
+        :param enable_pinning_translate: True if the CPU policy extra specs
+            should be translated to placement resources and traits.
+        """
         # { ident: RequestGroup }
         self._rg_by_id = {}
         self._group_policy = None
@@ -62,9 +92,184 @@ class ResourceRequest(object):
         # set to None to indicate "no limit".
         self._limit = CONF.scheduler.max_placement_results
 
-    def __str__(self):
-        return ', '.join(sorted(
-            list(str(rg) for rg in list(self._rg_by_id.values()))))
+        # TODO(efried): Handle member_of[$N], which will need to be reconciled
+        # with destination.aggregates handling in resources_from_request_spec
+
+        # request_spec.image is nullable
+        if 'image' in request_spec and request_spec.image:
+            image = request_spec.image
+        else:
+            image = objects.ImageMeta(properties=objects.ImageMetaProps())
+
+        # Parse the flavor extra specs
+        self._process_extra_specs(request_spec.flavor)
+
+        self.numbered_groups_from_flavor = self.get_num_of_numbered_groups()
+
+        # Now parse the (optional) image metadata
+        self._process_image_meta(image)
+
+        # TODO(stephenfin): Remove this parameter once we drop support for
+        # 'vcpu_pin_set'
+        self.cpu_pinning_requested = False
+
+        if enable_pinning_translate:
+            # Next up, let's handle those pesky CPU pinning policies
+            self._translate_pinning_policies(request_spec.flavor, image)
+
+        # Finally, parse the flavor itself, though we'll only use these fields
+        # if they don't conflict with something already provided by the flavor
+        # extra specs. These are all added to the unnumbered request group.
+        merged_resources = self.merged_resources()
+
+        if (orc.VCPU not in merged_resources and
+                orc.PCPU not in merged_resources):
+            self._add_resource(None, orc.VCPU, request_spec.vcpus)
+
+        if orc.MEMORY_MB not in merged_resources:
+            self._add_resource(None, orc.MEMORY_MB, request_spec.memory_mb)
+
+        if orc.DISK_GB not in merged_resources:
+            disk = request_spec.ephemeral_gb
+            disk += compute_utils.convert_mb_to_ceil_gb(request_spec.swap)
+            if 'is_bfv' not in request_spec or not request_spec.is_bfv:
+                disk += request_spec.root_gb
+
+            if disk:
+                self._add_resource(None, orc.DISK_GB, disk)
+
+        self._translate_memory_encryption(request_spec.flavor, image)
+
+        self._translate_vpmems_request(request_spec.flavor)
+
+        self.strip_zeros()
+
+    def _process_extra_specs(self, flavor):
+        if 'extra_specs' not in flavor:
+            return
+
+        for key, val in flavor.extra_specs.items():
+            if key == 'group_policy':
+                self._add_group_policy(val)
+                continue
+
+            match = self.XS_KEYPAT.match(key)
+            if not match:
+                continue
+
+            # 'prefix' is 'resources' or 'trait'
+            # 'suffix' is $N or None
+            # 'name' is either the resource class name or the trait name.
+            prefix, suffix, name = match.groups()
+
+            # Process "resources[$N]"
+            if prefix == self.XS_RES_PREFIX:
+                self._add_resource(suffix, name, val)
+
+            # Process "trait[$N]"
+            elif prefix == self.XS_TRAIT_PREFIX:
+                self._add_trait(suffix, name, val)
+
+    def _process_image_meta(self, image):
+        if not image or 'properties' not in image:
+            return
+
+        for trait in image.properties.get('traits_required', []):
+            # required traits from the image are always added to the
+            # unnumbered request group, granular request groups are not
+            # supported in image traits
+            self._add_trait(None, trait, "required")
+
+    def _translate_memory_encryption(self, flavor, image):
+        """When the hw:mem_encryption extra spec or the hw_mem_encryption
+        image property are requested, translate into a request for
+        resources:MEM_ENCRYPTION_CONTEXT=1 which requires a slot on a
+        host which can support encryption of the guest memory.
+        """
+        # NOTE(aspiers): In theory this could raise FlavorImageConflict,
+        # but we already check it in the API layer, so that should never
+        # happen.
+        if not hardware.get_mem_encryption_constraint(flavor, image):
+            # No memory encryption required, so no further action required.
+            return
+
+        self._add_resource(None, orc.MEM_ENCRYPTION_CONTEXT, 1)
+        LOG.debug("Added %s=1 to requested resources",
+                  orc.MEM_ENCRYPTION_CONTEXT)
+
+    def _translate_vpmems_request(self, flavor):
+        """When the hw:pmem extra spec is present, require hosts which can
+        provide enough vpmem resources.
+        """
+        vpmem_labels = hardware.get_vpmems(flavor)
+        if not vpmem_labels:
+            # No vpmems required
+            return
+        amount_by_rc = collections.defaultdict(int)
+        for vpmem_label in vpmem_labels:
+            resource_class = orc.normalize_name(
+                "PMEM_NAMESPACE_" + vpmem_label)
+            amount_by_rc[resource_class] += 1
+        for resource_class, amount in amount_by_rc.items():
+            self._add_resource(None, resource_class, amount)
+            LOG.debug("Added resource %s=%d to requested resources",
+                      resource_class, amount)
+
+    def _translate_pinning_policies(self, flavor, image):
+        """Translate the legacy pinning policies to resource requests."""
+        # NOTE(stephenfin): These can raise exceptions but these have already
+        # been validated by 'nova.virt.hardware.numa_get_constraints' in the
+        # API layer (see change I06fad233006c7bab14749a51ffa226c3801f951b).
+        # This call also handles conflicts between explicit VCPU/PCPU
+        # requests and implicit 'hw:cpu_policy'-based requests, mismatches
+        # between the number of CPUs in the flavor and explicit VCPU/PCPU
+        # requests, etc.
+        cpu_policy = hardware.get_cpu_policy_constraint(
+            flavor, image)
+        cpu_thread_policy = hardware.get_cpu_thread_policy_constraint(
+            flavor, image)
+        emul_thread_policy = hardware.get_emulator_thread_policy_constraint(
+            flavor)
+
+        # We don't need to worry about handling 'SHARED' - that will result in
+        # VCPUs which we include by default
+        if cpu_policy == obj_fields.CPUAllocationPolicy.DEDICATED:
+            # TODO(stephenfin): Remove when we drop support for 'vcpu_pin_set'
+            self.cpu_pinning_requested = True
+
+            # Switch VCPU -> PCPU
+            cpus = flavor.vcpus
+
+            LOG.debug('Translating request for %(vcpu_rc)s=%(cpus)d to '
+                      '%(vcpu_rc)s=0,%(pcpu_rc)s=%(cpus)d',
+                      {'vcpu_rc': orc.VCPU, 'pcpu_rc': orc.PCPU,
+                       'cpus': cpus})
+
+            if emul_thread_policy == 'isolate':
+                cpus += 1
+
+                LOG.debug('Adding additional %(pcpu_rc)s to account for '
+                          'emulator threads', {'pcpu_rc': orc.PCPU})
+
+            self._add_resource(None, orc.PCPU, cpus)
+
+        trait = {
+            obj_fields.CPUThreadAllocationPolicy.ISOLATE: 'forbidden',
+            obj_fields.CPUThreadAllocationPolicy.REQUIRE: 'required',
+        }.get(cpu_thread_policy)
+        if trait:
+            LOG.debug('Adding %(trait)s=%(value)s trait',
+                      {'trait': os_traits.HW_CPU_HYPERTHREADING,
+                       'value': trait})
+            self._add_trait(None, os_traits.HW_CPU_HYPERTHREADING, trait)
+
+    @property
+    def group_policy(self):
+        return self._group_policy
+
+    @group_policy.setter
+    def group_policy(self, value):
+        self._group_policy = value
 
     def get_request_group(self, ident):
         if ident not in self._rg_by_id:
@@ -132,112 +337,26 @@ class ResourceRequest(object):
             return
         self._group_policy = policy
 
-    @classmethod
-    def from_extra_specs(cls, extra_specs, req=None):
-        """Processes resources and traits in numbered groupings in extra_specs.
-
-        Examines extra_specs for items of the following forms:
-            "resources:$RESOURCE_CLASS": $AMOUNT
-            "resources$N:$RESOURCE_CLASS": $AMOUNT
-            "trait:$TRAIT_NAME": "required"
-            "trait$N:$TRAIT_NAME": "required"
-
-        Does *not* yet handle member_of[$N].
-
-        :param extra_specs: The flavor extra_specs dict.
-        :param req: the ResourceRequest object to add the requirements to or
-               None to create a new ResourceRequest
-        :return: A ResourceRequest object representing the resources and
-                 required traits in the extra_specs.
-        """
-        # TODO(efried): Handle member_of[$N], which will need to be reconciled
-        # with destination.aggregates handling in resources_from_request_spec
-
-        if req is not None:
-            ret = req
-        else:
-            ret = cls()
-
-        for key, val in extra_specs.items():
-            if key == 'group_policy':
-                ret._add_group_policy(val)
-                continue
-
-            match = cls.XS_KEYPAT.match(key)
-            if not match:
-                continue
-
-            # 'prefix' is 'resources' or 'trait'
-            # 'suffix' is $N or None
-            # 'name' is either the resource class name or the trait name.
-            prefix, suffix, name = match.groups()
-
-            # Process "resources[$N]"
-            if prefix == cls.XS_RES_PREFIX:
-                ret._add_resource(suffix, name, val)
-
-            # Process "trait[$N]"
-            elif prefix == cls.XS_TRAIT_PREFIX:
-                ret._add_trait(suffix, name, val)
-
-        return ret
-
-    @classmethod
-    def from_image_props(cls, image_meta_props, req=None):
-        """Processes image properties and adds trait requirements to the
-           ResourceRequest
-
-        :param image_meta_props: The ImageMetaProps object.
-        :param req: the ResourceRequest object to add the requirements to or
-               None to create a new ResourceRequest
-        :return: A ResourceRequest object representing the required traits on
-                the image.
-        """
-        if req is not None:
-            ret = req
-        else:
-            ret = cls()
-
-        if 'traits_required' in image_meta_props:
-            for trait in image_meta_props.traits_required:
-                # required traits from the image are always added to the
-                # unnumbered request group, granular request groups are not
-                # supported in image traits
-                ret._add_trait(None, trait, "required")
-
-        return ret
-
     def resource_groups(self):
         for rg in self._rg_by_id.values():
             yield rg.resources
 
-    def merged_resources(self, flavor_resources=None):
+    def get_num_of_numbered_groups(self):
+        return len([ident for ident in self._rg_by_id.keys()
+                    if ident is not None])
+
+    def merged_resources(self):
         """Returns a merge of {resource_class: amount} for all resource groups.
 
         Amounts of the same resource class from different groups are added
         together.
 
-        :param flavor_resources: A flat dict of {resource_class: amount}.  If
-                                 specified, the resources therein are folded
-                                 into the return dict, such that any resource
-                                 in flavor_resources is included only if that
-                                 resource class does not exist elsewhere in the
-                                 merged ResourceRequest.
         :return: A dict of the form {resource_class: amount}
         """
         ret = collections.defaultdict(lambda: 0)
         for resource_dict in self.resource_groups():
             for resource_class, amount in resource_dict.items():
                 ret[resource_class] += amount
-        if flavor_resources:
-            for resource_class, amount in flavor_resources.items():
-                # If it's in there - even if zero - ignore the one from the
-                # flavor.
-                if resource_class not in ret:
-                    ret[resource_class] = amount
-            # Now strip zeros.  This has to be done after the above - we can't
-            # use strip_zeros :(
-            ret = {rc: amt for rc, amt in ret.items() if amt}
         return dict(ret)
 
     def _clean_empties(self):
@@ -268,6 +387,8 @@ class ResourceRequest(object):
             required_traits = request_group.required_traits
             forbidden_traits = request_group.forbidden_traits
             aggregates = request_group.aggregates
+            in_tree = request_group.in_tree
+            forbidden_aggregates = request_group.forbidden_aggregates
 
             resource_query = ",".join(
                 sorted("%s:%s" % (rc, amount)
@@ -289,6 +410,14 @@ class ResourceRequest(object):
                     aggs.append(('member_of%s' % suffix,
                                  'in:' + ','.join(sorted(agglist))))
                 qs_params.extend(sorted(aggs))
+            if in_tree:
+                qs_params.append(('in_tree%s' % suffix, in_tree))
+            if forbidden_aggregates:
+                # member_ofN is a list of aggregate uuids. We need a
+                # tuple of ('member_ofN, '!in:uuid,uuid,...').
+                forbidden_aggs = '!in:' + ','.join(
+                    sorted(forbidden_aggregates))
+                qs_params.append(('member_of%s' % suffix, forbidden_aggs))
             return qs_params
 
         if self._limit is not None:
@@ -297,32 +426,26 @@ class ResourceRequest(object):
             qparams = []
         if self._group_policy is not None:
             qparams.append(('group_policy', self._group_policy))
-        nr_of_numbered_groups = 0
+
         for ident, rg in self._rg_by_id.items():
             # [('resourcesN', 'rclass:amount,rclass:amount,...'),
             #  ('requiredN', 'trait_name,!trait_name,...'),
             #  ('member_ofN', 'in:uuid,uuid,...'),
             #  ('member_ofN', 'in:uuid,uuid,...')]
             qparams.extend(to_queryparams(rg, ident or ''))
-            if ident:
-                nr_of_numbered_groups += 1
-        if nr_of_numbered_groups >= 2 and not self._group_policy:
-            # we know this will fail in placement so help the troubleshooting
-            LOG.warning(
-                "There is more than one numbered request group in the "
-                "allocation candidate query but the flavor did not specify "
-                "any group policy. This query will fail in placement due to "
-                "the missing group policy. If you specified more than one "
-                "numbered request group in the flavor extra_spec or booted "
-                "with more than one neutron port that has resource request "
-                "(i.e. the port has a QoS minimum bandwidth policy rule "
-                "attached) then you have to specify the group policy in the "
-                "flavor extra_spec. If it is OK to let these groups be "
-                "satisfied by overlapping resource providers then use "
-                "'group_policy': 'None'. If you want each group to be "
-                "satisfied from a separate resource provider then use "
-                "'group_policy': 'isolate'.")
+
         return parse.urlencode(sorted(qparams))
+
+    @property
+    def all_required_traits(self):
+        traits = set()
+        for rr in self._rg_by_id.values():
+            traits = traits.union(rr.required_traits)
+        return traits
+
+    def __str__(self):
+        return ', '.join(sorted(
+            list(str(rg) for rg in list(self._rg_by_id.values()))))
 
 
 def build_request_spec(image, instances, instance_type=None):
@@ -391,111 +514,134 @@ def resources_from_flavor(instance, flavor):
     """
     is_bfv = compute_utils.is_volume_backed_instance(instance._context,
                                                      instance)
-    swap_in_gb = compute_utils.convert_mb_to_ceil_gb(flavor.swap)
-    disk = ((0 if is_bfv else flavor.root_gb) +
-            swap_in_gb + flavor.ephemeral_gb)
+    # create a fake RequestSpec as a wrapper to the caller
+    req_spec = objects.RequestSpec(flavor=flavor, is_bfv=is_bfv)
 
-    resources = {
-        orc.VCPU: flavor.vcpus,
-        orc.MEMORY_MB: flavor.memory_mb,
-        orc.DISK_GB: disk,
-    }
-    if "extra_specs" in flavor:
-        # TODO(efried): This method is currently only used from places that
-        # assume the compute node is the only resource provider.  So for now,
-        # we just merge together all the resources specified in the flavor and
-        # pass them along.  This will need to be adjusted when nested and/or
-        # shared RPs are in play.
-        rreq = ResourceRequest.from_extra_specs(flavor.extra_specs)
-        resources = rreq.merged_resources(flavor_resources=resources)
+    # TODO(efried): This method is currently only used from places that
+    # assume the compute node is the only resource provider.  So for now, we
+    # just merge together all the resources specified in the flavor and pass
+    # them along.  This will need to be adjusted when nested and/or shared RPs
+    # are in play.
+    res_req = ResourceRequest(req_spec)
 
-    return resources
+    return res_req.merged_resources()
 
 
-def resources_from_request_spec(spec_obj):
+def resources_from_request_spec(ctxt, spec_obj, host_manager,
+        enable_pinning_translate=True):
     """Given a RequestSpec object, returns a ResourceRequest of the resources,
     traits, and aggregates it represents.
+
+    :param context: The request context.
+    :param spec_obj: A RequestSpec object.
+    :param host_manager: A HostManager object.
+    :param enable_pinning_translate: True if the CPU policy extra specs should
+        be translated to placement resources and traits.
+
+    :return: A ResourceRequest object.
+    :raises NoValidHost: If the specified host/node is not found in the DB.
     """
-    spec_resources = {
-        orc.VCPU: spec_obj.vcpus,
-        orc.MEMORY_MB: spec_obj.memory_mb,
-    }
-
-    requested_disk_mb = ((1024 * spec_obj.ephemeral_gb) +
-                         spec_obj.swap)
-
-    if 'is_bfv' not in spec_obj or not spec_obj.is_bfv:
-        # Either this is not a BFV instance, or we are not sure,
-        # so ask for root_gb allocation
-        requested_disk_mb += (1024 * spec_obj.root_gb)
-
-    # NOTE(sbauza): Disk request is expressed in MB but we count
-    # resources in GB. Since there could be a remainder of the division
-    # by 1024, we need to ceil the result to the next bigger Gb so we
-    # can be sure there would be enough disk space in the destination
-    # to sustain the request.
-    # FIXME(sbauza): All of that could be using math.ceil() but since
-    # we support both py2 and py3, let's fake it until we only support
-    # py3.
-    requested_disk_gb = requested_disk_mb // 1024
-    if requested_disk_mb % 1024 != 0:
-        # Let's ask for a bit more space since we count in GB
-        requested_disk_gb += 1
-    # NOTE(sbauza): Some flavors provide zero size for disk values, we need
-    # to avoid asking for disk usage.
-    if requested_disk_gb != 0:
-        spec_resources[orc.DISK_GB] = requested_disk_gb
-
-    # Process extra_specs
-    if "extra_specs" in spec_obj.flavor:
-        res_req = ResourceRequest.from_extra_specs(spec_obj.flavor.extra_specs)
-        # If any of the three standard resources above was explicitly given in
-        # the extra_specs - in any group - we need to replace it, or delete it
-        # if it was given as zero.  We'll do this by grabbing a merged version
-        # of the ResourceRequest resources and removing matching items from the
-        # spec_resources.
-        spec_resources = {rclass: amt for rclass, amt in spec_resources.items()
-                          if rclass not in res_req.merged_resources()}
-        # Now we don't need (or want) any remaining zero entries - remove them.
-        res_req.strip_zeros()
-    else:
-        # Start with an empty one
-        res_req = ResourceRequest()
-
-    # Process any image properties
-    if 'image' in spec_obj and 'properties' in spec_obj.image:
-        res_req = ResourceRequest.from_image_props(spec_obj.image.properties,
-                                                   req=res_req)
-
-    # Add the (remaining) items from the spec_resources to the sharing group
-    for rclass, amount in spec_resources.items():
-        res_req.get_request_group(None).resources[rclass] = amount
+    res_req = ResourceRequest(spec_obj, enable_pinning_translate)
 
     requested_resources = (spec_obj.requested_resources
-                           if 'requested_resources' in spec_obj
-                              and spec_obj.requested_resources
+                           if 'requested_resources' in spec_obj and
+                              spec_obj.requested_resources
                            else [])
     for group in requested_resources:
         res_req.add_request_group(group)
 
+    # values to get the destination target compute uuid
+    target_host = None
+    target_node = None
+    target_cell = None
+
     if 'requested_destination' in spec_obj:
         destination = spec_obj.requested_destination
-        if destination and destination.aggregates:
-            grp = res_req.get_request_group(None)
-            grp.aggregates = [ored.split(',')
-                              for ored in destination.aggregates]
+        if destination:
+            if 'host' in destination:
+                target_host = destination.host
+            if 'node' in destination:
+                target_node = destination.node
+            if 'cell' in destination:
+                target_cell = destination.cell
+            if destination.aggregates:
+                grp = res_req.get_request_group(None)
+                # If the target must be either in aggA *or* in aggB and must
+                # definitely be in aggC, the  destination.aggregates would be
+                #     ['aggA,aggB', 'aggC']
+                # Here we are converting it to
+                #     [['aggA', 'aggB'], ['aggC']]
+                grp.aggregates = [ored.split(',')
+                                  for ored in destination.aggregates]
+            if destination.forbidden_aggregates:
+                grp = res_req.get_request_group(None)
+                grp.forbidden_aggregates |= destination.forbidden_aggregates
 
-    # Don't limit allocation candidates when using force_hosts or force_nodes.
     if 'force_hosts' in spec_obj and spec_obj.force_hosts:
-        res_req._limit = None
+        # Prioritize the value from requested_destination just in case
+        # so that we don't inadvertently overwrite it to the old value
+        # of force_hosts persisted in the DB
+        target_host = target_host or spec_obj.force_hosts[0]
+
     if 'force_nodes' in spec_obj and spec_obj.force_nodes:
-        res_req._limit = None
+        # Prioritize the value from requested_destination just in case
+        # so that we don't inadvertently overwrite it to the old value
+        # of force_nodes persisted in the DB
+        target_node = target_node or spec_obj.force_nodes[0]
+
+    if target_host or target_node:
+        nodes = host_manager.get_compute_nodes_by_host_or_node(
+            ctxt, target_host, target_node, cell=target_cell)
+        if not nodes:
+            reason = (_('No such host - host: %(host)s node: %(node)s ') %
+                      {'host': target_host, 'node': target_node})
+            raise exception.NoValidHost(reason=reason)
+        if len(nodes) == 1:
+            if 'requested_destination' in spec_obj and destination:
+                # When we only supply hypervisor_hostname in api to create a
+                # server, the destination object will only include the node.
+                # Here when we get one node, we set both host and node to
+                # destination object. So we can reduce the number of HostState
+                # objects to run through the filters.
+                destination.host = nodes[0].host
+                destination.node = nodes[0].hypervisor_hostname
+            grp = res_req.get_request_group(None)
+            grp.in_tree = nodes[0].uuid
+        else:
+            # Multiple nodes are found when a target host is specified
+            # without a specific node. Since placement doesn't support
+            # multiple uuids in the `in_tree` queryparam, what we can do here
+            # is to remove the limit from the `GET /a_c` query to prevent
+            # the found nodes from being filtered out in placement.
+            res_req._limit = None
 
     # Don't limit allocation candidates when using affinity/anti-affinity.
     if ('scheduler_hints' in spec_obj and any(
         key in ['group', 'same_host', 'different_host']
         for key in spec_obj.scheduler_hints)):
         res_req._limit = None
+
+    if res_req.get_num_of_numbered_groups() >= 2 and not res_req.group_policy:
+        LOG.warning(
+            "There is more than one numbered request group in the "
+            "allocation candidate query but the flavor did not specify "
+            "any group policy. This query would fail in placement due to "
+            "the missing group policy. If you specified more than one "
+            "numbered request group in the flavor extra_spec then you need to "
+            "specify the group policy in the flavor extra_spec. If it is OK "
+            "to let these groups be satisfied by overlapping resource "
+            "providers then use 'group_policy': 'none'. If you want each "
+            "group to be satisfied from a separate resource provider then "
+            "use 'group_policy': 'isolate'.")
+
+        if res_req.numbered_groups_from_flavor <= 1:
+            LOG.info(
+                "At least one numbered request group is defined outside of "
+                "the flavor (e.g. in a port that has a QoS minimum bandwidth "
+                "policy rule attached) but the flavor did not specify any "
+                "group policy. To avoid the placement failure nova defaults "
+                "the group policy to 'none'.")
+            res_req.group_policy = 'none'
 
     return res_req
 
@@ -536,6 +682,9 @@ def claim_resources_on_destination(
                                      consumer
     """
     # Get the current allocations for the source node and the instance.
+    # NOTE(gibi) For the live migrate case, the caller provided the
+    # allocation that needs to be used on the dest_node along with the
+    # expected consumer_generation of the consumer (which is the instance).
     if not source_allocations:
         # NOTE(gibi): This is the forced evacuate case where the caller did not
         # provide any allocation request. So we ask placement here for the
@@ -551,80 +700,69 @@ def claim_resources_on_destination(
             context, instance.uuid)
         source_allocations = allocations.get('allocations', {})
         consumer_generation = allocations.get('consumer_generation')
-    else:
-        # NOTE(gibi) This is the live migrate case. The caller provided the
-        # allocation that needs to be used on the dest_node along with the
-        # expected consumer_generation of the consumer (which is the instance).
-        pass
 
-    if source_allocations:
-        # Generate an allocation request for the destination node.
-        # NOTE(gibi): if the source allocation allocates from more than one RP
-        # then we need to fail as the dest allocation might also need to be
-        # complex (e.g. nested) and we cannot calculate that allocation request
-        # properly without a placement allocation candidate call.
-        # Alternatively we could sum up the source allocation and try to
-        # allocate that from the root RP of the dest host. It would only work
-        # if the dest host would not require nested allocation for this server
-        # which is really a rare case.
-        if len(source_allocations) > 1:
-            reason = (_('Unable to move instance %(instance_uuid)s to '
-                        'host %(host)s. The instance has complex allocations '
-                        'on the source host so move cannot be forced.') %
-                      {'instance_uuid': instance.uuid,
-                       'host': dest_node.host})
-            raise exception.NoValidHost(reason=reason)
-        alloc_request = {
-            'allocations': {
-                dest_node.uuid: {
-                    'resources':
-                        source_allocations[source_node.uuid]['resources']}
-            },
-        }
-        # import locally to avoid cyclic import
-        from nova.scheduler.client import report
-        # The claim_resources method will check for existing allocations
-        # for the instance and effectively "double up" the allocations for
-        # both the source and destination node. That's why when requesting
-        # allocations for resources on the destination node before we move,
-        # we use the existing resource allocations from the source node.
-        if reportclient.claim_resources(
-                context, instance.uuid, alloc_request,
-                instance.project_id, instance.user_id,
-                allocation_request_version=report.CONSUMER_GENERATION_VERSION,
-                consumer_generation=consumer_generation):
-            LOG.debug('Instance allocations successfully created on '
-                      'destination node %(dest)s: %(alloc_request)s',
-                      {'dest': dest_node.uuid,
-                       'alloc_request': alloc_request},
-                      instance=instance)
-        else:
-            # We have to fail even though the user requested that we force
-            # the host. This is because we need Placement to have an
-            # accurate reflection of what's allocated on all nodes so the
-            # scheduler can make accurate decisions about which nodes have
-            # capacity for building an instance. We also cannot rely on the
-            # resource tracker in the compute service automatically healing
-            # the allocations since that code is going away in Queens.
-            reason = (_('Unable to move instance %(instance_uuid)s to '
-                        'host %(host)s. There is not enough capacity on '
-                        'the host for the instance.') %
-                      {'instance_uuid': instance.uuid,
-                       'host': dest_node.host})
-            raise exception.NoValidHost(reason=reason)
+        if not source_allocations:
+            # This shouldn't happen, so just raise an error since we cannot
+            # proceed.
+            raise exception.ConsumerAllocationRetrievalFailed(
+                consumer_uuid=instance.uuid,
+                error=_(
+                    'Expected to find allocations for source node resource '
+                    'provider %s. Retry the operation without forcing a '
+                    'destination host.') % source_node.uuid)
+
+    # Generate an allocation request for the destination node.
+    # NOTE(gibi): if the source allocation allocates from more than one RP
+    # then we need to fail as the dest allocation might also need to be
+    # complex (e.g. nested) and we cannot calculate that allocation request
+    # properly without a placement allocation candidate call.
+    # Alternatively we could sum up the source allocation and try to
+    # allocate that from the root RP of the dest host. It would only work
+    # if the dest host would not require nested allocation for this server
+    # which is really a rare case.
+    if len(source_allocations) > 1:
+        reason = (_('Unable to move instance %(instance_uuid)s to '
+                    'host %(host)s. The instance has complex allocations '
+                    'on the source host so move cannot be forced.') %
+                  {'instance_uuid': instance.uuid,
+                   'host': dest_node.host})
+        raise exception.NoValidHost(reason=reason)
+    alloc_request = {
+        'allocations': {
+            dest_node.uuid: {
+                'resources':
+                    source_allocations[source_node.uuid]['resources']}
+        },
+    }
+    # import locally to avoid cyclic import
+    from nova.scheduler.client import report
+    # The claim_resources method will check for existing allocations
+    # for the instance and effectively "double up" the allocations for
+    # both the source and destination node. That's why when requesting
+    # allocations for resources on the destination node before we move,
+    # we use the existing resource allocations from the source node.
+    if reportclient.claim_resources(
+            context, instance.uuid, alloc_request,
+            instance.project_id, instance.user_id,
+            allocation_request_version=report.CONSUMER_GENERATION_VERSION,
+            consumer_generation=consumer_generation):
+        LOG.debug('Instance allocations successfully created on '
+                  'destination node %(dest)s: %(alloc_request)s',
+                  {'dest': dest_node.uuid,
+                   'alloc_request': alloc_request},
+                  instance=instance)
     else:
-        # This shouldn't happen, but it could be a case where there are
-        # older (Ocata) computes still so the existing allocations are
-        # getting overwritten by the update_available_resource periodic
-        # task in the compute service.
-        # TODO(mriedem): Make this an error when the auto-heal
-        # compatibility code in the resource tracker is removed.
-        LOG.warning('No instance allocations found for source node '
-                    '%(source)s in Placement. Not creating allocations '
-                    'for destination node %(dest)s and assuming the '
-                    'compute service will heal the allocations.',
-                    {'source': source_node.uuid, 'dest': dest_node.uuid},
-                    instance=instance)
+        # We have to fail even though the user requested that we force
+        # the host. This is because we need Placement to have an
+        # accurate reflection of what's allocated on all nodes so the
+        # scheduler can make accurate decisions about which nodes have
+        # capacity for building an instance.
+        reason = (_('Unable to move instance %(instance_uuid)s to '
+                    'host %(host)s. There is not enough capacity on '
+                    'the host for the instance.') %
+                  {'instance_uuid': instance.uuid,
+                   'host': dest_node.host})
+        raise exception.NoValidHost(reason=reason)
 
 
 def set_vm_state_and_notify(context, instance_uuid, service, method, updates,
@@ -891,13 +1029,11 @@ def _get_group_details(context, instance_uuid, user_group_hosts=None):
             msg = _("ServerGroupSoftAffinityWeigher not configured")
             LOG.error(msg)
             raise exception.UnsupportedPolicyException(reason=msg)
-        if (not _SUPPORTS_SOFT_ANTI_AFFINITY
-                and 'soft-anti-affinity' == group.policy):
+        if (not _SUPPORTS_SOFT_ANTI_AFFINITY and
+                'soft-anti-affinity' == group.policy):
             msg = _("ServerGroupSoftAntiAffinityWeigher not configured")
             LOG.error(msg)
             raise exception.UnsupportedPolicyException(reason=msg)
-        # NOTE(melwitt): If the context is already targeted to a cell (during a
-        # move operation), we don't need to scatter-gather.
         group_hosts = set(group.get_hosts())
         user_hosts = set(user_group_hosts) if user_group_hosts else set()
         return GroupDetails(hosts=user_hosts | group_hosts,
@@ -1062,3 +1198,83 @@ def get_weight_multiplier(host_state, multiplier_name, multiplier_config):
         value = multiplier_config
 
     return value
+
+
+def fill_provider_mapping(
+        context, report_client, request_spec, host_selection):
+    """Fills out the request group - resource provider mapping in the
+    request spec.
+
+    This is a workaround as placement does not return which RP
+    fulfills which granular request group in the allocation candidate
+    request. There is a spec proposing a solution in placement:
+    https://review.opendev.org/#/c/597601/
+    When that spec is implemented then this function can be
+    replaced with a simpler code that copies the group - RP
+    mapping out from the Selection object returned by the scheduler's
+    select_destinations call.
+
+    :param context: The security context
+    :param report_client: SchedulerReportClient instance to be used to
+        communicate with placement
+    :param request_spec: The RequestSpec object associated with the
+        operation
+    :param host_selection: The Selection object returned by the scheduler
+        for this operation
+    """
+    # Exit early if this request spec does not require mappings.
+    if not request_spec.maps_requested_resources:
+        return
+
+    # Technically out-of-tree scheduler drivers can still not create
+    # allocations in placement but if request_spec.maps_requested_resources
+    # is not empty and the scheduling succeeded then placement has to be
+    # involved
+    ar = jsonutils.loads(host_selection.allocation_request)
+    allocs = ar['allocations']
+
+    fill_provider_mapping_based_on_allocation(
+        context, report_client, request_spec, allocs)
+
+
+def fill_provider_mapping_based_on_allocation(
+        context, report_client, request_spec, allocation):
+    """Fills out the request group - resource provider mapping in the
+    request spec based on the current allocation of the instance.
+
+    The fill_provider_mapping() variant is expected to be called in every
+    scenario when a Selection object is available from the scheduler. However
+    in case of revert operations such Selection does not exists. In this case
+    the mapping is calculated based on the allocation of the source host the
+    move operation is reverting to.
+
+    :param context: The security context
+    :param report_client: SchedulerReportClient instance to be used to
+        communicate with placement
+    :param request_spec: The RequestSpec object associated with the
+        operation
+    :param allocation: allocation dict of the instance, keyed by RP UUID.
+    """
+
+    # Exit early if this request spec does not require mappings.
+    if not request_spec.maps_requested_resources:
+        return
+
+    # NOTE(gibi): Getting traits from placement for each instance in a
+    # instance multi-create scenario is unnecessarily expensive. But
+    # instance multi-create cannot be used with pre-created neutron ports
+    # and this code can only be triggered with such pre-created ports so
+    # instance multi-create is not an issue. If this ever become an issue
+    # in the future then we could stash the RP->traits mapping on the
+    # Selection object since we can pull the traits for each provider from
+    # the GET /allocation_candidates response in the scheduler (or leverage
+    # the change from the spec mentioned in the docstring above).
+    provider_traits = {
+        rp_uuid: report_client.get_provider_traits(
+            context, rp_uuid).traits
+        for rp_uuid in allocation}
+    # NOTE(gibi): The allocation dict is in the format of the PUT /allocations
+    # and that format can change. The current format can be detected from
+    # allocation_request_version key of the Selection object.
+    request_spec.map_requested_resources_to_providers(
+        allocation, provider_traits)

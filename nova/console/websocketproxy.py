@@ -23,6 +23,7 @@ import sys
 
 from oslo_log import log as logging
 from oslo_utils import encodeutils
+from oslo_utils import importutils
 import six
 from six.moves import http_cookies as Cookie
 import six.moves.urllib.parse as urlparse
@@ -30,11 +31,13 @@ import websockify
 
 from nova.compute import rpcapi as compute_rpcapi
 import nova.conf
-from nova.consoleauth import rpcapi as consoleauth_rpcapi
 from nova import context
 from nova import exception
 from nova.i18n import _
 from nova import objects
+
+# Location of WebSockifyServer class in websockify v0.9.0
+websockifyserver = importutils.try_import('websockify.websockifyserver')
 
 LOG = logging.getLogger(__name__)
 
@@ -96,13 +99,14 @@ class NovaProxyRequestHandlerBase(object):
         # deployments due to DNS configuration and break VNC access completely
         return str(self.client_address[0])
 
-    def verify_origin_proto(self, connection_info, origin_proto):
-        access_url = connection_info.get('access_url')
-        if not access_url:
-            detail = _("No access_url in connection_info. "
-                        "Cannot validate protocol")
+    def verify_origin_proto(self, connect_info, origin_proto):
+        if 'access_url_base' not in connect_info:
+            detail = _("No access_url_base in connect_info. "
+                       "Cannot validate protocol")
             raise exception.ValidationError(detail=detail)
-        expected_protos = [urlparse.urlparse(access_url).scheme]
+
+        expected_protos = [
+            urlparse.urlparse(connect_info.access_url_base).scheme]
         # NOTE: For serial consoles the expected protocol could be ws or
         # wss which correspond to http and https respectively in terms of
         # security.
@@ -125,51 +129,19 @@ class NovaProxyRequestHandlerBase(object):
                                                          str(port),
                                                          console_type)
 
-    def _get_connect_info_consoleauth(self, ctxt, token):
-        # NOTE(PaulMurray) consoleauth check_token() validates the token
-        # and does an rpc to compute manager to check the console port
-        # is correct.
-        rpcapi = consoleauth_rpcapi.ConsoleAuthAPI()
-        return rpcapi.check_token(ctxt, token=token)
-
-    def _get_connect_info_database(self, ctxt, token):
+    def _get_connect_info(self, ctxt, token):
+        """Validate the token and get the connect info."""
         # NOTE(PaulMurray) ConsoleAuthToken.validate validates the token.
         # We call the compute manager directly to check the console port
         # is correct.
-        connect_info = objects.ConsoleAuthToken.validate(ctxt, token).to_dict()
+        connect_info = objects.ConsoleAuthToken.validate(ctxt, token)
 
         valid_port = self._check_console_port(
-            ctxt, connect_info['instance_uuid'], connect_info['port'],
-            connect_info['console_type'])
+            ctxt, connect_info.instance_uuid, connect_info.port,
+            connect_info.console_type)
 
         if not valid_port:
             raise exception.InvalidToken(token='***')
-
-        return connect_info
-
-    def _get_connect_info(self, ctxt, token):
-        """Validate the token and get the connect info."""
-        connect_info = None
-        # NOTE(PaulMurray) if we are using cells v1, we use the old consoleauth
-        # way of doing things. The database backend is not supported for cells
-        # v1.
-        if CONF.cells.enable:
-            connect_info = self._get_connect_info_consoleauth(ctxt, token)
-            if not connect_info:
-                raise exception.InvalidToken(token='***')
-        else:
-            # NOTE(melwitt): If consoleauth is enabled to aid in transitioning
-            # to the database backend, check it first before falling back to
-            # the database. Tokens that existed pre-database-backend will
-            # reside in the consoleauth service storage.
-            if CONF.workarounds.enable_consoleauth:
-                connect_info = self._get_connect_info_consoleauth(ctxt, token)
-            # If consoleauth is enabled to aid in transitioning to the database
-            # backend and we didn't find a token in the consoleauth service
-            # storage, check the database for a token because it's probably a
-            # post-database-backend token, which are stored in the database.
-            if not connect_info:
-                connect_info = self._get_connect_info_database(ctxt, token)
 
         return connect_info
 
@@ -249,8 +221,8 @@ class NovaProxyRequestHandlerBase(object):
                 raise exception.ValidationError(detail=detail)
 
         self.msg(_('connect info: %s'), str(connect_info))
-        host = connect_info['host']
-        port = int(connect_info['port'])
+        host = connect_info.host
+        port = connect_info.port
 
         # Connect to the target
         self.msg(_("connecting to: %(host)s:%(port)s") % {'host': host,
@@ -258,20 +230,21 @@ class NovaProxyRequestHandlerBase(object):
         tsock = self.socket(host, port, connect=True)
 
         # Handshake as necessary
-        if connect_info.get('internal_access_path'):
-            tsock.send(encodeutils.safe_encode(
-                "CONNECT %s HTTP/1.1\r\n\r\n" %
-                connect_info['internal_access_path']))
-            end_token = "\r\n\r\n"
-            while True:
-                data = tsock.recv(4096, socket.MSG_PEEK)
-                token_loc = data.find(end_token)
-                if token_loc != -1:
-                    if data.split("\r\n")[0].find("200") == -1:
-                        raise exception.InvalidConnectionInfo()
-                    # remove the response from recv buffer
-                    tsock.recv(token_loc + len(end_token))
-                    break
+        if 'internal_access_path' in connect_info:
+            path = connect_info.internal_access_path
+            if path:
+                tsock.send(encodeutils.safe_encode(
+                    'CONNECT %s HTTP/1.1\r\n\r\n' % path))
+                end_token = "\r\n\r\n"
+                while True:
+                    data = tsock.recv(4096, socket.MSG_PEEK)
+                    token_loc = data.find(end_token)
+                    if token_loc != -1:
+                        if data.split("\r\n")[0].find("200") == -1:
+                            raise exception.InvalidConnectionInfo()
+                        # remove the response from recv buffer
+                        tsock.recv(token_loc + len(end_token))
+                        break
 
         if self.server.security_proxy is not None:
             tenant_sock = TenantSock(self)
@@ -317,7 +290,16 @@ class NovaProxyRequestHandler(NovaProxyRequestHandlerBase,
         return self._compute_rpcapi
 
     def socket(self, *args, **kwargs):
-        return websockify.WebSocketServer.socket(*args, **kwargs)
+        # TODO(melwitt): The try_import and if-else condition can be removed
+        # when we get to the point where we're requiring at least websockify
+        # v.0.9.0 in our lower-constraints.
+        if websockifyserver is not None:
+            # In websockify v0.9.0, the 'socket' method moved to the
+            # websockify.websockifyserver.WebSockifyServer class.
+            return websockifyserver.WebSockifyServer.socket(*args, **kwargs)
+        else:
+            # Fall back to the websockify <= v0.8.0 'socket' method location.
+            return websockify.WebSocketServer.socket(*args, **kwargs)
 
 
 class NovaWebSocketProxy(websockify.WebSocketProxy):

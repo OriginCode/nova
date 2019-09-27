@@ -258,10 +258,19 @@ class MetadataRequestHandler(wsgi.Application):
             self._validate_shared_secret(provider_id, signature,
                                          instance_address)
 
-        instance_id, tenant_id = self._get_instance_id_from_lb(
-            provider_id, instance_address)
-        LOG.debug('Instance %s with address %s matches provider %s',
-                  instance_id, remote_address, provider_id)
+        cache_key = 'provider-%s-%s' % (provider_id, instance_address)
+        data = self._cache.get(cache_key)
+        if data:
+            LOG.debug("Using cached metadata for %s for %s",
+                      provider_id, instance_address)
+            instance_id, tenant_id = data
+        else:
+            instance_id, tenant_id = self._get_instance_id_from_lb(
+                provider_id, instance_address)
+            if CONF.api.metadata_cache_expiration > 0:
+                self._cache.set(cache_key, (instance_id, tenant_id))
+            LOG.debug('Instance %s with address %s matches provider %s',
+                      instance_id, remote_address, provider_id)
         return self._get_meta_by_instance_id(instance_id, tenant_id,
                                              instance_address)
 
@@ -271,8 +280,8 @@ class MetadataRequestHandler(wsgi.Application):
             encodeutils.to_utf8(CONF.neutron.metadata_proxy_shared_secret),
             encodeutils.to_utf8(requestor_id),
             hashlib.sha256).hexdigest()
-
-        if not secutils.constant_time_compare(expected_signature, signature):
+        if (not signature or
+            not secutils.constant_time_compare(expected_signature, signature)):
             if requestor_id:
                 LOG.warning('X-Instance-ID-Signature: %(signature)s does '
                             'not match the expected value: '
@@ -283,7 +292,6 @@ class MetadataRequestHandler(wsgi.Application):
                              'expected_signature': expected_signature,
                              'requestor_id': requestor_id,
                              'requestor_address': requestor_address})
-
             msg = _('Invalid proxy request signature.')
             raise webob.exc.HTTPForbidden(explanation=msg)
 

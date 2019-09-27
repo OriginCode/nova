@@ -12,19 +12,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-__all__ = [
-    'init',
-    'cleanup',
-    'set_defaults',
-    'add_extra_exmods',
-    'clear_extra_exmods',
-    'get_allowed_exmods',
-    'RequestContextSerializer',
-    'get_client',
-    'get_server',
-    'get_notifier',
-]
-
 import functools
 
 from oslo_log import log as logging
@@ -40,6 +27,19 @@ import nova.context
 import nova.exception
 from nova.i18n import _
 
+__all__ = [
+    'init',
+    'cleanup',
+    'set_defaults',
+    'add_extra_exmods',
+    'clear_extra_exmods',
+    'get_allowed_exmods',
+    'RequestContextSerializer',
+    'get_client',
+    'get_server',
+    'get_notifier',
+]
+
 profiler = importutils.try_import("osprofiler.profiler")
 
 
@@ -47,6 +47,7 @@ CONF = nova.conf.CONF
 
 LOG = logging.getLogger(__name__)
 
+# TODO(stephenfin): These should be private
 TRANSPORT = None
 LEGACY_NOTIFIER = None
 NOTIFICATION_TRANSPORT = None
@@ -431,9 +432,7 @@ class ClientRouter(periodic_task.PeriodicTasks):
         self.default_client = default_client
         self.target = default_client.target
         self.version_cap = default_client.version_cap
-        # NOTE(melwitt): Cells v1 does its own serialization and won't
-        # have a serializer available on the client object.
-        self.serializer = getattr(default_client, 'serializer', None)
+        self.serializer = default_client.serializer
 
     def client(self, context):
         transport = context.mq_connection

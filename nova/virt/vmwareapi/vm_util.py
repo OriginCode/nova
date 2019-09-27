@@ -138,13 +138,6 @@ def vm_ref_cache_from_instance(func):
     return wrapper
 
 
-def vm_ref_cache_from_name(func):
-    @functools.wraps(func)
-    def wrapper(session, name):
-        id = name
-        return _vm_ref_cache(id, func, session, name)
-    return wrapper
-
 # the config key which stores the VNC port
 VNC_CONFIG_KEY = 'config.extraConfig["RemoteDisplay.vnc.port"]'
 
@@ -1142,12 +1135,6 @@ def _get_vm_ref_from_name(session, vm_name):
                                     _get_object_for_value)
 
 
-@vm_ref_cache_from_name
-def get_vm_ref_from_name(session, vm_name):
-    return (_get_vm_ref_from_vm_uuid(session, vm_name) or
-            _get_vm_ref_from_name(session, vm_name))
-
-
 def _get_vm_ref_from_vm_uuid(session, instance_uuid):
     """Get reference to the VM.
 
@@ -1644,23 +1631,6 @@ def get_swap(session, vm_ref):
                     "VirtualDiskFlatVer2BackingInfo" and
                 'swap' in device.backing.fileName):
             return device
-
-
-def _get_folder(session, parent_folder_ref, name):
-    # Get list of child entities for the parent folder
-    prop_val = session._call_method(vutil, 'get_object_property',
-                                    parent_folder_ref,
-                                    'childEntity')
-    if prop_val:
-        child_entities = prop_val.ManagedObjectReference
-
-        # Return if the child folder with input name is already present
-        for child_entity in child_entities:
-            if child_entity._type != 'Folder':
-                continue
-            child_entity_name = vim_util.get_entity_name(session, child_entity)
-            if child_entity_name == name:
-                return child_entity
 
 
 def create_folder(session, parent_folder_ref, name):

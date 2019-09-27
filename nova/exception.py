@@ -187,6 +187,10 @@ class Invalid(NovaException):
     code = 400
 
 
+class InvalidConfiguration(Invalid):
+    msg_fmt = _("Configuration is Invalid.")
+
+
 class InvalidBDM(Invalid):
     msg_fmt = _("Block Device Mapping is Invalid.")
 
@@ -275,14 +279,6 @@ class MultiattachNotSupportedByVirtDriver(NovaException):
     # eventually support multiattach volumes.
     msg_fmt = _("Volume %(volume_id)s has 'multiattach' set, "
                 "which is not supported for this instance.")
-    code = 409
-
-
-class MultiattachSupportNotYetAvailable(NovaException):
-    # This exception indicates the deployment is not yet new enough to support
-    # multiattach volumes, so a 409 HTTPConflict response is generally used
-    # for handling this in the API.
-    msg_fmt = _("Multiattach volume support is not yet available.")
     code = 409
 
 
@@ -537,6 +533,12 @@ class UnableToMigrateToSelf(Invalid):
                 "to current host (%(host)s).")
 
 
+class OperationNotSupportedForSEV(NovaException):
+    msg_fmt = _("Operation '%(operation)s' not supported for SEV-enabled "
+                "instance (%(instance_uuid)s).")
+    code = 409
+
+
 class InvalidHypervisorType(Invalid):
     msg_fmt = _("The supplied hypervisor type of is invalid.")
 
@@ -615,10 +617,6 @@ class ImageBadRequest(Invalid):
 
 class InstanceUnacceptable(Invalid):
     msg_fmt = _("Instance %(instance_id)s is unacceptable: %(reason)s")
-
-
-class InvalidEc2Id(Invalid):
-    msg_fmt = _("Ec2 id %(ec2_id)s is unacceptable.")
 
 
 class InvalidUUID(Invalid):
@@ -865,7 +863,7 @@ class VifDetailsMissingMacvtapParameters(Invalid):
                 " correct.")
 
 
-class OvsConfigurationFailure(NovaException):
+class OVSConfigurationFailure(NovaException):
     msg_fmt = _("OVS configuration failed with: %(inner_exception)s.")
 
 
@@ -1278,40 +1276,8 @@ class FlavorExtraSpecUpdateCreateFailed(NovaException):
                 "after %(retries)d retries.")
 
 
-class CellNotFound(NotFound):
-    msg_fmt = _("Cell %(cell_name)s doesn't exist.")
-
-
-class CellExists(NovaException):
-    msg_fmt = _("Cell with name %(name)s already exists.")
-
-
-class CellRoutingInconsistency(NovaException):
-    msg_fmt = _("Inconsistency in cell routing: %(reason)s")
-
-
-class CellServiceAPIMethodNotFound(NotFound):
-    msg_fmt = _("Service API method not found: %(detail)s")
-
-
 class CellTimeout(NotFound):
     msg_fmt = _("Timeout waiting for response from cell")
-
-
-class CellMaxHopCountReached(NovaException):
-    msg_fmt = _("Cell message has reached maximum hop count: %(hop_count)s")
-
-
-class NoCellsAvailable(NovaException):
-    msg_fmt = _("No cells available matching scheduling criteria.")
-
-
-class CellsUpdateUnsupported(NovaException):
-    msg_fmt = _("Cannot update cells configuration file.")
-
-
-class InstanceUnknownCell(NotFound):
-    msg_fmt = _("Cell is not known for instance %(instance_uuid)s")
 
 
 class SchedulerHostFilterNotFound(NotFound):
@@ -1903,6 +1869,19 @@ class UnshelveException(NovaException):
     msg_fmt = _("Error during unshelve instance %(instance_id)s: %(reason)s")
 
 
+class MismatchVolumeAZException(Invalid):
+    msg_fmt = _("The availability zone between the server and its attached "
+                "volumes do not match: %(reason)s.")
+    code = 409
+
+
+class UnshelveInstanceInvalidState(InstanceInvalidState):
+    msg_fmt = _('Specifying an availability zone when unshelving server '
+                '%(instance_uuid)s with status "%(state)s" is not supported. '
+                'The server status must be SHELVED_OFFLOADED.')
+    code = 409
+
+
 class ImageVCPULimitsRangeExceeded(Invalid):
     msg_fmt = _('Image vCPU topology limits (sockets=%(image_sockets)d, '
                 'cores=%(image_cores)d, threads=%(image_threads)d) exceeds '
@@ -2004,6 +1983,11 @@ class InvalidHypervisorVirtType(Invalid):
                 "recognised")
 
 
+class InvalidMachineType(Invalid):
+    msg_fmt = _("Machine type '%(mtype)s' is not compatible with image "
+                "%(image_name)s (%(image_id)s): %(reason)s")
+
+
 class InvalidVirtualMachineMode(Invalid):
     msg_fmt = _("Virtual machine mode '%(vmmode)s' is not recognised")
 
@@ -2057,22 +2041,22 @@ class CPUPinningNotSupported(Invalid):
 
 class CPUPinningInvalid(Invalid):
     msg_fmt = _("CPU set to pin %(requested)s must be a subset of "
-                "free CPU set %(free)s")
+                "free CPU set %(available)s")
 
 
 class CPUUnpinningInvalid(Invalid):
     msg_fmt = _("CPU set to unpin %(requested)s must be a subset of "
-                "pinned CPU set %(pinned)s")
+                "pinned CPU set %(available)s")
 
 
 class CPUPinningUnknown(Invalid):
     msg_fmt = _("CPU set to pin %(requested)s must be a subset of "
-                "known CPU set %(cpuset)s")
+                "known CPU set %(available)s")
 
 
 class CPUUnpinningUnknown(Invalid):
     msg_fmt = _("CPU set to unpin %(requested)s must be a subset of "
-                "known CPU set %(cpuset)s")
+                "known CPU set %(available)s")
 
 
 class ImageCPUPinningForbidden(Forbidden):
@@ -2083,6 +2067,11 @@ class ImageCPUPinningForbidden(Forbidden):
 class ImageCPUThreadPolicyForbidden(Forbidden):
     msg_fmt = _("Image property 'hw_cpu_thread_policy' is not permitted to "
                 "override CPU thread pinning policy set against the flavor")
+
+
+class ImagePMUConflict(Forbidden):
+    msg_fmt = _("Image property 'hw_pmu' is not permitted to "
+                "override the PMU policy set in the flavor")
 
 
 class UnsupportedPolicyException(Invalid):
@@ -2111,6 +2100,10 @@ class UnsupportedImageModel(Invalid):
 
 class HostMappingNotFound(Invalid):
     msg_fmt = _("Host '%(name)s' is not mapped to any cell")
+
+
+class HostMappingExists(Invalid):
+    msg_fmt = _("Host '%(name)s' mapping already exists")
 
 
 class RealtimeConfigurationInvalid(Invalid):
@@ -2266,6 +2259,11 @@ class InventoryInUse(InvalidInventory):
     pass
 
 
+class UsagesRetrievalFailed(NovaException):
+    msg_fmt = _("Failed to retrieve usages for project '%(project_id)s' and "
+                "user '%(user_id)s'.")
+
+
 class UnsupportedPointerModelRequested(Invalid):
     msg_fmt = _("Pointer model '%(model)s' requested is not supported by "
                 "host.")
@@ -2406,12 +2404,6 @@ class CertificateValidationFailed(NovaException):
                 "certificate: %(cert_uuid)s. %(reason)s")
 
 
-class CertificateValidationNotYetAvailable(NovaException):
-    msg_fmt = _("Image signature certificate validation support is "
-                "not yet available.")
-    code = 409
-
-
 class InstanceRescueFailure(NovaException):
     msg_fmt = _("Failed to move instance to rescue mode: %(reason)s")
 
@@ -2467,3 +2459,81 @@ class ReshapeFailed(NovaException):
 class ReshapeNeeded(NovaException):
     msg_fmt = _("Virt driver indicates that provider inventories need to be "
                 "moved.")
+
+
+class FlavorImageConflict(NovaException):
+    msg_fmt = _("Conflicting values for %(setting)s found in the flavor "
+                "(%(flavor_val)s) and the image (%(image_val)s).")
+
+
+class MissingDomainCapabilityFeatureException(NovaException):
+    msg_fmt = _("Guest config could not be built without domain capabilities "
+                "including <%(feature)s> feature.")
+
+
+class HealPortAllocationException(NovaException):
+    msg_fmt = _("Healing port allocation failed.")
+
+
+class MoreThanOneResourceProviderToHealFrom(HealPortAllocationException):
+    msg_fmt = _("More than one matching resource provider %(rp_uuids)s is "
+                "available for healing the port allocation for port "
+                "%(port_id)s for instance %(instance_uuid)s. This script "
+                "does not have enough information to select the proper "
+                "resource provider from which to heal.")
+
+
+class NoResourceProviderToHealFrom(HealPortAllocationException):
+    msg_fmt = _("No matching resource provider is "
+                "available for healing the port allocation for port "
+                "%(port_id)s for instance %(instance_uuid)s. There are no "
+                "resource providers with matching traits %(traits)s in the "
+                "provider tree of the resource provider %(node_uuid)s ."
+                "This probably means that the neutron QoS configuration is "
+                "wrong. Consult with "
+                "https://docs.openstack.org/neutron/latest/admin/"
+                "config-qos-min-bw.html for information on how to configure "
+                "neutron. If the configuration is fixed the script can be run "
+                "again.")
+
+
+class UnableToQueryPorts(HealPortAllocationException):
+    msg_fmt = _("Unable to query ports for instance %(instance_uuid)s: "
+                "%(error)s")
+
+
+class UnableToUpdatePorts(HealPortAllocationException):
+    msg_fmt = _("Unable to update ports with allocations that are about to be "
+                "created in placement: %(error)s. The healing of the "
+                "instance is aborted. It is safe to try to heal the instance "
+                "again.")
+
+
+class UnableToRollbackPortUpdates(HealPortAllocationException):
+    msg_fmt = _("Failed to update neutron ports with allocation keys and the "
+                "automatic rollback of the previously successful port updates "
+                "also failed: %(error)s. Make sure that the "
+                "binding:profile.allocation key of the affected ports "
+                "%(port_uuids)s are manually cleaned in neutron according to "
+                "document https://docs.openstack.org/nova/latest/cli/"
+                "nova-manage.html#placement. If you re-run the script without "
+                "the manual fix then the missing allocation for these ports "
+                "will not be healed in placement.")
+
+
+class AssignedResourceNotFound(NovaException):
+    msg_fmt = _("Assigned resources not found: %(reason)s")
+
+
+class PMEMNamespaceConfigInvalid(NovaException):
+    msg_fmt = _("The pmem_namespaces configuration is invalid: %(reason)s, "
+                "please check your conf file. ")
+
+
+class GetPMEMNamespaceFailed(NovaException):
+    msg_fmt = _("Get PMEM namespaces on host failed: %(reason)s.")
+
+
+class VPMEMCleanupFailed(NovaException):
+    msg_fmt = _("Failed to clean up the vpmem backend device %(dev)s: "
+                "%(error)s")

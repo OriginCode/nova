@@ -166,17 +166,9 @@ Install and configure components
 
 #. Install the packages:
 
-   .. note:: ``nova-consoleauth`` is deprecated since 18.0.0 (Rocky) and will
-             be removed in an upcoming release. Console proxies should be
-             deployed per cell. If performing a fresh install (not an upgrade),
-             then you likely do not need to install the ``nova-consoleauth``
-             service. See
-             :oslo.config:option:`workarounds.enable_consoleauth` for details.
-
    .. code-block:: console
 
-      # apt install nova-api nova-conductor nova-consoleauth \
-        nova-novncproxy nova-scheduler
+      # apt install nova-api nova-conductor nova-novncproxy nova-scheduler
 
 #. Edit the ``/etc/nova/nova.conf`` file and complete the following actions:
 
@@ -204,7 +196,7 @@ Install and configure components
 
         [DEFAULT]
         # ...
-        transport_url = rabbit://openstack:RABBIT_PASS@controller
+        transport_url = rabbit://openstack:RABBIT_PASS@controller:5672/
 
      Replace ``RABBIT_PASS`` with the password you chose for the ``openstack``
      account in ``RabbitMQ``.
@@ -221,7 +213,8 @@ Install and configure components
 
         [keystone_authtoken]
         # ...
-        auth_url = http://controller:5000/v3
+        www_authenticate_uri = http://controller:5000/
+        auth_url = http://controller:5000/
         memcached_servers = controller:11211
         auth_type = password
         project_domain_name = Default
@@ -347,7 +340,6 @@ Install and configure components
    .. code-block:: console
 
       # su -s /bin/sh -c "nova-manage cell_v2 create_cell --name=cell1 --verbose" nova
-      109e1d4b-536a-40d0-83c6-5f121b82b650
 
 #. Populate the nova database:
 
@@ -360,12 +352,12 @@ Install and configure components
    .. code-block:: console
 
       # su -s /bin/sh -c "nova-manage cell_v2 list_cells" nova
-      +-------+--------------------------------------+
-      | Name  | UUID                                 |
-      +-------+--------------------------------------+
-      | cell1 | 109e1d4b-536a-40d0-83c6-5f121b82b650 |
-      | cell0 | 00000000-0000-0000-0000-000000000000 |
-      +-------+--------------------------------------+
+      +-------+--------------------------------------+----------------------------------------------------+--------------------------------------------------------------+----------+
+      |  Name |                 UUID                 |                   Transport URL                    |                     Database Connection                      | Disabled |
+      +-------+--------------------------------------+----------------------------------------------------+--------------------------------------------------------------+----------+
+      | cell0 | 00000000-0000-0000-0000-000000000000 |                       none:/                       | mysql+pymysql://nova:****@controller/nova_cell0?charset=utf8 |  False   |
+      | cell1 | f690f4fd-2bc5-4f15-8145-db561a7b9d3d | rabbit://openstack:****@controller:5672/nova_cell1 | mysql+pymysql://nova:****@controller/nova_cell1?charset=utf8 |  False   |
+      +-------+--------------------------------------+----------------------------------------------------+--------------------------------------------------------------+----------+
 
 Finalize installation
 ---------------------
@@ -375,9 +367,6 @@ Finalize installation
   .. code-block:: console
 
      # service nova-api restart
-     # service nova-consoleauth restart
      # service nova-scheduler restart
      # service nova-conductor restart
      # service nova-novncproxy restart
-
-  Note again that the ``nova-consoleauth`` service may not be necessary here.

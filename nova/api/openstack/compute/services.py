@@ -21,7 +21,7 @@ from nova.api.openstack.compute.schemas import services
 from nova.api.openstack import wsgi
 from nova.api import validation
 from nova import availability_zones
-from nova import compute
+from nova.compute import api as compute
 from nova import exception
 from nova.i18n import _
 from nova import objects
@@ -37,8 +37,9 @@ PARTIAL_CONSTRUCT_FOR_CELL_DOWN_MIN_VERSION = '2.69'
 class ServiceController(wsgi.Controller):
 
     def __init__(self):
+        super(ServiceController, self).__init__()
         self.host_api = compute.HostAPI()
-        self.aggregate_api = compute.api.AggregateAPI()
+        self.aggregate_api = compute.AggregateAPI()
         self.servicegroup_api = servicegroup.API()
         self.actions = {"enable": self._enable,
                         "disable": self._disable,
@@ -203,7 +204,8 @@ class ServiceController(wsgi.Controller):
             raise webob.exc.HTTPBadRequest(explanation=msg)
 
         try:
-            self.host_api.service_update(context, host, binary, payload)
+            self.host_api.service_update_by_host_and_binary(
+                context, host, binary, payload)
         except (exception.HostBinaryNotFound,
                 exception.HostMappingNotFound) as exc:
             raise webob.exc.HTTPNotFound(explanation=exc.format_message())
@@ -249,11 +251,9 @@ class ServiceController(wsgi.Controller):
                 # related compute_nodes record) delete since it will impact
                 # resource accounting in Placement and orphan the compute node
                 # resource provider.
-                # TODO(mriedem): Use a COUNT SQL query-based function instead
-                # of InstanceList.get_uuids_by_host for performance.
-                instance_uuids = objects.InstanceList.get_uuids_by_host(
-                    context, service['host'])
-                if instance_uuids:
+                num_instances = objects.InstanceList.get_count_by_hosts(
+                    context, [service['host']])
+                if num_instances:
                     raise webob.exc.HTTPConflict(
                         explanation=_('Unable to delete compute service that '
                                       'is hosting instances. Migrate or '
@@ -292,7 +292,8 @@ class ServiceController(wsgi.Controller):
             explanation = _("Service id %s refers to multiple services.") % id
             raise webob.exc.HTTPBadRequest(explanation=explanation)
 
-    @validation.query_schema(services.index_query_schema)
+    @validation.query_schema(services.index_query_schema_275, '2.75')
+    @validation.query_schema(services.index_query_schema, '2.0', '2.74')
     @wsgi.expected_errors(())
     def index(self, req):
         """Return a list of all running services. Filter by host & service
@@ -404,7 +405,7 @@ class ServiceController(wsgi.Controller):
             raise webob.exc.HTTPBadRequest(explanation=msg)
 
         # Now save our updates to the service record in the database.
-        service.save()
+        self.host_api.service_update(context, service)
 
         # Return the full service record details.
         additional_fields = ['forced_down']

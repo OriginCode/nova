@@ -47,7 +47,7 @@ class ImageMetaPayload(base.NotificationPayloadBase):
     # a. It is defined as "The value might be null (JSON null data type)."
     #    in the "Show image" API (GET /v2/images/{image_id})
     #    in the glance API v2 Reference.
-    #    (https://developer.openstack.org/api-ref/image/v2/index.html)
+    #    (https://docs.openstack.org/api-ref/image/v2/index.html)
     #
     #   * checksum
     #   * container_format
@@ -105,7 +105,8 @@ class ImageMetaPayload(base.NotificationPayloadBase):
 @nova_base.NovaObjectRegistry.register_notification
 class ImageMetaPropsPayload(base.NotificationPayloadBase):
     # Version 1.0: Initial version
-    VERSION = '1.0'
+    # Version 1.1: Added 'gop', 'virtio' and  'none' to hw_video_model field
+    VERSION = '1.1'
 
     SCHEMA = {
         'hw_architecture': ('image_meta_props', 'hw_architecture'),

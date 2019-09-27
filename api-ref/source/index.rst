@@ -6,7 +6,7 @@
 
 This is a reference for the OpenStack Compute API which is provided by the Nova
 project. To learn more about the OpenStack Compute API concepts, please refer to
-the `API guide <http://developer.openstack.org/api-guide/compute/index.html>`_.
+the `API guide <https://docs.openstack.org/api-guide/compute/index.html>`_.
 
 .. rest_expand_all::
 
@@ -53,6 +53,7 @@ the `API guide <http://developer.openstack.org/api-guide/compute/index.html>`_.
 .. include:: os-services.inc
 .. include:: os-simple-tenant-usage.inc
 .. include:: os-server-external-events.inc
+.. include:: server-topology.inc
 
 ===============
 Deprecated APIs
@@ -73,7 +74,6 @@ limited to some maximum microversion.
 .. include:: os-security-group-default-rules.inc
 .. include:: os-security-group-rules.inc
 .. include:: os-hosts.inc
-.. include:: os-cells.inc
 
 =============
 Obsolete APIs
@@ -89,3 +89,4 @@ Compute API in the past, but no longer exist.
 .. include:: os-fixed-ips.inc
 .. include:: os-floating-ips-bulk.inc
 .. include:: os-floating-ip-dns.inc
+.. include:: os-cells.inc

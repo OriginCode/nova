@@ -845,22 +845,15 @@ class Rbd(Image):
         else:
             self.rbd_name = '%s_%s' % (instance.uuid, disk_name)
 
-        self.pool = CONF.libvirt.images_rbd_pool
-        self.rbd_user = CONF.libvirt.rbd_user
-        self.ceph_conf = CONF.libvirt.images_rbd_ceph_conf
+        self.driver = rbd_utils.RBDDriver()
 
-        path = 'rbd:%s/%s' % (self.pool, self.rbd_name)
-        if self.rbd_user:
-            path += ':id=' + self.rbd_user
-        if self.ceph_conf:
-            path += ':conf=' + self.ceph_conf
+        path = 'rbd:%s/%s' % (self.driver.pool, self.rbd_name)
+        if self.driver.rbd_user:
+            path += ':id=' + self.driver.rbd_user
+        if self.driver.ceph_conf:
+            path += ':conf=' + self.driver.ceph_conf
 
         super(Rbd, self).__init__(path, "block", "rbd", is_block_dev=False)
-
-        self.driver = rbd_utils.RBDDriver(
-            pool=self.pool,
-            ceph_conf=self.ceph_conf,
-            rbd_user=self.rbd_user)
 
         self.discard_mode = CONF.libvirt.hw_disk_discard
 
@@ -887,16 +880,16 @@ class Rbd(Image):
         info.target_dev = disk_info['dev']
         info.source_type = 'network'
         info.source_protocol = 'rbd'
-        info.source_name = '%s/%s' % (self.pool, self.rbd_name)
+        info.source_name = '%s/%s' % (self.driver.pool, self.rbd_name)
         info.source_hosts = hosts
         info.source_ports = ports
         info.boot_order = boot_order
-        auth_enabled = (CONF.libvirt.rbd_user is not None)
+        auth_enabled = (self.driver.rbd_user is not None)
         if CONF.libvirt.rbd_secret_uuid:
             info.auth_secret_uuid = CONF.libvirt.rbd_secret_uuid
             auth_enabled = True  # Force authentication locally
-            if CONF.libvirt.rbd_user:
-                info.auth_username = CONF.libvirt.rbd_user
+            if self.driver.rbd_user:
+                info.auth_username = self.driver.rbd_user
         if auth_enabled:
             info.auth_secret_type = 'ceph'
             info.auth_secret_uuid = CONF.libvirt.rbd_secret_uuid
@@ -922,9 +915,28 @@ class Rbd(Image):
         """
         return self.driver.size(self.rbd_name)
 
+    @staticmethod
+    def _remove_non_raw_cache_image(base):
+        # NOTE(boxiang): If the cache image file exists, we will check
+        # the format of it. Only raw format image is compatible for
+        # RBD image backend. If format is not raw, we will remove it
+        # at first. We limit force_raw_images to True this time. So
+        # the format of new cache image must be raw.
+        # We can remove this in 'U' version later.
+        if not os.path.exists(base):
+            return True
+        image_format = images.qemu_img_info(base)
+        if image_format.file_format != 'raw':
+            try:
+                os.remove(base)
+            except OSError as e:
+                LOG.warning("Ignoring failure to remove %(path)s: "
+                            "%(error)s", {'path': base, 'error': e})
+
     def create_image(self, prepare_template, base, size, *args, **kwargs):
 
         if not self.exists():
+            self._remove_non_raw_cache_image(base)
             prepare_template(target=base, *args, **kwargs)
 
         # prepare_template() may have cloned the image into a new rbd
@@ -968,7 +980,7 @@ class Rbd(Image):
                                           reason=reason)
 
     def flatten(self):
-        self.driver.flatten(self.rbd_name, pool=self.pool)
+        self.driver.flatten(self.rbd_name, pool=self.driver.pool)
 
     def get_model(self, connection):
         secret = None
@@ -981,8 +993,8 @@ class Rbd(Image):
         servers = [str(':'.join(k)) for k in zip(hosts, ports)]
 
         return imgmodel.RBDImage(self.rbd_name,
-                                 self.pool,
-                                 self.rbd_user,
+                                 self.driver.pool,
+                                 self.driver.rbd_user,
                                  secret,
                                  servers)
 
@@ -1056,7 +1068,7 @@ class Rbd(Image):
         self.driver.create_snap(self.rbd_name, snapshot_name, protect=True)
         location = {'url': 'rbd://%(fsid)s/%(pool)s/%(image)s/%(snap)s' %
                            dict(fsid=fsid,
-                                pool=self.pool,
+                                pool=self.driver.pool,
                                 image=self.rbd_name,
                                 snap=snapshot_name)}
         try:

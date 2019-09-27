@@ -123,7 +123,7 @@ class _TestInstancePCIRequests(object):
         self.assertEqual(2, len(req.requests))
         self.assertEqual('alias_1', req.requests[0].alias_name)
         self.assertEqual('preferred', req.requests[0].numa_policy)
-        self.assertIsNone(None, req.requests[0].requester_id)
+        self.assertIsNone(req.requests[0].requester_id)
         self.assertEqual(uuids.requester_id, req.requests[1].requester_id)
 
     def test_from_request_spec_instance_props(self):
@@ -180,6 +180,24 @@ class _TestInstancePCIRequests(object):
 
         self.assertNotIn('requester_id', primitive['nova_object.data'])
         self.assertIn('numa_policy', primitive['nova_object.data'])
+
+    def test_source_property(self):
+        neutron_port_pci_req = objects.InstancePCIRequest(
+            count=1,
+            spec=[{'vendor_id': '15b3', 'device_id': '1018'}],
+            request_id=uuids.pci_request_id1,
+            requester_id=uuids.requester_id1,
+            alias_name = None)
+        flavor_alias_pci_req = objects.InstancePCIRequest(
+            count=1,
+            spec=[{'vendor_id': '15b3', 'device_id': '1810'}],
+            request_id=uuids.pci_request_id2,
+            requester_id=uuids.requester_id2,
+            alias_name = 'alias_1')
+        self.assertEqual(neutron_port_pci_req.source,
+                         objects.InstancePCIRequest.NEUTRON_PORT)
+        self.assertEqual(flavor_alias_pci_req.source,
+                         objects.InstancePCIRequest.FLAVOR_ALIAS)
 
 
 class TestInstancePCIRequests(test_objects._LocalTest,

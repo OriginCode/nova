@@ -30,10 +30,12 @@ from oslo_utils import fileutils
 
 import nova.conf
 from nova.i18n import _
+from nova import objects
 from nova.objects import fields as obj_fields
 import nova.privsep.fs
 import nova.privsep.idmapshift
 import nova.privsep.libvirt
+from nova.scheduler import utils as scheduler_utils
 from nova import utils
 from nova.virt import images
 from nova.virt.libvirt import config as vconfig
@@ -45,7 +47,7 @@ LOG = logging.getLogger(__name__)
 RESIZE_SNAPSHOT_NAME = 'nova-resize'
 
 # Mapping used to convert libvirt cpu features to traits, for more details, see
-# https://github.com/libvirt/libvirt/blob/master/src/cpu/cpu_map.xml.
+# https://github.com/libvirt/libvirt/blob/master/src/cpu_map/
 CPU_TRAITS_MAPPING = {
     '3dnow': os_traits.HW_CPU_X86_3DNOW,
     'abm': os_traits.HW_CPU_X86_ABM,
@@ -59,6 +61,7 @@ CPU_TRAITS_MAPPING = {
     'avx512f': os_traits.HW_CPU_X86_AVX512F,
     'avx512pf': os_traits.HW_CPU_X86_AVX512PF,
     'avx512vl': os_traits.HW_CPU_X86_AVX512VL,
+    'avx512vnni': os_traits.HW_CPU_X86_AVX512VNNI,
     'bmi1': os_traits.HW_CPU_X86_BMI,
     'bmi2': os_traits.HW_CPU_X86_BMI2,
     'pclmuldq': os_traits.HW_CPU_X86_CLMUL,
@@ -80,6 +83,9 @@ CPU_TRAITS_MAPPING = {
     'vmx': os_traits.HW_CPU_X86_VMX,
     'xop': os_traits.HW_CPU_X86_XOP
 }
+
+# Reverse CPU_TRAITS_MAPPING
+TRAITS_CPU_MAPPING = {v: k for k, v in CPU_TRAITS_MAPPING.items()}
 
 
 def create_image(disk_format, path, size):
@@ -265,22 +271,14 @@ def copy_image(src, dest, host=None, receive=False,
             compression=compression)
 
 
-def write_to_file(path, contents, umask=None):
+def write_to_file(path, contents):
     """Write the given contents to a file
 
     :param path: Destination file
     :param contents: Desired contents of the file
-    :param umask: Umask to set when creating this file (will be reset)
     """
-    if umask:
-        saved_umask = os.umask(umask)
-
-    try:
-        with open(path, 'w') as f:
-            f.write(contents)
-    finally:
-        if umask:
-            os.umask(saved_umask)
+    with open(path, 'w') as f:
+        f.write(contents)
 
 
 def chown_for_id_maps(path, id_maps):
@@ -554,35 +552,34 @@ def get_machine_type(image_meta):
     return get_default_machine_type(get_arch(image_meta))
 
 
-def machine_type_mappings():
-    mappings = {}
+def get_default_machine_type(arch):
+    # NOTE(lyarwood): Values defined in [libvirt]/hw_machine_type take
+    # precedence here if available for the provided arch.
     for mapping in CONF.libvirt.hw_machine_type or {}:
         host_arch, _, machine_type = mapping.partition('=')
         if machine_type == '':
             LOG.warning("Invalid hw_machine_type config value %s", mapping)
-        else:
-            mappings[host_arch] = machine_type
-    return mappings
-
-
-def get_default_machine_type(arch):
-    # NOTE(lyarwood): Values defined in [libvirt]/hw_machine_type take
-    # precedence here if available for the provided arch.
-    machine_type = machine_type_mappings().get(arch)
-    if machine_type:
-        return machine_type
+        elif host_arch == arch:
+            return machine_type
     # NOTE(kchamart): For ARMv7 and AArch64, use the 'virt' board as the
     # default machine type.  It is the recommended board, which is designed
     # to be used with virtual machines.  The 'virt' board is more flexible,
     # supports PCI, 'virtio', has decent RAM limits, etc.
-    if arch in (obj_fields.Architecture.ARMV7,
-                obj_fields.Architecture.AARCH64):
-        return "virt"
-
-    if arch in (obj_fields.Architecture.S390,
-                obj_fields.Architecture.S390X):
-        return "s390-ccw-virtio"
-    return None
+    #
+    # NOTE(sean-k-mooney): Nova's default for x86 is still 'pc', so
+    # use that, not 'q35', for x86_64 and i686.
+    #
+    # NOTE(aspiers): If you change this, don't forget to update the
+    # docs and metadata for hw_machine_type in glance.
+    default_mtypes = {
+        obj_fields.Architecture.ARMV7: "virt",
+        obj_fields.Architecture.AARCH64: "virt",
+        obj_fields.Architecture.S390: "s390-ccw-virtio",
+        obj_fields.Architecture.S390X: "s390-ccw-virtio",
+        obj_fields.Architecture.I686: "pc",
+        obj_fields.Architecture.X86_64: "pc",
+    }
+    return default_mtypes.get(arch)
 
 
 def mdev_name2uuid(mdev_name):
@@ -597,3 +594,14 @@ def mdev_uuid2name(mdev_uuid):
     mdev_<uuid_with_underscores>).
     """
     return "mdev_" + mdev_uuid.replace('-', '_')
+
+
+def get_flags_by_flavor_specs(flavor):
+    req_spec = objects.RequestSpec(flavor=flavor)
+    resource_request = scheduler_utils.ResourceRequest(req_spec)
+    required_traits = resource_request.all_required_traits
+
+    flags = [TRAITS_CPU_MAPPING[trait] for trait in required_traits
+             if trait in TRAITS_CPU_MAPPING]
+
+    return set(flags)

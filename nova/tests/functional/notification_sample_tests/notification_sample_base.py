@@ -99,7 +99,6 @@ class NotificationSampleTestBase(test.TestCase,
 
         self.start_service('conductor')
         self.start_service('scheduler')
-        self.start_service('network', manager=CONF.network_manager)
         self.compute = self.start_service('compute')
         # Reset the service create notifications
         fake_notifier.reset()
@@ -146,7 +145,8 @@ class NotificationSampleTestBase(test.TestCase,
                        notification emitted during the test.
         """
         if not actual:
-            self.assertEqual(1, len(fake_notifier.VERSIONED_NOTIFICATIONS))
+            self.assertEqual(1, len(fake_notifier.VERSIONED_NOTIFICATIONS),
+                             fake_notifier.VERSIONED_NOTIFICATIONS)
             notification = fake_notifier.VERSIONED_NOTIFICATIONS[0]
         else:
             notification = actual

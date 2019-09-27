@@ -13,6 +13,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import copy
+
 import mock
 from oslo_serialization import jsonutils
 import six
@@ -40,6 +42,20 @@ def fake_create(newflavor):
     newflavor["rxtx_factor"] = 1.0
     newflavor["is_public"] = True
     newflavor["disabled"] = False
+
+
+def fake_create_without_swap(newflavor):
+    newflavor['flavorid'] = 1234
+    newflavor["name"] = 'test'
+    newflavor["memory_mb"] = 512
+    newflavor["vcpus"] = 2
+    newflavor["root_gb"] = 1
+    newflavor["ephemeral_gb"] = 1
+    newflavor["swap"] = 0
+    newflavor["rxtx_factor"] = 1.0
+    newflavor["is_public"] = True
+    newflavor["disabled"] = False
+    newflavor["extra_specs"] = {"key1": "value1"}
 
 
 class FlavorManageTestV21(test.NoDBTestCase):
@@ -126,10 +142,11 @@ class FlavorManageTestV21(test.NoDBTestCase):
     def test_create_missing_disk(self):
         self._test_create_missing_parameter('disk')
 
-    def _create_flavor_success_case(self, body, req=None):
+    def _create_flavor_success_case(self, body, req=None, version=None):
         req = req if req else self._get_http_request(url=self.base_url)
         req.headers['Content-Type'] = 'application/json'
-        req.headers['X-OpenStack-Nova-API-Version'] = self.microversion
+        req.headers['X-OpenStack-Nova-API-Version'] = (
+            version or self.microversion)
         req.method = 'POST'
         req.body = jsonutils.dump_as_bytes(body)
         res = req.get_response(self.app)
@@ -170,6 +187,10 @@ class FlavorManageTestV21(test.NoDBTestCase):
 
     def test_create_with_name_too_long(self):
         self.request_body['flavor']['name'] = 'a' * 256
+        self._create_flavor_bad_request_case(self.request_body)
+
+    def test_create_with_short_name(self):
+        self.request_body['flavor']['name'] = ''
         self._create_flavor_bad_request_case(self.request_body)
 
     def test_create_with_name_leading_trailing_spaces(self):
@@ -337,6 +358,18 @@ class FlavorManageTestV21(test.NoDBTestCase):
 class FlavorManageTestV2_55(FlavorManageTestV21):
     microversion = '2.55'
 
+    def get_flavor(self, flavor, **kwargs):
+        return objects.Flavor(
+            flavorid=flavor['id'], name=flavor['name'],
+            memory_mb=flavor['ram'], vcpus=flavor['vcpus'],
+            root_gb=flavor['disk'], swap=flavor['swap'],
+            ephemeral_gb=flavor['OS-FLV-EXT-DATA:ephemeral'],
+            disabled=flavor['OS-FLV-DISABLED:disabled'],
+            is_public=flavor['os-flavor-access:is_public'],
+            rxtx_factor=flavor['rxtx_factor'],
+            description=flavor['description'],
+            **kwargs)
+
     def setUp(self):
         super(FlavorManageTestV2_55, self).setUp()
         # Send a description in POST /flavors requests.
@@ -353,15 +386,7 @@ class FlavorManageTestV2_55(FlavorManageTestV21):
         # First create a flavor.
         flavor = self._create_flavor_success_case(self.request_body)['flavor']
         self.assertEqual('test description', flavor['description'])
-        mock_get.return_value = objects.Flavor(
-            flavorid=flavor['id'], name=flavor['name'],
-            memory_mb=flavor['ram'], vcpus=flavor['vcpus'],
-            root_gb=flavor['disk'], swap=flavor['swap'],
-            ephemeral_gb=flavor['OS-FLV-EXT-DATA:ephemeral'],
-            disabled=flavor['OS-FLV-DISABLED:disabled'],
-            is_public=flavor['os-flavor-access:is_public'],
-            rxtx_factor=flavor['rxtx_factor'],
-            description=flavor['description'])
+        mock_get.return_value = self.get_flavor(flavor)
         # Now null out the flavor description.
         flavor = self.controller._update(
             self._get_http_request(), flavor['id'],
@@ -422,6 +447,96 @@ class FlavorManageTestV2_55(FlavorManageTestV21):
             self.assertRaises(self.validation_error, self.controller._update,
                               self._get_http_request(), flavor['id'],
                               body={'flavor': {'description': description}})
+
+
+class FlavorManageTestV2_61(FlavorManageTestV2_55):
+    """Run the same tests as we would for v2.55 but with a extra_specs."""
+    microversion = '2.61'
+
+    def get_flavor(self, flavor):
+        return super(FlavorManageTestV2_61, self).get_flavor(
+            flavor, extra_specs={"key1": "value1"})
+
+    def setUp(self):
+        super(FlavorManageTestV2_61, self).setUp()
+        self.expected_flavor = copy.deepcopy(self.request_body)
+        self.expected_flavor['flavor']['extra_specs'] = {}
+
+    @mock.patch('nova.objects.Flavor.get_by_flavor_id')
+    @mock.patch('nova.objects.Flavor.save')
+    def test_flavor_update_extra_spec(self, mock_flavor_save, mock_get):
+        # First create a flavor.
+        flavor = self._create_flavor_success_case(self.request_body)['flavor']
+        mock_get.return_value = self.get_flavor(flavor)
+        flavor = self.controller._update(
+            self._get_http_request(), flavor['id'],
+            body={'flavor': {'description': None}})['flavor']
+        self.assertEqual({"key1": "value1"}, flavor['extra_specs'])
+
+
+class FlavorManageTestV2_75(FlavorManageTestV2_61):
+    microversion = '2.75'
+
+    FLAVOR_WITH_NO_SWAP = objects.Flavor(
+        name='test',
+        memory_mb=512,
+        vcpus=2,
+        root_gb=1,
+        ephemeral_gb=1,
+        flavorid=1234,
+        rxtx_factor=1.0,
+        disabled=False,
+        is_public=True,
+        swap=0,
+        extra_specs={"key1": "value1"}
+    )
+
+    def test_create_flavor_default_swap_value_old_version(self):
+        self.stub_out("nova.objects.Flavor.create", fake_create_without_swap)
+        del self.request_body['flavor']['swap']
+        resp = self._create_flavor_success_case(self.request_body,
+                                                version='2.74')
+        self.assertEqual(resp['flavor']['swap'], "")
+
+    @mock.patch('nova.objects.Flavor.get_by_flavor_id')
+    @mock.patch('nova.objects.Flavor.save')
+    def test_update_flavor_default_swap_value_old_version(self, mock_save,
+                                                          mock_get):
+        self.stub_out("nova.objects.Flavor.create", fake_create_without_swap)
+        del self.request_body['flavor']['swap']
+        flavor = self._create_flavor_success_case(self.request_body,
+                                                version='2.74')['flavor']
+        mock_get.return_value = self.FLAVOR_WITH_NO_SWAP
+        req = fakes.HTTPRequest.blank(
+            '/fake/flavors',
+            version='2.74')
+        req.method = 'PUT'
+        response = self.controller._update(
+            req, flavor['id'],
+            body={'flavor': {'description': None}})['flavor']
+        self.assertEqual(response['swap'], '')
+
+    @mock.patch('nova.objects.FlavorList.get_all')
+    def test_create_flavor_default_swap_value(self, mock_get):
+        self.stub_out("nova.objects.Flavor.create", fake_create_without_swap)
+        del self.request_body['flavor']['swap']
+        resp = self._create_flavor_success_case(self.request_body)
+        self.assertEqual(resp['flavor']['swap'], 0)
+
+    @mock.patch('nova.objects.Flavor.get_by_flavor_id')
+    @mock.patch('nova.objects.Flavor.save')
+    def test_update_flavor_default_swap_value(self, mock_save, mock_get):
+        self.stub_out("nova.objects.Flavor.create", fake_create_without_swap)
+        del self.request_body['flavor']['swap']
+        mock_get.return_value = self.FLAVOR_WITH_NO_SWAP
+        flavor = self._create_flavor_success_case(self.request_body)['flavor']
+        req = fakes.HTTPRequest.blank(
+            '/fake/flavors',
+            version=self.microversion)
+        response = self.controller._update(
+            req, flavor['id'],
+            body={'flavor': {'description': None}})['flavor']
+        self.assertEqual(response['swap'], 0)
 
 
 class PrivateFlavorManageTestV21(test.TestCase):

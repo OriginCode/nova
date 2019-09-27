@@ -340,6 +340,7 @@ class Instance(BASE, NovaBase, models.SoftDeleteMixin):
 
     # OpenStack compute cell name.  This will only be set at the top of
     # the cells tree and it'll be a full cell name such as 'api!hop1!hop2'
+    # TODO(stephenfin): Remove this
     cell_name = Column(String(255))
 
     # NOTE(pumaranikar): internal_id attribute is no longer used (bug 1441242)
@@ -350,6 +351,8 @@ class Instance(BASE, NovaBase, models.SoftDeleteMixin):
 
     # Records whether an instance has been deleted from disk
     cleaned = Column(Integer, default=0)
+
+    hidden = Column(Boolean, default=False)
 
 
 class InstanceInfoCache(BASE, NovaBase, models.SoftDeleteMixin):
@@ -388,6 +391,9 @@ class InstanceExtra(BASE, NovaBase, models.SoftDeleteMixin):
     migration_context = orm.deferred(Column(Text))
     keypairs = orm.deferred(Column(Text))
     trusted_certs = orm.deferred(Column(Text))
+    # NOTE(Luyao): 'vpmems' is still in the database
+    # and can be removed in the future release.
+    resources = orm.deferred(Column(Text))
     instance = orm.relationship(Instance,
                             backref=orm.backref('extra',
                                                 uselist=False),
@@ -791,6 +797,10 @@ class Migration(BASE, NovaBase, models.SoftDeleteMixin):
     disk_total = Column(BigInteger, nullable=True)
     disk_processed = Column(BigInteger, nullable=True)
     disk_remaining = Column(BigInteger, nullable=True)
+    cross_cell_move = Column(Boolean, default=False)
+
+    user_id = Column(String(255), nullable=True)
+    project_id = Column(String(255), nullable=True)
 
     instance = orm.relationship("Instance", foreign_keys=instance_uuid,
                             primaryjoin='and_(Migration.instance_uuid == '
@@ -1088,6 +1098,8 @@ class InstanceTypeExtraSpecs(BASE, NovaBase, models.SoftDeleteMixin):
                  'InstanceTypeExtraSpecs.deleted == 0)')
 
 
+# TODO(stephenfin): Remove this in the U release or later, once we're sure we
+# won't want it back (it's for cells v1, so we won't)
 class Cell(BASE, NovaBase, models.SoftDeleteMixin):
     """Represents parent and child cells of this cell.  Cells can
     have multiple parents and children, so there could be any number

@@ -28,30 +28,34 @@ from oslo_config import cfg
 from oslo_serialization import jsonutils
 from oslo_upgradecheck import upgradecheck
 import pkg_resources
+import six
 from sqlalchemy import func as sqlfunc
 from sqlalchemy import MetaData, Table, and_, select
-from sqlalchemy.sql import false
 
 from nova.cmd import common as cmd_common
 import nova.conf
 from nova import config
 from nova import context as nova_context
 from nova.db.sqlalchemy import api as db_session
+from nova import exception
 from nova.i18n import _
 from nova.objects import cell_mapping as cell_mapping_obj
 from nova import utils
 from nova import version
+from nova.volume import cinder
 
 CONF = nova.conf.CONF
 
-PLACEMENT_DOCS_LINK = 'https://docs.openstack.org/nova/latest' \
-                      '/user/placement.html'
-
-# NOTE(efried): 1.30 is required by nova-compute to support resource provider
-# reshaping (inventory and allocation data migration).
+# NOTE(vrushali): 1.32 is required by nova-scheduler to use member_of
+# queryparam to prepare a list of forbidden aggregates that should be
+# ignored by placement service in the allocation candidates API.
 # NOTE: If you bump this version, remember to update the history
 # section in the nova-status man page (doc/source/cli/nova-status).
-MIN_PLACEMENT_MICROVERSION = "1.30"
+MIN_PLACEMENT_MICROVERSION = "1.32"
+
+# NOTE(mriedem): 3.44 is needed to work with volume attachment records which
+# are required for supporting multi-attach capable volumes.
+MIN_CINDER_MICROVERSION = '3.44'
 
 
 class UpgradeCommands(upgradecheck.UpgradeCommands):
@@ -314,151 +318,32 @@ class UpgradeCommands(upgradecheck.UpgradeCommands):
         # those nodes are already migrated, so there is nothing to do.
         return upgradecheck.Result(upgradecheck.Code.SUCCESS)
 
-    def _get_min_service_version(self, context, binary):
-        meta = MetaData(bind=db_session.get_engine(context=context))
-        services = Table('services', meta, autoload=True)
-        return select([sqlfunc.min(services.c.version)]).select_from(
-            services).where(and_(
-                services.c.binary == binary,
-                services.c.deleted == 0,
-                services.c.forced_down == false())).scalar()
-
-    def _check_request_spec_migration(self):
-        """Checks to make sure request spec migrations are complete.
-
-        Iterates all cells checking to see that non-deleted instances have
-        a matching request spec in the API database. This is necessary in order
-        to drop the migrate_instances_add_request_spec online data migration
-        and accompanying compatibility code found through nova-api and
-        nova-conductor.
+    def _check_cinder(self):
+        """Checks to see that the cinder API is available at a given minimum
+        microversion.
         """
-        meta = MetaData(bind=db_session.get_api_engine())
-        mappings = self._get_cell_mappings()
-
-        if not mappings:
-            # There are no cell mappings so we can't determine this, just
-            # return a warning. The cellsv2 check would have already failed
-            # on this.
-            msg = (_('Unable to determine request spec migrations without '
-                     'cell mappings.'))
-            return upgradecheck.Result(upgradecheck.Code.WARNING, msg)
-
-        request_specs = Table('request_specs', meta, autoload=True)
-        ctxt = nova_context.get_admin_context()
-        incomplete_cells = []  # list of cell mapping uuids
-        for mapping in mappings:
-            with nova_context.target_cell(ctxt, mapping) as cctxt:
-                # Get all instance uuids for non-deleted instances in this
-                # cell.
-                meta = MetaData(bind=db_session.get_engine(context=cctxt))
-                instances = Table('instances', meta, autoload=True)
-                instance_records = (
-                    select([instances.c.uuid]).select_from(instances).where(
-                        instances.c.deleted == 0
-                    ).execute().fetchall())
-                # For each instance in the list, verify that it has a matching
-                # request spec in the API DB.
-                for inst in instance_records:
-                    spec_id = (
-                        select([request_specs.c.id]).select_from(
-                            request_specs).where(
-                            request_specs.c.instance_uuid == inst['uuid']
-                        ).execute().scalar())
-                    if spec_id is None:
-                        # This cell does not have all of its instances
-                        # migrated for request specs so track it and move on.
-                        incomplete_cells.append(mapping.uuid)
-                        break
-
-        # It's a failure if there are any unmigrated instances at this point
-        # because we are planning to drop the online data migration routine and
-        # compatibility code in Stein.
-        if incomplete_cells:
-            msg = (_("The following cells have instances which do not have "
-                     "matching request_specs in the API database: %s Run "
-                     "'nova-manage db online_data_migrations' on each cell "
-                     "to create the missing request specs.") %
-                   ', '.join(incomplete_cells))
-            return upgradecheck.Result(upgradecheck.Code.FAILURE, msg)
-        return upgradecheck.Result(upgradecheck.Code.SUCCESS)
-
-    def _check_console_auths(self):
-        """Checks for console usage and warns with info for rolling upgrade.
-
-        Iterates all cells checking to see if the nova-consoleauth service is
-        non-deleted/non-disabled and whether there are any console token auths
-        in that cell database. If there is a nova-consoleauth service being
-        used and no console token auths in the cell database, emit a warning
-        telling the user to set [workarounds]enable_consoleauth = True if they
-        are performing a rolling upgrade.
-        """
-        # If we're using cells v1, we don't need to check if the workaround
-        # needs to be used because cells v1 always uses nova-consoleauth.
-        # If the operator has already enabled the workaround, we don't need
-        # to check anything.
-        if CONF.cells.enable or CONF.workarounds.enable_consoleauth:
+        # Check to see if nova is even configured for Cinder yet (fresh install
+        # or maybe not using Cinder at all).
+        if CONF.cinder.auth_type is None:
             return upgradecheck.Result(upgradecheck.Code.SUCCESS)
 
-        # We need to check cell0 for nova-consoleauth service records because
-        # it's possible a deployment could have services stored in the cell0
-        # database, if they've defaulted their [database]connection in
-        # nova.conf to cell0.
-        mappings = self._get_cell_mappings()
-
-        if not mappings:
-            # There are no cell mappings so we can't determine this, just
-            # return a warning. The cellsv2 check would have already failed
-            # on this.
-            msg = (_('Unable to check consoles without cell mappings.'))
-            return upgradecheck.Result(upgradecheck.Code.WARNING, msg)
-
-        ctxt = nova_context.get_admin_context()
-        # If we find a non-deleted, non-disabled nova-consoleauth service in
-        # any cell, we will assume the deployment is using consoles.
-        using_consoles = False
-        for mapping in mappings:
-            with nova_context.target_cell(ctxt, mapping) as cctxt:
-                # Check for any non-deleted, non-disabled nova-consoleauth
-                # service.
-                meta = MetaData(bind=db_session.get_engine(context=cctxt))
-                services = Table('services', meta, autoload=True)
-                consoleauth_service_record = (
-                    select([services.c.id]).select_from(services).where(and_(
-                        services.c.binary == 'nova-consoleauth',
-                        services.c.deleted == 0,
-                        services.c.disabled == false())).execute().first())
-                if consoleauth_service_record:
-                    using_consoles = True
-                    break
-
-        if using_consoles:
-            # If the deployment is using consoles, we can only be certain the
-            # upgrade is complete if each compute service is >= Rocky and
-            # supports storing console token auths in the database backend.
-            for mapping in mappings:
-                # Skip cell0 as no compute services should be in it.
-                if mapping.is_cell0():
-                    continue
-                # Get the minimum nova-compute service version in this
-                # cell.
-                with nova_context.target_cell(ctxt, mapping) as cctxt:
-                    min_version = self._get_min_service_version(
-                        cctxt, 'nova-compute')
-                    # We could get None for the minimum version in the case of
-                    # new install where there are no computes. If there are
-                    # compute services, they should all have versions.
-                    if min_version is not None and min_version < 35:
-                        msg = _("One or more cells were found which have "
-                                "nova-compute services older than Rocky. "
-                                "Please set the "
-                                "'[workarounds]enable_consoleauth' "
-                                "configuration option to 'True' on your "
-                                "console proxy host if you are performing a "
-                                "rolling upgrade to enable consoles to "
-                                "function during a partial upgrade.")
-                        return upgradecheck.Result(upgradecheck.Code.WARNING,
-                                                  msg)
-
+        try:
+            # TODO(mriedem): Eventually use get_ksa_adapter here when it
+            # supports cinder.
+            cinder.is_microversion_supported(
+                nova_context.get_admin_context(), MIN_CINDER_MICROVERSION)
+        except exception.CinderAPIVersionNotAvailable:
+            return upgradecheck.Result(
+                upgradecheck.Code.FAILURE,
+                _('Cinder API %s or greater is required. Deploy at least '
+                  'Cinder 12.0.0 (Queens).') % MIN_CINDER_MICROVERSION)
+        except Exception as ex:
+            # Anything else trying to connect, like bad config, is out of our
+            # hands so just return a warning.
+            return upgradecheck.Result(
+                upgradecheck.Code.WARNING,
+                _('Unable to determine Cinder API version due to error: %s') %
+                six.text_type(ex))
         return upgradecheck.Result(upgradecheck.Code.SUCCESS)
 
     # The format of the check functions is to return an upgradecheck.Result
@@ -475,10 +360,8 @@ class UpgradeCommands(upgradecheck.UpgradeCommands):
         (_('Placement API'), _check_placement),
         # Added in Rocky (but also useful going back to Pike)
         (_('Ironic Flavor Migration'), _check_ironic_flavor_migration),
-        # Added in Rocky
-        (_('Request Spec Migration'), _check_request_spec_migration),
-        # Added in Stein (but also useful going back to Rocky)
-        (_('Console Auths'), _check_console_auths),
+        # Added in Train
+        (_('Cinder API'), _check_cinder),
     )
 
 

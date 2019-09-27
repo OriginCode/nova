@@ -13,21 +13,12 @@
 from nova.compute import manager as compute_manager
 from nova import context as nova_context
 from nova import objects
-from nova.scheduler import weights
 from nova import test
 from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import integrated_helpers
 from nova.tests.unit.image import fake as image_fake
 from nova.tests.unit import policy_fixture
-from nova.virt import fake
-
-
-class HostNameWeigher(weights.BaseHostWeigher):
-    def _weigh_object(self, host_state, weight_properties):
-        """Arbitrary preferring host1 over host2 over host3."""
-        weights = {'host1': 100, 'host2': 50, 'host3': 1}
-        return weights.get(host_state.host, 0)
 
 
 class TestRequestSpecRetryReschedule(test.TestCase,
@@ -75,20 +66,13 @@ class TestRequestSpecRetryReschedule(test.TestCase,
         self.admin_api.microversion = 'latest'
         self.api.microversion = 'latest'
 
-        # The consoleauth service is needed for deleting console tokens when
-        # the server is deleted.
-        self.start_service('consoleauth')
-
-        # Use our custom weigher defined above to make sure that we have
-        # a predictable scheduling sort order.
-        self.flags(weight_classes=[__name__ + '.HostNameWeigher'],
-                   group='filter_scheduler')
+        # Use custom weigher to make sure that we have a predictable
+        # scheduling sort order.
+        self.useFixture(nova_fixtures.HostNameWeigherFixture())
         self.start_service('scheduler')
 
         # Let's now start three compute nodes as we said above.
-        self.addCleanup(fake.restore_nodes)
         for host in ['host1', 'host2', 'host3']:
-            fake.set_nodes([host])
             self.start_service('compute', host=host)
 
     def _stub_resize_failure(self, failed_host):

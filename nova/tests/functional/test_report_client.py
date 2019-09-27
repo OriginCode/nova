@@ -188,8 +188,8 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             rp = self.client._get_resource_provider(self.context,
                                                     self.compute_uuid)
             self.assertIsNone(rp)
-            rps = self.client._get_providers_in_tree(self.context,
-                                                     self.compute_uuid)
+            rps = self.client.get_providers_in_tree(self.context,
+                                                    self.compute_uuid)
             self.assertEqual([], rps)
             # But get_provider_tree_and_ensure_root creates one (via
             # _ensure_resource_provider)
@@ -209,8 +209,8 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             rp = self.client._get_resource_provider(self.context,
                                                     self.compute_uuid)
             self.assertIsNotNone(rp)
-            rps = self.client._get_providers_in_tree(self.context,
-                                                     self.compute_uuid)
+            rps = self.client.get_providers_in_tree(self.context,
+                                                    self.compute_uuid)
             self.assertEqual(1, len(rps))
 
             # We should also have empty sets of aggregate and trait
@@ -243,10 +243,16 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             # Update allocations with our instance
             alloc_dict = utils.resources_from_flavor(self.instance,
                                                      self.instance.flavor)
+            payload = {
+                "allocations": {
+                    self.compute_uuid: {"resources": alloc_dict}
+                },
+                "project_id": self.instance.project_id,
+                "user_id": self.instance.user_id,
+                "consumer_generation": None
+            }
             self.client.put_allocations(
-                self.context, self.compute_uuid, self.instance_uuid,
-                alloc_dict, self.instance.project_id, self.instance.user_id,
-                None)
+                self.context, self.instance_uuid, payload)
 
             # Check that allocations were made
             resp = self.client.get('/allocations/%s' % self.instance_uuid)
@@ -325,7 +331,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
                             global_request_id=global_request_id)
 
     def test_get_provider_tree_with_nested_and_aggregates(self):
-        """A more in-depth test of get_provider_tree_and_ensure_root with
+        r"""A more in-depth test of get_provider_tree_and_ensure_root with
         nested and sharing resource providers.
 
                ss1(DISK)    ss2(DISK)           ss3(DISK)
@@ -685,13 +691,18 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
                 inv,
                 self.client._get_inventory(
                     self.context, uuids.cn)['inventories'])
-
+            payload = {
+                "allocations": {
+                    uuids.cn: {"resources": {orc.SRIOV_NET_VF: 1}}
+                },
+                "project_id": uuids.proj,
+                "user_id": uuids.user,
+                "consumer_generation": None
+            }
             # Now set up an InventoryInUse case by creating a VF allocation...
             self.assertTrue(
                 self.client.put_allocations(
-                    self.context, uuids.cn, uuids.consumer,
-                    {orc.SRIOV_NET_VF: 1},
-                    uuids.proj, uuids.user, None))
+                    self.context, uuids.consumer, payload))
             # ...and trying to delete the provider's VF inventory
             bad_inv = {
                 'CUSTOM_BANDWIDTH': {
@@ -979,7 +990,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             # Now associate the compute **host name** with an aggregate and
             # ensure the aggregate association is saved properly
             self.client.aggregate_add_host(
-                self.context, agg_uuid, self.compute_name)
+                self.context, agg_uuid, host_name=self.compute_name)
 
             # Check that the ProviderTree cache hasn't been modified (since
             # the aggregate_add_host() method is only called from nova-api and
@@ -1008,12 +1019,15 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
 
     def test_alloc_cands_smoke(self):
         """Simple call to get_allocation_candidates for version checking."""
+        flavor = objects.Flavor(
+            vcpus=1, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=0)
+        req_spec = objects.RequestSpec(flavor=flavor, is_bfv=False)
         with self._interceptor():
             self.client.get_allocation_candidates(
-                self.context, utils.ResourceRequest())
+                self.context, utils.ResourceRequest(req_spec))
 
     def _set_up_provider_tree(self):
-        """Create two compute nodes in placement ("this" one, and another one)
+        r"""Create two compute nodes in placement ("this" one, and another one)
         and a storage provider sharing with both.
 
              +-----------------------+      +------------------------+
@@ -1134,7 +1148,7 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
             # care to check.
             for k, expected in pdict.items():
                 # For inventories, we're only validating totals
-                if k is 'inventory':
+                if k == 'inventory':
                     self.assertEqual(
                         set(expected), set(actual_data.inventory),
                         "Mismatched inventory keys for provider %s" % uuid)
@@ -1178,8 +1192,10 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
                 'user_id': uuids.user,
             },
         }
-        self.client.put('/allocations/' + uuids.cn_inst1, ret[uuids.cn_inst1])
-        self.client.put('/allocations/' + uuids.cn_inst2, ret[uuids.cn_inst2])
+        self.client.put('/allocations/' + uuids.cn_inst1, ret[uuids.cn_inst1],
+                        version='1.28')
+        self.client.put('/allocations/' + uuids.cn_inst2, ret[uuids.cn_inst2],
+                        version='1.28')
         # And on the other compute (with sharing)
         self.client.put(
             '/allocations/' + uuids.othercn_inst,
@@ -1190,7 +1206,8 @@ class SchedulerReportClientTests(SchedulerReportClientTestBase):
                 'consumer_generation': None,
                 'project_id': uuids.proj,
                 'user_id': uuids.user,
-            })
+            },
+            version='1.28')
 
         return ret
 

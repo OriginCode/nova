@@ -117,7 +117,7 @@ Related options:
 * ``connection_uri``: depends on this
 * ``disk_prefix``: depends on this
 * ``cpu_mode``: depends on this
-* ``cpu_model``: depends on this
+* ``cpu_models``: depends on this
 """),
     cfg.StrOpt('connection_uri',
                default='',
@@ -423,7 +423,7 @@ The live-migration force complete API also uses post-copy when permitted. If
 post-copy mode is not available, force complete falls back to pausing the VM
 to ensure the live-migration operation will complete.
 
-When using post-copy mode, if the source and destination hosts loose network
+When using post-copy mode, if the source and destination hosts lose network
 connectivity, the VM being live-migrated will need to be rebooted. For more
 details, please see the Administration guide.
 
@@ -527,7 +527,7 @@ Related options:
         choices=[
             ('host-model', 'Clone the host CPU feature flags'),
             ('host-passthrough', 'Use the host CPU model exactly'),
-            ('custom', 'Use the CPU model in ``[libvirt]cpu_model``'),
+            ('custom', 'Use the CPU model in ``[libvirt]cpu_models``'),
             ('none', "Don't set a specific CPU model. For instances with "
              "``[libvirt] virt_type`` as KVM/QEMU, the default CPU model from "
              "QEMU will be used, which provides a basic set of CPU features "
@@ -541,24 +541,37 @@ will default to ``none``.
 
 Related options:
 
-* ``cpu_model``: This should be set ONLY when ``cpu_mode`` is set to
+* ``cpu_models``: This should be set ONLY when ``cpu_mode`` is set to
   ``custom``. Otherwise, it would result in an error and the instance launch
   will fail.
 """),
-    cfg.StrOpt('cpu_model',
-               help="""
-Set the name of the libvirt CPU model the instance should use.
+    cfg.ListOpt('cpu_models',
+        deprecated_name='cpu_model',
+        default=[],
+        help="""
+An ordered list of CPU models the host supports.
+
+It is expected that the list is ordered so that the more common and less
+advanced CPU models are listed earlier. Here is an example:
+``SandyBridge,IvyBridge,Haswell,Broadwell``, the latter CPU model's features is
+richer that the previous CPU model.
 
 Possible values:
 
-* The named CPU models listed in ``/usr/share/libvirt/cpu_map.xml``
+* The named CPU models listed in ``/usr/share/libvirt/cpu_map.xml`` for
+  libvirt prior to version 4.7.0 or ``/usr/share/libvirt/cpu_map/*.xml``
+  for version 4.7.0 and higher.
 
 Related options:
 
 * ``cpu_mode``: This should be set to ``custom`` ONLY when you want to
-  configure (via ``cpu_model``) a specific named CPU model.  Otherwise, it
+  configure (via ``cpu_models``) a specific named CPU model.  Otherwise, it
   would result in an error and the instance launch will fail.
 * ``virt_type``: Only the virtualization types ``kvm`` and ``qemu`` use this.
+
+.. note::
+    Be careful to only specify models which can be fully supported in
+    hardware.
 """),
     cfg.ListOpt(
         'cpu_model_extra_flags',
@@ -576,7 +589,7 @@ to address the guest performance degradation as a result of applying the
 
     [libvirt]
     cpu_mode = custom
-    cpu_model = IvyBridge
+    cpu_models = IvyBridge
     cpu_model_extra_flags = pcid
 
 To specify multiple CPU flags (e.g. the Intel ``VMX`` to expose the
@@ -585,13 +598,13 @@ huge pages for CPU models that do not provide it)::
 
     [libvirt]
     cpu_mode = custom
-    cpu_model = Haswell-noTSX-IBRS
+    cpu_models = Haswell-noTSX-IBRS
     cpu_model_extra_flags = PCID, VMX, pdpe1gb
 
 As it can be noticed from above, the ``cpu_model_extra_flags`` config
 attribute is case insensitive.  And specifying extra flags is valid in
 combination with all the three possible values for ``cpu_mode``:
-``custom`` (this also requires an explicit ``cpu_model`` to be
+``custom`` (this also requires an explicit ``cpu_models`` to be
 specified), ``host-model``, or ``host-passthrough``.  A valid example
 for allowing extra CPU flags even for ``host-passthrough`` mode is that
 sometimes QEMU may disable certain CPU features -- e.g. Intel's
@@ -600,8 +613,9 @@ expose that CPU flag to the Nova instance, the you need to explicitly
 ask for it.
 
 The possible values for ``cpu_model_extra_flags`` depends on the CPU
-model in use.  Refer to ``/usr/share/libvirt/cpu_map.xml`` possible CPU
-feature flags for a given CPU model.
+model in use. Refer to ``/usr/share/libvirt/cpu_map.xml`` for libvirt
+prior to version 4.7.0 or ``/usr/share/libvirt/cpu_map/*.xml`` thereafter
+for possible CPU feature flags for a given CPU model.
 
 Note that when using this config attribute to set the 'PCID' CPU flag
 with the ``custom`` CPU mode, not all virtual (i.e. libvirt / QEMU) CPU
@@ -627,7 +641,7 @@ need to use the ``cpu_model_extra_flags``.
 Related options:
 
 * cpu_mode
-* cpu_model
+* cpu_models
 """),
     cfg.StrOpt('snapshots_directory',
                default='$instances_path/snapshots',
@@ -654,7 +668,11 @@ this environment.
 
 Possible cache modes:
 
-* default: Same as writethrough.
+* default: "It Depends" -- For Nova-managed disks, ``none``, if the host
+  file system is capable of Linux's 'O_DIRECT' semantics; otherwise
+  ``writeback``.  For volume drivers, the default is driver-dependent:
+  ``none`` for everything except for SMBFS and Virtuzzo (which use
+  ``writeback``).
 * none: With caching mode set to none, the host page cache is disabled, but
   the disk write cache is enabled for the guest. In this mode, the write
   performance in the guest is optimal because write operations bypass the host
@@ -667,25 +685,25 @@ Possible cache modes:
   writethrough mode. Shareable disk devices, like for a multi-attachable block
   storage volume, will have their cache mode set to 'none' regardless of
   configuration.
-* writethrough: writethrough mode is the default caching mode. With
-  caching set to writethrough mode, the host page cache is enabled, but the
-  disk write cache is disabled for the guest. Consequently, this caching mode
-  ensures data integrity even if the applications and storage stack in the
-  guest do not transfer data to permanent storage properly (either through
-  fsync operations or file system barriers). Because the host page cache is
-  enabled in this mode, the read performance for applications running in the
-  guest is generally better. However, the write performance might be reduced
-  because the disk write cache is disabled.
-* writeback: With caching set to writeback mode, both the host page cache
-  and the disk write cache are enabled for the guest. Because of this, the
-  I/O performance for applications running in the guest is good, but the data
-  is not protected in a power failure. As a result, this caching mode is
-  recommended only for temporary data where potential data loss is not a
-  concern.
-  NOTE: Certain backend disk mechanisms may provide safe writeback cache
-  semantics. Specifically those that bypass the host page cache, such as
-  QEMU's integrated RBD driver. Ceph documentation recommends setting this
-  to writeback for maximum performance while maintaining data safety.
+* writethrough: With caching set to writethrough mode, the host page cache is
+  enabled, but the disk write cache is disabled for the guest. Consequently,
+  this caching mode ensures data integrity even if the applications and storage
+  stack in the guest do not transfer data to permanent storage properly (either
+  through fsync operations or file system barriers). Because the host page
+  cache is enabled in this mode, the read performance for applications running
+  in the guest is generally better. However, the write performance might be
+  reduced because the disk write cache is disabled.
+* writeback: With caching set to writeback mode, both the host page
+  cache and the disk write cache are enabled for the guest. Because of
+  this, the I/O performance for applications running in the guest is
+  good, but the data is not protected in a power failure. As a result,
+  this caching mode is recommended only for temporary data where
+  potential data loss is not a concern.
+  NOTE: Certain backend disk mechanisms may provide safe
+  writeback cache semantics. Specifically those that bypass the host
+  page cache, such as QEMU's integrated RBD driver. Ceph documentation
+  recommends setting this to writeback for maximum performance while
+  maintaining data safety.
 * directsync: Like "writethrough", but it bypasses the host page cache.
 * unsafe: Caching mode of unsafe ignores cache transfer operations
   completely. As its name implies, this caching mode should be used only for
@@ -711,10 +729,11 @@ http://man7.org/linux/man-pages/man7/random.7.html.
                 help='For qemu or KVM guests, set this option to specify '
                      'a default machine type per host architecture. '
                      'You can find a list of supported machine types '
-                     'in your environment by checking the output of '
-                     'the "virsh capabilities" command. The format of the '
-                     'value for this config option is host-arch=machine-type. '
-                     'For example: x86_64=machinetype1,armv7l=machinetype2'),
+                     'in your environment by checking the output of the '
+                     ':command:`virsh capabilities` command. The format of '
+                     'the value for this config option is '
+                     '``host-arch=machine-type``. For example: '
+                     '``x86_64=machinetype1,armv7l=machinetype2``.'),
     cfg.StrOpt('sysinfo_serial',
                default='unique',
                choices=(
@@ -834,6 +853,47 @@ Related options:
 * ``virt_type`` must be set to ``kvm`` or ``qemu``.
 * ``ram_allocation_ratio`` must be set to 1.0.
 """),
+    cfg.IntOpt('num_memory_encrypted_guests',
+               default=None,
+               min=0,
+               help="""
+Maximum number of guests with encrypted memory which can run
+concurrently on this compute host.
+
+For now this is only relevant for AMD machines which support SEV
+(Secure Encrypted Virtualization).  Such machines have a limited
+number of slots in their memory controller for storing encryption
+keys.  Each running guest with encrypted memory will consume one of
+these slots.
+
+The option may be reused for other equivalent technologies in the
+future.  If the machine does not support memory encryption, the option
+will be ignored and inventory will be set to 0.
+
+If the machine does support memory encryption, *for now* a value of
+``None`` means an effectively unlimited inventory, i.e. no limit will
+be imposed by Nova on the number of SEV guests which can be launched,
+even though the underlying hardware will enforce its own limit.
+However it is expected that in the future, auto-detection of the
+inventory from the hardware will become possible, at which point
+``None`` will cause auto-detection to automatically impose the correct
+limit.
+
+.. note::
+
+   It is recommended to read :ref:`the deployment documentation's
+   section on this option <num_memory_encrypted_guests>` before
+   deciding whether to configure this setting or leave it at the
+   default.
+
+Related options:
+
+* :oslo.config:option:`libvirt.virt_type` must be set to ``kvm``.
+
+* It's recommended to consider including ``x86_64=q35`` in
+  :oslo.config:option:`libvirt.hw_machine_type`; see
+  :ref:`deploying-sev-capable-infrastructure` for more on this.
+"""),
 ]
 
 libvirt_imagebackend_opts = [
@@ -852,6 +912,7 @@ Related options:
 * compute.use_cow_images
 * images_volume_group
 * [workarounds]/ensure_libvirt_rbd_instance_dir_cleanup
+* compute.force_raw_images
 """),
     cfg.StrOpt('images_volume_group',
                help="""
@@ -893,37 +954,10 @@ Requires:
 ]
 
 libvirt_imagecache_opts = [
-    cfg.StrOpt('image_info_filename_pattern',
-               default='$instances_path/$image_cache_subdirectory_name/'
-                       '%(image)s.info',
-               deprecated_for_removal=True,
-               deprecated_since='14.0.0',
-               deprecated_reason='Image info files are no longer used by the '
-                                 'image cache',
-               help='Allows image information files to be stored in '
-                    'non-standard locations'),
     cfg.IntOpt('remove_unused_resized_minimum_age_seconds',
                default=3600,
                help='Unused resized base images younger than this will not be '
                     'removed'),
-    cfg.BoolOpt('checksum_base_images',
-                default=False,
-                deprecated_for_removal=True,
-                deprecated_since='14.0.0',
-                deprecated_reason='The image cache no longer periodically '
-                                  'calculates checksums of stored images. '
-                                  'Data integrity can be checked at the block '
-                                  'or filesystem level.',
-                help='Write a checksum for files in _base to disk'),
-    cfg.IntOpt('checksum_interval_seconds',
-               default=3600,
-               deprecated_for_removal=True,
-               deprecated_since='14.0.0',
-               deprecated_reason='The image cache no longer periodically '
-                                 'calculates checksums of stored images. '
-                                 'Data integrity can be checked at the block '
-                                 'or filesystem level.',
-               help='How frequently to checksum base images'),
 ]
 
 libvirt_lvm_opts = [
@@ -1063,6 +1097,11 @@ the Ceph RBD server.
     cfg.StrOpt('rbd_secret_uuid',
                help="""
 The libvirt UUID of the secret for the rbd_user volumes.
+"""),
+    cfg.IntOpt('rbd_connect_timeout',
+               default=5,
+               help="""
+The RADOS client timeout in seconds when initially connecting to the cluster.
 """),
 ]
 
@@ -1296,6 +1335,32 @@ maximum number of retry attempts that can be made to discover the NVMe device.
 """),
 ]
 
+
+libvirt_pmem_opts = [
+    cfg.ListOpt('pmem_namespaces',
+                item_type=cfg.types.String(),
+                default=[],
+                help="""
+Configure persistent memory(pmem) namespaces.
+
+These namespaces must have been already created on the host. This config
+option is in the following format::
+
+    "$LABEL:$NSNAME[|$NSNAME][,$LABEL:$NSNAME[|$NSNAME]]"
+
+* ``$NSNAME`` is the name of the pmem namespace.
+* ``$LABEL`` represents one resource class, this is used to generate
+      the resource class name as ``CUSTOM_PMEM_NAMESPACE_$LABEL``.
+
+For example::
+
+    [libvirt]
+    pmem_namespaces=128G:ns0|ns1|ns2|ns3,262144MB:ns4|ns5,MEDIUM:ns6|ns7
+
+"""),
+]
+
+
 ALL_OPTS = list(itertools.chain(
     libvirt_general_opts,
     libvirt_imagebackend_opts,
@@ -1315,6 +1380,7 @@ ALL_OPTS = list(itertools.chain(
     libvirt_volume_vzstorage_opts,
     libvirt_virtio_queue_sizes,
     libvirt_volume_nvmeof_opts,
+    libvirt_pmem_opts,
 ))
 
 

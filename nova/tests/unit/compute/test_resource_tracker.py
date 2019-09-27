@@ -16,6 +16,7 @@ import datetime
 from keystoneauth1 import exceptions as ks_exc
 import mock
 import os_resource_classes as orc
+import os_traits
 from oslo_config import cfg
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
@@ -37,6 +38,7 @@ from nova.objects import pci_device
 from nova.pci import manager as pci_manager
 from nova.scheduler.client import report
 from nova import test
+from nova.tests.unit import fake_instance
 from nova.tests.unit import fake_notifier
 from nova.tests.unit.objects import test_pci_device as fake_pci_device
 from nova.virt import driver
@@ -165,16 +167,26 @@ _NUMA_PAGE_TOPOLOGIES = {
 
 _NUMA_HOST_TOPOLOGIES = {
     '2mb': objects.NUMATopology(cells=[
-        objects.NUMACell(id=0, cpuset=set([1, 2]), memory=_2MB,
-                         cpu_usage=0, memory_usage=0,
-                         mempages=[_NUMA_PAGE_TOPOLOGIES['2mb*1024']],
-                         siblings=[set([1]), set([2])],
-                         pinned_cpus=set([])),
-        objects.NUMACell(id=1, cpuset=set([3, 4]), memory=_2MB,
-                         cpu_usage=0, memory_usage=0,
-                         mempages=[_NUMA_PAGE_TOPOLOGIES['2mb*1024']],
-                         siblings=[set([3]), set([4])],
-                         pinned_cpus=set([]))]),
+        objects.NUMACell(
+            id=0,
+            cpuset=set([1, 2]),
+            pcpuset=set(),
+            memory=_2MB,
+            cpu_usage=0,
+            memory_usage=0,
+            mempages=[_NUMA_PAGE_TOPOLOGIES['2mb*1024']],
+            siblings=[set([1]), set([2])],
+            pinned_cpus=set()),
+        objects.NUMACell(
+            id=1,
+            cpuset=set([3, 4]),
+            pcpuset=set(),
+            memory=_2MB,
+            cpu_usage=0,
+            memory_usage=0,
+            mempages=[_NUMA_PAGE_TOPOLOGIES['2mb*1024']],
+            siblings=[set([3]), set([4])],
+            pinned_cpus=set())]),
 }
 
 
@@ -202,6 +214,7 @@ _INSTANCE_FIXTURES = [
         old_flavor = _INSTANCE_TYPE_OBJ_FIXTURES[1],
         new_flavor = _INSTANCE_TYPE_OBJ_FIXTURES[1],
         deleted = False,
+        resources = None,
     ),
     objects.Instance(
         id=2,
@@ -226,6 +239,7 @@ _INSTANCE_FIXTURES = [
         old_flavor = _INSTANCE_TYPE_OBJ_FIXTURES[2],
         new_flavor = _INSTANCE_TYPE_OBJ_FIXTURES[2],
         deleted = False,
+        resources = None,
     ),
 ]
 
@@ -312,6 +326,7 @@ _MIGRATION_INSTANCE_FIXTURES = {
         flavor=_INSTANCE_TYPE_OBJ_FIXTURES[1],
         old_flavor=_INSTANCE_TYPE_OBJ_FIXTURES[1],
         new_flavor=_INSTANCE_TYPE_OBJ_FIXTURES[2],
+        resources = None,
     ),
     # dest-only
     'f6ed631a-8645-4b12-8e1e-2fff55795765': objects.Instance(
@@ -336,6 +351,7 @@ _MIGRATION_INSTANCE_FIXTURES = {
         flavor=_INSTANCE_TYPE_OBJ_FIXTURES[2],
         old_flavor=_INSTANCE_TYPE_OBJ_FIXTURES[1],
         new_flavor=_INSTANCE_TYPE_OBJ_FIXTURES[2],
+        resources=None,
     ),
     # source-and-dest
     'f4f0bfea-fe7e-4264-b598-01cb13ef1997': objects.Instance(
@@ -360,6 +376,7 @@ _MIGRATION_INSTANCE_FIXTURES = {
         flavor=_INSTANCE_TYPE_OBJ_FIXTURES[2],
         old_flavor=_INSTANCE_TYPE_OBJ_FIXTURES[1],
         new_flavor=_INSTANCE_TYPE_OBJ_FIXTURES[2],
+        resources=None,
     ),
     # dest-only-evac
     '077fb63a-bdc8-4330-90ef-f012082703dc': objects.Instance(
@@ -384,6 +401,7 @@ _MIGRATION_INSTANCE_FIXTURES = {
         flavor=_INSTANCE_TYPE_OBJ_FIXTURES[2],
         old_flavor=_INSTANCE_TYPE_OBJ_FIXTURES[1],
         new_flavor=_INSTANCE_TYPE_OBJ_FIXTURES[2],
+        resources=None,
     ),
 }
 
@@ -416,26 +434,12 @@ _MIGRATION_CONTEXT_FIXTURES = {
 }
 
 
-def overhead_zero(instance):
-    # Emulate that the driver does not adjust the memory
-    # of the instance...
-    return {
-        'memory_mb': 0,
-        'disk_gb': 0,
-        'vcpus': 0,
-    }
-
-
-def setup_rt(hostname, virt_resources=_VIRT_DRIVER_AVAIL_RESOURCES,
-             estimate_overhead=overhead_zero):
+def setup_rt(hostname, virt_resources=_VIRT_DRIVER_AVAIL_RESOURCES):
     """Sets up the resource tracker instance with mock fixtures.
 
     :param virt_resources: Optional override of the resource representation
                            returned by the virt driver's
                            `get_available_resource()` method.
-    :param estimate_overhead: Optional override of a function that should
-                              return overhead of memory given an instance
-                              object. Defaults to returning zero overhead.
     """
     query_client_mock = mock.MagicMock()
     report_client_mock = mock.MagicMock()
@@ -445,9 +449,9 @@ def setup_rt(hostname, virt_resources=_VIRT_DRIVER_AVAIL_RESOURCES,
     virt_resources = copy.deepcopy(virt_resources)
     vd.get_available_resource.return_value = virt_resources
     vd.get_inventory.side_effect = NotImplementedError
+    # TODO(mriedem): Need to make this mocked virt driver implement upt.
     vd.update_provider_tree.side_effect = NotImplementedError
     vd.get_host_ip_addr.return_value = _NODENAME
-    vd.estimate_instance_overhead.side_effect = estimate_overhead
     vd.rebalances_nodes = False
 
     with test.nested(
@@ -478,12 +482,29 @@ class BaseTestCase(test.NoDBTestCase):
                    reserved_host_disk_mb=0,
                    reserved_host_memory_mb=0,
                    reserved_host_cpus=0)
+        self.allocations = {
+            _COMPUTE_NODE_FIXTURES[0].uuid: {
+                "generation": 0,
+                "resources": {
+                    "VCPU": 1,
+                    "MEMORY_MB": 512
+                }
+            }
+        }
+        self.compute = _COMPUTE_NODE_FIXTURES[0]
+        self.resource_0 = objects.Resource(provider_uuid=self.compute.uuid,
+                                           resource_class="CUSTOM_RESOURCE_0",
+                                           identifier="bar")
+        self.resource_1 = objects.Resource(provider_uuid=self.compute.uuid,
+                                           resource_class="CUSTOM_RESOURCE_1",
+                                           identifier="foo_1")
+        self.resource_2 = objects.Resource(provider_uuid=self.compute.uuid,
+                                           resource_class="CUSTOM_RESOURCE_1",
+                                           identifier="foo_2")
 
-    def _setup_rt(self, virt_resources=_VIRT_DRIVER_AVAIL_RESOURCES,
-                  estimate_overhead=overhead_zero):
+    def _setup_rt(self, virt_resources=_VIRT_DRIVER_AVAIL_RESOURCES):
         (self.rt, self.sched_client_mock, self.report_client_mock,
-         self.driver_mock) = setup_rt(
-                 _HOSTNAME, virt_resources, estimate_overhead)
+         self.driver_mock) = setup_rt(_HOSTNAME, virt_resources)
 
     def _setup_ptree(self, compute):
         """Set up a ProviderTree with a compute node root, and mock the
@@ -497,6 +518,9 @@ class BaseTestCase(test.NoDBTestCase):
         ptree = provider_tree.ProviderTree()
         ptree.new_root(compute.hypervisor_hostname, compute.uuid)
         ptree.update_traits = mock.Mock()
+        resources = {"CUSTOM_RESOURCE_0": {self.resource_0},
+                     "CUSTOM_RESOURCE_1": {self.resource_1, self.resource_2}}
+        ptree.update_resources(compute.uuid, resources)
 
         rc_mock = self.rt.reportclient
         gptaer_mock = rc_mock.get_provider_tree_and_ensure_root
@@ -579,7 +603,8 @@ class TestUpdateAvailableResources(BaseTestCase):
                                              'system_metadata',
                                              'numa_topology',
                                              'flavor',
-                                             'migration_context'])
+                                             'migration_context',
+                                             'resources'])
         get_cn_mock.assert_called_once_with(mock.ANY, _HOSTNAME,
                                             _NODENAME)
         migr_mock.assert_called_once_with(mock.ANY, _HOSTNAME,
@@ -1079,6 +1104,131 @@ class TestUpdateAvailableResources(BaseTestCase):
                                                  actual_resources))
         update_mock.assert_called_once()
 
+    @mock.patch('nova.compute.utils.is_volume_backed_instance',
+                new=mock.Mock(return_value=False))
+    @mock.patch('nova.objects.PciDeviceList.get_by_compute_node',
+                new=mock.Mock(return_value=objects.PciDeviceList()))
+    @mock.patch('nova.objects.MigrationContext.get_by_instance_uuid',
+                new=mock.Mock(return_value=None))
+    @mock.patch('nova.objects.ComputeNode.get_by_host_and_nodename')
+    @mock.patch('nova.objects.MigrationList.get_in_progress_by_host_and_node')
+    @mock.patch('nova.objects.Instance.get_by_uuid')
+    @mock.patch('nova.objects.InstanceList.get_by_host_and_node')
+    def test_populate_assigned_resources(self, mock_get_instances,
+                                         mock_get_instance,
+                                         mock_get_migrations,
+                                         mock_get_cn):
+        # when update_available_resources, rt.assigned_resources
+        # will be populated, resources assigned to tracked migrations
+        # and instances will be tracked in rt.assigned_resources.
+        self._setup_rt()
+
+        # one instance is in the middle of being "resized" to the same host,
+        # meaning there are two related resource allocations - one against
+        # the instance and one against the migration record
+        # here resource_1 and resource_2 are assigned to resizing inst
+        migr_obj = _MIGRATION_FIXTURES['source-and-dest']
+        inst_uuid = migr_obj.instance_uuid
+        resizing_inst = _MIGRATION_INSTANCE_FIXTURES[inst_uuid].obj_clone()
+        mig_ctxt = _MIGRATION_CONTEXT_FIXTURES[resizing_inst.uuid]
+        mig_ctxt.old_resources = objects.ResourceList(
+                objects=[self.resource_1])
+        mig_ctxt.new_resources = objects.ResourceList(
+                objects=[self.resource_2])
+        resizing_inst.migration_context = mig_ctxt
+        # the other instance is not being resized and only has the single
+        # resource allocation for itself
+        # here resource_0 is assigned to inst
+        inst = _INSTANCE_FIXTURES[0]
+        inst.resources = objects.ResourceList(objects=[self.resource_0])
+
+        mock_get_instances.return_value = [inst, resizing_inst]
+        mock_get_instance.return_value = resizing_inst
+        mock_get_migrations.return_value = [migr_obj]
+        mock_get_cn.return_value = self.compute
+
+        update_mock = self._update_available_resources()
+        update_mock.assert_called_once()
+        expected_assigned_resources = {self.compute.uuid: {
+                "CUSTOM_RESOURCE_0": {self.resource_0},
+                "CUSTOM_RESOURCE_1": {self.resource_1, self.resource_2}
+            }}
+        self.assertEqual(expected_assigned_resources,
+                         self.rt.assigned_resources)
+
+    @mock.patch('nova.compute.utils.is_volume_backed_instance',
+                new=mock.Mock(return_value=False))
+    @mock.patch('nova.objects.PciDeviceList.get_by_compute_node',
+                new=mock.Mock(return_value=objects.PciDeviceList()))
+    @mock.patch('nova.objects.MigrationContext.get_by_instance_uuid',
+                new=mock.Mock(return_value=None))
+    @mock.patch('nova.objects.ComputeNode.get_by_host_and_nodename')
+    @mock.patch('nova.objects.MigrationList.get_in_progress_by_host_and_node')
+    @mock.patch('nova.objects.Instance.get_by_uuid')
+    @mock.patch('nova.objects.InstanceList.get_by_host_and_node')
+    def test_check_resources_startup_success(self, mock_get_instances,
+                                             mock_get_instance,
+                                             mock_get_migrations,
+                                             mock_get_cn):
+        # When update_available_resources is running on startup,
+        # it will trigger this function to check if there are
+        # assigned resources not in provider tree. If so, the reason
+        # may be admin delete the resources on the host or delete some
+        # resource configurations in file.
+        self._setup_rt()
+        # there are three resources in provider tree
+        self.rt.provider_tree = self._setup_ptree(self.compute)
+        migr_obj = migr_obj = _MIGRATION_FIXTURES['source-and-dest']
+        inst_uuid = migr_obj.instance_uuid
+        resizing_inst = _MIGRATION_INSTANCE_FIXTURES[inst_uuid].obj_clone()
+        mig_ctxt = _MIGRATION_CONTEXT_FIXTURES[resizing_inst.uuid]
+        mig_ctxt.old_resources = objects.ResourceList(
+                objects=[self.resource_1])
+        mig_ctxt.new_resources = objects.ResourceList(
+                objects=[self.resource_2])
+        resizing_inst.migration_context = mig_ctxt
+        inst = _INSTANCE_FIXTURES[0]
+        inst.resources = objects.ResourceList(objects=[self.resource_0])
+
+        mock_get_instances.return_value = [inst, resizing_inst]
+        mock_get_instance.return_value = resizing_inst
+        mock_get_migrations.return_value = [migr_obj]
+        mock_get_cn.return_value = self.compute
+
+        # check_resources is only triggered when startup
+        update_mock = self._update_available_resources(startup=True)
+        update_mock.assert_called_once()
+
+    @mock.patch('nova.compute.utils.is_volume_backed_instance',
+                new=mock.Mock(return_value=False))
+    @mock.patch('nova.objects.PciDeviceList.get_by_compute_node',
+                new=mock.Mock(return_value=objects.PciDeviceList()))
+    @mock.patch('nova.objects.ComputeNode.get_by_host_and_nodename')
+    @mock.patch('nova.objects.MigrationList.get_in_progress_by_host_and_node')
+    @mock.patch('nova.objects.InstanceList.get_by_host_and_node')
+    def test_check_resources_startup_fail(self, mock_get_instances,
+                                          mock_get_migrations,
+                                          mock_get_cn):
+        # Similar to testcase test_check_resources_startup_success,
+        # and this one is for check_resources failed
+        resource = objects.Resource(provider_uuid=self.compute.uuid,
+                                    resource_class="CUSTOM_RESOURCE_0",
+                                    identifier="notfound")
+        self._setup_rt()
+        # there are three resources in provider tree
+        self.rt.provider_tree = self._setup_ptree(self.compute)
+
+        inst = _INSTANCE_FIXTURES[0]
+        inst.resources = objects.ResourceList(objects=[resource])
+
+        mock_get_instances.return_value = [inst]
+        mock_get_migrations.return_value = []
+        mock_get_cn.return_value = self.compute
+
+        # There are assigned resources not found in provider tree
+        self.assertRaises(exc.AssignedResourceNotFound,
+                          self._update_available_resources, startup=True)
+
 
 class TestInitComputeNode(BaseTestCase):
 
@@ -1165,23 +1315,18 @@ class TestInitComputeNode(BaseTestCase):
         self.assertEqual(_HOSTNAME, self.rt.compute_nodes[_NODENAME].host)
 
     @mock.patch('nova.objects.ComputeNodeList.get_by_hypervisor')
-    @mock.patch('nova.objects.PciDeviceList.get_by_compute_node',
-                return_value=objects.PciDeviceList(objects=[]))
     @mock.patch('nova.objects.ComputeNode.create')
     @mock.patch('nova.objects.ComputeNode.get_by_host_and_nodename')
     @mock.patch('nova.compute.resource_tracker.ResourceTracker.'
                 '_update')
     def test_compute_node_created_on_empty(self, update_mock, get_mock,
-                                           create_mock, pci_tracker_mock,
+                                           create_mock,
                                            get_by_hypervisor_mock):
         get_by_hypervisor_mock.return_value = []
         self._test_compute_node_created(update_mock, get_mock, create_mock,
-                                        pci_tracker_mock,
                                         get_by_hypervisor_mock)
 
     @mock.patch('nova.objects.ComputeNodeList.get_by_hypervisor')
-    @mock.patch('nova.objects.PciDeviceList.get_by_compute_node',
-                return_value=objects.PciDeviceList(objects=[]))
     @mock.patch('nova.objects.ComputeNode.create')
     @mock.patch('nova.objects.ComputeNode.get_by_host_and_nodename')
     @mock.patch('nova.compute.resource_tracker.ResourceTracker.'
@@ -1189,32 +1334,26 @@ class TestInitComputeNode(BaseTestCase):
     def test_compute_node_created_on_empty_rebalance(self, update_mock,
                                                      get_mock,
                                                      create_mock,
-                                                     pci_tracker_mock,
                                                      get_by_hypervisor_mock):
         get_by_hypervisor_mock.return_value = []
         self._test_compute_node_created(update_mock, get_mock, create_mock,
-                                        pci_tracker_mock,
                                         get_by_hypervisor_mock,
                                         rebalances_nodes=True)
 
     @mock.patch('nova.objects.ComputeNodeList.get_by_hypervisor')
-    @mock.patch('nova.objects.PciDeviceList.get_by_compute_node',
-                return_value=objects.PciDeviceList(objects=[]))
     @mock.patch('nova.objects.ComputeNode.create')
     @mock.patch('nova.objects.ComputeNode.get_by_host_and_nodename')
     @mock.patch('nova.compute.resource_tracker.ResourceTracker.'
                 '_update')
     def test_compute_node_created_too_many(self, update_mock, get_mock,
-                                           create_mock, pci_tracker_mock,
+                                           create_mock,
                                            get_by_hypervisor_mock):
         get_by_hypervisor_mock.return_value = ["fake_node_1", "fake_node_2"]
         self._test_compute_node_created(update_mock, get_mock, create_mock,
-                                        pci_tracker_mock,
                                         get_by_hypervisor_mock,
                                         rebalances_nodes=True)
 
-    def _test_compute_node_created(self, update_mock, get_mock,
-                                   create_mock, pci_tracker_mock,
+    def _test_compute_node_created(self, update_mock, get_mock, create_mock,
                                    get_by_hypervisor_mock,
                                    rebalances_nodes=False):
         self.flags(cpu_allocation_ratio=1.0, ram_allocation_ratio=1.0,
@@ -1243,12 +1382,12 @@ class TestInitComputeNode(BaseTestCase):
             'current_workload': 0,
             'vcpus': 4,
             'running_vms': 0,
-            'pci_passthrough_devices': '[]'
+            'pci_passthrough_devices': '[]',
+            'uuid': uuids.compute_node_uuid
         }
         # The expected compute represents the initial values used
         # when creating a compute node.
         expected_compute = objects.ComputeNode(
-            id=42,
             host_ip=resources['host_ip'],
             vcpus=resources['vcpus'],
             memory_mb=resources['memory_mb'],
@@ -1268,21 +1407,12 @@ class TestInitComputeNode(BaseTestCase):
             cpu_allocation_ratio=CONF.initial_cpu_allocation_ratio,
             disk_allocation_ratio=CONF.initial_disk_allocation_ratio,
             stats={'failed_builds': 0},
-            pci_device_pools=objects.PciDevicePoolList(objects=[]),
             uuid=uuids.compute_node_uuid
         )
 
-        def set_cn_id():
-            # The PCI tracker needs the compute node's ID when starting up, so
-            # make sure that we set the ID value so we don't get a Cannot load
-            # 'id' in base class error
-            cn = self.rt.compute_nodes[_NODENAME]
-            cn.id = 42  # Has to be a number, not a mock
-            cn.uuid = uuids.compute_node_uuid
-
-        create_mock.side_effect = set_cn_id
-        self.assertTrue(
-            self.rt._init_compute_node(mock.sentinel.ctx, resources))
+        with mock.patch.object(self.rt, '_setup_pci_tracker') as setup_pci:
+            self.assertTrue(
+                self.rt._init_compute_node(mock.sentinel.ctx, resources))
 
         cn = self.rt.compute_nodes[_NODENAME]
         get_mock.assert_called_once_with(mock.sentinel.ctx, _HOSTNAME,
@@ -1294,22 +1424,47 @@ class TestInitComputeNode(BaseTestCase):
             get_by_hypervisor_mock.assert_not_called()
         create_mock.assert_called_once_with()
         self.assertTrue(obj_base.obj_equal_prims(expected_compute, cn))
-        pci_tracker_mock.assert_called_once_with(mock.sentinel.ctx,
-                                                 42)
+        setup_pci.assert_called_once_with(mock.sentinel.ctx, cn, resources)
         self.assertFalse(update_mock.called)
 
+    @mock.patch('nova.compute.resource_tracker.ResourceTracker.'
+                '_setup_pci_tracker')
+    @mock.patch('nova.objects.ComputeNode.get_by_host_and_nodename',
+                side_effect=exc.ComputeHostNotFound(host=_HOSTNAME))
+    @mock.patch('nova.objects.ComputeNode.create',
+                side_effect=(test.TestingException, None))
+    def test_compute_node_create_fail_retry_works(self, mock_create, mock_get,
+                                                  mock_setup_pci):
+        """Tests that _init_compute_node will not save the ComputeNode object
+        in the compute_nodes dict if create() fails.
+        """
+        self._setup_rt()
+        self.assertEqual({}, self.rt.compute_nodes)
+        ctxt = context.get_context()
+        # The first ComputeNode.create fails so rt.compute_nodes should
+        # remain empty.
+        resources = copy.deepcopy(_VIRT_DRIVER_AVAIL_RESOURCES)
+        resources['uuid'] = uuids.cn_uuid  # for the LOG.info message
+        self.assertRaises(test.TestingException,
+                          self.rt._init_compute_node, ctxt, resources)
+        self.assertEqual({}, self.rt.compute_nodes)
+        # Second create works so compute_nodes should have a mapping.
+        self.assertTrue(self.rt._init_compute_node(ctxt, resources))
+        self.assertIn(_NODENAME, self.rt.compute_nodes)
+        mock_get.assert_has_calls([mock.call(
+            ctxt, _HOSTNAME, _NODENAME)] * 2)
+        self.assertEqual(2, mock_create.call_count)
+        mock_setup_pci.assert_called_once_with(
+            ctxt, test.MatchType(objects.ComputeNode), resources)
+
     @mock.patch('nova.objects.ComputeNodeList.get_by_hypervisor')
-    @mock.patch('nova.objects.PciDeviceList.get_by_compute_node',
-                return_value=objects.PciDeviceList(objects=[]))
     @mock.patch('nova.objects.ComputeNode.create')
     @mock.patch('nova.objects.ComputeNode.get_by_host_and_nodename')
     @mock.patch('nova.compute.resource_tracker.ResourceTracker.'
                 '_update')
     def test_node_removed(self, update_mock, get_mock,
-                          create_mock, pci_tracker_mock,
-                          get_by_hypervisor_mock):
+                          create_mock, get_by_hypervisor_mock):
         self._test_compute_node_created(update_mock, get_mock, create_mock,
-                                        pci_tracker_mock,
                                         get_by_hypervisor_mock)
         self.rt.old_resources[_NODENAME] = mock.sentinel.foo
         self.assertIn(_NODENAME, self.rt.compute_nodes)
@@ -1413,8 +1568,15 @@ class TestUpdateComputeNode(BaseTestCase):
         self.rt._update(mock.sentinel.ctx, new_compute)
         save_mock.assert_called_once_with()
         norm_mock.assert_called_once_with(mock.sentinel.inv_data, new_compute)
+        # Assert a warning was logged about using a virt driver that does not
+        # implement update_provider_tree.
+        self.assertIn('Compute driver "%s" does not implement the '
+                      '"update_provider_tree" interface.' %
+                      CONF.compute_driver, self.stdlog.logger.output)
 
-    def test_existing_node_capabilities_as_traits(self):
+    @mock.patch('nova.compute.resource_tracker.ResourceTracker.'
+                '_sync_compute_service_disabled_trait')
+    def test_existing_node_capabilities_as_traits(self, mock_sync_disabled):
         """The capabilities_as_traits() driver method returns traits
         information for a node/provider.
         """
@@ -1441,9 +1603,14 @@ class TestUpdateComputeNode(BaseTestCase):
             new_compute.hypervisor_hostname,
             [mock.sentinel.trait]
         )
+        mock_sync_disabled.assert_called_once_with(
+            mock.sentinel.ctx, {mock.sentinel.trait})
 
+    @mock.patch('nova.compute.resource_tracker.ResourceTracker.'
+                '_sync_compute_service_disabled_trait')
     @mock.patch('nova.objects.ComputeNode.save')
-    def test_existing_node_update_provider_tree_implemented(self, save_mock):
+    def test_existing_node_update_provider_tree_implemented(
+            self, save_mock, mock_sync_disabled):
         """The update_provider_tree() virt driver method is only implemented
         for some virt drivers. This method returns inventory, trait, and
         aggregate information for resource providers in a tree associated with
@@ -1526,10 +1693,14 @@ class TestUpdateComputeNode(BaseTestCase):
         # 1024MB in GB
         exp_inv[orc.DISK_GB]['reserved'] = 1
         self.assertEqual(exp_inv, ptree.data(new_compute.uuid).inventory)
+        mock_sync_disabled.assert_called_once()
 
     @mock.patch('nova.compute.resource_tracker.ResourceTracker.'
+                '_sync_compute_service_disabled_trait')
+    @mock.patch('nova.compute.resource_tracker.ResourceTracker.'
                 '_resource_change', return_value=False)
-    def test_update_retry_success(self, mock_resource_change):
+    def test_update_retry_success(self, mock_resource_change,
+                                  mock_sync_disabled):
         self._setup_rt()
         orig_compute = _COMPUTE_NODE_FIXTURES[0].obj_clone()
         self.rt.compute_nodes[_NODENAME] = orig_compute
@@ -1550,12 +1721,16 @@ class TestUpdateComputeNode(BaseTestCase):
         self.rt._update(mock.sentinel.ctx, new_compute)
 
         self.assertEqual(2, ufpt_mock.call_count)
+        self.assertEqual(2, mock_sync_disabled.call_count)
         # The retry is restricted to _update_to_placement
         self.assertEqual(1, mock_resource_change.call_count)
 
     @mock.patch('nova.compute.resource_tracker.ResourceTracker.'
+                '_sync_compute_service_disabled_trait')
+    @mock.patch('nova.compute.resource_tracker.ResourceTracker.'
                 '_resource_change', return_value=False)
-    def test_update_retry_raises(self, mock_resource_change):
+    def test_update_retry_raises(self, mock_resource_change,
+                                 mock_sync_disabled):
         self._setup_rt()
         orig_compute = _COMPUTE_NODE_FIXTURES[0].obj_clone()
         self.rt.compute_nodes[_NODENAME] = orig_compute
@@ -1577,8 +1752,61 @@ class TestUpdateComputeNode(BaseTestCase):
                           self.rt._update, mock.sentinel.ctx, new_compute)
 
         self.assertEqual(4, ufpt_mock.call_count)
+        self.assertEqual(4, mock_sync_disabled.call_count)
         # The retry is restricted to _update_to_placement
         self.assertEqual(1, mock_resource_change.call_count)
+
+    @mock.patch('nova.objects.Service.get_by_compute_host',
+                return_value=objects.Service(disabled=True))
+    def test_sync_compute_service_disabled_trait_add(self, mock_get_by_host):
+        """Tests the scenario that the compute service is disabled so the
+        COMPUTE_STATUS_DISABLED trait is added to the traits set.
+        """
+        self._setup_rt()
+        ctxt = context.get_admin_context()
+        traits = set()
+        self.rt._sync_compute_service_disabled_trait(ctxt, traits)
+        self.assertEqual({os_traits.COMPUTE_STATUS_DISABLED}, traits)
+        mock_get_by_host.assert_called_once_with(ctxt, self.rt.host)
+
+    @mock.patch('nova.objects.Service.get_by_compute_host',
+                return_value=objects.Service(disabled=False))
+    def test_sync_compute_service_disabled_trait_remove(
+            self, mock_get_by_host):
+        """Tests the scenario that the compute service is enabled so the
+        COMPUTE_STATUS_DISABLED trait is removed from the traits set.
+        """
+        self._setup_rt()
+        ctxt = context.get_admin_context()
+        # First test with the trait actually in the set.
+        traits = {os_traits.COMPUTE_STATUS_DISABLED}
+        self.rt._sync_compute_service_disabled_trait(ctxt, traits)
+        self.assertEqual(set(), traits)
+        mock_get_by_host.assert_called_once_with(ctxt, self.rt.host)
+        # Now run it again with the empty set to make sure the method handles
+        # the trait not already being in the set (idempotency).
+        self.rt._sync_compute_service_disabled_trait(ctxt, traits)
+        self.assertEqual(0, len(traits))
+
+    @mock.patch('nova.objects.Service.get_by_compute_host',
+                # One might think Service.get_by_compute_host would raise
+                # ServiceNotFound but the DB API raises ComputeHostNotFound.
+                side_effect=exc.ComputeHostNotFound(host=_HOSTNAME))
+    @mock.patch('nova.compute.resource_tracker.LOG.error')
+    def test_sync_compute_service_disabled_trait_service_not_found(
+            self, mock_log_error, mock_get_by_host):
+        """Tests the scenario that the compute service is not found so the
+        traits set is unmodified and an error is logged.
+        """
+        self._setup_rt()
+        ctxt = context.get_admin_context()
+        traits = set()
+        self.rt._sync_compute_service_disabled_trait(ctxt, traits)
+        self.assertEqual(0, len(traits))
+        mock_get_by_host.assert_called_once_with(ctxt, self.rt.host)
+        mock_log_error.assert_called_once()
+        self.assertIn('Unable to find services table record for nova-compute',
+                      mock_log_error.call_args[0][0])
 
     def test_update_compute_node_save_fails_restores_old_resources(self):
         """Tests the scenario that compute_node.save() fails and the
@@ -1798,6 +2026,7 @@ class TestInstanceClaim(BaseTestCase):
         self._setup_rt()
         cn = _COMPUTE_NODE_FIXTURES[0].obj_clone()
         self.rt.compute_nodes[_NODENAME] = cn
+        self.rt.provider_tree = self._setup_ptree(cn)
 
         # not using mock.sentinel.ctx because instance_claim calls #elevated
         self.ctx = mock.MagicMock()
@@ -1807,7 +2036,8 @@ class TestInstanceClaim(BaseTestCase):
         self.instance = _INSTANCE_FIXTURES[0].obj_clone()
 
     def assertEqualNUMAHostTopology(self, expected, got):
-        attrs = ('cpuset', 'memory', 'id', 'cpu_usage', 'memory_usage')
+        attrs = ('cpuset', 'pcpuset', 'memory', 'id', 'cpu_usage',
+                 'memory_usage')
         if None in (expected, got):
             if expected != got:
                 raise AssertionError("Topologies don't match. Expected: "
@@ -1834,7 +2064,7 @@ class TestInstanceClaim(BaseTestCase):
 
         with mock.patch.object(self.instance, 'save'):
             claim = self.rt.instance_claim(mock.sentinel.ctx, self.instance,
-                                           _NODENAME, None)
+                                           _NODENAME, self.allocations, None)
 
         self.assertEqual(self.rt.host, self.instance.host)
         self.assertEqual(self.rt.host, self.instance.launched_on)
@@ -1878,7 +2108,7 @@ class TestInstanceClaim(BaseTestCase):
         with mock.patch.object(self.rt, '_update') as update_mock:
             with mock.patch.object(self.instance, 'save'):
                 self.rt.instance_claim(self.ctx, self.instance, _NODENAME,
-                                       None)
+                                       self.allocations, None)
             cn = self.rt.compute_nodes[_NODENAME]
             update_mock.assert_called_once_with(self.elevated, cn)
             self.assertTrue(obj_base.obj_equal_prims(expected, cn))
@@ -1891,6 +2121,18 @@ class TestInstanceClaim(BaseTestCase):
         # called in a removed state
         pci_mock.return_value = objects.InstancePCIRequests(requests=[])
         check_bfv_mock.return_value = False
+        cn = self.rt.compute_nodes[_NODENAME]
+        allocations = {
+            cn.uuid: {
+                "generation": 0,
+                "resources": {
+                    "VCPU": 1,
+                    "MEMORY_MB": 512,
+                    "CUSTOM_RESOURCE_0": 1,
+                    "CUSTOM_RESOURCE_1": 2,
+                }
+            }
+        }
 
         expected = copy.deepcopy(_COMPUTE_NODE_FIXTURES[0])
         disk_used = self.instance.root_gb + self.instance.ephemeral_gb
@@ -1915,10 +2157,15 @@ class TestInstanceClaim(BaseTestCase):
         with mock.patch.object(self.rt, '_update') as update_mock:
             with mock.patch.object(self.instance, 'save'):
                 self.rt.instance_claim(self.ctx, self.instance, _NODENAME,
-                                       None)
+                                       allocations, None)
             cn = self.rt.compute_nodes[_NODENAME]
             update_mock.assert_called_once_with(self.elevated, cn)
             self.assertTrue(obj_base.obj_equal_prims(expected, cn))
+            # Verify that the assigned resources are tracked
+            for rc, amount in [("CUSTOM_RESOURCE_0", 1),
+                               ("CUSTOM_RESOURCE_1", 2)]:
+                self.assertEqual(amount,
+                                 len(self.rt.assigned_resources[cn.uuid][rc]))
 
         expected_updated = copy.deepcopy(_COMPUTE_NODE_FIXTURES[0])
         vals = {
@@ -1939,6 +2186,9 @@ class TestInstanceClaim(BaseTestCase):
             self.rt.update_usage(self.ctx, self.instance, _NODENAME)
         cn = self.rt.compute_nodes[_NODENAME]
         self.assertTrue(obj_base.obj_equal_prims(expected_updated, cn))
+        # Verify that the resources are released
+        for rc in ["CUSTOM_RESOURCE_0", "CUSTOM_RESOURCE_1"]:
+            self.assertEqual(0, len(self.rt.assigned_resources[cn.uuid][rc]))
 
     @mock.patch('nova.compute.utils.is_volume_backed_instance')
     @mock.patch('nova.objects.InstancePCIRequests.get_by_instance_uuid')
@@ -1970,7 +2220,7 @@ class TestInstanceClaim(BaseTestCase):
         with mock.patch.object(self.rt, '_update') as update_mock:
             with mock.patch.object(self.instance, 'save'):
                 self.rt.instance_claim(self.ctx, self.instance, _NODENAME,
-                                       None)
+                                       self.allocations, None)
             cn = self.rt.compute_nodes[_NODENAME]
             update_mock.assert_called_once_with(self.elevated, cn)
             self.assertTrue(obj_base.obj_equal_prims(expected, cn))
@@ -2030,11 +2280,94 @@ class TestInstanceClaim(BaseTestCase):
         with mock.patch.object(self.rt, '_update') as update_mock:
             with mock.patch.object(self.instance, 'save'):
                 self.rt.instance_claim(self.ctx, self.instance, _NODENAME,
-                                       None)
+                                       self.allocations, None)
             cn = self.rt.compute_nodes[_NODENAME]
             update_mock.assert_called_once_with(self.elevated, cn)
             pci_stats_mock.assert_called_once_with([request])
             self.assertTrue(obj_base.obj_equal_prims(expected, cn))
+
+    @mock.patch('nova.compute.utils.is_volume_backed_instance',
+                new=mock.Mock(return_value=False))
+    @mock.patch('nova.objects.InstancePCIRequests.get_by_instance_uuid',
+                new=mock.Mock(return_value=objects.InstancePCIRequests(
+                    requests=[])))
+    def test_claim_with_resources(self):
+        cn = self.rt.compute_nodes[_NODENAME]
+        allocations = {
+            cn.uuid: {
+                "generation": 0,
+                "resources": {
+                    "VCPU": 1,
+                    "MEMORY_MB": 512,
+                    "CUSTOM_RESOURCE_0": 1,
+                    "CUSTOM_RESOURCE_1": 2,
+                }
+            }
+        }
+        expected_resources_0 = {self.resource_0}
+        expected_resources_1 = {self.resource_1, self.resource_2}
+        with mock.patch.object(self.rt, '_update'):
+            with mock.patch.object(self.instance, 'save'):
+                self.rt.instance_claim(self.ctx, self.instance, _NODENAME,
+                                       allocations, None)
+
+        self.assertEqual((expected_resources_0 | expected_resources_1),
+                         set(self.instance.resources))
+
+    @mock.patch('nova.compute.utils.is_volume_backed_instance',
+                new=mock.Mock(return_value=False))
+    @mock.patch('nova.objects.InstancePCIRequests.get_by_instance_uuid',
+                new=mock.Mock(return_value=objects.InstancePCIRequests(
+                    requests=[])))
+    def test_claim_with_resources_from_free(self):
+        cn = self.rt.compute_nodes[_NODENAME]
+        self.rt.assigned_resources = {
+            self.resource_1.provider_uuid: {
+                self.resource_1.resource_class: {self.resource_1}}}
+        allocations = {
+            cn.uuid: {
+                "generation": 0,
+                "resources": {
+                    "VCPU": 1,
+                    "MEMORY_MB": 512,
+                    "CUSTOM_RESOURCE_1": 1,
+                }
+            }
+        }
+        # resource_1 is assigned to other instances,
+        # so only resource_2 is available
+        expected_resources = {self.resource_2}
+        with mock.patch.object(self.rt, '_update'):
+            with mock.patch.object(self.instance, 'save'):
+                self.rt.instance_claim(self.ctx, self.instance, _NODENAME,
+                                       allocations, None)
+
+        self.assertEqual(expected_resources, set(self.instance.resources))
+
+    @mock.patch('nova.compute.utils.is_volume_backed_instance',
+                new=mock.Mock(return_value=False))
+    @mock.patch('nova.objects.InstancePCIRequests.get_by_instance_uuid',
+                new=mock.Mock(return_value=objects.InstancePCIRequests(
+                    requests=[])))
+    def test_claim_failed_with_resources(self):
+        cn = self.rt.compute_nodes[_NODENAME]
+        # Only one "CUSTOM_RESOURCE_0" resource is available
+        allocations = {
+            cn.uuid: {
+                "generation": 0,
+                "resources": {
+                    "VCPU": 1,
+                    "MEMORY_MB": 512,
+                    "CUSTOM_RESOURCE_0": 2
+                }
+            }
+        }
+        with mock.patch.object(self.instance, 'save'):
+            self.assertRaises(exc.ComputeResourcesUnavailable,
+                              self.rt.instance_claim, self.ctx, self.instance,
+                              _NODENAME, allocations, None)
+        self.assertEqual(
+            0, len(self.rt.assigned_resources[cn.uuid]['CUSTOM_RESOURCE_0']))
 
     @mock.patch('nova.compute.utils.is_volume_backed_instance')
     @mock.patch('nova.objects.InstancePCIRequests.get_by_instance_uuid')
@@ -2060,7 +2393,7 @@ class TestInstanceClaim(BaseTestCase):
                            return_value=self.instance)
         def _doit(mock_clone):
             with self.rt.instance_claim(self.ctx, self.instance, _NODENAME,
-                                        None):
+                                        self.allocations, None):
                 # Raise an exception. Just make sure below that the abort()
                 # method of the claim object was called (and the resulting
                 # resources reset to the pre-claimed amounts)
@@ -2093,7 +2426,7 @@ class TestInstanceClaim(BaseTestCase):
         @mock.patch.object(self.instance, 'save')
         def _claim(mock_save, mock_clone):
             return self.rt.instance_claim(self.ctx, self.instance, _NODENAME,
-                                          None)
+                                          self.allocations, None)
 
         cn = self.rt.compute_nodes[_NODENAME]
 
@@ -2122,25 +2455,6 @@ class TestInstanceClaim(BaseTestCase):
         self.assertEqual(0, cn.memory_mb_used)
         self.assertEqual(0, cn.running_vms)
 
-    @mock.patch('nova.objects.InstancePCIRequests.get_by_instance_uuid')
-    @mock.patch('nova.objects.MigrationList.get_in_progress_by_host_and_node')
-    @mock.patch('nova.objects.ComputeNode.save')
-    def test_claim_limits(self, save_mock, migr_mock, pci_mock):
-        pci_mock.return_value = objects.InstancePCIRequests(requests=[])
-
-        good_limits = {
-            'memory_mb': _COMPUTE_NODE_FIXTURES[0].memory_mb,
-            'disk_gb': _COMPUTE_NODE_FIXTURES[0].local_gb,
-            'vcpu': _COMPUTE_NODE_FIXTURES[0].vcpus,
-        }
-        for key in good_limits.keys():
-            bad_limits = copy.deepcopy(good_limits)
-            bad_limits[key] = 0
-
-            self.assertRaises(exc.ComputeResourcesUnavailable,
-                    self.rt.instance_claim,
-                    self.ctx, self.instance, _NODENAME, bad_limits)
-
     @mock.patch('nova.compute.utils.is_volume_backed_instance')
     @mock.patch('nova.objects.InstancePCIRequests.get_by_instance_uuid')
     @mock.patch('nova.objects.MigrationList.get_in_progress_by_host_and_node')
@@ -2162,7 +2476,7 @@ class TestInstanceClaim(BaseTestCase):
         with mock.patch.object(self.rt, '_update') as update_mock:
             with mock.patch.object(self.instance, 'save'):
                 self.rt.instance_claim(self.ctx, self.instance, _NODENAME,
-                                       limits)
+                                       self.allocations, limits)
             update_mock.assert_called_once_with(self.ctx.elevated(), cn)
             new_numa = cn.numa_topology
             new_numa = objects.NUMATopology.obj_from_db_obj(new_numa)
@@ -2251,7 +2565,7 @@ class TestResize(BaseTestCase):
             mock.patch('nova.objects.Instance.save'),
         ) as (create_mig_mock, ctxt_mock, inst_save_mock):
             claim = self.rt.resize_claim(ctx, instance, new_flavor, _NODENAME,
-                                         None)
+                                         None, self.allocations)
 
         create_mig_mock.assert_called_once_with(
                 ctx, instance, new_flavor, _NODENAME,
@@ -2307,6 +2621,8 @@ class TestResize(BaseTestCase):
                    reserved_host_memory_mb=0)
         virt_resources = copy.deepcopy(_VIRT_DRIVER_AVAIL_RESOURCES)
         self._setup_rt(virt_resources=virt_resources)
+        cn = _COMPUTE_NODE_FIXTURES[0].obj_clone()
+        self.rt.provider_tree = self._setup_ptree(cn)
 
         # not using mock.sentinel.ctx because resize_claim calls #elevated
         ctx = mock.MagicMock()
@@ -2319,9 +2635,19 @@ class TestResize(BaseTestCase):
         old_flavor = instance.flavor
         instance.new_flavor = _INSTANCE_TYPE_OBJ_FIXTURES[2]
 
+        # allocations for create
+        allocations = {
+            cn.uuid: {
+                "generation": 0,
+                "resources": {
+                    "CUSTOM_RESOURCE_0": 1,
+                }
+            }
+        }
         # Build instance
         with mock.patch.object(instance, 'save'):
-            self.rt.instance_claim(ctx, instance, _NODENAME, None)
+            self.rt.instance_claim(ctx, instance, _NODENAME,
+                                   allocations, None)
 
         expected = compute_update_usage(expected, old_flavor, sign=1)
         expected.running_vms = 1
@@ -2330,10 +2656,26 @@ class TestResize(BaseTestCase):
             self.rt.compute_nodes[_NODENAME],
             ignore=['stats']
         ))
+        # Verify that resources are assigned and tracked
+        self.assertEqual(
+            1, len(self.rt.assigned_resources[cn.uuid]["CUSTOM_RESOURCE_0"]))
 
+        # allocation for resize
+        allocations = {
+            cn.uuid: {
+                "generation": 0,
+                "resources": {
+                    "CUSTOM_RESOURCE_1": 2,
+                }
+            }
+        }
         # This migration context is fine, it points to the first instance
         # fixture and indicates a source-and-dest resize.
         mig_context_obj = _MIGRATION_CONTEXT_FIXTURES[instance.uuid]
+        mig_context_obj.old_resources = objects.ResourceList(
+            objects=[self.resource_0])
+        mig_context_obj.new_resources = objects.ResourceList(
+            objects=[self.resource_1, self.resource_2])
         instance.migration_context = mig_context_obj
 
         migration = objects.Migration(
@@ -2360,7 +2702,8 @@ class TestResize(BaseTestCase):
                        return_value=mig_context_obj),
             mock.patch('nova.objects.Instance.save'),
         ) as (create_mig_mock, ctxt_mock, inst_save_mock):
-            self.rt.resize_claim(ctx, instance, new_flavor, _NODENAME, None)
+            self.rt.resize_claim(ctx, instance, new_flavor, _NODENAME,
+                                 None, allocations)
 
         expected = compute_update_usage(expected, new_flavor, sign=1)
         self.assertTrue(obj_base.obj_equal_prims(
@@ -2368,6 +2711,12 @@ class TestResize(BaseTestCase):
             self.rt.compute_nodes[_NODENAME],
             ignore=['stats']
         ))
+        # Verify that resources are assigned and tracked
+        for rc, amount in [("CUSTOM_RESOURCE_0", 1),
+                           ("CUSTOM_RESOURCE_1", 2)]:
+            self.assertEqual(amount,
+                             len(self.rt.assigned_resources[cn.uuid][rc]))
+
         # Confirm or revert resize
         if revert:
             flavor = new_flavor
@@ -2385,6 +2734,24 @@ class TestResize(BaseTestCase):
             self.rt.compute_nodes[_NODENAME],
             ignore=['stats']
         ))
+        if revert:
+            # Verify that the new resources are released
+            self.assertEqual(
+                0, len(self.rt.assigned_resources[cn.uuid][
+                    "CUSTOM_RESOURCE_1"]))
+            # Old resources are not released
+            self.assertEqual(
+                1, len(self.rt.assigned_resources[cn.uuid][
+                    "CUSTOM_RESOURCE_0"]))
+        else:
+            # Verify that the old resources are released
+            self.assertEqual(
+                0, len(self.rt.assigned_resources[cn.uuid][
+                    "CUSTOM_RESOURCE_0"]))
+            # new resources are not released
+            self.assertEqual(
+                2, len(self.rt.assigned_resources[cn.uuid][
+                    "CUSTOM_RESOURCE_1"]))
 
     def test_instance_build_resize_revert(self):
         self._test_instance_build_resize(revert=True)
@@ -2490,7 +2857,8 @@ class TestResize(BaseTestCase):
                        return_value=mig_context_obj),
             mock.patch('nova.objects.Instance.save'),
         ) as (alloc_mock, create_mig_mock, ctxt_mock, inst_save_mock):
-            self.rt.resize_claim(ctx, instance, new_flavor, _NODENAME, None)
+            self.rt.resize_claim(ctx, instance, new_flavor, _NODENAME,
+                                 None, self.allocations)
 
         pci_claim_mock.assert_called_once_with(ctx, pci_req_mock.return_value,
                                                None)
@@ -2517,23 +2885,37 @@ class TestResize(BaseTestCase):
 
         instance = _INSTANCE_FIXTURES[0].obj_clone()
         instance.task_state = task_states.RESIZE_MIGRATING
-        instance.flavor = _INSTANCE_TYPE_OBJ_FIXTURES[2]
+        instance.new_flavor = _INSTANCE_TYPE_OBJ_FIXTURES[2]
         instance.migration_context = objects.MigrationContext()
         instance.migration_context.new_pci_devices = objects.PciDeviceList(
             objects=pci_devs)
 
-        self.rt.tracked_instances = set([instance.uuid])
+        # When reverting a resize and dropping the move claim, the
+        # destination compute calls drop_move_claim to drop the new_flavor
+        # usage and the instance should be in tracked_migrations from when
+        # the resize_claim was made on the dest during prep_resize.
+        self.rt.tracked_migrations = {
+            instance.uuid: objects.Migration(migration_type='resize')}
 
         # not using mock.sentinel.ctx because drop_move_claim calls elevated
         ctx = mock.MagicMock()
 
         with test.nested(
             mock.patch.object(self.rt, '_update'),
-            mock.patch.object(self.rt.pci_tracker, 'free_device')
-            ) as (update_mock, mock_pci_free_device):
-                self.rt.drop_move_claim(ctx, instance, _NODENAME)
-                mock_pci_free_device.assert_called_once_with(
-                    pci_dev, mock.ANY)
+            mock.patch.object(self.rt.pci_tracker, 'free_device'),
+            mock.patch.object(self.rt, '_get_usage_dict'),
+            mock.patch.object(self.rt, '_update_usage')
+        ) as (
+            update_mock, mock_pci_free_device, mock_get_usage,
+            mock_update_usage,
+        ):
+            self.rt.drop_move_claim(ctx, instance, _NODENAME)
+            mock_pci_free_device.assert_called_once_with(
+                pci_dev, mock.ANY)
+            mock_get_usage.assert_called_once_with(
+                instance.new_flavor, instance, numa_topology=None)
+            mock_update_usage.assert_called_once_with(
+                mock_get_usage.return_value, _NODENAME, sign=-1)
 
     @mock.patch('nova.compute.utils.is_volume_backed_instance',
                 return_value=False)
@@ -2656,8 +3038,10 @@ class TestResize(BaseTestCase):
                        side_effect=[mig_context_obj1, mig_context_obj2]),
             mock.patch('nova.objects.Instance.save'),
         ) as (create_mig_mock, ctxt_mock, inst_save_mock):
-            self.rt.resize_claim(ctx, instance1, flavor1, _NODENAME, None)
-            self.rt.resize_claim(ctx, instance2, flavor2, _NODENAME, None)
+            self.rt.resize_claim(ctx, instance1, flavor1, _NODENAME,
+                                 None, self.allocations)
+            self.rt.resize_claim(ctx, instance2, flavor2, _NODENAME,
+                                 None, self.allocations)
         cn = self.rt.compute_nodes[_NODENAME]
         self.assertTrue(obj_base.obj_equal_prims(expected, cn))
         self.assertEqual(2, len(self.rt.tracked_migrations),
@@ -2738,6 +3122,7 @@ class TestRebuild(BaseTestCase):
             flavor = _INSTANCE_TYPE_OBJ_FIXTURES[2],
             old_flavor = _INSTANCE_TYPE_OBJ_FIXTURES[2],
             new_flavor = _INSTANCE_TYPE_OBJ_FIXTURES[2],
+            resources = None,
         )
 
         # not using mock.sentinel.ctx because resize_claim calls #elevated
@@ -2747,7 +3132,7 @@ class TestRebuild(BaseTestCase):
             mock.patch('nova.objects.Migration.save'),
             mock.patch('nova.objects.Instance.save'),
         ) as (mig_save_mock, inst_save_mock):
-            self.rt.rebuild_claim(ctx, instance, _NODENAME,
+            self.rt.rebuild_claim(ctx, instance, _NODENAME, self.allocations,
                                   migration=migration)
 
         self.assertEqual(_HOSTNAME, migration.dest_compute)
@@ -2758,21 +3143,69 @@ class TestRebuild(BaseTestCase):
         inst_save_mock.assert_called_once_with()
 
 
+class TestLiveMigration(BaseTestCase):
+
+    def test_live_migration_claim(self):
+        self._setup_rt()
+        self.rt.compute_nodes[_NODENAME] = _COMPUTE_NODE_FIXTURES[0]
+        ctxt = context.get_admin_context()
+        instance = fake_instance.fake_instance_obj(ctxt)
+        instance.pci_requests = None
+        instance.pci_devices = None
+        instance.numa_topology = None
+        migration = objects.Migration(id=42, migration_type='live-migration',
+                                      status='accepted')
+        image_meta = objects.ImageMeta(properties=objects.ImageMetaProps())
+        self.rt.pci_tracker = pci_manager.PciDevTracker(mock.sentinel.ctx)
+        with test.nested(
+            mock.patch.object(objects.ImageMeta, 'from_instance',
+                              return_value=image_meta),
+            mock.patch.object(objects.Migration, 'save'),
+            mock.patch.object(objects.Instance, 'save'),
+            mock.patch.object(self.rt, '_update'),
+            mock.patch.object(self.rt.pci_tracker, 'claim_instance'),
+            mock.patch.object(self.rt, '_update_usage_from_migration')
+        ) as (mock_from_instance, mock_migration_save, mock_instance_save,
+              mock_update, mock_pci_claim_instance, mock_update_usage):
+            claim = self.rt.live_migration_claim(ctxt, instance, _NODENAME,
+                                                 migration, limits=None)
+            self.assertEqual(42, claim.migration.id)
+            # Check that we didn't set the status to 'pre-migrating', like we
+            # do for cold migrations, but which doesn't exist for live
+            # migrations.
+            self.assertEqual('accepted', claim.migration.status)
+            self.assertIn('migration_context', instance)
+            mock_update.assert_called_with(
+                mock.ANY, _COMPUTE_NODE_FIXTURES[0])
+            mock_pci_claim_instance.assert_not_called()
+            mock_update_usage.assert_called_with(ctxt, instance, migration,
+                                                 _NODENAME)
+
+
 class TestUpdateUsageFromMigration(test.NoDBTestCase):
-    @mock.patch('nova.compute.resource_tracker.ResourceTracker.'
-                '_get_instance_type')
-    def test_unsupported_move_type(self, get_mock):
-        rt = resource_tracker.ResourceTracker(mock.sentinel.virt_driver,
-                                              _HOSTNAME)
-        migration = objects.Migration(migration_type='live-migration')
-        # For same-node migrations, the RT's _get_instance_type() method is
-        # called if there is a migration that is trackable. Here, we want to
-        # ensure that this method isn't called for live-migration migrations.
-        rt._update_usage_from_migration(mock.sentinel.ctx,
-                                        mock.sentinel.instance,
-                                        migration,
-                                        _NODENAME)
-        self.assertFalse(get_mock.called)
+
+    def test_missing_old_flavor_outbound_resize(self):
+        """Tests the case that an instance is not being tracked on the source
+        host because it has been resized to a dest host. The confirm_resize
+        operation in ComputeManager sets instance.old_flavor to None before
+        the migration.status is changed to "confirmed" so the source compute
+        RT considers it an in-progress migration and tries to update tracked
+        usage from the instance.old_flavor (which is None when
+        _update_usage_from_migration runs). This test just makes sure that the
+        RT method gracefully handles the instance.old_flavor being gone.
+        """
+        migration = _MIGRATION_FIXTURES['source-only']
+        rt = resource_tracker.ResourceTracker(
+            migration.source_compute, mock.sentinel.virt_driver)
+        ctxt = context.get_admin_context()
+        instance = objects.Instance(
+            uuid=migration.instance_uuid, old_flavor=None,
+            migration_context=objects.MigrationContext())
+        rt._update_usage_from_migration(
+            ctxt, instance, migration, migration.source_node)
+        self.assertNotIn('Starting to track outgoing migration',
+                         self.stdlog.logger.output)
+        self.assertNotIn(migration.instance_uuid, rt.tracked_migrations)
 
     def test_missing_old_flavor_outbound_resize(self):
         """Tests the case that an instance is not being tracked on the source
@@ -2935,6 +3368,25 @@ class TestUpdateUsageFromMigrations(BaseTestCase):
             mock_update_usage.assert_called_once_with(
                 mock.sentinel.ctx, instance, migration, _NODENAME)
             mock_update_usage.reset_mock()
+
+    @mock.patch('nova.objects.migration.Migration.save')
+    @mock.patch.object(resource_tracker.ResourceTracker,
+                       '_update_usage_from_migration')
+    def test_live_migrating_state(self, mock_update_usage, mock_save):
+        self._setup_rt()
+        migration_context = objects.MigrationContext(migration_id=1)
+        instance = objects.Instance(
+            vm_state=vm_states.ACTIVE, task_state=task_states.MIGRATING,
+            migration_context=migration_context)
+        migration = objects.Migration(
+            source_compute='other-host', source_node='other-node',
+            dest_compute=_HOSTNAME, dest_node=_NODENAME,
+            instance_uuid=uuids.instance, id=1, instance=instance,
+            migration_type='live-migration')
+        self.rt._update_usage_from_migrations(
+            mock.sentinel.ctx, [migration], _NODENAME)
+        mock_update_usage.assert_called_once_with(
+            mock.sentinel.ctx, instance, migration, _NODENAME)
 
 
 class TestUpdateUsageFromInstance(BaseTestCase):
@@ -3174,9 +3626,10 @@ class TestUpdateUsageFromInstance(BaseTestCase):
         # instance and has allocations for it.
         rc.delete_allocation_for_instance.assert_not_called()
 
+    @mock.patch('nova.compute.resource_tracker.LOG.warning')
     @mock.patch('nova.objects.Instance.get_by_uuid')
     def test_remove_deleted_instances_allocations_unknown_instance(
-            self, mock_inst_get):
+            self, mock_inst_get, mock_log_warning):
         """Tests the case that an instance is found with allocations for
         this host/node but is not in the dict of tracked instances. The
         allocations are not removed for the instance since we don't know
@@ -3211,6 +3664,56 @@ class TestUpdateUsageFromInstance(BaseTestCase):
         # testing the current behavior but in the future when we get smart
         # and figure things out, this should actually be an error.
         rc.delete_allocation_for_instance.assert_not_called()
+        # Assert the expected warning was logged.
+        mock_log_warning.assert_called_once()
+        self.assertIn("Instance %s is not being actively managed by "
+                      "this compute host but has allocations "
+                      "referencing this compute host",
+                      mock_log_warning.call_args[0][0])
+
+    @mock.patch('nova.compute.resource_tracker.LOG.debug')
+    @mock.patch('nova.objects.Instance.get_by_uuid')
+    def test_remove_deleted_instances_allocations_state_transition_instance(
+            self, mock_inst_get, mock_log_debug):
+        """Tests the case that an instance is found with allocations for
+        this host/node but is not in the dict of tracked instances but the
+        instance.task_state is not None so we do not log a warning nor remove
+        allocations since we want to let the operation play out.
+        """
+        instance = copy.deepcopy(_INSTANCE_FIXTURES[0])
+        instance.task_state = task_states.SPAWNING
+        mock_inst_get.return_value = instance
+        rc = self.rt.reportclient
+        # No tracked instances on this node.
+        # But there is an allocation for an instance on this node.
+        allocs = report.ProviderAllocInfo(
+            allocations={
+                instance.uuid: {
+                    'resources': {
+                        'VCPU': 1,
+                        'MEMORY_MB': 2048,
+                        'DISK_GB': 20
+                    }
+                }
+            }
+        )
+        rc.get_allocations_for_resource_provider = mock.MagicMock(
+            return_value=allocs)
+        rc.delete_allocation_for_instance = mock.MagicMock()
+        cn = self.rt.compute_nodes[_NODENAME]
+        ctx = mock.MagicMock()
+        # Call the method.
+        self.rt._remove_deleted_instances_allocations(
+            ctx, cn, [], {})
+        # We don't delete the allocation because the instance is on this host
+        # but is transitioning task states.
+        rc.delete_allocation_for_instance.assert_not_called()
+        # Assert the expected debug message was logged.
+        mock_log_debug.assert_called_once()
+        self.assertIn('Instance with task_state "%s" is not being '
+                      'actively managed by this compute host but has '
+                      'allocations referencing this compute node',
+                      mock_log_debug.call_args[0][0])
 
     def test_remove_deleted_instances_allocations_retrieval_fail(self):
         """When the report client errs or otherwise retrieves no allocations,
@@ -3305,6 +3808,38 @@ class TestInstanceInResizeState(test.NoDBTestCase):
         instance = objects.Instance(vm_state=vm_states.RESIZED,
                                     task_state=task_states.RESIZE_FINISH)
         self.assertTrue(resource_tracker._instance_in_resize_state(instance))
+
+
+class TestInstanceIsLiveMigrating(test.NoDBTestCase):
+    def test_migrating_active(self):
+        instance = objects.Instance(vm_state=vm_states.ACTIVE,
+                                    task_state=task_states.MIGRATING)
+        self.assertTrue(
+            resource_tracker._instance_is_live_migrating(instance))
+
+    def test_migrating_paused(self):
+        instance = objects.Instance(vm_state=vm_states.PAUSED,
+                                    task_state=task_states.MIGRATING)
+        self.assertTrue(
+            resource_tracker._instance_is_live_migrating(instance))
+
+    def test_migrating_other(self):
+        instance = objects.Instance(vm_state=vm_states.STOPPED,
+                                    task_state=task_states.MIGRATING)
+        self.assertFalse(
+            resource_tracker._instance_is_live_migrating(instance))
+
+    def test_non_migrating_active(self):
+        instance = objects.Instance(vm_state=vm_states.ACTIVE,
+                                    task_state=None)
+        self.assertFalse(
+            resource_tracker._instance_is_live_migrating(instance))
+
+    def test_non_migrating_paused(self):
+        instance = objects.Instance(vm_state=vm_states.PAUSED,
+                                    task_state=None)
+        self.assertFalse(
+            resource_tracker._instance_is_live_migrating(instance))
 
 
 class TestSetInstanceHostAndNode(BaseTestCase):
@@ -3425,22 +3960,6 @@ class ComputeMonitorTestCase(BaseTestCase):
         self.assertEqual(metrics, expected_metrics)
 
 
-class TestIsTrackableMigration(test.NoDBTestCase):
-    def test_true(self):
-        mig = objects.Migration()
-        for mig_type in ('resize', 'migration', 'evacuation'):
-            mig.migration_type = mig_type
-
-            self.assertTrue(resource_tracker._is_trackable_migration(mig))
-
-    def test_false(self):
-        mig = objects.Migration()
-        for mig_type in ('live-migration',):
-            mig.migration_type = mig_type
-
-            self.assertFalse(resource_tracker._is_trackable_migration(mig))
-
-
 class OverCommitTestCase(BaseTestCase):
     def test_cpu_allocation_ratio_none_negative(self):
         self.assertRaises(ValueError,
@@ -3453,3 +3972,57 @@ class OverCommitTestCase(BaseTestCase):
     def test_disk_allocation_ratio_none_negative(self):
         self.assertRaises(ValueError,
                           CONF.set_default, 'disk_allocation_ratio', -1.0)
+
+
+class TestPciTrackerDelegationMethods(BaseTestCase):
+
+    def setUp(self):
+        super(TestPciTrackerDelegationMethods, self).setUp()
+        self._setup_rt()
+        self.rt.pci_tracker = mock.MagicMock()
+        self.context = context.RequestContext(mock.sentinel.user_id,
+                                              mock.sentinel.project_id)
+        self.instance = _INSTANCE_FIXTURES[0].obj_clone()
+
+    def test_claim_pci_devices(self):
+        request = objects.InstancePCIRequest(
+            count=1,
+            spec=[{'vendor_id': 'v', 'product_id': 'p'}])
+        pci_requests = objects.InstancePCIRequests(
+            requests=[request],
+            instance_uuid=self.instance.uuid)
+        self.rt.claim_pci_devices(self.context, pci_requests)
+        self.rt.pci_tracker.claim_instance.assert_called_once_with(
+            self.context, pci_requests, None)
+        self.assertTrue(self.rt.pci_tracker.save.called)
+
+    def test_allocate_pci_devices_for_instance(self):
+        self.rt.allocate_pci_devices_for_instance(self.context, self.instance)
+        self.rt.pci_tracker.allocate_instance.assert_called_once_with(
+            self.instance)
+        self.assertTrue(self.rt.pci_tracker.save.called)
+
+    def test_free_pci_device_allocations_for_instance(self):
+        self.rt.free_pci_device_allocations_for_instance(self.context,
+                                                         self.instance)
+        self.rt.pci_tracker.free_instance_allocations.assert_called_once_with(
+            self.context,
+            self.instance)
+        self.assertTrue(self.rt.pci_tracker.save.called)
+
+    def test_free_pci_device_claims_for_instance(self):
+        self.rt.free_pci_device_claims_for_instance(self.context,
+                                                    self.instance)
+        self.rt.pci_tracker.free_instance_claims.assert_called_once_with(
+            self.context,
+            self.instance)
+        self.assertTrue(self.rt.pci_tracker.save.called)
+
+
+class ResourceTrackerTestCase(test.NoDBTestCase):
+
+    def test_init_ensure_provided_reportclient_is_used(self):
+        """Simple test to make sure if a reportclient is provided it is used"""
+        rt = resource_tracker.ResourceTracker(
+            _HOSTNAME, mock.sentinel.driver, mock.sentinel.reportclient)
+        self.assertIs(rt.reportclient, mock.sentinel.reportclient)

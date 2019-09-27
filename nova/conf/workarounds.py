@@ -155,54 +155,27 @@ Related options:
 """),
 
     cfg.BoolOpt(
-        'enable_consoleauth',
-        default=False,
-        deprecated_for_removal=True,
-        deprecated_since="18.0.0",
-        deprecated_reason="""
-This option has been added as deprecated originally because it is used
-for avoiding a upgrade issue and it will not be used in the future.
-See the help text for more details.
-""",
-        help="""
-Enable the consoleauth service to avoid resetting unexpired consoles.
-
-Console token authorizations have moved from the ``nova-consoleauth`` service
-to the database, so all new consoles will be supported by the database backend.
-With this, consoles that existed before database backend support will be reset.
-For most operators, this should be a minimal disruption as the default TTL of a
-console token is 10 minutes.
-
-Operators that have much longer token TTL configured or otherwise wish to avoid
-immediately resetting all existing consoles can enable this flag to continue
-using the ``nova-consoleauth`` service in addition to the database backend.
-Once all of the old ``nova-consoleauth`` supported console tokens have expired,
-this flag should be disabled. For example, if a deployment has configured a
-token TTL of one hour, the operator may disable the flag, one hour after
-deploying the new code during an upgrade.
-
-.. note:: Cells v1 was not converted to use the database backend for
-  console token authorizations. Cells v1 console token authorizations will
-  continue to be supported by the ``nova-consoleauth`` service and use of
-  the ``[workarounds]/enable_consoleauth`` option does not apply to
-  Cells v1 users.
-
-Related options:
-
-* ``[consoleauth]/token_ttl``
-"""),
-
-    cfg.BoolOpt(
         'enable_numa_live_migration',
         default=False,
+        deprecated_for_removal=True,
+        deprecated_since='20.0.0',
+        deprecated_reason="""This option was added to mitigate known issues
+when live migrating instances with a NUMA topology with the libvirt driver.
+Those issues are resolved in Train. Clouds using the libvirt driver and fully
+upgraded to Train support NUMA-aware live migration. This option will be
+removed in a future release.
+""",
         help="""
 Enable live migration of instances with NUMA topologies.
 
-Live migration of instances with NUMA topologies is disabled by default
-when using the libvirt driver. This includes live migration of instances with
-CPU pinning or hugepages. CPU pinning and huge page information for such
-instances is not currently re-calculated, as noted in `bug #1289064`_.  This
-means that if instances were already present on the destination host, the
+Live migration of instances with NUMA topologies when using the libvirt driver
+is only supported in deployments that have been fully upgraded to Train. In
+previous versions, or in mixed Stein/Train deployments with a rolling upgrade
+in progress, live migration of instances with NUMA topologies is disabled by
+default when using the libvirt driver. This includes live migration of
+instances with CPU pinning or hugepages. CPU pinning and huge page information
+for such instances is not currently re-calculated, as noted in `bug #1289064`_.
+This means that if instances were already present on the destination host, the
 migrated instance could be placed on the same dedicated cores as these
 instances or use hugepages allocated for another instance. Alternately, if the
 host platforms were not homogeneous, the instance could be assigned to
@@ -248,6 +221,31 @@ Related options:
 * ``compute_driver`` (libvirt)
 * ``[libvirt]/images_type`` (rbd)
 * ``instances_path``
+"""),
+
+    cfg.BoolOpt(
+        'disable_fallback_pcpu_query',
+        default=False,
+        deprecated_for_removal=True,
+        deprecated_since='20.0.0',
+        help="""
+Disable fallback request for VCPU allocations when using pinned instances.
+
+Starting in Train, compute nodes using the libvirt virt driver can report
+``PCPU`` inventory and will use this for pinned instances. The scheduler will
+automatically translate requests using the legacy CPU pinning-related flavor
+extra specs, ``hw:cpu_policy`` and ``hw:cpu_thread_policy``, their image
+metadata property equivalents, and the emulator threads pinning flavor extra
+spec, ``hw:emulator_threads_policy``, to new placement requests. However,
+compute nodes require additional configuration in order to report ``PCPU``
+inventory and this configuration may not be present immediately after an
+upgrade. To ensure pinned instances can be created without this additional
+configuration, the scheduler will make a second request to placement for
+old-style ``VCPU``-based allocations and fallback to these allocation
+candidates if necessary. This has a slight performance impact and is not
+necessary on new or upgraded deployments where the new configuration has been
+set on all hosts. By setting this option, the second lookup is disabled and the
+scheduler will only request ``PCPU``-based allocations.
 """),
 ]
 

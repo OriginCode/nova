@@ -37,7 +37,7 @@ from oslo_vmware.objects import datastore as ds_obj
 from oslo_vmware import vim_util as vutil
 
 from nova.api.metadata import base as instance_metadata
-from nova import compute
+from nova.compute import api as compute
 from nova.compute import power_state
 from nova.compute import task_states
 import nova.conf
@@ -1844,10 +1844,6 @@ class VMwareVMOps(object):
     def check_cache_folder(self, ds_name, ds_ref):
         """Check that the cache folder exists."""
         self._create_folder_if_missing(ds_name, ds_ref, self._base_folder)
-
-    def check_temp_folder(self, ds_name, ds_ref):
-        """Check that the temp folder exists."""
-        self._create_folder_if_missing(ds_name, ds_ref, self._tmp_folder)
 
     def inject_network_info(self, instance, network_info):
         """inject network info for specified instance."""

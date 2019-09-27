@@ -128,7 +128,7 @@ class TestNUMATopologyFilter(test.NoDBTestCase):
         self.assertEqual(limits.cpu_allocation_ratio, 21)
         self.assertEqual(limits.ram_allocation_ratio, 1.3)
 
-    @mock.patch('nova.objects.instance_numa_topology.InstanceNUMACell'
+    @mock.patch('nova.objects.instance_numa.InstanceNUMACell'
                 '.cpu_pinning_requested',
                 return_value=True)
     def _do_test_numa_topology_filter_cpu_policy(
@@ -197,7 +197,6 @@ class TestNUMATopologyFilter(test.NoDBTestCase):
 
     def test_numa_topology_filter_pass_cpu_thread_policy_others(self):
         cpu_policy = fields.CPUAllocationPolicy.DEDICATED
-        cpu_thread_policy = fields.CPUThreadAllocationPolicy.PREFER
         numa_topology = fakes.NUMA_TOPOLOGY
 
         for cpu_thread_policy in [
@@ -241,16 +240,28 @@ class TestNUMATopologyFilter(test.NoDBTestCase):
                                             tunneled=False)
         network_b = objects.NetworkMetadata(physnets=set(), tunneled=True)
         host_topology = objects.NUMATopology(cells=[
-            objects.NUMACell(id=1, cpuset=set([1, 2]), memory=2048,
-                             cpu_usage=2, memory_usage=2048, mempages=[],
-                             siblings=[set([1]), set([2])],
-                             pinned_cpus=set([]),
-                             network_metadata=network_a),
-            objects.NUMACell(id=2, cpuset=set([3, 4]), memory=2048,
-                             cpu_usage=2, memory_usage=2048, mempages=[],
-                             siblings=[set([3]), set([4])],
-                             pinned_cpus=set([]),
-                             network_metadata=network_b)])
+            objects.NUMACell(
+                id=1,
+                cpuset=set([1, 2]),
+                pcpuset=set(),
+                memory=2048,
+                cpu_usage=2,
+                memory_usage=2048,
+                mempages=[],
+                siblings=[set([1]), set([2])],
+                pinned_cpus=set(),
+                network_metadata=network_a),
+            objects.NUMACell(
+                id=2,
+                cpuset=set([3, 4]),
+                pcpuset=set(),
+                memory=2048,
+                cpu_usage=2,
+                memory_usage=2048,
+                mempages=[],
+                siblings=[set([3]), set([4])],
+                pinned_cpus=set(),
+                network_metadata=network_b)])
 
         return fakes.FakeHostState('host1', 'node1', {
             'numa_topology': host_topology,

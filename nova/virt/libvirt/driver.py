@@ -54,6 +54,7 @@ from os_brick.encryptors import luks as luks_encryptor
 from os_brick import exception as brick_exception
 from os_brick.initiator import connector
 import os_resource_classes as orc
+import os_traits as ot
 from oslo_concurrency import processutils
 from oslo_log import log as logging
 from oslo_serialization import base64
@@ -83,6 +84,7 @@ from nova.console import serial as serial_console
 from nova.console import type as ctype
 from nova import context as nova_context
 from nova import crypto
+from nova.db import constants as db_const
 from nova import exception
 from nova.i18n import _
 from nova import image
@@ -139,8 +141,11 @@ DEFAULT_FIREWALL_DRIVER = "%s.%s" % (
     libvirt_firewall.IptablesFirewallDriver.__name__)
 
 DEFAULT_UEFI_LOADER_PATH = {
-    "x86_64": "/usr/share/OVMF/OVMF_CODE.fd",
-    "aarch64": "/usr/share/AAVMF/AAVMF_CODE.fd"
+    "x86_64": ['/usr/share/OVMF/OVMF_CODE.fd',
+               '/usr/share/OVMF/OVMF_CODE.secboot.fd',
+               '/usr/share/qemu/ovmf-x86_64-code.bin'],
+    "aarch64": ['/usr/share/AAVMF/AAVMF_CODE.fd',
+                '/usr/share/qemu/aavmf-aarch64-code.bin']
 }
 
 MAX_CONSOLE_BYTES = 100 * units.Ki
@@ -164,6 +169,7 @@ class InjectionInfo(collections.namedtuple(
     def __repr__(self):
         return ('InjectionInfo(network_info=%r, files=%r, '
                 'admin_pass=<SANITIZED>)') % (self.network_info, self.files)
+
 
 libvirt_volume_drivers = [
     'iscsi=nova.virt.libvirt.volume.iscsi.LibvirtISCSIVolumeDriver',
@@ -248,15 +254,10 @@ QEMU_MAX_SERIAL_PORTS = 4
 # Qemu supports 4 serial consoles, we remove 1 because of the PTY one defined
 ALLOWED_QEMU_SERIAL_PORTS = QEMU_MAX_SERIAL_PORTS - 1
 
-# libvirt postcopy support
-MIN_LIBVIRT_POSTCOPY_VERSION = (1, 3, 3)
-
 MIN_LIBVIRT_OTHER_ARCH = {
     fields.Architecture.AARCH64: MIN_LIBVIRT_KVM_AARCH64_VERSION,
 }
 
-# perf events support
-MIN_LIBVIRT_PERF_VERSION = (2, 0, 0)
 LIBVIRT_PERF_EVENT_PREFIX = 'VIR_PERF_PARAM_'
 
 PERF_EVENTS_CPU_FLAG_MAPPING = {'cmt': 'cmt',
@@ -271,9 +272,6 @@ MIN_LIBVIRT_MDEV_SUPPORT = (3, 4, 0)
 # See https://bugzilla.redhat.com/show_bug.cgi?id=1378242
 # for details.
 MIN_LIBVIRT_MULTIATTACH = (3, 10, 0)
-
-MIN_LIBVIRT_LUKS_VERSION = (2, 2, 0)
-MIN_QEMU_LUKS_VERSION = (2, 6, 0)
 
 MIN_LIBVIRT_FILE_BACKED_VERSION = (4, 0, 0)
 MIN_QEMU_FILE_BACKED_VERSION = (2, 6, 0)
@@ -291,6 +289,16 @@ MIN_LIBVIRT_BETTER_SIGKILL_HANDLING = (4, 7, 0)
 
 VGPU_RESOURCE_SEMAPHORE = "vgpu_resources"
 
+# see https://libvirt.org/formatdomain.html#elementsVideo
+MIN_LIBVIRT_VIDEO_MODEL_VERSIONS = {
+    fields.VideoModel.GOP: (3, 2, 0),
+    fields.VideoModel.NONE: (4, 6, 0),
+}
+
+# Persistent Memory (PMEM/NVDIMM) Device Support
+MIN_LIBVIRT_PMEM_SUPPORT = (5, 0, 0)
+MIN_QEMU_PMEM_SUPPORT = (3, 1, 0)
+
 
 class LibvirtDriver(driver.ComputeDriver):
     def __init__(self, virtapi, read_only=False):
@@ -298,6 +306,14 @@ class LibvirtDriver(driver.ComputeDriver):
         # capabilities on the instance rather than on the class.
         # This prevents the risk of one test setting a capability
         # which bleeds over into other tests.
+
+        # LVM and RBD require raw images. If we are not configured to
+        # force convert images into raw format, then we _require_ raw
+        # images only.
+        raw_only = ('rbd', 'lvm')
+        requires_raw_image = (CONF.libvirt.images_type in raw_only and
+                              not CONF.force_raw_images)
+
         self.capabilities = {
             "has_imagecache": True,
             "supports_evacuate": True,
@@ -311,6 +327,22 @@ class LibvirtDriver(driver.ComputeDriver):
             # determined in init_host.
             "supports_multiattach": False,
             "supports_trusted_certs": True,
+            # Supported image types
+            "supports_image_type_aki": True,
+            "supports_image_type_ari": True,
+            "supports_image_type_ami": True,
+            # FIXME(danms): I can see a future where people might want to
+            # configure certain compute nodes to not allow giant raw images
+            # to be booted (like nodes that are across a WAN). Thus, at some
+            # point we may want to be able to _not_ expose "supports raw" on
+            # some nodes by policy. Until then, raw is always supported.
+            "supports_image_type_raw": True,
+            "supports_image_type_iso": True,
+            # NOTE(danms): Certain backends do not work with complex image
+            # formats. If we are configured for those backends, then we
+            # should not expose the corresponding support traits.
+            "supports_image_type_qcow2": not requires_raw_image,
+            "supports_pcpus": True,
         }
         super(LibvirtDriver, self).__init__(virtapi)
 
@@ -325,8 +357,8 @@ class LibvirtDriver(driver.ComputeDriver):
         self._initiator = None
         self._fc_wwnns = None
         self._fc_wwpns = None
-        self._caps = None
         self._supported_perf_events = []
+        self.__has_hyperthreading = None
         self.firewall_driver = firewall.load_driver(
             DEFAULT_FIREWALL_DRIVER,
             host=self._host)
@@ -397,6 +429,99 @@ class LibvirtDriver(driver.ComputeDriver):
         # intended to be updatable directly
         self.provider_tree = None
 
+        # The CPU models in the configuration are case-insensitive, but the CPU
+        # model in the libvirt is case-sensitive, therefore create a mapping to
+        # map the lower case CPU model name to normal CPU model name.
+        self.cpu_models_mapping = {}
+        self.cpu_model_flag_mapping = {}
+
+        self._vpmems_by_name, self._vpmems_by_rc = self._discover_vpmems(
+                vpmem_conf=CONF.libvirt.pmem_namespaces)
+
+    def _discover_vpmems(self, vpmem_conf=None):
+        """Discover vpmems on host and configuration.
+
+        :param vpmem_conf: pmem namespaces configuration from CONF
+        :returns: a dict of vpmem keyed by name, and
+                  a dict of vpmem list keyed by resource class
+        :raises: exception.InvalidConfiguration if Libvirt or QEMU version
+                 does not meet requirement.
+        """
+        if not vpmem_conf:
+            return {}, {}
+
+        if not self._host.has_min_version(lv_ver=MIN_LIBVIRT_PMEM_SUPPORT,
+                                          hv_ver=MIN_QEMU_PMEM_SUPPORT):
+            raise exception.InvalidConfiguration(
+                _('Nova requires QEMU version %(qemu)s or greater '
+                  'and Libvirt version %(libvirt)s or greater '
+                  'for NVDIMM (Persistent Memory) support.') % {
+                'qemu': libvirt_utils.version_to_string(
+                    MIN_QEMU_PMEM_SUPPORT),
+                'libvirt': libvirt_utils.version_to_string(
+                    MIN_LIBVIRT_PMEM_SUPPORT)})
+
+        # vpmem keyed by name {name: objects.LibvirtVPMEMDevice,...}
+        vpmems_by_name = {}
+        # vpmem list keyed by resource class
+        # {'RC_0': [objects.LibvirtVPMEMDevice, ...], 'RC_1': [...]}
+        vpmems_by_rc = collections.defaultdict(list)
+
+        vpmems_host = self._get_vpmems_on_host()
+        for ns_conf in vpmem_conf:
+            try:
+                ns_label, ns_names = ns_conf.split(":", 1)
+            except ValueError:
+                reason = _("The configuration doesn't follow the format")
+                raise exception.PMEMNamespaceConfigInvalid(
+                        reason=reason)
+            ns_names = ns_names.split("|")
+            for ns_name in ns_names:
+                if ns_name not in vpmems_host:
+                    reason = _("The PMEM namespace %s isn't on host") % ns_name
+                    raise exception.PMEMNamespaceConfigInvalid(
+                            reason=reason)
+                if ns_name in vpmems_by_name:
+                    reason = (_("Duplicated PMEM namespace %s configured") %
+                                ns_name)
+                    raise exception.PMEMNamespaceConfigInvalid(
+                            reason=reason)
+                pmem_ns_updated = vpmems_host[ns_name]
+                pmem_ns_updated.label = ns_label
+                vpmems_by_name[ns_name] = pmem_ns_updated
+                rc = orc.normalize_name(
+                        "PMEM_NAMESPACE_%s" % ns_label)
+                vpmems_by_rc[rc].append(pmem_ns_updated)
+
+        return vpmems_by_name, vpmems_by_rc
+
+    def _get_vpmems_on_host(self):
+        """Get PMEM namespaces on host using ndctl utility."""
+        try:
+            output = nova.privsep.libvirt.get_pmem_namespaces()
+        except Exception as e:
+            reason = _("Get PMEM namespaces by ndctl utility, "
+                    "please ensure ndctl is installed: %s") % e
+            raise exception.GetPMEMNamespacesFailed(reason=reason)
+
+        if not output:
+            return {}
+        namespaces = jsonutils.loads(output)
+        vpmems_host = {}  # keyed by namespace name
+        for ns in namespaces:
+            # store namespace info parsed from ndctl utility return
+            if not ns.get('name'):
+                # The name is used to identify namespaces, it's optional
+                # config when creating namespace. If an namespace don't have
+                # name, it can not be used by Nova, we will skip it.
+                continue
+            vpmems_host[ns['name']] = objects.LibvirtVPMEMDevice(
+                name=ns['name'],
+                devpath= '/dev/' + ns['daxregion']['devices'][0]['chardev'],
+                size=ns['size'],
+                align=ns['daxregion']['align'])
+        return vpmems_host
+
     def _get_volume_drivers(self):
         driver_registry = dict()
 
@@ -413,16 +538,43 @@ class LibvirtDriver(driver.ComputeDriver):
 
     @property
     def disk_cachemode(self):
+        # It can be confusing to understand the QEMU cache mode
+        # behaviour, because each cache=$MODE is a convenient shorthand
+        # to toggle _three_ cache.* booleans.  Consult the below table
+        # (quoting from the QEMU man page):
+        #
+        #              | cache.writeback | cache.direct | cache.no-flush
+        # --------------------------------------------------------------
+        # writeback    | on              | off          | off
+        # none         | on              | on           | off
+        # writethrough | off             | off          | off
+        # directsync   | off             | on           | off
+        # unsafe       | on              | off          | on
+        #
+        # Where:
+        #
+        #  - 'cache.writeback=off' means: QEMU adds an automatic fsync()
+        #    after each write request.
+        #
+        #  - 'cache.direct=on' means: Use Linux's O_DIRECT, i.e. bypass
+        #    the kernel page cache.  Caches in any other layer (disk
+        #    cache, QEMU metadata caches, etc.) can still be present.
+        #
+        #  - 'cache.no-flush=on' means: Ignore flush requests, i.e.
+        #    never call fsync(), even if the guest explicitly requested
+        #    it.
+        #
+        # Use cache mode "none" (cache.writeback=on, cache.direct=on,
+        # cache.no-flush=off) for consistent performance and
+        # migration correctness.  Some filesystems don't support
+        # O_DIRECT, though.  For those we fallback to the next
+        # reasonable option that is "writeback" (cache.writeback=on,
+        # cache.direct=off, cache.no-flush=off).
+
         if self._disk_cachemode is None:
-            # We prefer 'none' for consistent performance, host crash
-            # safety & migration correctness by avoiding host page cache.
-            # Some filesystems don't support O_DIRECT though. For those we
-            # fallback to 'writethrough' which gives host crash safety, and
-            # is safe for migration provided the filesystem is cache coherent
-            # (cluster filesystems typically are, but things like NFS are not).
             self._disk_cachemode = "none"
             if not nova.privsep.utils.supports_direct_io(CONF.instances_path):
-                self._disk_cachemode = "writethrough"
+                self._disk_cachemode = "writeback"
         return self._disk_cachemode
 
     def _set_cache_mode(self, conf):
@@ -480,6 +632,8 @@ class LibvirtDriver(driver.ComputeDriver):
 
     def init_host(self, host):
         self._host.initialize()
+
+        self._check_cpu_set_configuration()
 
         self._do_quality_warnings()
 
@@ -563,19 +717,89 @@ class LibvirtDriver(driver.ComputeDriver):
         # new enough) and "native TLS" options at the same time is
         # nonsensical.
         if (CONF.libvirt.live_migration_tunnelled and
-            CONF.libvirt.live_migration_with_native_tls):
-                msg = _("Setting both 'live_migration_tunnelled' and "
-                        "'live_migration_with_native_tls' at the same "
-                        "time is invalid. If you have the relevant "
-                        "libvirt and QEMU versions, and TLS configured "
-                        "in your environment, pick "
-                        "'live_migration_with_native_tls'.")
-                raise exception.Invalid(msg)
+                CONF.libvirt.live_migration_with_native_tls):
+            msg = _("Setting both 'live_migration_tunnelled' and "
+                    "'live_migration_with_native_tls' at the same "
+                    "time is invalid. If you have the relevant "
+                    "libvirt and QEMU versions, and TLS configured "
+                    "in your environment, pick "
+                    "'live_migration_with_native_tls'.")
+            raise exception.Invalid(msg)
+
+        # Some imagebackends are only able to import raw disk images,
+        # and will fail if given any other format. See the bug
+        # https://bugs.launchpad.net/nova/+bug/1816686 for more details.
+        if CONF.libvirt.images_type in ('rbd',):
+            if not CONF.force_raw_images:
+                msg = _("'[DEFAULT]/force_raw_images = False' is not "
+                        "allowed with '[libvirt]/images_type = rbd'. "
+                        "Please check the two configs and if you really "
+                        "do want to use rbd as images_type, set "
+                        "force_raw_images to True.")
+                raise exception.InvalidConfiguration(msg)
 
         # TODO(sbauza): Remove this code once mediated devices are persisted
         # across reboots.
         if self._host.has_min_version(MIN_LIBVIRT_MDEV_SUPPORT):
             self._recreate_assigned_mediated_devices()
+
+        self._check_cpu_compatibility()
+
+    def _check_cpu_compatibility(self):
+        mode = CONF.libvirt.cpu_mode
+        models = CONF.libvirt.cpu_models
+
+        if (CONF.libvirt.virt_type not in ("kvm", "qemu") and
+                mode not in (None, 'none')):
+            msg = _("Config requested an explicit CPU model, but "
+                    "the current libvirt hypervisor '%s' does not "
+                    "support selecting CPU models") % CONF.libvirt.virt_type
+            raise exception.Invalid(msg)
+
+        if mode != "custom":
+            if not models:
+                return
+            msg = _("The cpu_models option is not required when "
+                    "cpu_mode!=custom")
+            raise exception.Invalid(msg)
+
+        if not models:
+            msg = _("The cpu_models option is required when cpu_mode=custom")
+            raise exception.Invalid(msg)
+
+        cpu = vconfig.LibvirtConfigGuestCPU()
+        for model in models:
+            cpu.model = self._get_cpu_model_mapping(model)
+            if not cpu.model:
+                msg = (_("Configured CPU model: %(model)s is not correct, "
+                         "or your host CPU arch does not suuport this "
+                         "model. Please correct your config and try "
+                         "again.") % {'model': model})
+                raise exception.InvalidCPUInfo(msg)
+            try:
+                self._compare_cpu(cpu, self._get_cpu_info(), None)
+            except exception.InvalidCPUInfo as e:
+                msg = (_("Configured CPU model: %(model)s is not "
+                         "compatible with host CPU. Please correct your "
+                         "config and try again. %(e)s") % {
+                            'model': model, 'e': e})
+                raise exception.InvalidCPUInfo(msg)
+
+        # Use guest CPU model to check the compatibility between guest CPU and
+        # configured extra_flags
+        cpu = vconfig.LibvirtConfigGuestCPU()
+        cpu.model = self._host.get_capabilities().host.cpu.model
+        for flag in set(x.lower() for x in CONF.libvirt.cpu_model_extra_flags):
+            cpu.add_feature(vconfig.LibvirtConfigCPUFeature(flag))
+            try:
+                self._compare_cpu(cpu, self._get_cpu_info(), None)
+            except (exception.InvalidCPUInfo,
+                    exception.MigrationPreCheckError) as e:
+                msg = (_("Configured extra flag: %(flag)s it not correct, or "
+                         "the host CPU does not support this flag. Please "
+                         "correct the config and try again. %(e)s") % {
+                            'flag': flag, 'e': e})
+                raise exception.InvalidCPUInfo(msg)
 
     @staticmethod
     def _is_existing_mdev(uuid):
@@ -652,6 +876,70 @@ class LibvirtDriver(driver.ComputeDriver):
                         'any of the interfaces: %(ifaces)s',
                         {'my_ip': CONF.my_ip, 'ifaces': ", ".join(ips)})
 
+    def _check_cpu_set_configuration(self):
+        # evaluate these now to force a quick fail if they're invalid
+        vcpu_pin_set = hardware.get_vcpu_pin_set() or set()
+        cpu_shared_set = hardware.get_cpu_shared_set() or set()
+        cpu_dedicated_set = hardware.get_cpu_dedicated_set() or set()
+
+        # TODO(stephenfin): Remove this in U once we remove the 'vcpu_pin_set'
+        # option
+        if not vcpu_pin_set:
+            if not (cpu_shared_set or cpu_dedicated_set):
+                return
+
+            if not cpu_dedicated_set.isdisjoint(cpu_shared_set):
+                msg = _(
+                    "The '[compute] cpu_dedicated_set' and '[compute] "
+                    "cpu_shared_set' configuration options must be "
+                    "disjoint.")
+                raise exception.InvalidConfiguration(msg)
+
+            if CONF.reserved_host_cpus:
+                msg = _(
+                    "The 'reserved_host_cpus' config option cannot be defined "
+                    "alongside the '[compute] cpu_shared_set' or '[compute] "
+                    "cpu_dedicated_set' options. Unset 'reserved_host_cpus'.")
+                raise exception.InvalidConfiguration(msg)
+
+            return
+
+        if cpu_dedicated_set:
+            # NOTE(stephenfin): This is a new option in Train so it can be
+            # an error
+            msg = _(
+                "The 'vcpu_pin_set' config option has been deprecated and "
+                "cannot be defined alongside '[compute] cpu_dedicated_set'. "
+                "Unset 'vcpu_pin_set'.")
+            raise exception.InvalidConfiguration(msg)
+
+        if cpu_shared_set:
+            LOG.warning(
+                "The '[compute] cpu_shared_set' and 'vcpu_pin_set' config "
+                "options have both been defined. While 'vcpu_pin_set' is "
+                "defined, it will continue to be used to configure the "
+                "specific host CPUs used for 'VCPU' inventory, while "
+                "'[compute] cpu_shared_set' will only be used for guest "
+                "emulator threads when 'hw:emulator_threads_policy=shared' "
+                "is defined in the flavor. This is legacy behavior and will "
+                "not be supported in a future release. "
+                "If you wish to define specific host CPUs to be used for "
+                "'VCPU' or 'PCPU' inventory, you must migrate the "
+                "'vcpu_pin_set' config option value to '[compute] "
+                "cpu_shared_set' and '[compute] cpu_dedicated_set', "
+                "respectively, and undefine 'vcpu_pin_set'.")
+        else:
+            LOG.warning(
+                "The 'vcpu_pin_set' config option has been deprecated and "
+                "will be removed in a future release. When defined, "
+                "'vcpu_pin_set' will be used to calculate 'VCPU' inventory "
+                "and schedule instances that have 'VCPU' allocations. "
+                "If you wish to define specific host CPUs to be used for "
+                "'VCPU' or 'PCPU' inventory, you must migrate the "
+                "'vcpu_pin_set' config option value to '[compute] "
+                "cpu_shared_set' and '[compute] cpu_dedicated_set', "
+                "respectively, and undefine 'vcpu_pin_set'.")
+
     def _prepare_migration_flags(self):
         migration_flags = 0
 
@@ -707,25 +995,13 @@ class LibvirtDriver(driver.ComputeDriver):
             migration_flags |= libvirt.VIR_MIGRATE_TLS
         return migration_flags
 
-    def _is_post_copy_available(self):
-        return self._host.has_min_version(lv_ver=MIN_LIBVIRT_POSTCOPY_VERSION)
-
-    def _is_native_luks_available(self):
-        return self._host.has_min_version(MIN_LIBVIRT_LUKS_VERSION,
-                                          MIN_QEMU_LUKS_VERSION)
-
     def _handle_live_migration_post_copy(self, migration_flags):
         if CONF.libvirt.live_migration_permit_post_copy:
-            if self._is_post_copy_available():
-                migration_flags |= libvirt.VIR_MIGRATE_POSTCOPY
-            else:
-                LOG.info('The live_migration_permit_post_copy is set '
-                         'to True, but it is not supported.')
+            migration_flags |= libvirt.VIR_MIGRATE_POSTCOPY
         return migration_flags
 
     def _handle_live_migration_auto_converge(self, migration_flags):
-        if (self._is_post_copy_available() and
-                (migration_flags & libvirt.VIR_MIGRATE_POSTCOPY) != 0):
+        if self._is_post_copy_enabled(migration_flags):
             LOG.info('The live_migration_permit_post_copy is set to '
                      'True and post copy live migration is available '
                      'so auto-converge will not be in use.')
@@ -840,24 +1116,6 @@ class LibvirtDriver(driver.ComputeDriver):
             return True
         except (exception.InternalError, exception.InstanceNotFound):
             return False
-
-    def estimate_instance_overhead(self, instance_info):
-        overhead = super(LibvirtDriver, self).estimate_instance_overhead(
-            instance_info)
-        if isinstance(instance_info, objects.Flavor):
-            # A flavor object is passed during case of migrate
-            emu_policy = hardware.get_emulator_thread_policy_constraint(
-                instance_info)
-            if emu_policy == fields.CPUEmulatorThreadsPolicy.ISOLATE:
-                overhead['vcpus'] += 1
-        else:
-            # An instance object is passed during case of spawing or a
-            # dict is passed when computing resource for an instance
-            numa_topology = hardware.instance_topology_from_instance(
-                instance_info)
-            if numa_topology and numa_topology.emulator_threads_isolated:
-                overhead['vcpus'] += 1
-        return overhead
 
     def list_instances(self):
         names = []
@@ -1076,6 +1334,11 @@ class LibvirtDriver(driver.ComputeDriver):
 
     def cleanup(self, context, instance, network_info, block_device_info=None,
                 destroy_disks=True, migrate_data=None, destroy_vifs=True):
+        # zero the data on backend pmem device
+        vpmems = self._get_vpmems(instance)
+        if vpmems:
+            self._cleanup_vpmems(vpmems)
+
         if destroy_vifs:
             self._unplug_vifs(instance, network_info, True)
 
@@ -1169,6 +1432,14 @@ class LibvirtDriver(driver.ComputeDriver):
 
         self._undefine_domain(instance)
 
+    def _cleanup_vpmems(self, vpmems):
+        for vpmem in vpmems:
+            try:
+                nova.privsep.libvirt.cleanup_vpmem(vpmem.devpath)
+            except Exception as e:
+                raise exception.VPMEMCleanupFailed(dev=vpmem.devpath,
+                                                   error=e)
+
     def _detach_encrypted_volumes(self, instance, block_device_info):
         """Detaches encrypted volumes attached to instance."""
         disks = self._get_instance_disk_info(instance, block_device_info)
@@ -1208,13 +1479,6 @@ class LibvirtDriver(driver.ComputeDriver):
             ret.append(int(obj.get('unit', 0)))
         return max(ret)
 
-    @staticmethod
-    def _get_rbd_driver():
-        return rbd_utils.RBDDriver(
-                pool=CONF.libvirt.images_rbd_pool,
-                ceph_conf=CONF.libvirt.images_rbd_ceph_conf,
-                rbd_user=CONF.libvirt.rbd_user)
-
     def _cleanup_rbd(self, instance):
         # NOTE(nic): On revert_resize, the cleanup steps for the root
         # volume are handled with an "rbd snap rollback" command,
@@ -1225,7 +1489,7 @@ class LibvirtDriver(driver.ComputeDriver):
                                       disk.endswith('disk.local'))
         else:
             filter_fn = lambda disk: disk.startswith(instance.uuid)
-        LibvirtDriver._get_rbd_driver().cleanup_volumes(filter_fn)
+        rbd_utils.RBDDriver().cleanup_volumes(filter_fn)
 
     def _cleanup_lvm(self, instance, block_device_info):
         """Delete all LVM disks for given instance object."""
@@ -1268,6 +1532,11 @@ class LibvirtDriver(driver.ComputeDriver):
     def _cleanup_resize(self, context, instance, network_info):
         inst_base = libvirt_utils.get_instance_path(instance)
         target = inst_base + '_resize'
+
+        # zero the data on backend old pmem device
+        vpmems = self._get_vpmems(instance, prefix='old')
+        if vpmems:
+            self._cleanup_vpmems(vpmems)
 
         # Deletion can fail over NFS, so retry the deletion as required.
         # Set maximum attempt as 5, most test can remove the directory
@@ -1371,14 +1640,14 @@ class LibvirtDriver(driver.ComputeDriver):
                                         requested_size)
 
     def _use_native_luks(self, encryption=None):
-        """Is LUKS the required provider and native QEMU LUKS available
+        """Check if LUKS is the required 'provider'
         """
         provider = None
         if encryption:
             provider = encryption.get('provider', None)
         if provider in encryptors.LEGACY_PROVIDER_CLASS_TO_FORMAT_MAP:
             provider = encryptors.LEGACY_PROVIDER_CLASS_TO_FORMAT_MAP[provider]
-        return provider == encryptors.LUKS and self._is_native_luks_available()
+        return provider == encryptors.LUKS
 
     def _get_volume_config(self, connection_info, disk_info):
         vol_driver = self._get_volume_driver(connection_info)
@@ -1982,10 +2251,10 @@ class LibvirtDriver(driver.ComputeDriver):
         #               redundant because LVM supports only cold snapshots.
         #               It is necessary in case this situation changes in the
         #               future.
-        if (self._host.has_min_version(hv_type=host.HV_DRIVER_QEMU)
-                and source_type not in ('lvm')
-                and not CONF.ephemeral_storage_encryption.enabled
-                and not CONF.workarounds.disable_libvirt_livesnapshot
+        if (self._host.has_min_version(hv_type=host.HV_DRIVER_QEMU) and
+                source_type != 'lvm' and
+                not CONF.ephemeral_storage_encryption.enabled and
+                not CONF.workarounds.disable_libvirt_livesnapshot and
                 # NOTE(rmk): We cannot perform live snapshots when a
                 # managedSave file is present, so we will use the cold/legacy
                 # method for instances which are shutdown or paused.
@@ -1994,7 +2263,7 @@ class LibvirtDriver(driver.ComputeDriver):
                 # remove the restriction on PAUSED once we require
                 # libvirt>=3.6.0 and qemu>=2.10 since that works with the
                 # Pike Ubuntu Cloud Archive testing in Queens.
-                and state not in (power_state.SHUTDOWN, power_state.PAUSED)):
+                state not in (power_state.SHUTDOWN, power_state.PAUSED)):
             live_snapshot = True
             # Abort is an idempotent operation, so make sure any block
             # jobs which may have failed are ended. This operation also
@@ -3165,14 +3434,14 @@ class LibvirtDriver(driver.ComputeDriver):
         if CONF.libvirt.images_type == 'rbd':
             filter_fn = lambda disk: (disk.startswith(instance.uuid) and
                                       disk.endswith('.rescue'))
-            LibvirtDriver._get_rbd_driver().cleanup_volumes(filter_fn)
+            rbd_utils.RBDDriver().cleanup_volumes(filter_fn)
 
     def poll_rebooting_instances(self, timeout, instances):
         pass
 
     def spawn(self, context, instance, image_meta, injected_files,
               admin_password, allocations, network_info=None,
-              block_device_info=None):
+              block_device_info=None, power_on=True):
         disk_info = blockinfo.get_disk_info(CONF.libvirt.virt_type,
                                             instance,
                                             image_meta,
@@ -3201,7 +3470,8 @@ class LibvirtDriver(driver.ComputeDriver):
             context, xml, instance, network_info,
             block_device_info=block_device_info,
             post_xml_callback=gen_confdrive,
-            destroy_disks_on_failure=True)
+            destroy_disks_on_failure=True,
+            power_on=power_on)
         LOG.debug("Guest created on hypervisor", instance=instance)
 
         def _wait_for_boot():
@@ -3212,8 +3482,11 @@ class LibvirtDriver(driver.ComputeDriver):
                 LOG.info("Instance spawned successfully.", instance=instance)
                 raise loopingcall.LoopingCallDone()
 
-        timer = loopingcall.FixedIntervalLoopingCall(_wait_for_boot)
-        timer.start(interval=0.5).wait()
+        if power_on:
+            timer = loopingcall.FixedIntervalLoopingCall(_wait_for_boot)
+            timer.start(interval=0.5).wait()
+        else:
+            LOG.info("Instance spawned successfully.", instance=instance)
 
     def _get_console_output_file(self, instance, console_log):
         bytes_to_read = MAX_CONSOLE_BYTES
@@ -3848,6 +4121,27 @@ class LibvirtDriver(driver.ComputeDriver):
                  if pci_dev.address in direct_passthrough_pci_addresses])
             self._detach_pci_devices(guest, direct_passthrough_pci_addresses)
 
+    def _update_compute_provider_status(self, context, service):
+        """Calls the ComputeVirtAPI.update_compute_provider_status method
+
+        :param context: nova auth RequestContext
+        :param service: nova.objects.Service record for this host which is
+            expected to only manage a single ComputeNode
+        """
+        rp_uuid = None
+        try:
+            rp_uuid = service.compute_node.uuid
+            self.virtapi.update_compute_provider_status(
+                context, rp_uuid, enabled=not service.disabled)
+        except Exception:
+            # This is best effort so just log the exception but don't fail.
+            # The update_available_resource periodic task will sync the trait.
+            LOG.warning(
+                'An error occurred while updating compute node '
+                'resource provider status to "%s" for provider: %s',
+                'disabled' if service.disabled else 'enabled',
+                rp_uuid or service.host, exc_info=True)
+
     def _set_host_enabled(self, enabled,
                           disable_reason=DISABLE_REASON_UNDEFINED):
         """Enables / Disables the compute service on this host.
@@ -3884,6 +4178,9 @@ class LibvirtDriver(driver.ComputeDriver):
                     service.save()
                     LOG.debug('Updating compute service status to %s',
                               status_name[disable_service])
+                    # Update the disabled trait status on the corresponding
+                    # compute node resource provider in placement.
+                    self._update_compute_provider_status(ctx, service)
                 else:
                     LOG.debug('Not overriding manual compute service '
                               'status with: %s',
@@ -3901,9 +4198,27 @@ class LibvirtDriver(driver.ComputeDriver):
         else:
             mount.get_manager().host_down()
 
-    def _get_guest_cpu_model_config(self):
+    def _get_cpu_model_mapping(self, model):
+        """Get the CPU model mapping
+
+        The CPU models which admin configured are case-insensitive, libvirt is
+        case-sensitive, therefore build a mapping to get the correct CPU model
+        name.
+
+        :param model: Case-insensitive CPU model name.
+        :return: Case-sensitive CPU model name, or None(Only when configured
+                 CPU model name not correct)
+        """
+        if not self.cpu_models_mapping:
+            cpu_models = self._host.get_cpu_model_names()
+            for cpu_model in cpu_models:
+                self.cpu_models_mapping[cpu_model.lower()] = cpu_model
+        return self.cpu_models_mapping.get(model.lower(), None)
+
+    def _get_guest_cpu_model_config(self, flavor=None):
         mode = CONF.libvirt.cpu_mode
-        model = CONF.libvirt.cpu_model
+        models = [self._get_cpu_model_mapping(model)
+                  for model in CONF.libvirt.cpu_models]
         extra_flags = set([flag.lower() for flag in
             CONF.libvirt.cpu_model_extra_flags])
 
@@ -3933,31 +4248,21 @@ class LibvirtDriver(driver.ComputeDriver):
             if mode is None or mode == "none":
                 return None
 
-        if ((CONF.libvirt.virt_type != "kvm" and
-             CONF.libvirt.virt_type != "qemu")):
-            msg = _("Config requested an explicit CPU model, but "
-                    "the current libvirt hypervisor '%s' does not "
-                    "support selecting CPU models") % CONF.libvirt.virt_type
-            raise exception.Invalid(msg)
-
-        if mode == "custom" and model is None:
-            msg = _("Config requested a custom CPU model, but no "
-                    "model name was provided")
-            raise exception.Invalid(msg)
-        elif mode != "custom" and model is not None:
-            msg = _("A CPU model name should not be set when a "
-                    "host CPU model is requested")
-            raise exception.Invalid(msg)
-
-        LOG.debug("CPU mode '%(mode)s' model '%(model)s' was chosen, "
-                  "with extra flags: '%(extra_flags)s'",
-                  {'mode': mode,
-                   'model': (model or ""),
-                   'extra_flags': (extra_flags or "")})
-
         cpu = vconfig.LibvirtConfigGuestCPU()
         cpu.mode = mode
-        cpu.model = model
+        cpu.model = models[0] if models else None
+
+        # compare flavor trait and cpu models, select the first mathched model
+        if flavor and mode == "custom":
+            flags = libvirt_utils.get_flags_by_flavor_specs(flavor)
+            if flags:
+                cpu.model = self._match_cpu_model_by_flags(models, flags)
+
+        LOG.debug("CPU mode '%(mode)s' models '%(models)s' was chosen, "
+                  "with extra flags: '%(extra_flags)s'",
+                  {'mode': mode,
+                   'models': (cpu.model or ""),
+                   'extra_flags': (extra_flags or "")})
 
         # NOTE (kchamart): Currently there's no existing way to ask if a
         # given CPU model + CPU flags combination is supported by KVM &
@@ -3974,9 +4279,28 @@ class LibvirtDriver(driver.ComputeDriver):
 
         return cpu
 
+    def _match_cpu_model_by_flags(self, models, flags):
+        for model in models:
+            if flags.issubset(self.cpu_model_flag_mapping.get(model, set([]))):
+                return model
+            cpu = vconfig.LibvirtConfigCPU()
+            cpu.arch = self._host.get_capabilities().host.cpu.arch
+            cpu.model = model
+            features_xml = self._get_guest_baseline_cpu_features(cpu.to_xml())
+            if features_xml:
+                cpu.parse_str(features_xml)
+                feature_names = [f.name for f in cpu.features]
+                self.cpu_model_flag_mapping[model] = feature_names
+                if flags.issubset(feature_names):
+                    return model
+
+        msg = ('No CPU model match traits, models: {models}, required '
+               'flags: {flags}'.format(models=models, flags=flags))
+        raise exception.InvalidCPUInfo(msg)
+
     def _get_guest_cpu_config(self, flavor, image_meta,
                               guest_cpu_numa_config, instance_numa_topology):
-        cpu = self._get_guest_cpu_model_config()
+        cpu = self._get_guest_cpu_model_config(flavor)
 
         if cpu is None:
             return None
@@ -4454,7 +4778,7 @@ class LibvirtDriver(driver.ComputeDriver):
         return emulatorpin_cpuset
 
     def _get_guest_numa_config(self, instance_numa_topology, flavor,
-                               allowed_cpus=None, image_meta=None):
+                               image_meta):
         """Returns the config objects for the guest NUMA specs.
 
         Determines the CPUs that the guest can be pinned to if the guest
@@ -4469,9 +4793,7 @@ class LibvirtDriver(driver.ComputeDriver):
             a) If there is no specified guest NUMA topology, then
                all tuple elements except cpu_set shall be None. cpu_set
                will be populated with the chosen CPUs that the guest
-               allowed CPUs fit within, which could be the supplied
-               allowed_cpus value if the host doesn't support NUMA
-               topologies.
+               allowed CPUs fit within.
 
             b) If there is a specified guest NUMA topology, then
                cpu_set will be None and guest_cpu_numa will be the
@@ -4492,6 +4814,12 @@ class LibvirtDriver(driver.ComputeDriver):
             # mess up though, raise an exception
             raise exception.NUMATopologyUnsupported()
 
+        # We only pin an instance to some host cores if the user has provided
+        # configuration to suggest we should.
+        shared_cpus = None
+        if CONF.vcpu_pin_set or CONF.compute.cpu_shared_set:
+            shared_cpus = self._get_vcpu_available()
+
         topology = self._get_host_numa_topology()
 
         # We have instance NUMA so translate it to the config class
@@ -4505,12 +4833,12 @@ class LibvirtDriver(driver.ComputeDriver):
             # TODO(ndipanov): Attempt to spread the instance
             # across NUMA nodes and expose the topology to the
             # instance as an optimisation
-            return GuestNumaConfig(allowed_cpus, None, None, None)
+            return GuestNumaConfig(shared_cpus, None, None, None)
 
         if not topology:
             # No NUMA topology defined for host - This will only happen with
             # some libvirt versions and certain platforms.
-            return GuestNumaConfig(allowed_cpus, None,
+            return GuestNumaConfig(shared_cpus, None,
                                    guest_cpu_numa_config, None)
 
         # Now get configuration from the numa_topology
@@ -4682,6 +5010,10 @@ class LibvirtDriver(driver.ComputeDriver):
 
     def _set_features(self, guest, os_type, caps, virt_type, image_meta,
             flavor):
+        hide_hypervisor_id = (strutils.bool_from_string(
+                flavor.extra_specs.get('hide_hypervisor_id')) or
+            image_meta.properties.get('img_hide_hypervisor_id'))
+
         if virt_type == "xen":
             # PAE only makes sense in X86
             if caps.host.cpu.arch in (fields.Architecture.I686,
@@ -4704,14 +5036,38 @@ class LibvirtDriver(driver.ComputeDriver):
             # with Microsoft
             hv.spinlock_retries = 8191
             hv.vapic = True
+
+            # NOTE(kosamara): Spoofing the vendor_id aims to allow the nvidia
+            # driver to work on windows VMs. At the moment, the nvidia driver
+            # checks for the hyperv vendorid, and if it doesn't find that, it
+            # works. In the future, its behaviour could become more strict,
+            # checking for the presence of other hyperv feature flags to
+            # determine that it's loaded in a VM. If that happens, this
+            # workaround will not be enough, and we'll need to drop the whole
+            # hyperv element.
+            # That would disable some optimizations, reducing the guest's
+            # performance.
+            if hide_hypervisor_id:
+                hv.vendorid_spoof = True
+
             guest.features.append(hv)
 
-        flavor_hide_kvm = strutils.bool_from_string(
-                flavor.get('extra_specs', {}).get('hide_hypervisor_id'))
-        if (virt_type in ("qemu", "kvm") and
-                (image_meta.properties.get('img_hide_hypervisor_id') or
-                 flavor_hide_kvm)):
-            guest.features.append(vconfig.LibvirtConfigGuestFeatureKvmHidden())
+        if virt_type in ("qemu", "kvm"):
+            if hide_hypervisor_id:
+                guest.features.append(
+                    vconfig.LibvirtConfigGuestFeatureKvmHidden())
+
+            # NOTE(sean-k-mooney): we validate that the image and flavor
+            # cannot have conflicting values in the compute API
+            # so we just use the values directly. If it is not set in
+            # either the flavor or image pmu will be none and we should
+            # not generate the element to allow qemu to decide if a vPMU
+            # should be provided for backwards compatibility.
+            pmu = (flavor.extra_specs.get('hw:pmu') or
+                   image_meta.properties.get('hw_pmu'))
+            if pmu is not None:
+                guest.features.append(
+                    vconfig.LibvirtConfigGuestFeaturePMU(pmu))
 
     def _check_number_of_serial_console(self, num_ports):
         virt_type = CONF.libvirt.virt_type
@@ -4720,9 +5076,15 @@ class LibvirtDriver(driver.ComputeDriver):
             raise exception.SerialPortNumberLimitExceeded(
                 allowed=ALLOWED_QEMU_SERIAL_PORTS, virt_type=virt_type)
 
+    def _video_model_supported(self, model):
+        if model not in fields.VideoModel.ALL:
+            return False
+        min_ver = MIN_LIBVIRT_VIDEO_MODEL_VERSIONS.get(model)
+        if min_ver and not self._host.has_min_version(lv_ver=min_ver):
+            return False
+        return True
+
     def _add_video_driver(self, guest, image_meta, flavor):
-        VALID_VIDEO_DEVICES = ("vga", "cirrus", "vmvga",
-                               "xen", "qxl", "virtio")
         video = vconfig.LibvirtConfigGuestVideo()
         # NOTE(ldbragst): The following logic sets the video.type
         # depending on supported defaults given the architecture,
@@ -4740,7 +5102,7 @@ class LibvirtDriver(driver.ComputeDriver):
             # NOTE(ldbragst): PowerKVM doesn't support 'cirrus' be default
             # so use 'vga' instead when running on Power hardware.
             video.type = 'vga'
-        elif guestarch in (fields.Architecture.AARCH64):
+        elif guestarch == fields.Architecture.AARCH64:
             # NOTE(kevinz): Only virtio device type is supported by AARCH64
             # so use 'virtio' instead when running on AArch64 hardware.
             video.type = 'virtio'
@@ -4748,7 +5110,7 @@ class LibvirtDriver(driver.ComputeDriver):
             video.type = 'qxl'
         if image_meta.properties.get('hw_video_model'):
             video.type = image_meta.properties.hw_video_model
-            if (video.type not in VALID_VIDEO_DEVICES):
+            if not self._video_model_supported(video.type):
                 raise exception.InvalidVideoMode(model=video.type)
 
         # Set video memory, only if the flavor's limit is set
@@ -4760,6 +5122,10 @@ class LibvirtDriver(driver.ComputeDriver):
         if max_vram and video_ram:
             video.vram = video_ram * units.Mi / units.Ki
         guest.add_device(video)
+
+        # NOTE(sean-k-mooney): return the video device we added
+        # for simpler testing.
+        return video
 
     def _add_qga_device(self, guest, instance):
         qga = vconfig.LibvirtConfigGuestChannel()
@@ -4795,7 +5161,7 @@ class LibvirtDriver(driver.ComputeDriver):
             self._add_rng_device(guest, flavor)
 
     def _get_guest_memory_backing_config(
-            self, inst_topology, numatune, flavor):
+            self, inst_topology, numatune, flavor, image_meta):
         wantsmempages = False
         if inst_topology:
             for cell in inst_topology.cells:
@@ -4835,6 +5201,10 @@ class LibvirtDriver(driver.ComputeDriver):
                     MIN_LIBVIRT_FILE_BACKED_DISCARD_VERSION,
                     MIN_QEMU_FILE_BACKED_DISCARD_VERSION):
                 membacking.discard = True
+        if self._sev_enabled(flavor, image_meta):
+            if not membacking:
+                membacking = vconfig.LibvirtConfigGuestMemoryBacking()
+            membacking.locked = True
 
         return membacking
 
@@ -4879,17 +5249,37 @@ class LibvirtDriver(driver.ComputeDriver):
         return instance.flavor
 
     def _has_uefi_support(self):
-        # This means that the host can support uefi booting for guests
+        # This means that the host can support UEFI booting for guests
         supported_archs = [fields.Architecture.X86_64,
                            fields.Architecture.AARCH64]
         caps = self._host.get_capabilities()
+        # TODO(dmllr, kchamart): Get rid of probing the OVMF binary file
+        # paths, it is not robust, because nothing but the binary's
+        # filename is reported, which means you have to detect its
+        # architecture and features by other means.  To solve this,
+        # query the libvirt's getDomainCapabilities() to get the
+        # firmware paths (as reported in the 'loader' value).  Nova now
+        # has a wrapper method for this, get_domain_capabilities().
+        # This is a more reliable way to detect UEFI boot support.
+        #
+        # Further, with libvirt 5.3 onwards, support for UEFI boot is
+        # much more simplified by the "firmware auto-selection" feature.
+        # When using this, Nova doesn't need to query OVMF file paths at
+        # all; libvirt will take care of it.  This is done by taking
+        # advantage of the so-called firmware "descriptor files" --
+        # small JSON files (which will be shipped by Linux
+        # distributions) that describe a UEFI firmware binary's
+        # "characteristics", such as the binary's file path, its
+        # features, architecture, supported machine type, NVRAM template
+        # and so forth.
+
         return ((caps.host.cpu.arch in supported_archs) and
-                os.path.exists(DEFAULT_UEFI_LOADER_PATH[caps.host.cpu.arch]))
+                any((os.path.exists(p)
+                     for p in DEFAULT_UEFI_LOADER_PATH[caps.host.cpu.arch])))
 
     def _get_supported_perf_events(self):
 
-        if (len(CONF.libvirt.enabled_perf_events) == 0 or
-             not self._host.has_min_version(MIN_LIBVIRT_PERF_VERSION)):
+        if (len(CONF.libvirt.enabled_perf_events) == 0):
             return []
 
         supported_events = []
@@ -4921,7 +5311,8 @@ class LibvirtDriver(driver.ComputeDriver):
         return True
 
     def _configure_guest_by_virt_type(self, guest, virt_type, caps, instance,
-                                      image_meta, flavor, root_device_name):
+                                      image_meta, flavor, root_device_name,
+                                      sev_enabled):
         if virt_type == "xen":
             if guest.os_type == fields.VMMode.HVM:
                 guest.os_loader = CONF.libvirt.xen_hvmloader_path
@@ -4944,8 +5335,9 @@ class LibvirtDriver(driver.ComputeDriver):
                                     "functional testing and therefore "
                                     "considered experimental.")
                         uefi_logged = True
-                    guest.os_loader = DEFAULT_UEFI_LOADER_PATH[
-                        caps.host.cpu.arch]
+                    for lpath in DEFAULT_UEFI_LOADER_PATH[caps.host.cpu.arch]:
+                        if os.path.exists(lpath):
+                            guest.os_loader = lpath
                     guest.os_loader_type = "pflash"
                 else:
                     raise exception.UEFINotSupported()
@@ -5195,12 +5587,12 @@ class LibvirtDriver(driver.ComputeDriver):
 
         if not CONF.libvirt.num_pcie_ports:
             return False
-        if (caps.host.cpu.arch == fields.Architecture.AARCH64
-                and guest.os_mach_type.startswith('virt')):
+        if (caps.host.cpu.arch == fields.Architecture.AARCH64 and
+                guest.os_mach_type.startswith('virt')):
             return True
-        if (caps.host.cpu.arch == fields.Architecture.X86_64
-                and guest.os_mach_type is not None
-                and 'q35' in guest.os_mach_type):
+        if (caps.host.cpu.arch == fields.Architecture.X86_64 and
+                guest.os_mach_type is not None and
+                'q35' in guest.os_mach_type):
             return True
         return False
 
@@ -5233,6 +5625,7 @@ class LibvirtDriver(driver.ComputeDriver):
         flavor = instance.flavor
         inst_path = libvirt_utils.get_instance_path(instance)
         disk_mapping = disk_info['mapping']
+        vpmems = self._get_ordered_vpmems(instance, flavor)
 
         virt_type = CONF.libvirt.virt_type
         guest = vconfig.LibvirtConfigGuest()
@@ -5242,10 +5635,9 @@ class LibvirtDriver(driver.ComputeDriver):
         # We are using default unit for memory: KiB
         guest.memory = flavor.memory_mb * units.Ki
         guest.vcpus = flavor.vcpus
-        allowed_cpus = hardware.get_vcpu_pin_set()
 
         guest_numa_config = self._get_guest_numa_config(
-            instance.numa_topology, flavor, allowed_cpus, image_meta)
+            instance.numa_topology, flavor, image_meta)
 
         guest.cpuset = guest_numa_config.cpuset
         guest.cputune = guest_numa_config.cputune
@@ -5254,7 +5646,7 @@ class LibvirtDriver(driver.ComputeDriver):
         guest.membacking = self._get_guest_memory_backing_config(
             instance.numa_topology,
             guest_numa_config.numatune,
-            flavor)
+            flavor, image_meta)
 
         guest.metadata.append(self._get_guest_config_meta(instance))
         guest.idmaps = self._get_guest_idmaps()
@@ -5286,9 +5678,11 @@ class LibvirtDriver(driver.ComputeDriver):
                 self._get_guest_os_type(virt_type))
         caps = self._host.get_capabilities()
 
+        sev_enabled = self._sev_enabled(flavor, image_meta)
+
         self._configure_guest_by_virt_type(guest, virt_type, caps, instance,
                                            image_meta, flavor,
-                                           root_device_name)
+                                           root_device_name, sev_enabled)
         if virt_type not in ('lxc', 'uml'):
             self._conf_non_lxc_uml(virt_type, guest, root_device_name, rescue,
                     instance, inst_path, image_meta, disk_info)
@@ -5344,7 +5738,137 @@ class LibvirtDriver(driver.ComputeDriver):
         if mdevs:
             self._guest_add_mdevs(guest, mdevs)
 
+        if sev_enabled:
+            self._guest_configure_sev(guest, caps.host.cpu.arch,
+                                      guest.os_mach_type)
+
+        if vpmems:
+            self._guest_add_vpmems(guest, vpmems)
+
         return guest
+
+    def _get_ordered_vpmems(self, instance, flavor):
+        ordered_vpmems = []
+        vpmems = self._get_vpmems(instance)
+        labels = hardware.get_vpmems(flavor)
+        for label in labels:
+            for vpmem in vpmems:
+                if vpmem.label == label:
+                    ordered_vpmems.append(vpmem)
+                    vpmems.remove(vpmem)
+                    break
+        return ordered_vpmems
+
+    def _get_vpmems(self, instance, prefix=None):
+        vpmems = []
+        resources = instance.resources
+        if prefix == 'old' and instance.migration_context:
+            if 'old_resources' in instance.migration_context:
+                resources = instance.migration_context.old_resources
+        if not resources:
+            return vpmems
+        for resource in resources:
+            rc = resource.resource_class
+            if rc.startswith("CUSTOM_PMEM_NAMESPACE_"):
+                vpmem = self._vpmems_by_name[resource.identifier]
+                vpmems.append(vpmem)
+        return vpmems
+
+    def _guest_add_vpmems(self, guest, vpmems):
+        guest.max_memory_size = guest.memory
+        guest.max_memory_slots = 0
+        for vpmem in vpmems:
+            size_kb = vpmem.size / units.Ki
+            align_kb = vpmem.align / units.Ki
+
+            vpmem_config = vconfig.LibvirtConfigGuestVPMEM(
+                devpath=vpmem.devpath, size_kb=size_kb, align_kb=align_kb)
+
+            # max memory size needs contain vpmem size
+            guest.max_memory_size += size_kb
+            # one vpmem will occupy one memory slot
+            guest.max_memory_slots += 1
+            guest.add_device(vpmem_config)
+
+    def _sev_enabled(self, flavor, image_meta):
+        """To enable AMD SEV, the following should be true:
+
+        a) the supports_amd_sev instance variable in the host is
+           true,
+        b) the instance extra specs and/or image properties request
+           memory encryption to be enabled, and
+        c) there are no conflicts between extra specs, image properties
+           and machine type selection.
+
+        Most potential conflicts in c) should already be caught in the
+        API layer.  However there is still one remaining case which
+        needs to be handled here: when the image does not contain an
+        hw_machine_type property, the machine type will be chosen from
+        CONF.libvirt.hw_machine_type if configured, otherwise falling
+        back to the hardcoded value which is currently 'pc'.  If it
+        ends up being 'pc' or another value not in the q35 family, we
+        need to raise an exception.  So calculate the machine type and
+        pass it to be checked alongside the other sanity checks which
+        are run while determining whether SEV is selected.
+        """
+        if not self._host.supports_amd_sev:
+            return False
+
+        mach_type = libvirt_utils.get_machine_type(image_meta)
+        return hardware.get_mem_encryption_constraint(flavor, image_meta,
+                                                      mach_type)
+
+    def _guest_configure_sev(self, guest, arch, mach_type):
+        sev = self._find_sev_feature(arch, mach_type)
+        if sev is None:
+            # In theory this should never happen because it should
+            # only get called if SEV was requested, in which case the
+            # guest should only get scheduled on this host if it
+            # supports SEV, and SEV support is dependent on the
+            # presence of this <sev> feature.  That said, it's
+            # conceivable that something could get messed up along the
+            # way, e.g. a mismatch in the choice of machine type.  So
+            # make sure that if it ever does happen, we at least get a
+            # helpful error rather than something cryptic like
+            # "AttributeError: 'NoneType' object has no attribute 'cbitpos'
+            raise exception.MissingDomainCapabilityFeatureException(
+                feature='sev')
+
+        designer.set_driver_iommu_for_sev(guest)
+        self._guest_add_launch_security(guest, sev)
+
+    def _guest_add_launch_security(self, guest, sev):
+        launch_security = vconfig.LibvirtConfigGuestSEVLaunchSecurity()
+        launch_security.cbitpos = sev.cbitpos
+        launch_security.reduced_phys_bits = sev.reduced_phys_bits
+        guest.launch_security = launch_security
+
+    def _find_sev_feature(self, arch, mach_type):
+        """Search domain capabilities for the given arch and machine type
+        for the <sev> element under <features>, and return it if found.
+        """
+        domain_caps = self._host.get_domain_capabilities()
+        if arch not in domain_caps:
+            LOG.warning(
+                "Wanted to add SEV to config for guest with arch %(arch)s "
+                "but only had domain capabilities for: %(archs)s",
+                {'arch': arch, 'archs': ' '.join(domain_caps)})
+            return None
+
+        if mach_type not in domain_caps[arch]:
+            LOG.warning(
+                "Wanted to add SEV to config for guest with machine type "
+                "%(mtype)s but for arch %(arch)s only had domain capabilities "
+                "for machine types: %(mtypes)s",
+                {'mtype': mach_type, 'arch': arch,
+                 'mtypes': ' '.join(domain_caps[arch])})
+            return None
+
+        for feature in domain_caps[arch][mach_type].features:
+            if feature.root_name == 'sev':
+                return feature
+
+        return None
 
     def _guest_add_mdevs(self, guest, chosen_mdevs):
         for chosen_mdev in chosen_mdevs:
@@ -5354,8 +5878,8 @@ class LibvirtDriver(driver.ComputeDriver):
 
     @staticmethod
     def _guest_add_spice_channel(guest):
-        if (CONF.spice.enabled and CONF.spice.agent_enabled
-                and guest.virt_type not in ('lxc', 'uml', 'xen')):
+        if (CONF.spice.enabled and CONF.spice.agent_enabled and
+                guest.virt_type not in ('lxc', 'uml', 'xen')):
             channel = vconfig.LibvirtConfigGuestChannel()
             channel.type = 'spicevmc'
             channel.target_name = "com.redhat.spice.0"
@@ -5379,8 +5903,8 @@ class LibvirtDriver(driver.ComputeDriver):
     def _guest_add_watchdog_action(guest, flavor, image_meta):
         # image meta takes precedence over flavor extra specs; disable the
         # watchdog action by default
-        watchdog_action = (flavor.extra_specs.get('hw:watchdog_action')
-                           or 'disabled')
+        watchdog_action = (flavor.extra_specs.get('hw:watchdog_action') or
+                           'disabled')
         watchdog_action = image_meta.properties.get('hw_watchdog_action',
                                                     watchdog_action)
         # NB(sross): currently only actually supported by KVM/QEmu
@@ -5731,47 +6255,65 @@ class LibvirtDriver(driver.ComputeDriver):
             guest.resume()
         return guest
 
-    def _get_vcpu_total(self):
-        """Get available vcpu number of physical computer.
+    def _get_pcpu_available(self):
+        """Get number of host cores to be used for PCPUs.
 
-        :returns: the number of cpu core instances can be used.
-
+        :returns: The number of host cores to be used for PCPUs.
         """
-        try:
-            total_pcpus = self._host.get_cpu_count()
-        except libvirt.libvirtError:
-            LOG.warning("Cannot get the number of cpu, because this "
-                        "function is not implemented for this platform.")
-            return 0
+        if not CONF.compute.cpu_dedicated_set:
+            return set()
 
-        if not CONF.vcpu_pin_set:
-            return total_pcpus
+        online_cpus = self._host.get_online_cpus()
+        dedicated_cpus = hardware.get_cpu_dedicated_set()
 
-        available_ids = hardware.get_vcpu_pin_set()
-        # We get the list of online CPUs on the host and see if the requested
-        # set falls under these. If not, we retain the old behavior.
-        online_pcpus = None
-        try:
-            online_pcpus = self._host.get_online_cpus()
-        except libvirt.libvirtError as ex:
-            error_code = ex.get_error_code()
-            err_msg = encodeutils.exception_to_unicode(ex)
-            LOG.warning(
-                "Couldn't retrieve the online CPUs due to a Libvirt "
-                "error: %(error)s with error code: %(error_code)s",
-                {'error': err_msg, 'error_code': error_code})
-        if online_pcpus:
-            if not (available_ids <= online_pcpus):
-                msg = (_("Invalid vcpu_pin_set config, one or more of the "
-                         "specified cpuset is not online. Online cpuset(s): "
-                         "%(online)s, requested cpuset(s): %(req)s"),
-                       {'online': sorted(online_pcpus),
-                        'req': sorted(available_ids)})
-                raise exception.Invalid(msg)
-        elif sorted(available_ids)[-1] >= total_pcpus:
-            raise exception.Invalid(_("Invalid vcpu_pin_set config, "
-                                      "out of hypervisor cpu range."))
-        return len(available_ids)
+        if not dedicated_cpus.issubset(online_cpus):
+            msg = _("Invalid '[compute] cpu_dedicated_set' config: one or "
+                    "more of the configured CPUs is not online. Online "
+                    "cpuset(s): %(online)s, configured cpuset(s): %(req)s")
+            raise exception.Invalid(msg % {
+                'online': sorted(online_cpus),
+                'req': sorted(dedicated_cpus)})
+
+        return dedicated_cpus
+
+    def _get_vcpu_available(self):
+        """Get host cores to be used for VCPUs.
+
+        :returns: A list of host CPU cores that can be used for VCPUs.
+        """
+        online_cpus = self._host.get_online_cpus()
+
+        # NOTE(stephenfin): The use of the legacy 'vcpu_pin_set' option happens
+        # if it's defined, regardless of whether '[compute] cpu_shared_set' is
+        # also configured. This is legacy behavior required for upgrades that
+        # should be removed in the future, when we can rely exclusively on
+        # '[compute] cpu_shared_set'.
+        if CONF.vcpu_pin_set:
+            # TODO(stephenfin): Remove this in U
+            shared_cpus = hardware.get_vcpu_pin_set()
+        elif CONF.compute.cpu_shared_set:
+            shared_cpus = hardware.get_cpu_shared_set()
+        elif CONF.compute.cpu_dedicated_set:
+            return set()
+        else:
+            return online_cpus
+
+        if not shared_cpus.issubset(online_cpus):
+            msg = _("Invalid '%(config_opt)s' config: one or "
+                    "more of the configured CPUs is not online. Online "
+                    "cpuset(s): %(online)s, configured cpuset(s): %(req)s")
+
+            if CONF.vcpu_pin_set:
+                config_opt = 'vcpu_pin_set'
+            else:  # CONF.compute.cpu_shared_set
+                config_opt = '[compute] cpu_shared_set'
+
+            raise exception.Invalid(msg % {
+                'config_opt': config_opt,
+                'online': sorted(online_cpus),
+                'req': sorted(shared_cpus)})
+
+        return shared_cpus
 
     @staticmethod
     def _get_local_gb_info():
@@ -5787,7 +6329,7 @@ class LibvirtDriver(driver.ComputeDriver):
             info = lvm.get_volume_group_info(
                                CONF.libvirt.images_volume_group)
         elif CONF.libvirt.images_type == 'rbd':
-            info = LibvirtDriver._get_rbd_driver().get_pool_info()
+            info = rbd_utils.RBDDriver().get_pool_info()
         else:
             info = libvirt_utils.get_fs_info(CONF.instances_path)
 
@@ -5947,11 +6489,11 @@ class LibvirtDriver(driver.ComputeDriver):
         caps = self._host.get_capabilities()
         instance_caps = list()
         for g in caps.guests:
-            for dt in g.domtype:
+            for domain_type in g.domains:
                 try:
                     instance_cap = (
                         fields.Architecture.canonicalize(g.arch),
-                        fields.HVType.canonicalize(dt),
+                        fields.HVType.canonicalize(domain_type),
                         fields.VMMode.canonicalize(g.ostype))
                     instance_caps.append(instance_cap)
                 except exception.InvalidArchitectureName:
@@ -6454,12 +6996,22 @@ class LibvirtDriver(driver.ComputeDriver):
             return
 
         cells = []
-        allowed_cpus = hardware.get_vcpu_pin_set()
-        online_cpus = self._host.get_online_cpus()
-        if allowed_cpus:
-            allowed_cpus &= online_cpus
-        else:
-            allowed_cpus = online_cpus
+
+        available_shared_cpus = self._get_vcpu_available()
+        available_dedicated_cpus = self._get_pcpu_available()
+
+        # NOTE(stephenfin): In an ideal world, if the operator had not
+        # configured this host to report PCPUs using the '[compute]
+        # cpu_dedicated_set' option, then we should not be able to used pinned
+        # instances on this host. However, that would force operators to update
+        # their configuration as part of the Stein -> Train upgrade or be
+        # unable to schedule instances on the host. As a result, we need to
+        # revert to legacy behavior and use 'vcpu_pin_set' for both VCPUs and
+        # PCPUs.
+        # TODO(stephenfin): Remove this in U
+        if not available_dedicated_cpus and not (
+                CONF.compute.cpu_shared_set and not CONF.vcpu_pin_set):
+            available_dedicated_cpus = available_shared_cpus
 
         def _get_reserved_memory_for_cell(self, cell_id, page_size):
             cell = self._reserved_hugepages.get(cell_id, {})
@@ -6506,14 +7058,19 @@ class LibvirtDriver(driver.ComputeDriver):
         tunnel_affinities = _get_tunnel_numa_affinity()
 
         for cell in topology.cells:
-            cpuset = set(cpu.id for cpu in cell.cpus)
+            cpus = set(cpu.id for cpu in cell.cpus)
+
+            cpuset = cpus & available_shared_cpus
+            pcpuset = cpus & available_dedicated_cpus
+
             siblings = sorted(map(set,
                                   set(tuple(cpu.siblings)
                                         if cpu.siblings else ()
                                       for cpu in cell.cpus)
                                   ))
-            cpuset &= allowed_cpus
-            siblings = [sib & allowed_cpus for sib in siblings]
+
+            cpus &= available_shared_cpus | available_dedicated_cpus
+            siblings = [sib & cpus for sib in siblings]
             # Filter out empty sibling sets that may be left
             siblings = [sib for sib in siblings if len(sib) > 0]
 
@@ -6530,13 +7087,21 @@ class LibvirtDriver(driver.ComputeDriver):
                 physnets=physnet_affinities[cell.id],
                 tunneled=tunnel_affinities[cell.id])
 
-            cell = objects.NUMACell(id=cell.id, cpuset=cpuset,
-                                    memory=cell.memory / units.Ki,
-                                    cpu_usage=0, memory_usage=0,
-                                    siblings=siblings,
-                                    pinned_cpus=set([]),
-                                    mempages=mempages,
-                                    network_metadata=network_metadata)
+            # NOTE(stephenfin): Note that we don't actually return any usage
+            # information here. This is because this is handled by the resource
+            # tracker via the 'update_available_resource' periodic task, which
+            # loops through all instances and calculated usage accordingly
+            cell = objects.NUMACell(
+                id=cell.id,
+                cpuset=cpuset,
+                pcpuset=pcpuset,
+                memory=cell.memory / units.Ki,
+                cpu_usage=0,
+                pinned_cpus=set(),
+                memory_usage=0,
+                siblings=siblings,
+                mempages=mempages,
+                network_metadata=network_metadata)
             cells.append(cell)
 
         return objects.NUMATopology(cells=cells)
@@ -6658,7 +7223,9 @@ class LibvirtDriver(driver.ComputeDriver):
         """
         disk_gb = int(self._get_local_gb_info()['total'])
         memory_mb = int(self._host.get_memory_mb_total())
-        vcpus = self._get_vcpu_total()
+        vcpus = len(self._get_vcpu_available())
+        pcpus = len(self._get_pcpu_available())
+        memory_enc_slots = self._get_memory_encrypted_slots()
 
         # NOTE(yikun): If the inv record does not exists, the allocation_ratio
         # will use the CONF.xxx_allocation_ratio value if xxx_allocation_ratio
@@ -6666,15 +7233,8 @@ class LibvirtDriver(driver.ComputeDriver):
         # otherwise.
         inv = provider_tree.data(nodename).inventory
         ratios = self._get_allocation_ratios(inv)
+        resources = collections.defaultdict(set)
         result = {
-            orc.VCPU: {
-                'total': vcpus,
-                'min_unit': 1,
-                'max_unit': vcpus,
-                'step_size': 1,
-                'allocation_ratio': ratios[orc.VCPU],
-                'reserved': CONF.reserved_host_cpus,
-            },
             orc.MEMORY_MB: {
                 'total': memory_mb,
                 'min_unit': 1,
@@ -6684,6 +7244,38 @@ class LibvirtDriver(driver.ComputeDriver):
                 'reserved': CONF.reserved_host_memory_mb,
             },
         }
+
+        # NOTE(stephenfin): We have to optionally report these since placement
+        # forbids reporting inventory with total=0
+        if vcpus:
+            result[orc.VCPU] = {
+                'total': vcpus,
+                'min_unit': 1,
+                'max_unit': vcpus,
+                'step_size': 1,
+                'allocation_ratio': ratios[orc.VCPU],
+                'reserved': CONF.reserved_host_cpus,
+            }
+
+        if pcpus:
+            result[orc.PCPU] = {
+                'total': pcpus,
+                'min_unit': 1,
+                'max_unit': pcpus,
+                'step_size': 1,
+                'allocation_ratio': 1,
+                'reserved': 0,
+            }
+
+        if memory_enc_slots:
+            result[orc.MEM_ENCRYPTION_CONTEXT] = {
+                'total': memory_enc_slots,
+                'min_unit': 1,
+                'max_unit': 1,
+                'step_size': 1,
+                'allocation_ratio': 1.0,
+                'reserved': 0,
+            }
 
         # If a sharing DISK_GB provider exists in the provider tree, then our
         # storage is shared, and we should not report the DISK_GB inventory in
@@ -6707,27 +7299,80 @@ class LibvirtDriver(driver.ComputeDriver):
         # types, only one type will be used for each of the physical GPUs.
         # If one of the pGPUs doesn't support this type, it won't be used.
         # TODO(sbauza): Use traits to make a better world.
-        inventories_dict = self._get_gpu_inventories()
-        if inventories_dict:
-            self._update_provider_tree_for_vgpu(
-                inventories_dict, provider_tree, nodename,
-                allocations=allocations)
+        self._update_provider_tree_for_vgpu(
+           provider_tree, nodename, allocations=allocations)
+
+        self._update_provider_tree_for_pcpu(
+            provider_tree, nodename, allocations=allocations)
+
+        self._update_provider_tree_for_vpmems(
+            provider_tree, nodename, result, resources)
 
         provider_tree.update_inventory(nodename, result)
+        provider_tree.update_resources(nodename, resources)
 
         traits = self._get_cpu_traits()
-        if traits is not None:
-            # _get_cpu_traits returns a dict of trait names mapped to boolean
-            # values. Add traits equal to True to provider tree, remove
-            # those False traits from provider tree.
-            traits_to_add = [t for t in traits if traits[t]]
-            traits_to_remove = set(traits) - set(traits_to_add)
-            provider_tree.add_traits(nodename, *traits_to_add)
-            provider_tree.remove_traits(nodename, *traits_to_remove)
+        # _get_cpu_traits returns a dict of trait names mapped to boolean
+        # values. Add traits equal to True to provider tree, remove
+        # those False traits from provider tree.
+        traits_to_add = [t for t in traits if traits[t]]
+        traits_to_remove = set(traits) - set(traits_to_add)
+        provider_tree.add_traits(nodename, *traits_to_add)
+        provider_tree.remove_traits(nodename, *traits_to_remove)
 
         # Now that we updated the ProviderTree, we want to store it locally
         # so that spawn() or other methods can access it thru a getter
         self.provider_tree = copy.deepcopy(provider_tree)
+
+    def _update_provider_tree_for_vpmems(self, provider_tree, nodename,
+                                         inventory, resources):
+        """Update resources and inventory for vpmems in provider tree."""
+        prov_data = provider_tree.data(nodename)
+        for rc, vpmems in self._vpmems_by_rc.items():
+            inventory[rc] = {
+                'total': len(vpmems),
+                'max_unit': len(vpmems),
+                'min_unit': 1,
+                'step_size': 1,
+                'allocation_ratio': 1.0,
+                'reserved': 0
+            }
+            for vpmem in vpmems:
+                resource_obj = objects.Resource(
+                    provider_uuid=prov_data.uuid,
+                    resource_class=rc,
+                    identifier=vpmem.name,
+                    metadata=vpmem)
+                resources[rc].add(resource_obj)
+
+    def _get_memory_encrypted_slots(self):
+        slots = CONF.libvirt.num_memory_encrypted_guests
+        if not self._host.supports_amd_sev:
+            if slots and slots > 0:
+                LOG.warning("Host is configured with "
+                            "libvirt.num_memory_encrypted_guests set to "
+                            "%d, but is not SEV-capable.", slots)
+            return 0
+
+        # NOTE(aspiers): Auto-detection of the number of available
+        # slots for AMD SEV is not yet possible, so honor the
+        # configured value, or impose no limit if this is not
+        # specified.  This does incur a risk that if operators don't
+        # read the instructions and configure the maximum correctly,
+        # the maximum could be exceeded resulting in SEV guests
+        # failing at launch-time.  However at least SEV guests will
+        # launch until the maximum, and when auto-detection code is
+        # added later, an upgrade will magically fix the issue.
+        #
+        # Note also that the configured value can be 0 on an
+        # SEV-capable host, since there might conceivably be good
+        # reasons for the operator to want to disable SEV even when
+        # it's available (e.g. due to performance impact, or
+        # implementation bugs which may surface later).
+        if slots is not None:
+            return slots
+        else:
+            return db_const.MAX_INT
 
     @staticmethod
     def _is_reshape_needed_vgpu_on_root(provider_tree, nodename):
@@ -7011,8 +7656,8 @@ class LibvirtDriver(driver.ComputeDriver):
                         rp_uuid, root_node, consumer_uuid, alloc_data,
                         resources, pgpu_rps)
 
-    def _update_provider_tree_for_vgpu(self, inventories_dict, provider_tree,
-                                       nodename, allocations=None):
+    def _update_provider_tree_for_vgpu(self, provider_tree, nodename,
+                                       allocations=None):
         """Updates the provider tree for VGPU inventory.
 
         Before Stein, VGPU inventory and allocations were on the root compute
@@ -7021,17 +7666,6 @@ class LibvirtDriver(driver.ComputeDriver):
         "reshape" the tree if necessary on first start of this compute service
         in Stein.
 
-        :param inventories_dict: Dictionary of inventories for VGPU class
-            directly provided by _get_gpu_inventories() and which looks like:
-                {'pci_0000_84_00_0':
-                    {'total': $TOTAL,
-                     'min_unit': 1,
-                     'max_unit': $MAX_UNIT, # defaults to $TOTAL
-                     'step_size': 1,
-                     'reserved': 0,
-                     'allocation_ratio': 1.0,
-                    }
-                }
         :param provider_tree: The ProviderTree to update.
         :param nodename: The ComputeNode.hypervisor_hostname, also known as
             the name of the root node provider in the tree for this host.
@@ -7044,6 +7678,11 @@ class LibvirtDriver(driver.ComputeDriver):
         :raises: nova.exception.ReshapeFailed if the requested tree reshape
             fails for whatever reason.
         """
+        # First, check if this host actually has vGPU to reshape
+        inventories_dict = self._get_gpu_inventories()
+        if not inventories_dict:
+            return
+
         # Check to see if the root compute node provider in the tree for
         # this host already has VGPU inventory because if it does, and
         # we're not currently reshaping (allocations is None), we need
@@ -7074,6 +7713,151 @@ class LibvirtDriver(driver.ComputeDriver):
                 del root_node.inventory[orc.VGPU]
                 provider_tree.update_inventory(nodename, root_node.inventory)
 
+    def _update_provider_tree_for_pcpu(self, provider_tree, nodename,
+                                       allocations=None):
+        """Updates the provider tree for PCPU inventory.
+
+        Before Train, pinned instances consumed VCPU inventory just like
+        unpinned instances. Starting in Train, these instances now consume PCPU
+        inventory. The function can reshape the inventory, changing allocations
+        of VCPUs to PCPUs.
+
+        :param provider_tree: The ProviderTree to update.
+        :param nodename: The ComputeNode.hypervisor_hostname, also known as
+            the name of the root node provider in the tree for this host.
+        :param allocations: A dict, keyed by consumer UUID, of allocation
+            records, or None::
+
+                {
+                    $CONSUMER_UUID: {
+                        "allocations": {
+                            $RP_UUID: {
+                                "generation": $RP_GEN,
+                                "resources": {
+                                    $RESOURCE_CLASS: $AMOUNT,
+                                    ...
+                                },
+                            },
+                            ...
+                        },
+                        "project_id": $PROJ_ID,
+                        "user_id": $USER_ID,
+                        "consumer_generation": $CONSUMER_GEN,
+                    },
+                    ...
+                }
+
+            If provided, this indicates a reshape was requested and should be
+            performed.
+        :raises: nova.exception.ReshapeNeeded if ``allocations`` is None and
+            the method determines a reshape of the tree is needed, i.e. VCPU
+            inventory and allocations must be migrated to PCPU resources.
+        :raises: nova.exception.ReshapeFailed if the requested tree reshape
+            fails for whatever reason.
+        """
+        # If we're not configuring PCPUs, then we've nothing to worry about
+        # (yet)
+        if not CONF.compute.cpu_dedicated_set:
+            return
+
+        root_node = provider_tree.data(nodename)
+
+        # Similarly, if PCPU inventories are already reported then there is no
+        # need to reshape
+        if orc.PCPU in root_node.inventory:
+            return
+
+        ctx = nova_context.get_admin_context()
+        compute_node = objects.ComputeNode.get_by_nodename(ctx, nodename)
+
+        # Finally, if the compute node doesn't appear to support NUMA, move
+        # swiftly on
+        if not compute_node.numa_topology:
+            return
+
+        # The ComputeNode.numa_topology is a StringField, deserialize
+        numa = objects.NUMATopology.obj_from_db_obj(compute_node.numa_topology)
+
+        # If the host doesn't know of any pinned CPUs, we can continue
+        if not any(cell.pinned_cpus for cell in numa.cells):
+            return
+
+        # At this point, we know there's something to be migrated here but not
+        # how much. If the allocations are None, we're at the startup of the
+        # compute node and a Reshape is needed. Indicate this by raising the
+        # ReshapeNeeded exception
+
+        if allocations is None:
+            LOG.info(
+                'Requesting provider tree reshape in order to move '
+                'VCPU to PCPU allocations to the compute node '
+                'provider %s', nodename)
+            raise exception.ReshapeNeeded()
+
+        # Go figure out how many VCPUs to migrate to PCPUs. We've been telling
+        # people for years *not* to mix pinned and unpinned instances, meaning
+        # we should be able to move all VCPUs to PCPUs, but we never actually
+        # enforced this in code and there's an all-too-high chance someone
+        # didn't get the memo
+
+        allocations_needing_reshape = []
+
+        # we need to tackle the allocations against instances on this host...
+
+        instances = objects.InstanceList.get_by_host(
+            ctx, compute_node.host, expected_attrs=['numa_topology'])
+        for instance in instances:
+            if not instance.numa_topology:
+                continue
+
+            if not instance.numa_topology.cpu_pinning_requested:
+                continue
+
+            allocations_needing_reshape.append(instance.uuid)
+
+        # ...and those for any migrations
+
+        migrations = objects.MigrationList.get_in_progress_by_host_and_node(
+            ctx, compute_node.host, compute_node.hypervisor_hostname)
+        for migration in migrations:
+            # we don't care about migrations that have landed here, since we
+            # already have those instances above
+            if not migration.dest_compute or (
+                    migration.dest_compute == compute_node.host):
+                continue
+
+            instance = objects.Instance.get_by_uuid(
+                ctx, migration.instance_uuid, expected_attrs=['numa_topology'])
+
+            if not instance.numa_topology:
+                continue
+
+            if not instance.numa_topology.cpu_pinning_requested:
+                continue
+
+            allocations_needing_reshape.append(migration.uuid)
+
+        for allocation_uuid in allocations_needing_reshape:
+            consumer_allocations = allocations.get(allocation_uuid, {}).get(
+                'allocations', {})
+            # TODO(stephenfin): We can probably just check the allocations for
+            # ComputeNode.uuid since compute nodes are the only (?) provider of
+            # VCPU and PCPU resources
+            for rp_uuid in consumer_allocations:
+                resources = consumer_allocations[rp_uuid]['resources']
+
+                if orc.PCPU in resources or orc.VCPU not in resources:
+                    # Either this has been migrated or it's not a compute node
+                    continue
+
+                # Switch stuff around. We can do a straight swap since an
+                # instance is either pinned or unpinned. By doing this, we're
+                # modifying the provided 'allocations' dict, which will
+                # eventually be used by the resource tracker to update
+                # placement
+                resources['PCPU'] = resources['VCPU']
+                del resources[orc.VCPU]
+
     def get_available_resource(self, nodename):
         """Retrieve resource information.
 
@@ -7093,7 +7877,7 @@ class LibvirtDriver(driver.ComputeDriver):
         # See: https://bugs.launchpad.net/nova/+bug/1215593
         data["supported_instances"] = self._get_instance_capabilities()
 
-        data["vcpus"] = self._get_vcpu_total()
+        data["vcpus"] = len(self._get_vcpu_available())
         data["memory_mb"] = self._host.get_memory_mb_total()
         data["local_gb"] = disk_info_dict['total']
         data["vcpus_used"] = self._get_vcpu_used()
@@ -7118,8 +7902,7 @@ class LibvirtDriver(driver.ComputeDriver):
         available_least = disk_free_gb * units.Gi - disk_over_committed
         data['disk_available_least'] = available_least / units.Gi
 
-        data['pci_passthrough_devices'] = \
-            self._get_pci_passthrough_devices()
+        data['pci_passthrough_devices'] = self._get_pci_passthrough_devices()
 
         numa_topology = self._get_host_numa_topology()
         if numa_topology:
@@ -7182,22 +7965,6 @@ class LibvirtDriver(driver.ComputeDriver):
         :param disk_over_commit: if true, allow disk over commit
         :returns: a LibvirtLiveMigrateData object
         """
-
-        # TODO(zcornelius): Remove this check in Stein, as we'll only support
-        #                   Rocky and newer computes.
-        # If file_backed_memory is enabled on this host, we have to make sure
-        # the source is new enough to support it. Since the source generates
-        # the XML for the destination, we depend on the source generating a
-        # file-backed XML for us, so fail if it won't do that.
-        if CONF.libvirt.file_backed_memory > 0:
-            srv = objects.Service.get_by_compute_host(context, instance.host)
-            if srv.version < 32:
-                msg = ("Cannot migrate instance %(uuid)s from node %(node)s. "
-                       "Node %(node)s is not compatible with "
-                       "file_backed_memory" % {"uuid": instance.uuid,
-                                               "node": srv.host})
-                raise exception.MigrationPreCheckError(reason=msg)
-
         if disk_over_commit:
             disk_available_gb = dst_compute_info['free_disk_gb']
         else:
@@ -7231,13 +7998,66 @@ class LibvirtDriver(driver.ComputeDriver):
         if disk_over_commit is not None:
             data.disk_over_commit = disk_over_commit
         data.disk_available_mb = disk_available_mb
-        data.dst_wants_file_backed_memory = \
-                CONF.libvirt.file_backed_memory > 0
+        data.dst_wants_file_backed_memory = CONF.libvirt.file_backed_memory > 0
         data.file_backed_memory_discard = (CONF.libvirt.file_backed_memory and
             self._host.has_min_version(MIN_LIBVIRT_FILE_BACKED_DISCARD_VERSION,
                                        MIN_QEMU_FILE_BACKED_DISCARD_VERSION))
 
+        # TODO(artom) Set to indicate that the destination (us) can perform a
+        # NUMA-aware live migration. NUMA-aware live migration will become
+        # unconditionally supported in RPC 6.0, so this sentinel can be removed
+        # then.
+        if instance.numa_topology:
+            data.dst_supports_numa_live_migration = True
+
         return data
+
+    def post_claim_migrate_data(self, context, instance, migrate_data, claim):
+        migrate_data.dst_numa_info = self._get_live_migrate_numa_info(
+                claim.claimed_numa_topology, claim.instance_type,
+                claim.image_meta)
+        return migrate_data
+
+    def _get_live_migrate_numa_info(self, instance_numa_topology, flavor,
+                                    image_meta):
+        """Builds a LibvirtLiveMigrateNUMAInfo object to send to the source of
+        a live migration, containing information about how the instance is to
+        be pinned on the destination host.
+
+        :param instance_numa_topology: The InstanceNUMATopology as fitted to
+                                       the destination by the live migration
+                                       Claim.
+        :param flavor: The Flavor object for the instance.
+        :param image_meta: The ImageMeta object for the instance.
+        :returns: A LibvirtLiveMigrateNUMAInfo object indicating how to update
+                  the XML for the destination host.
+        """
+        info = objects.LibvirtLiveMigrateNUMAInfo()
+        cpu_set, guest_cpu_tune, guest_cpu_numa, guest_numa_tune = \
+            self._get_guest_numa_config(instance_numa_topology, flavor,
+                                        image_meta)
+        # NOTE(artom) These two should always be either None together, or
+        # truth-y together.
+        if guest_cpu_tune and guest_numa_tune:
+            info.cpu_pins = {}
+            for pin in guest_cpu_tune.vcpupin:
+                info.cpu_pins[str(pin.id)] = pin.cpuset
+
+            info.emulator_pins = guest_cpu_tune.emulatorpin.cpuset
+
+            if guest_cpu_tune.vcpusched:
+                # NOTE(artom) vcpusched is a list, but there's only ever one
+                # element in it (see _get_guest_numa_config under
+                # wants_realtime)
+                info.sched_vcpus = guest_cpu_tune.vcpusched[0].vcpus
+                info.sched_priority = guest_cpu_tune.vcpusched[0].priority
+
+            info.cell_pins = {}
+            for node in guest_numa_tune.memnodes:
+                info.cell_pins[str(node.cellid)] = set(node.nodeset)
+
+        LOG.debug('Built NUMA live migration info: %s', info)
+        return info
 
     def cleanup_live_migration_destination_check(self, context,
                                                  dest_check_data):
@@ -7324,6 +8144,13 @@ class LibvirtDriver(driver.ComputeDriver):
         # default to True here for all computes >= Queens.
         dest_check_data.src_supports_native_luks = True
 
+        # TODO(artom) Set to indicate that the source (us) can perform a
+        # NUMA-aware live migration. NUMA-aware live migration will become
+        # unconditionally supported in RPC 6.0, so this sentinel can be removed
+        # then.
+        if instance.numa_topology:
+            dest_check_data.src_supports_numa_live_migration = True
+
         return dest_check_data
 
     def _is_shared_block_storage(self, instance, dest_check_data,
@@ -7400,7 +8227,8 @@ class LibvirtDriver(driver.ComputeDriver):
     def _compare_cpu(self, guest_cpu, host_cpu_str, instance):
         """Check the host is compatible with the requested CPU
 
-        :param guest_cpu: nova.objects.VirtCPUModel or None
+        :param guest_cpu: nova.objects.VirtCPUModel
+            or nova.virt.libvirt.vconfig.LibvirtConfigGuestCPU or None.
         :param host_cpu_str: JSON from _get_cpu_info() method
 
         If the 'guest_cpu' parameter is not None, this will be
@@ -7434,6 +8262,8 @@ class LibvirtDriver(driver.ComputeDriver):
             cpu.threads = info['topology']['threads']
             for f in info['features']:
                 cpu.add_feature(vconfig.LibvirtConfigCPUFeature(f))
+        elif isinstance(guest_cpu, vconfig.LibvirtConfigGuestCPU):
+            cpu = guest_cpu
         else:
             cpu = self._vcpu_model_to_cpu_config(guest_cpu)
 
@@ -7556,7 +8386,7 @@ class LibvirtDriver(driver.ComputeDriver):
 
         # 'dest' will be substituted into 'migration_uri' so ensure
         # it does't contain any characters that could be used to
-        # exploit the URI accepted by libivrt
+        # exploit the URI accepted by libvirt
         if not libvirt_utils.is_valid_hostname(dest):
             raise exception.InvalidHostname(hostname=dest)
 
@@ -7589,6 +8419,26 @@ class LibvirtDriver(driver.ComputeDriver):
                     ' for live migration to work properly you'
                     ' must disable serial console.')
             raise exception.MigrationError(reason=msg)
+
+    def _detach_direct_passthrough_vifs(self, context,
+                                        migrate_data, instance):
+        """detaches passthrough vif to enable live migration
+
+        :param context: security context
+        :param migrate_data: a LibvirtLiveMigrateData object
+        :param instance: instance object that is migrated.
+        """
+        # NOTE(sean-k-mooney): if we have vif data available we
+        # loop over each vif and detach all direct passthrough
+        # vifs to allow sriov live migration.
+        direct_vnics = network_model.VNIC_TYPES_DIRECT_PASSTHROUGH
+        vifs = [vif.source_vif for vif in migrate_data.vifs
+                if "source_vif" in vif and vif.source_vif]
+        for vif in vifs:
+            if vif['vnic_type'] in direct_vnics:
+                LOG.info("Detaching vif %s from instnace "
+                         "%s for live migration", vif['id'], instance.id)
+                self.detach_interface(context, instance, vif)
 
     def _live_migration_operation(self, context, instance, dest,
                                   block_migration, migrate_data, guest,
@@ -7664,6 +8514,8 @@ class LibvirtDriver(driver.ComputeDriver):
                         inst_type=instance.flavor,
                         virt_type=CONF.libvirt.virt_type,
                         host=self._host)
+                    self._detach_direct_passthrough_vifs(context,
+                        migrate_data, instance)
                 new_xml_str = libvirt_migrate.get_updated_guest_xml(
                     # TODO(sahid): It's not a really good idea to pass
                     # the method _get_volume_config and we should to find
@@ -7940,19 +8792,34 @@ class LibvirtDriver(driver.ComputeDriver):
                     libvirt_migrate.save_stats(instance, migration,
                                                info, remaining)
 
+                    # NOTE(fanzhang): do not include disk transfer stats in
+                    # the progress percentage calculation but log them.
+                    disk_remaining = 100
+                    if info.disk_total != 0:
+                        disk_remaining = round(info.disk_remaining *
+                                               100 / info.disk_total)
+
                     lg = LOG.debug
                     if (n % 60) == 0:
                         lg = LOG.info
 
                     lg("Migration running for %(secs)d secs, "
-                       "memory %(remaining)d%% remaining; "
+                       "memory %(remaining)d%% remaining "
                        "(bytes processed=%(processed_memory)d, "
                        "remaining=%(remaining_memory)d, "
-                       "total=%(total_memory)d)",
+                       "total=%(total_memory)d); "
+                       "disk %(disk_remaining)d%% remaining "
+                       "(bytes processed=%(processed_disk)d, "
+                       "remaining=%(remaining_disk)d, "
+                       "total=%(total_disk)d).",
                        {"secs": n / 2, "remaining": remaining,
                         "processed_memory": info.memory_processed,
                         "remaining_memory": info.memory_remaining,
-                        "total_memory": info.memory_total}, instance=instance)
+                        "total_memory": info.memory_total,
+                        "disk_remaining": disk_remaining,
+                        "processed_disk": info.disk_processed,
+                        "remaining_disk": info.disk_remaining,
+                        "total_disk": info.disk_total}, instance=instance)
 
                 n = n + 1
             elif info.type == libvirt.VIR_DOMAIN_JOB_COMPLETED:
@@ -8059,10 +8926,7 @@ class LibvirtDriver(driver.ComputeDriver):
                       instance=instance)
 
     def _is_post_copy_enabled(self, migration_flags):
-        if self._is_post_copy_available():
-            if (migration_flags & libvirt.VIR_MIGRATE_POSTCOPY) != 0:
-                return True
-        return False
+        return (migration_flags & libvirt.VIR_MIGRATE_POSTCOPY) != 0
 
     def live_migration_force_complete(self, instance):
         try:
@@ -8112,6 +8976,40 @@ class LibvirtDriver(driver.ComputeDriver):
                                           instance.ramdisk_id,
                                           instance, fallback_from_host)
 
+    def _reattach_instance_vifs(self, context, instance, network_info):
+        guest = self._host.get_guest(instance)
+        # validate that the guest has the expected number of interfaces
+        # attached.
+        guest_interfaces = guest.get_interfaces()
+        # NOTE(sean-k-mooney): In general len(guest_interfaces) will
+        # be equal to len(network_info) as interfaces will not be hot unplugged
+        # unless they are SR-IOV direct mode interfaces. As such we do not
+        # need an else block here as it would be a noop.
+        if len(guest_interfaces) < len(network_info):
+            # NOTE(sean-k-mooney): we are doing a post live migration
+            # for a guest with sriov vif that were detached as part of
+            # the migration. loop over the vifs and attach the missing
+            # vif as part of the post live migration phase.
+            direct_vnics = network_model.VNIC_TYPES_DIRECT_PASSTHROUGH
+            for vif in network_info:
+                if vif['vnic_type'] in direct_vnics:
+                    LOG.info("Attaching vif %s to instance %s",
+                             vif['id'], instance.id)
+                    self.attach_interface(context, instance,
+                                          instance.image_meta, vif)
+
+    def rollback_live_migration_at_source(self, context, instance,
+                                          migrate_data):
+        """reconnect sriov interfaces after failed live migration
+        :param context: security context
+        :param instance:  the instance being migrated
+        :param migrate_date: a LibvirtLiveMigrateData object
+        """
+        network_info = network_model.NetworkInfo(
+            [vif.source_vif for vif in migrate_data.vifs
+                            if "source_vif" in vif and vif.source_vif])
+        self._reattach_instance_vifs(context, instance, network_info)
+
     def rollback_live_migration_at_destination(self, context, instance,
                                                network_info,
                                                block_device_info,
@@ -8127,8 +9025,8 @@ class LibvirtDriver(driver.ComputeDriver):
             is_shared_instance_path = True
             if migrate_data:
                 is_shared_instance_path = migrate_data.is_shared_instance_path
-                if (migrate_data.obj_attr_is_set("serial_listen_ports")
-                    and migrate_data.serial_listen_ports):
+                if (migrate_data.obj_attr_is_set("serial_listen_ports") and
+                        migrate_data.serial_listen_ports):
                     # Releases serial ports reserved.
                     for port in migrate_data.serial_listen_ports:
                         serial_console.release_port(
@@ -8262,10 +9160,8 @@ class LibvirtDriver(driver.ComputeDriver):
             src_native_luks = False
             if migrate_data.obj_attr_is_set('src_supports_native_luks'):
                 src_native_luks = migrate_data.src_supports_native_luks
-            dest_native_luks = self._is_native_luks_available()
-            allow_native_luks = src_native_luks and dest_native_luks
             self._connect_volume(context, connection_info, instance,
-                                 allow_native_luks=allow_native_luks)
+                                 allow_native_luks=src_native_luks)
 
         self._pre_live_migration_plug_vifs(
             instance, network_info, migrate_data)
@@ -8469,11 +9365,7 @@ class LibvirtDriver(driver.ComputeDriver):
         :param network_info: instance network information
         :param block_migration: if true, post operation of block_migration.
         """
-        # The source node set the VIR_MIGRATE_PERSIST_DEST flag when live
-        # migrating so the guest xml should already be persisted on the
-        # destination host, so just perform a sanity check to make sure it
-        # made it as expected.
-        self._host.get_guest(instance)
+        self._reattach_instance_vifs(context, instance, network_info)
 
     def _get_instance_disk_info_from_config(self, guest_config,
                                             block_device_info):
@@ -9009,7 +9901,8 @@ class LibvirtDriver(driver.ComputeDriver):
                 raise
 
     def finish_revert_migration(self, context, instance, network_info,
-                                block_device_info=None, power_on=True):
+                                migration, block_device_info=None,
+                                power_on=True):
         LOG.debug("Starting finish_revert_migration",
                   instance=instance)
 
@@ -9042,11 +9935,6 @@ class LibvirtDriver(driver.ComputeDriver):
         # _finish_revert_resize_network_migrate_finish(), right after updating
         # the port binding. For any ports not covered by those "bind-time"
         # events, we wait for "plug-time" events here.
-        # TODO(artom) This DB lookup is done for backportability. A subsequent
-        # patch will remove it and change the finish_revert_migration() method
-        # signature to pass is the migration object.
-        migration = objects.Migration.get_by_id_and_instance(
-            context, instance.migration_context.migration_id, instance.uuid)
         events = network_info.get_plug_time_events(migration)
         if events:
             LOG.debug('Instance is using plug-time events: %s', events,
@@ -9082,7 +9970,7 @@ class LibvirtDriver(driver.ComputeDriver):
         for block, key in blocks:
             section = doc.findall(block)
             for node in section:
-                for child in node.getchildren():
+                for child in node:
                     if child.tag == 'target' and child.get('dev'):
                         result[key].append(child.get('dev'))
         return result
@@ -9161,8 +10049,7 @@ class LibvirtDriver(driver.ComputeDriver):
         # TODO(sahid): Needs to use get_info but more changes have to
         # be done since a mapping STATE_MAP LIBVIRT_POWER_STATE is
         # needed.
-        (state, max_mem, mem, num_cpu, cpu_time) = \
-            guest._get_domain_info(self._host)
+        state, max_mem, mem, num_cpu, cpu_time = guest._get_domain_info()
         config_drive = configdrive.required_by(instance)
         launched_at = timeutils.normalize_time(instance.launched_at)
         uptime = timeutils.delta_seconds(launched_at,
@@ -9524,12 +10411,24 @@ class LibvirtDriver(driver.ComputeDriver):
                            nova.privsep.fs.FS_FORMAT_XFS]
 
     def _get_cpu_traits(self):
+        """Get CPU-related traits to be set and unset on the host's resource
+        provider.
+
+        :return: A dict of trait names mapped to boolean values or None.
+        """
+        traits = self._get_cpu_feature_traits()
+        traits[ot.HW_CPU_X86_AMD_SEV] = self._host.supports_amd_sev
+        traits[ot.HW_CPU_HYPERTHREADING] = self._host.has_hyperthreading
+
+        return traits
+
+    def _get_cpu_feature_traits(self):
         """Get CPU traits of VMs based on guest CPU model config:
         1. if mode is 'host-model' or 'host-passthrough', use host's
         CPU features.
         2. if mode is None, choose a default CPU model based on CPU
         architecture.
-        3. if mode is 'custom', use cpu_model to generate CPU features.
+        3. if mode is 'custom', use cpu_models to generate CPU features.
         The code also accounts for cpu_model_extra_flags configuration when
         cpu_mode is 'host-model', 'host-passthrough' or 'custom', this
         ensures user specified CPU feature flags to be included.
@@ -9540,7 +10439,7 @@ class LibvirtDriver(driver.ComputeDriver):
             LOG.info('The current libvirt hypervisor %(virt_type)s '
                      'does not support reporting CPU traits.',
                      {'virt_type': CONF.libvirt.virt_type})
-            return
+            return {}
 
         caps = deepcopy(self._host.get_capabilities())
         if cpu.mode in ('host-model', 'host-passthrough'):
@@ -9549,21 +10448,43 @@ class LibvirtDriver(driver.ComputeDriver):
                              caps.host.cpu.features | cpu.features]
             return libvirt_utils.cpu_features_to_traits(host_features)
 
+        def _resolve_features(cpu):
+            xml_str = cpu.to_xml()
+            features_xml = self._get_guest_baseline_cpu_features(xml_str)
+            feature_names = []
+            if features_xml:
+                cpu = vconfig.LibvirtConfigCPU()
+                cpu.parse_str(features_xml)
+                feature_names = [f.name for f in cpu.features]
+            return feature_names
+
+        features = set()
         # Choose a default CPU model when cpu_mode is not specified
         if cpu.mode is None:
             caps.host.cpu.model = libvirt_utils.get_cpu_model_from_arch(
                 caps.host.cpu.arch)
             caps.host.cpu.features = set()
+            features = features.union(_resolve_features(caps.host.cpu))
         else:
-            # For custom mode, set model to guest CPU model
-            caps.host.cpu.model = cpu.model
-            caps.host.cpu.features = set()
+            models = [self._get_cpu_model_mapping(model)
+                      for model in CONF.libvirt.cpu_models]
+            # For custom mode, iterate through cpu models
+            for model in models:
+                caps.host.cpu.model = model
+                caps.host.cpu.features = set()
+                features = features.union(_resolve_features(caps.host.cpu))
             # Account for features in cpu_model_extra_flags conf
-            for f in cpu.features:
-                caps.host.cpu.add_feature(
-                    vconfig.LibvirtConfigCPUFeature(name=f.name))
+            features = features.union([f.name for f in cpu.features])
 
-        xml_str = caps.host.cpu.to_xml()
+        return libvirt_utils.cpu_features_to_traits(features)
+
+    def _get_guest_baseline_cpu_features(self, xml_str):
+        """Calls libvirt's baselineCPU API to compute the biggest set of
+        CPU features which is compatible with the given host CPU.
+
+        :param xml_str: XML description of host CPU
+        :return: An XML string of the computed CPU, or None on error
+        """
         LOG.debug("Libvirt baseline CPU %s", xml_str)
         # TODO(lei-zh): baselineCPU is not supported on all platforms.
         # There is some work going on in the libvirt community to replace the
@@ -9571,11 +10492,11 @@ class LibvirtDriver(driver.ComputeDriver):
         # https://www.redhat.com/archives/libvir-list/2018-May/msg01204.html.
         try:
             if hasattr(libvirt, 'VIR_CONNECT_BASELINE_CPU_EXPAND_FEATURES'):
-                features = self._host.get_connection().baselineCPU(
+                return self._host.get_connection().baselineCPU(
                     [xml_str],
                     libvirt.VIR_CONNECT_BASELINE_CPU_EXPAND_FEATURES)
             else:
-                features = self._host.get_connection().baselineCPU([xml_str])
+                return self._host.get_connection().baselineCPU([xml_str])
         except libvirt.libvirtError as ex:
             with excutils.save_and_reraise_exception() as ctxt:
                 error_code = ex.get_error_code()
@@ -9584,8 +10505,4 @@ class LibvirtDriver(driver.ComputeDriver):
                     LOG.info('URI %(uri)s does not support full set'
                              ' of host capabilities: %(error)s',
                              {'uri': self._host._uri, 'error': ex})
-                    return libvirt_utils.cpu_features_to_traits([])
-
-        cpu.parse_str(features)
-        return libvirt_utils.cpu_features_to_traits(
-            [f.name for f in cpu.features])
+                    return None

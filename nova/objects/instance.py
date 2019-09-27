@@ -21,13 +21,11 @@ from oslo_serialization import jsonutils
 from oslo_utils import timeutils
 from oslo_utils import versionutils
 from sqlalchemy import or_
+from sqlalchemy.sql import false
 from sqlalchemy.sql import func
 from sqlalchemy.sql import null
 
 from nova import availability_zones as avail_zone
-from nova.cells import opts as cells_opts
-from nova.cells import rpcapi as cells_rpcapi
-from nova.cells import utils as cells_utils
 from nova.compute import task_states
 from nova.compute import vm_states
 from nova.db import api as db
@@ -58,10 +56,11 @@ _INSTANCE_OPTIONAL_NON_COLUMN_FIELDS = ['flavor', 'old_flavor',
 # These are fields that are optional and in instance_extra
 _INSTANCE_EXTRA_FIELDS = ['numa_topology', 'pci_requests',
                           'flavor', 'vcpu_model', 'migration_context',
-                          'keypairs', 'device_metadata', 'trusted_certs']
+                          'keypairs', 'device_metadata', 'trusted_certs',
+                          'resources']
 # These are fields that applied/drooped by migration_context
 _MIGRATION_CONTEXT_ATTRS = ['numa_topology', 'pci_requests',
-                            'pci_devices']
+                            'pci_devices', 'resources']
 
 # These are fields that can be specified as expected_attrs
 INSTANCE_OPTIONAL_ATTRS = (_INSTANCE_OPTIONAL_JOINED_FIELDS +
@@ -114,7 +113,10 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
     # Version 2.2: Added keypairs
     # Version 2.3: Added device_metadata
     # Version 2.4: Added trusted_certs
-    VERSION = '2.4'
+    # Version 2.5: Added hard_delete kwarg in destroy
+    # Version 2.6: Added hidden
+    # Version 2.7: Added resources
+    VERSION = '2.7'
 
     fields = {
         'id': fields.IntegerField(),
@@ -184,6 +186,7 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         'shutdown_terminate': fields.BooleanField(default=False),
         'disable_terminate': fields.BooleanField(default=False),
 
+        # TODO(stephenfin): Remove this in version 3.0 of the object
         'cell_name': fields.StringField(nullable=True),
 
         'metadata': fields.DictOfStringsField(),
@@ -215,6 +218,8 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
                                                 nullable=True),
         'keypairs': fields.ObjectField('KeyPairList'),
         'trusted_certs': fields.ObjectField('TrustedCerts', nullable=True),
+        'hidden': fields.BooleanField(default=False),
+        'resources': fields.ObjectField('ResourceList', nullable=True),
         }
 
     obj_extra_fields = ['name']
@@ -222,6 +227,10 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
     def obj_make_compatible(self, primitive, target_version):
         super(Instance, self).obj_make_compatible(primitive, target_version)
         target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (2, 7) and 'resources' in primitive:
+            del primitive['resources']
+        if target_version < (2, 6) and 'hidden' in primitive:
+            del primitive['hidden']
         if target_version < (2, 4) and 'trusted_certs' in primitive:
             del primitive['trusted_certs']
         if target_version < (2, 3) and 'device_metadata' in primitive:
@@ -483,6 +492,12 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
                     db_inst['extra'].get('trusted_certs'))
             else:
                 instance.trusted_certs = None
+        if 'resources' in expected_attrs:
+            if have_extra:
+                instance._load_resources(
+                    db_inst['extra'].get('resources'))
+            else:
+                instance.resources = None
         if any([x in expected_attrs for x in ('flavor',
                                               'old_flavor',
                                               'new_flavor')]):
@@ -597,6 +612,13 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
                 trusted_certs.obj_to_primitive())
         else:
             updates['extra']['trusted_certs'] = None
+        resources = updates.pop('resources', None)
+        expected_attrs.append('resources')
+        if resources:
+            updates['extra']['resources'] = jsonutils.dumps(
+                resources.obj_to_primitive())
+        else:
+            updates['extra']['resources'] = None
         db_inst = db.instance_create(self._context, updates)
         self._from_db_object(self._context, self, db_inst, expected_attrs)
 
@@ -608,7 +630,7 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         self.obj_reset_changes(['ec2_ids'])
 
     @base.remotable
-    def destroy(self):
+    def destroy(self, hard_delete=False):
         if not self.obj_attr_is_set('id'):
             raise exception.ObjectActionError(action='destroy',
                                               reason='already destroyed')
@@ -621,20 +643,14 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         else:
             constraint = None
 
-        cell_type = cells_opts.get_cell_type()
-        if cell_type is not None:
-            stale_instance = self.obj_clone()
-
         try:
             db_inst = db.instance_destroy(self._context, self.uuid,
-                                          constraint=constraint)
+                                          constraint=constraint,
+                                          hard_delete=hard_delete)
             self._from_db_object(self._context, self, db_inst)
         except exception.ConstraintNotMet:
             raise exception.ObjectActionError(action='destroy',
                                               reason='host changed')
-        if cell_type == 'compute':
-            cells_api = cells_rpcapi.CellsAPI()
-            cells_api.instance_destroy_at_top(self._context, stale_instance)
         delattr(self, base.get_attrname('id'))
 
     def _save_info_cache(self, context):
@@ -725,6 +741,8 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
                 value = jsonutils.dumps(obj.obj_to_primitive())
             self._extra_values_to_save[field] = value
 
+    # TODO(stephenfin): Remove the 'admin_state_reset' field in version 3.0 of
+    # the object
     @base.remotable
     def save(self, expected_vm_state=None,
              expected_task_state=None, admin_state_reset=False):
@@ -742,35 +760,7 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         :param admin_state_reset: True if admin API is forcing setting
                                   of task_state/vm_state
         """
-        # Store this on the class because _cell_name_blocks_sync is useless
-        # after the db update call below.
-        self._sync_cells = not self._cell_name_blocks_sync()
-
         context = self._context
-        cell_type = cells_opts.get_cell_type()
-
-        if cell_type is not None:
-            # NOTE(comstud): We need to stash a copy of ourselves
-            # before any updates are applied.  When we call the save
-            # methods on nested objects, we will lose any changes to
-            # them.  But we need to make sure child cells can tell
-            # what is changed.
-            #
-            # We also need to nuke any updates to vm_state and task_state
-            # unless admin_state_reset is True.  compute cells are
-            # authoritative for their view of vm_state and task_state.
-            stale_instance = self.obj_clone()
-
-        cells_update_from_api = (cell_type == 'api' and self.cell_name and
-                                 self._sync_cells)
-
-        if cells_update_from_api:
-            def _handle_cell_update_from_api():
-                cells_api = cells_rpcapi.CellsAPI()
-                cells_api.instance_update_from_api(context, stale_instance,
-                            expected_vm_state,
-                            expected_task_state,
-                            admin_state_reset)
 
         self._extra_values_to_save = {}
         updates = {}
@@ -799,20 +789,13 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
                     # as a result of bug.
                     raise exception.InstanceNotFound(instance_id=self.uuid)
             elif field in changes:
-                if (field == 'cell_name' and self[field] is not None and
-                        self[field].startswith(cells_utils.BLOCK_SYNC_FLAG)):
-                    updates[field] = self[field].replace(
-                            cells_utils.BLOCK_SYNC_FLAG, '', 1)
-                else:
-                    updates[field] = self[field]
+                updates[field] = self[field]
 
         if self._extra_values_to_save:
             db.instance_extra_update_by_uuid(context, self.uuid,
                                              self._extra_values_to_save)
 
         if not updates:
-            if cells_update_from_api:
-                _handle_cell_update_from_api()
             return
 
         # Cleaned needs to be turned back into an int here
@@ -844,28 +827,11 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         self._from_db_object(context, self, inst_ref,
                              expected_attrs=expected_attrs)
 
-        if cells_update_from_api:
-            _handle_cell_update_from_api()
-        elif cell_type == 'compute':
-            if self._sync_cells:
-                cells_api = cells_rpcapi.CellsAPI()
-                cells_api.instance_update_at_top(context, stale_instance)
-
-        def _notify():
-            # NOTE(danms): We have to be super careful here not to trigger
-            # any lazy-loads that will unmigrate or unbackport something. So,
-            # make a copy of the instance for notifications first.
-            new_ref = self.obj_clone()
-
-            notifications.send_update(context, old_ref, new_ref)
-
-        # NOTE(alaski): If cell synchronization is blocked it means we have
-        # already run this block of code in either the parent or child of this
-        # cell.  Therefore this notification has already been sent.
-        if not self._sync_cells:
-            _notify = lambda: None  # noqa: F811
-
-        _notify()
+        # NOTE(danms): We have to be super careful here not to trigger
+        # any lazy-loads that will unmigrate or unbackport something. So,
+        # make a copy of the instance for notifications first.
+        new_ref = self.obj_clone()
+        notifications.send_update(context, old_ref, new_ref)
 
         self.obj_reset_changes()
 
@@ -1035,6 +1001,16 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
             self.trusted_certs = objects.TrustedCerts.obj_from_primitive(
                 jsonutils.loads(db_trusted_certs))
 
+    def _load_resources(self, db_resources=_NO_DATA_SENTINEL):
+        if db_resources is None:
+            self.resources = None
+        elif db_resources is _NO_DATA_SENTINEL:
+            self.resources = objects.ResourceList.get_by_instance_uuid(
+                self._context, self.uuid)
+        else:
+            self.resources = objects.ResourceList.obj_from_primitive(
+                jsonutils.loads(db_resources))
+
     def apply_migration_context(self):
         if self.migration_context:
             self._set_migration_context_to_instance(prefix='new_')
@@ -1150,6 +1126,8 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
             return self._load_keypairs()
         elif attrname == 'trusted_certs':
             return self._load_trusted_certs()
+        elif attrname == 'resources':
+            return self._load_resources()
         elif attrname == 'security_groups':
             self._load_security_groups()
         elif attrname == 'pci_devices':
@@ -1215,49 +1193,6 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         if not md_was_changed:
             self.obj_reset_changes(['metadata'])
 
-    def _cell_name_blocks_sync(self):
-        if (self.obj_attr_is_set('cell_name') and
-                self.cell_name is not None and
-                self.cell_name.startswith(cells_utils.BLOCK_SYNC_FLAG)):
-            return True
-        return False
-
-    def _normalize_cell_name(self):
-        """Undo skip_cell_sync()'s cell_name modification if applied"""
-
-        if not self.obj_attr_is_set('cell_name') or self.cell_name is None:
-            return
-        cn_changed = 'cell_name' in self.obj_what_changed()
-        if self.cell_name.startswith(cells_utils.BLOCK_SYNC_FLAG):
-            self.cell_name = self.cell_name.replace(
-                    cells_utils.BLOCK_SYNC_FLAG, '', 1)
-            # cell_name is not normally an empty string, this means it was None
-            # or unset before cells_utils.BLOCK_SYNC_FLAG was applied.
-            if len(self.cell_name) == 0:
-                self.cell_name = None
-        if not cn_changed:
-            self.obj_reset_changes(['cell_name'])
-
-    @contextlib.contextmanager
-    def skip_cells_sync(self):
-        """Context manager to save an instance without syncing cells.
-
-        Temporarily disables the cells syncing logic, if enabled.  This should
-        only be used when saving an instance that has been passed down/up from
-        another cell in order to avoid passing it back to the originator to be
-        re-saved.
-        """
-        cn_changed = 'cell_name' in self.obj_what_changed()
-        if not self.obj_attr_is_set('cell_name') or self.cell_name is None:
-            self.cell_name = ''
-        self.cell_name = '%s%s' % (cells_utils.BLOCK_SYNC_FLAG, self.cell_name)
-        if not cn_changed:
-            self.obj_reset_changes(['cell_name'])
-        try:
-            yield
-        finally:
-            self._normalize_cell_name()
-
     def get_network_info(self):
         if self.info_cache is None:
             return network_model.NetworkInfo.hydrate([])
@@ -1319,7 +1254,9 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
     # Version 2.2: Pagination for get_active_by_window_joined()
     # Version 2.3: Add get_count_by_vm_state()
     # Version 2.4: Add get_counts()
-    VERSION = '2.4'
+    # Version 2.5: Add get_uuids_by_host_and_node()
+    # Version 2.6: Add get_uuids_by_hosts()
+    VERSION = '2.6'
 
     fields = {
         'objects': fields.ListOfObjectsField('Instance'),
@@ -1381,6 +1318,24 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
             columns_to_join=_expected_cols(expected_attrs))
         return _make_instance_list(context, cls(), db_inst_list,
                                    expected_attrs)
+
+    @staticmethod
+    @db_api.pick_context_manager_reader
+    def _get_uuids_by_host_and_node(context, host, node):
+        return context.session.query(
+            models.Instance.uuid).filter_by(
+            host=host).filter_by(node=node).filter_by(deleted=0).all()
+
+    @base.remotable_classmethod
+    def get_uuids_by_host_and_node(cls, context, host, node):
+        """Return non-deleted instance UUIDs for the given host and node.
+
+        :param context: nova auth request context
+        :param host: Filter instances on this host.
+        :param node: Filter instances on this node.
+        :returns: list of non-deleted instance UUIDs on the given host and node
+        """
+        return cls._get_uuids_by_host_and_node(context, host, node)
 
     @base.remotable_classmethod
     def get_by_host_and_not_type(cls, context, host, type_id=None,
@@ -1505,7 +1460,14 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
 
     @base.remotable_classmethod
     def get_uuids_by_host(cls, context, host):
-        return db.instance_get_all_uuids_by_host(context, host)
+        return db.instance_get_all_uuids_by_hosts(context, [host])[host]
+
+    @base.remotable_classmethod
+    def get_uuids_by_hosts(cls, context, hosts):
+        """Returns a dict, keyed by hypervisor hostname, of a list of instance
+        UUIDs associated with that compute node.
+        """
+        return db.instance_get_all_uuids_by_hosts(context, hosts)
 
     @staticmethod
     @db_api.pick_context_manager_reader
@@ -1539,6 +1501,10 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
             filter_by(deleted=0).\
             filter(not_soft_deleted).\
             filter_by(project_id=project_id)
+        # NOTE(mriedem): Filter out hidden instances since there should be a
+        # non-hidden version of the instance in another cell database and the
+        # API will only show one of them, so we don't count the hidden copy.
+        project_query = project_query.filter_by(hidden=false())
 
         project_result = project_query.first()
         fields = ('instances', 'cores', 'ram')

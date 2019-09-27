@@ -132,7 +132,7 @@ class MigrateServerTestsV21(admin_only_action_common.CommonTests):
             mock_resize.assert_called_once_with(
                 self.context, instance, host_name=self.host_name)
         self.mock_get.assert_called_once_with(self.context, instance.uuid,
-                                              expected_attrs=None,
+                                              expected_attrs=['flavor'],
                                               cell_down_support=False)
 
     def test_migrate_too_many_instances(self):
@@ -295,6 +295,29 @@ class MigrateServerTestsV21(admin_only_action_common.CommonTests):
             exception.MigrationError(reason=''),
             expected_exc=webob.exc.HTTPInternalServerError,
             check_response=False)
+
+    @mock.patch('nova.api.openstack.common.'
+                'supports_port_resource_request_during_move',
+                return_value=True)
+    @mock.patch('nova.objects.Service.get_by_host_and_binary')
+    @mock.patch('nova.api.openstack.common.'
+                'instance_has_port_with_resource_request', return_value=True)
+    def test_migrate_with_bandwidth_from_old_compute_not_supported(
+            self, mock_has_res_req, mock_get_service, mock_support):
+        instance = self._stub_instance_get()
+
+        mock_get_service.return_value = objects.Service(host=instance['host'])
+        mock_get_service.return_value.version = 38
+
+        self.assertRaises(
+            webob.exc.HTTPConflict, self.controller._migrate, self.req,
+            instance['uuid'], body={'migrate': None})
+
+        mock_has_res_req.assert_called_once_with(
+            self.req.environ['nova.context'], instance['uuid'],
+            self.controller.network_api)
+        mock_get_service.assert_called_once_with(
+            self.req.environ['nova.context'], instance['host'], 'nova-compute')
 
 
 class MigrateServerTestsV225(MigrateServerTestsV21):
@@ -585,6 +608,20 @@ class MigrateServerTestsV268(MigrateServerTestsV256):
         self._test_actions(['_migrate_live'], body_map=body_map,
                            method_translations=method_translations,
                            args_map=args_map)
+
+    @mock.patch('nova.virt.hardware.get_mem_encryption_constraint',
+                new=mock.Mock(return_value=True))
+    @mock.patch.object(objects.instance.Instance, 'image_meta')
+    def test_live_migrate_sev_rejected(self, mock_image):
+        instance = self._stub_instance_get()
+        body = {'os-migrateLive': {'host': 'hostname',
+                                   'block_migration': 'auto'}}
+        ex = self.assertRaises(webob.exc.HTTPConflict,
+                               self.controller._migrate_live,
+                               self.req, fakes.FAKE_UUID, body=body)
+        self.assertIn("Operation 'live-migration' not supported for "
+                      "SEV-enabled instance (%s)" % instance.uuid,
+                      six.text_type(ex))
 
     def test_live_migrate_with_forced_host(self):
         body = {'os-migrateLive': {'host': 'hostname',

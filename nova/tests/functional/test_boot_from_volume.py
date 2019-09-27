@@ -10,9 +10,12 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import six
+
 from nova import context
 from nova import objects
 from nova.tests import fixtures as nova_fixtures
+from nova.tests.functional.api import client as api_client
 from nova.tests.functional import integrated_helpers
 from nova.tests.functional import test_servers
 
@@ -46,7 +49,7 @@ class BootFromVolumeTest(integrated_helpers.InstanceHelperMixin,
         self.flags(allow_resize_to_same_host=True)
         super(BootFromVolumeTest, self).setUp()
         self.admin_api = self.api_fixture.admin_api
-        self.useFixture(nova_fixtures.CinderFixtureNewAttachFlow(self))
+        self.useFixture(nova_fixtures.CinderFixture(self))
 
     def test_boot_from_volume_larger_than_local_gb(self):
         # Verify no local disk is being used currently
@@ -62,7 +65,7 @@ class BootFromVolumeTest(integrated_helpers.InstanceHelperMixin,
         # disk. It should succeed for boot from volume.
         server = self._build_server(flavor_id)
         server['imageRef'] = ''
-        volume_uuid = nova_fixtures.CinderFixtureNewAttachFlow.IMAGE_BACKED_VOL
+        volume_uuid = nova_fixtures.CinderFixture.IMAGE_BACKED_VOL
         bdm = {'boot_index': 0,
                'uuid': volume_uuid,
                'source_type': 'volume',
@@ -132,7 +135,7 @@ class BootFromVolumeTest(integrated_helpers.InstanceHelperMixin,
         self._verify_request_spec_flavor_not_zero(server_id)
 
         # Rebuild
-        # The image_uuid is from CinderFixtureNewAttachFlow for the
+        # The image_uuid is from CinderFixture for the
         # volume representing IMAGE_BACKED_VOL.
         image_uuid = '155d900f-4e14-4e4c-a73d-069cbf4541e6'
         post_data = {'rebuild': {'imageRef': image_uuid}}
@@ -145,3 +148,17 @@ class BootFromVolumeTest(integrated_helpers.InstanceHelperMixin,
         self._verify_instance_flavor_not_zero(server_id)
         # Check that request spec has not been saved with 0 root_gb
         self._verify_request_spec_flavor_not_zero(server_id)
+
+    def test_max_local_block_devices_0_force_bfv(self):
+        """Tests that when the API is configured with max_local_block_devices=0
+        a user cannot boot from image, they must boot from volume.
+        """
+        self.flags(max_local_block_devices=0)
+        server = self._build_minimal_create_server_request(
+            self.admin_api, 'test_max_local_block_devices_0_force_bfv')
+        ex = self.assertRaises(api_client.OpenStackApiException,
+                               self.admin_api.post_server,
+                               {'server': server})
+        self.assertEqual(400, ex.response.status_code)
+        self.assertIn('You specified more local devices than the limit allows',
+                      six.text_type(ex))

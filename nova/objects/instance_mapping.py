@@ -17,6 +17,7 @@ from oslo_utils import versionutils
 import six
 from sqlalchemy.orm import joinedload
 from sqlalchemy.sql import false
+from sqlalchemy.sql import func
 from sqlalchemy.sql import or_
 
 from nova import context as nova_context
@@ -101,8 +102,8 @@ class InstanceMapping(base.NovaTimestampObject, base.NovaObject):
         db_mapping = (context.session.query(api_models.InstanceMapping)
                         .options(joinedload('cell_mapping'))
                         .filter(
-                            api_models.InstanceMapping.instance_uuid
-                            == instance_uuid)).first()
+                            api_models.InstanceMapping.instance_uuid ==
+                            instance_uuid)).first()
         if not db_mapping:
             raise exception.InstanceMappingNotFound(uuid=instance_uuid)
 
@@ -294,7 +295,8 @@ class InstanceMappingList(base.ObjectListBase, base.NovaObject):
     # Version 1.0: Initial version
     # Version 1.1: Added get_by_cell_id method.
     # Version 1.2: Added get_by_instance_uuids method
-    VERSION = '1.2'
+    # Version 1.3: Added get_counts()
+    VERSION = '1.3'
 
     fields = {
         'objects': fields.ListOfObjectsField('InstanceMapping'),
@@ -391,3 +393,63 @@ class InstanceMappingList(base.ObjectListBase, base.NovaObject):
             context, cell_uuid, project_id, limit)
         return base.obj_make_list(context, cls(), objects.InstanceMapping,
                 db_mappings)
+
+    @staticmethod
+    @db_api.api_context_manager.reader
+    def _get_counts_in_db(context, project_id, user_id=None):
+        project_query = context.session.query(
+            func.count(api_models.InstanceMapping.id)).\
+            filter_by(queued_for_delete=False).\
+            filter_by(project_id=project_id)
+        project_result = project_query.scalar()
+        counts = {'project': {'instances': project_result}}
+        if user_id:
+            user_result = project_query.filter_by(user_id=user_id).scalar()
+            counts['user'] = {'instances': user_result}
+        return counts
+
+    @base.remotable_classmethod
+    def get_counts(cls, context, project_id, user_id=None):
+        """Get the counts of InstanceMapping objects in the database.
+
+        The count is used to represent the count of instances for the purpose
+        of counting quota usage. Instances that are queued_for_deleted=True are
+        not included in the count (deleted and SOFT_DELETED instances).
+        Instances that are queued_for_deleted=None are not included in the
+        count because we are not certain about whether or not they are deleted.
+
+        :param context: The request context for database access
+        :param project_id: The project_id to count across
+        :param user_id: The user_id to count across
+        :returns: A dict containing the project-scoped counts and user-scoped
+                  counts if user_id is specified. For example:
+
+                    {'project': {'instances': <count across project>},
+                     'user': {'instances': <count across user>}}
+        """
+        return cls._get_counts_in_db(context, project_id, user_id=user_id)
+
+    @staticmethod
+    @db_api.api_context_manager.reader
+    def _get_count_by_uuids_and_user_in_db(context, uuids, user_id):
+        query = (context.session.query(
+            func.count(api_models.InstanceMapping.id))
+            .filter(api_models.InstanceMapping.instance_uuid.in_(uuids))
+            .filter_by(queued_for_delete=False)
+            .filter_by(user_id=user_id))
+        return query.scalar()
+
+    @classmethod
+    def get_count_by_uuids_and_user(cls, context, uuids, user_id):
+        """Get the count of InstanceMapping objects by UUIDs and user_id.
+
+        The count is used to represent the count of server group members
+        belonging to a particular user, for the purpose of counting quota
+        usage. Instances that are queued_for_deleted=True are not included in
+        the count (deleted and SOFT_DELETED instances).
+
+        :param uuids: List of instance UUIDs on which to filter
+        :param user_id: The user_id on which to filter
+        :returns: An integer for the count
+        """
+        return cls._get_count_by_uuids_and_user_in_db(context, uuids, user_id)

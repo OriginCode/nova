@@ -37,11 +37,10 @@ class FinishResizeErrorAllocationCleanupTestCase(
         req = {'resize': {'flavorRef': self.flavor2['id']}}
         self.api.post_server_action(server['id'], req)
         # The instance is set to ERROR status before the fault is recorded so
-        # to avoid a race we need to wait for the task_state to change
-        # to None which happens after the fault is recorded.
-        server = self._wait_for_server_parameter(
-            self.admin_api, server,
-            {'status': 'ERROR', 'OS-EXT-STS:task_state': None})
+        # to avoid a race we need to wait for the migration status to change
+        # to 'error' which happens after the fault is recorded.
+        self._wait_for_migration_status(server, ['error'])
+        server = self._wait_for_state_change(self.admin_api, server, 'ERROR')
         # The server should be pointing at $dest_host because resize_instance
         # will have updated the host/node value on the instance before casting
         # to the finish_resize method on the dest compute.

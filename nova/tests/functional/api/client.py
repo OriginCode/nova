@@ -421,6 +421,10 @@ class TestOpenStackClient(object):
     def delete_server_group(self, group_id):
         self.api_delete('/os-server-groups/%s' % group_id)
 
+    def create_server_external_events(self, events):
+        body = {'events': events}
+        return self.api_post('/os-server-external-events', body).body['events']
+
     def get_instance_actions(self, server_id):
         return self.api_get('/servers/%s/os-instance-actions' %
                             (server_id)).body['instanceActions']
@@ -529,3 +533,17 @@ class TestOpenStackClient(object):
 
     def get_server_diagnostics(self, server_id):
         return self.api_get('/servers/%s/diagnostics' % server_id).body
+
+    def get_quota_detail(self, project_id=None):
+        if not project_id:
+            project_id = self.project_id
+        return self.api_get(
+            '/os-quota-sets/%s/detail' % project_id).body['quota_set']
+
+    def update_quota(self, quotas, project_id=None):
+        if not project_id:
+            project_id = self.project_id
+        body = {'quota_set': {}}
+        body['quota_set'].update(quotas)
+        return self.api_put(
+            '/os-quota-sets/%s' % project_id, body).body['quota_set']

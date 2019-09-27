@@ -53,7 +53,8 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject):
     # Version 1.16: Added disk_allocation_ratio
     # Version 1.17: Added mapped
     # Version 1.18: Added get_by_uuid().
-    VERSION = '1.18'
+    # Version 1.19: Added get_by_nodename().
+    VERSION = '1.19'
 
     fields = {
         'id': fields.IntegerField(read_only=True),
@@ -143,9 +144,9 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject):
 
     @staticmethod
     def _host_from_db_object(compute, db_compute):
-        if (('host' not in db_compute or db_compute['host'] is None)
-                and 'service_id' in db_compute
-                and db_compute['service_id'] is not None):
+        if (('host' not in db_compute or db_compute['host'] is None) and
+                'service_id' in db_compute and
+                db_compute['service_id'] is not None):
             # FIXME(sbauza) : Unconverted compute record, provide compatibility
             # This has to stay until we can be sure that any/all compute nodes
             # in the database have been converted to use the host field
@@ -268,6 +269,17 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject):
     def get_by_host_and_nodename(cls, context, host, nodename):
         db_compute = db.compute_node_get_by_host_and_nodename(
             context, host, nodename)
+        return cls._from_db_object(context, cls(), db_compute)
+
+    @base.remotable_classmethod
+    def get_by_nodename(cls, context, hypervisor_hostname):
+        '''Get by node name (i.e. hypervisor hostname).
+
+        Raises ComputeHostNotFound if hypervisor_hostname with the given name
+        doesn't exist.
+        '''
+        db_compute = db.compute_node_get_by_nodename(
+            context, hypervisor_hostname)
         return cls._from_db_object(context, cls(), db_compute)
 
     # TODO(pkholkin): Remove this method in the next major version bump

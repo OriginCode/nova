@@ -136,10 +136,24 @@ by using query options.
 For different user roles, the user has different query options set:
 
 - For general user, there is limited set of attributes of the servers can be
-  used as query option. ``reservation_id``, ``name``, ``status``, ``image``,
-  ``flavor``, ``ip``, ``changes-since``, ``changes-before``, ``ip6``,
-  ``tags``, ``tags-any``, ``not-tags``, ``not-tags-any`` are supported options
-  to be used. Other options will be ignored by nova silently.
+  used as query option. The supported options are:
+
+  - ``changes-since``
+  - ``flavor``
+  - ``image``
+  - ``ip``
+  - ``ip6`` (New in version 2.5)
+  - ``name``
+  - ``not-tags`` (New in version 2.26)
+  - ``not-tags-any`` (New in version 2.26)
+  - ``reservation_id``
+  - ``status``
+  - ``tags`` (New in version 2.26)
+  - ``tags-any`` (New in version 2.26)
+  - ``changes-before`` (New in version 2.66)
+  - ``locked`` (New in version 2.73)
+
+  Other options will be ignored by nova silently.
 
 - For administrator, most of the server attributes can be used as query
   options. Before the Ocata release, the fields in the database schema of
@@ -609,7 +623,8 @@ Server actions
 
    But administrators can perform the actions on the server
    even though the server is locked. By default, only owner or administrator
-   can lock the sever, and administrator can overwrite owner's lock.
+   can lock the sever, and administrator can overwrite owner's lock along with
+   the locked_reason if it is specified.
 
    Unlock will unlock a server in locked state so additional
    operations can be performed on the server by non-admin users.
@@ -675,13 +690,84 @@ limit.
 Block Device Mapping
 ~~~~~~~~~~~~~~~~~~~~
 
-.. todo:: Add some description about BDM.
+Simply speaking, Block Device Mapping describes how block devices are
+exposed to the server.
+
+For some historical reasons, nova has two ways to mention the block device
+mapping in server creation request body:
+
+- ``block_device_mapping``: This is the legacy way and supports backward
+  compatibility for EC2 API.
+- ``block_device_mapping_v2``: This is the recommended format to specify
+  Block Device Mapping information in server creation request body.
+
+Users cannot mix the two formats in the same request.
+
+For more information, refer to `Block Device Mapping
+<https://docs.openstack.org/nova/latest/user/block-device-mapping.html>`_.
+
+For the full list of ``block_device_mapping_v2`` parameters available when
+creating a server, see the `API reference
+<https://docs.openstack.org/api-ref/compute/?expanded=create-server-detail#create-server>`_.
+
+**Example for block_device_mapping_v2**
+
+This will create a 100GB size volume type block device from an image with UUID
+of ``bb02b1a3-bc77-4d17-ab5b-421d89850fca``. It will be used as the first order
+boot device (``boot_index=0``), and this block device will not be deleted after
+we terminate the server. Note that the ``imageRef`` parameter is not required
+in this case since we are creating a volume-backed server.
+
+.. code-block:: json
+
+    {
+        "server": {
+            "name": "volume-backed-server-test",
+            "flavorRef": "52415800-8b69-11e0-9b19-734f1195ff37",
+            "block_device_mapping_v2": [
+                {
+                    "boot_index": 0,
+                    "uuid": "bb02b1a3-bc77-4d17-ab5b-421d89850fca",
+                    "volume_size": "100",
+                    "source_type": "image",
+                    "destination_type": "volume",
+                    "delete_on_termination": false
+                }
+            ]
+        }
+    }
 
 Scheduler Hints
 ~~~~~~~~~~~~~~~
 
-Refer to `this document`_ for information on scheduler hints.
+Scheduler hints are a way for the user to influence on which host the scheduler
+places a server. They are pre-determined key-value pairs specified as a
+dictionary separate from the main ``server`` dictionary in the server create
+request. Available scheduler hints vary from cloud to cloud, depending on the
+`cloud's configuration`_.
 
+.. code-block:: json
+
+    {
+        "server": {
+            "name": "server-in-group",
+            "imageRef": "52415800-8b69-11e0-9b19-734f6f006e54",
+            "flavorRef": "52415800-8b69-11e0-9b19-734f1195ff37"
+        },
+        "os:scheduler_hints": {
+            "group": "05a81485-010f-4df1-bbec-7821c85686e8"
+        }
+    }
+
+
+For more information on how to specify scheduler hints refer to
+`the create-server-detail Request section`_ in the Compute API reference.
+
+For more information on how scheduler hints are different from flavor extra
+specs, refer to `this document`_.
+
+.. _cloud's configuration: https://docs.openstack.org/nova/latest/admin/configuration/schedulers.html
+.. _the create-server-detail Request section: https://docs.openstack.org/api-ref/compute/?expanded=create-server-detail#create-server
 .. _this document: https://docs.openstack.org/nova/latest/reference/scheduler-hints-vs-flavor-extra-specs.html#scheduler-hints
 
 Server Consoles
@@ -954,10 +1040,11 @@ Configure Guest OS
 
 Metadata API
 ------------
-Nova provides a metadata api for servers to retrieve server specific metadata.
-Neutron ensures this metadata api can be accessed through a predefined ip
-address (169.254.169.254). For more details, see :nova-doc:`Metadata Service
-<user/metadata-service.html>`.
+
+Nova provides a metadata API for servers to retrieve server specific metadata.
+Neutron ensures this metadata API can be accessed through a predefined IP
+address, ``169.254.169.254``. For more details, refer to the :nova-doc:`user
+guide <user/metadata.html>`.
 
 Config Drive
 ------------
@@ -965,20 +1052,19 @@ Config Drive
 Nova is able to write metadata to a special configuration drive that attaches
 to the server when it boots. The server can mount this drive and read files
 from it to get information that is normally available through the metadata
-service. For more details, see :nova-doc:`Config Drive
-<user/config-drive.html>`.
+service. For more details, refer to the :nova-doc:`user guide
+<user/metadata.html>`.
 
 User data
 ---------
+
 A user data file is a special key in the metadata service that holds a file
 that cloud-aware applications in the server can access.
 
-Nova has two ways to send user data to the deployed server, one is by
-metadata service to let server able to access to its metadata through
-a predefined ip address (169.254.169.254), then other way is to use config
-drive which will wrap metadata into a iso9660 or vfat format disk so that
-the deployed server can consume it by active engines such as cloud-init
-during its boot process.
+This information can be accessed via the metadata API or a config drive. The
+latter allows the deployed server to consume it by active engines such as
+cloud-init during its boot process, where network connectivity may not be an
+option.
 
 Server personality
 ------------------

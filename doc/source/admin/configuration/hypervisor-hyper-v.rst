@@ -52,7 +52,7 @@ following commands:
 .. code-block:: bat
 
    C:\>net stop w32time
-   C:\>w32tm /config /manualpeerlist:pool.ntp.org,0x8 /syncfromflags:MANUAL
+   C:\>w32tm /config "/manualpeerlist:pool.ntp.org,0x8" /syncfromflags:MANUAL
    C:\>net start w32time
 
 Keep in mind that the node will have to be time synchronized with the other
@@ -318,7 +318,7 @@ Download the nova code
 
    .. code-block:: none
 
-      PS C:\> git.exe clone https://git.openstack.org/openstack/nova
+      PS C:\> git.exe clone https://opendev.org/openstack/nova
 
 Install nova-compute service
 ----------------------------
@@ -370,7 +370,7 @@ on Hyper-V. Below is a sample ``nova.conf`` for Windows:
    [glance]
    api_servers = http://IP_ADDRESS:9292
    [neutron]
-   url = http://IP_ADDRESS:9696
+   endpoint_override = http://IP_ADDRESS:9696
    auth_strategy = keystone
    project_name = service
    username = neutron

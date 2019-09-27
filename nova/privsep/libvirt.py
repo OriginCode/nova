@@ -72,8 +72,7 @@ def ploop_init(size, disk_format, fs_type, disk_path):
     :param disk_path: ploop image file
     """
     processutils.execute('ploop', 'init', '-s', size, '-f', disk_format, '-t',
-                         fs_type, disk_path, run_as_root=True,
-                         check_exit_code=True)
+                         fs_type, disk_path, check_exit_code=True)
 
     # Add read access for all users, because "ploop init" creates
     # disk with rw rights only for root. OpenStack user should have access
@@ -98,7 +97,7 @@ def ploop_resize(disk_path, size):
                          '--size', '%dM' % (size // units.Mi),
                          '--resize_partition',
                          '--hdd', disk_path,
-                         run_as_root=True, check_exit_code=True)
+                         check_exit_code=True)
 
 
 @nova.privsep.sys_admin_pctxt.entrypoint
@@ -111,7 +110,7 @@ def ploop_restore_descriptor(image_dir, base_delta, fmt):
     """
     processutils.execute('ploop', 'restore-descriptor', '-f', fmt,
                          image_dir, base_delta,
-                         run_as_root=True, check_exit_code=True)
+                         check_exit_code=True)
 
 
 @nova.privsep.sys_admin_pctxt.entrypoint
@@ -214,3 +213,49 @@ def create_mdev(physical_device, mdev_type, uuid=None):
     with open(fpath, 'w') as f:
         f.write(uuid)
     return uuid
+
+
+@nova.privsep.sys_admin_pctxt.entrypoint
+def systemd_run_qb_mount(qb_vol, mnt_base, cfg_file=None):
+    """Mount QB volume in separate CGROUP"""
+    # Note(kaisers): Details on why we run without --user at bug #1756823
+    sysdr_cmd = ['systemd-run', '--scope', 'mount.quobyte', '--disable-xattrs',
+                 qb_vol, mnt_base]
+    if cfg_file:
+        sysdr_cmd.extend(['-c', cfg_file])
+    return processutils.execute(*sysdr_cmd)
+
+
+# NOTE(kaisers): this method is deliberately not wrapped in a privsep entry.
+def unprivileged_qb_mount(qb_vol, mnt_base, cfg_file=None):
+    """Mount QB volume"""
+    mnt_cmd = ['mount.quobyte', '--disable-xattrs', qb_vol, mnt_base]
+    if cfg_file:
+        mnt_cmd.extend(['-c', cfg_file])
+    return processutils.execute(*mnt_cmd)
+
+
+@nova.privsep.sys_admin_pctxt.entrypoint
+def umount(mnt_base):
+    """Unmount volume"""
+    unprivileged_umount(mnt_base)
+
+
+# NOTE(kaisers): this method is deliberately not wrapped in a privsep entry.
+def unprivileged_umount(mnt_base):
+    """Unmount volume"""
+    umnt_cmd = ['umount', mnt_base]
+    return processutils.execute(*umnt_cmd)
+
+
+@nova.privsep.sys_admin_pctxt.entrypoint
+def get_pmem_namespaces():
+    ndctl_cmd = ['ndctl', 'list', '-X']
+    nss_info = processutils.execute(*ndctl_cmd)[0]
+    return nss_info
+
+
+@nova.privsep.sys_admin_pctxt.entrypoint
+def cleanup_vpmem(devpath):
+    daxio_cmd = ['daxio', '-z', '-o', '%s' % devpath]
+    processutils.execute(*daxio_cmd)

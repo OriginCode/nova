@@ -11,13 +11,14 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+
 import copy
 import itertools
 
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import versionutils
-
+import six
 
 from nova.db.sqlalchemy import api as db
 from nova.db.sqlalchemy import api_models
@@ -26,7 +27,6 @@ from nova import objects
 from nova.objects import base
 from nova.objects import fields
 from nova.objects import instance as obj_instance
-from nova.virt import hardware
 
 LOG = logging.getLogger(__name__)
 
@@ -67,6 +67,7 @@ class RequestSpec(base.NovaObject):
         'availability_zone': fields.StringField(nullable=True),
         'flavor': fields.ObjectField('Flavor', nullable=False),
         'num_instances': fields.IntegerField(default=1),
+        # NOTE(alex_xu): This field won't be persisted.
         'ignore_hosts': fields.ListOfStringsField(nullable=True),
         # NOTE(mriedem): In reality, you can only ever have one
         # host in the force_hosts list. The fact this is a list
@@ -76,9 +77,11 @@ class RequestSpec(base.NovaObject):
         # node in the force_nodes list. The fact this is a list
         # is a mistake perpetuated over time.
         'force_nodes': fields.ListOfStringsField(nullable=True),
+        # NOTE(alex_xu): This field won't be persisted.
         'requested_destination': fields.ObjectField('Destination',
                                                     nullable=True,
                                                     default=None),
+        # NOTE(alex_xu): This field won't be persisted.
         'retry': fields.ObjectField('SchedulerRetries', nullable=True),
         'limits': fields.ObjectField('SchedulerLimits', nullable=True),
         'instance_group': fields.ObjectField('InstanceGroup', nullable=True),
@@ -88,6 +91,7 @@ class RequestSpec(base.NovaObject):
         'scheduler_hints': fields.DictOfListOfStringsField(nullable=True),
         'instance_uuid': fields.UUIDField(),
         'security_groups': fields.ObjectField('SecurityGroupList'),
+        # NOTE(alex_xu): This field won't be persisted.
         'network_metadata': fields.ObjectField('NetworkMetadata'),
         'is_bfv': fields.BooleanField(),
         # NOTE(gibi): Eventually we want to store every resource request as
@@ -95,6 +99,7 @@ class RequestSpec(base.NovaObject):
         # resources like vcpu, ram, disk, and flavor.extra_spec based resources
         # are not handled this way. See the Todo in from_components() where
         # requested_resources are set.
+        # NOTE(alex_xu): This field won't be persisted.
         'requested_resources': fields.ListOfObjectsField('RequestGroup',
                                                          nullable=True,
                                                          default=None)
@@ -210,11 +215,11 @@ class RequestSpec(base.NovaObject):
             self.pci_requests = pci_requests
 
     def _from_instance_numa_topology(self, numa_topology):
-        if isinstance(numa_topology, dict):
-            self.numa_topology = hardware.instance_topology_from_instance(
-                dict(numa_topology=numa_topology))
-        else:
-            self.numa_topology = numa_topology
+        if isinstance(numa_topology, six.string_types):
+            numa_topology = objects.InstanceNUMATopology.obj_from_primitive(
+                jsonutils.loads(numa_topology))
+
+        self.numa_topology = numa_topology
 
     def _from_flavor(self, flavor):
         if isinstance(flavor, objects.Flavor):
@@ -247,6 +252,10 @@ class RequestSpec(base.NovaObject):
             self.instance_group = objects.InstanceGroup(policy=policies[0],
                                                         hosts=hosts,
                                                         members=members)
+            # InstanceGroup.uuid is not nullable so only set it if we got it.
+            group_uuid = filter_properties.get('group_uuid')
+            if group_uuid:
+                self.instance_group.uuid = group_uuid
             # hosts has to be not part of the updates for saving the object
             self.instance_group.obj_reset_changes(['hosts'])
         else:
@@ -330,12 +339,12 @@ class RequestSpec(base.NovaObject):
         :param hint_name: name of the hint
         :param default: the default value if the hint is not there
         """
-        if (not self.obj_attr_is_set('scheduler_hints')
-                or self.scheduler_hints is None):
+        if (not self.obj_attr_is_set('scheduler_hints') or
+                self.scheduler_hints is None):
             return default
         hint_val = self.scheduler_hints.get(hint_name, default)
-        return (hint_val[0] if isinstance(hint_val, list)
-                and len(hint_val) == 1 else hint_val)
+        return (hint_val[0] if isinstance(hint_val, list) and
+                len(hint_val) == 1 else hint_val)
 
     def _to_legacy_image(self):
         return base.obj_to_primitive(self.image) if (
@@ -369,7 +378,8 @@ class RequestSpec(base.NovaObject):
         return {'group_updated': True,
                 'group_hosts': set(self.instance_group.hosts),
                 'group_policies': set([self.instance_group.policy]),
-                'group_members': set(self.instance_group.members)}
+                'group_members': set(self.instance_group.members),
+                'group_uuid': self.instance_group.uuid}
 
     def to_legacy_request_spec_dict(self):
         """Returns a legacy request_spec dict from the RequestSpec object.
@@ -792,7 +802,7 @@ class RequestSpec(base.NovaObject):
         This is a workaround as placement does not return which RP fulfills
         which granular request group in the allocation candidate request. There
         is a spec proposing a solution in placement:
-        https://review.openstack.org/#/c/597601/
+        https://review.opendev.org/#/c/597601/
 
         :param placement_allocations: The overall allocation made by the
                                       scheduler for this RequestSpec
@@ -807,9 +817,9 @@ class RequestSpec(base.NovaObject):
 
         for group in self.requested_resources:
             # See the limitations in the func doc above
-            if (not group.use_same_provider
-                    or group.aggregates
-                    or group.forbidden_traits):
+            if (not group.use_same_provider or
+                    group.aggregates or
+                    group.forbidden_traits):
                 raise NotImplementedError()
 
         # Iterate through every possible group - RP mappings and try to find a
@@ -870,7 +880,9 @@ class Destination(base.NovaObject):
     # Version 1.0: Initial version
     # Version 1.1: Add cell field
     # Version 1.2: Add aggregates field
-    VERSION = '1.2'
+    # Version 1.3: Add allow_cross_cell_move field.
+    # Version 1.4: Add forbidden_aggregates field
+    VERSION = '1.4'
 
     fields = {
         'host': fields.StringField(),
@@ -884,11 +896,25 @@ class Destination(base.NovaObject):
         # are passed to placement.  See require_aggregates() below.
         'aggregates': fields.ListOfStringsField(nullable=True,
                                                 default=None),
+        # NOTE(mriedem): allow_cross_cell_move defaults to False so that the
+        # scheduler by default selects hosts from the cell specified in the
+        # cell field.
+        'allow_cross_cell_move': fields.BooleanField(default=False),
+        # NOTE(vrushali): These are forbidden aggregates passed to placement as
+        # query params to the allocation candidates API. Nova uses this field
+        # to implement the isolate_aggregates request filter.
+        'forbidden_aggregates': fields.SetOfStringsField(nullable=True,
+                                                         default=None),
     }
 
     def obj_make_compatible(self, primitive, target_version):
         super(Destination, self).obj_make_compatible(primitive, target_version)
         target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 4):
+            if 'forbidden_aggregates' in primitive:
+                del primitive['forbidden_aggregates']
+        if target_version < (1, 3) and 'allow_cross_cell_move' in primitive:
+            del primitive['allow_cross_cell_move']
         if target_version < (1, 2):
             if 'aggregates' in primitive:
                 del primitive['aggregates']
@@ -920,6 +946,20 @@ class Destination(base.NovaObject):
         if self.aggregates is None:
             self.aggregates = []
         self.aggregates.append(','.join(aggregates))
+
+    def append_forbidden_aggregates(self, forbidden_aggregates):
+        """Add a set of aggregates to the forbidden aggregates.
+
+        This will take a set of forbidden aggregates that should be
+        ignored by the placement service.
+
+        :param forbidden_aggregates: A set of aggregates which should be
+                                    ignored by the placement service.
+
+        """
+        if self.forbidden_aggregates is None:
+            self.forbidden_aggregates = set([])
+        self.forbidden_aggregates |= forbidden_aggregates
 
 
 @base.NovaObjectRegistry.register
@@ -997,7 +1037,9 @@ class RequestGroup(base.NovaObject):
     """
     # Version 1.0: Initial version
     # Version 1.1: add requester_id and provider_uuids fields
-    VERSION = '1.1'
+    # Version 1.2: add in_tree field
+    # Version 1.3: Add forbidden_aggregates field
+    VERSION = '1.3'
 
     fields = {
         'use_same_provider': fields.BooleanField(default=True),
@@ -1011,6 +1053,11 @@ class RequestGroup(base.NovaObject):
         # member of the aggregate aggregate_UUID1 and member of the aggregate
         # aggregate_UUID2 or aggregate_UUID3 .
         'aggregates': fields.ListOfListsOfStringsField(default=[]),
+        # The forbidden_aggregates field has a form of
+        #     set(['aggregate_UUID1', 'aggregate_UUID12', 'aggregate_UUID3'])
+        # meaning that the request should not be fulfilled from an RP
+        # belonging to any of the aggregates in forbidden_aggregates field.
+        'forbidden_aggregates': fields.SetOfStringsField(default=set()),
         # The entity the request is coming from (e.g. the Neutron port uuid)
         # which may not always be a UUID.
         'requester_id': fields.StringField(nullable=True, default=None),
@@ -1018,6 +1065,7 @@ class RequestGroup(base.NovaObject):
         # NOTE(gibi): this can be more than one if this is the unnumbered
         # request group (i.e. use_same_provider=False)
         'provider_uuids': fields.ListOfUUIDField(default=[]),
+        'in_tree': fields.UUIDField(nullable=True, default=None),
     }
 
     def __init__(self, context=None, **kwargs):
@@ -1062,6 +1110,12 @@ class RequestGroup(base.NovaObject):
         super(RequestGroup, self).obj_make_compatible(
             primitive, target_version)
         target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 3):
+            if 'forbidden_aggregates' in primitive:
+                del primitive['forbidden_aggregates']
+        if target_version < (1, 2):
+            if 'in_tree' in primitive:
+                del primitive['in_tree']
         if target_version < (1, 1):
             if 'requester_id' in primitive:
                 del primitive['requester_id']

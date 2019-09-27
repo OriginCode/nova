@@ -58,12 +58,6 @@ following components:
 - One or more :program:`nova-compute` services. Hosts the instances for which
   consoles are provided.
 
-.. note::
-
-   Previously, the :program:`nova-consoleauth` application was necessary for
-   token authorization. This is no longer the case since nova 18.0.0
-   (Rocky). See :ref:`below <about-nova-consoleauth>` for more information.
-
 .. todo::
 
    The below diagram references :program:`nova-consoleauth` and needs to be
@@ -89,8 +83,12 @@ clients. noVNC provides VNC support through a web browser.
 
   If using non-US key mappings, you need at least noVNC 1.0.0 for `a fix`__.
 
+  If using VMware ESX/ESXi hypervisors, you need at least noVNC 1.1.0 for
+  `a fix`__.
+
   __ https://bugs.launchpad.net/nova/+bug/1752896
   __ https://github.com/novnc/noVNC/commit/99feba6ba8fee5b3a2b2dc99dc25e9179c560d31
+  __ https://github.com/novnc/noVNC/commit/2c813a33fe6821f5af737327c50f388052fa963b
 
 Configuration
 ~~~~~~~~~~~~~
@@ -595,23 +593,10 @@ address of the controller or the VIP.
 About ``nova-consoleauth``
 --------------------------
 
-The deprecated :doc:`/cli/nova-consoleauth` service provides a shared service
-to manage token authentication that the client proxies outlined below can
-leverage. This service must be running for either proxy to work. Many proxies
-of either type can be run against a single :program:`nova-consoleauth` service
-in a cluster configuration.
-
-.. important::
-
-   Do not confuse the :program:`nova-consoleauth` shared service with
-   :doc:`/cli/nova-console` service, which is a XenAPI-specific service that
-   most recent VNC proxy architectures do not use.
-
-.. deprecated:: 18.0.0
-
-   ``nova-consoleauth`` is deprecated since 18.0.0 (Rocky) and will be removed
-   in an upcoming release. See
-   :oslo.config:option:`workarounds.enable_consoleauth` for details.
+The now-removed :program:`nova-consoleauth` service was previously used to
+provide a shared service to manage token authentication that the client proxies
+outlined below could leverage. Token authentication was moved to the database in
+18.0.0 (Rocky) and the service was removed in 20.0.0 (Train).
 
 
 Frequently Asked Questions
@@ -627,15 +612,7 @@ Frequently Asked Questions
 - **Q: I want VNC support in the OpenStack dashboard. What services do I
   need?**
 
-  A: You need ``nova-novncproxy``, ``nova-consoleauth``, and correctly
-  configured compute hosts.
-
-- **Q: When I use ``nova get-vnc-console`` or click on the VNC tab of the
-  OpenStack dashboard, it hangs. Why?**
-
-  A: Make sure you are running ``nova-consoleauth`` (in addition to
-  ``nova-novncproxy``). The proxies rely on ``nova-consoleauth`` to validate
-  tokens, and waits for a reply from them until a timeout is reached.
+  A: You need ``nova-novncproxy`` and correctly configured compute hosts.
 
 - **Q: My VNC proxy worked fine during my all-in-one test, but now it doesn't
   work on multi host. Why?**

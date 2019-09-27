@@ -22,7 +22,9 @@ from oslo_log import log as logging
 from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova.objects import fields as obj_fields
+from nova.tests.unit.virt.libvirt import fake_libvirt_data
 from nova.virt.libvirt import config as vconfig
+
 
 # Allow passing None to the various connect methods
 # (i.e. allow the client to rely on default URLs)
@@ -72,6 +74,8 @@ VIR_DOMAIN_EVENT_RESUMED = 4
 VIR_DOMAIN_EVENT_STOPPED = 5
 VIR_DOMAIN_EVENT_SHUTDOWN = 6
 VIR_DOMAIN_EVENT_PMSUSPENDED = 7
+
+VIR_DOMAIN_EVENT_SUSPENDED_POSTCOPY = 7
 
 VIR_DOMAIN_UNDEFINE_MANAGED_SAVE = 1
 VIR_DOMAIN_UNDEFINE_NVRAM = 4
@@ -464,60 +468,32 @@ class HostMdevDevicesInfo(object):
 
 class HostInfo(object):
 
-    def __init__(self, arch=obj_fields.Architecture.X86_64, kB_mem=4096,
-                 cpus=2, cpu_mhz=800, cpu_nodes=1,
-                 cpu_sockets=1, cpu_cores=2,
-                 cpu_threads=1, cpu_model="Penryn",
-                 cpu_vendor="Intel", numa_topology='',
-                 cpu_disabled=None):
+    def __init__(self, cpu_nodes=1, cpu_sockets=1, cpu_cores=2, cpu_threads=1,
+                 kB_mem=4096):
         """Create a new Host Info object
 
-        :param arch: (string) indicating the CPU arch
-                     (eg 'i686' or whatever else uname -m might return)
-        :param kB_mem: (int) memory size in KBytes
-        :param cpus: (int) the number of active CPUs
-        :param cpu_mhz: (int) expected CPU frequency
         :param cpu_nodes: (int) the number of NUMA cell, 1 for unusual
                           NUMA topologies or uniform
         :param cpu_sockets: (int) number of CPU sockets per node if nodes > 1,
                             total number of CPU sockets otherwise
         :param cpu_cores: (int) number of cores per socket
         :param cpu_threads: (int) number of threads per core
-        :param cpu_model: CPU model
-        :param cpu_vendor: CPU vendor
-        :param numa_topology: Numa topology
-        :param cpu_disabled: List of disabled cpus
+        :param kB_mem: (int) memory size in KBytes
         """
 
-        self.arch = arch
+        self.arch = obj_fields.Architecture.X86_64
         self.kB_mem = kB_mem
-        self.cpus = cpus
-        self.cpu_mhz = cpu_mhz
+        self.cpus = cpu_nodes * cpu_sockets * cpu_cores * cpu_threads
+        self.cpu_mhz = 800
         self.cpu_nodes = cpu_nodes
         self.cpu_cores = cpu_cores
         self.cpu_threads = cpu_threads
         self.cpu_sockets = cpu_sockets
-        self.cpu_model = cpu_model
-        self.cpu_vendor = cpu_vendor
-        self.numa_topology = numa_topology
-        self.disabled_cpus_list = cpu_disabled or []
-
-
-class NUMAHostInfo(HostInfo):
-    """A NUMA-by-default variant of HostInfo."""
-
-    def __init__(self, **kwargs):
-        super(NUMAHostInfo, self).__init__(**kwargs)
-
-        if not self.numa_topology:
-            topology = NUMATopology(self.cpu_nodes, self.cpu_sockets,
-                                    self.cpu_cores, self.cpu_threads,
-                                    self.kB_mem)
-            self.numa_topology = topology
-
-            # update number of active cpus
-            cpu_count = len(topology.cells) * len(topology.cells[0].cpus)
-            self.cpus = cpu_count - len(self.disabled_cpus_list)
+        self.cpu_model = "Penryn"
+        self.cpu_vendor = "Intel"
+        self.numa_topology = NUMATopology(self.cpu_nodes, self.cpu_sockets,
+                                          self.cpu_cores, self.cpu_threads,
+                                          self.kB_mem)
 
 
 class NUMATopology(vconfig.LibvirtConfigCapsNUMATopology):
@@ -888,6 +864,24 @@ class Domain(object):
                     })
             devices['hostdevs'] = hostdev_info
 
+            vpmem_info = []
+            vpmems = device_nodes.findall('./memory')
+            for vpmem in vpmems:
+                model = vpmem.get('model')
+                if model == 'nvdimm':
+                    source = vpmem.find('./source')
+                    target = vpmem.find('./target')
+                    path = source.find('./path').text
+                    alignsize = source.find('./alignsize').text
+                    size = target.find('./size').text
+                    node = target.find('./node').text
+                    vpmem_info.append({
+                        'path': path,
+                        'size': size,
+                        'alignsize': alignsize,
+                        'node': node})
+            devices['vpmems'] = vpmem_info
+
         definition['devices'] = devices
 
         return definition
@@ -1045,7 +1039,26 @@ class Domain(object):
       <address uuid='%(address_uuid)s'/>
     </source>
     </hostdev>
-            ''' % hostdev
+            ''' % hostdev  # noqa
+
+        vpmems = ''
+        for vpmem in self._def['devices']['vpmems']:
+            vpmems += '''
+    <memory model='nvdimm' access='shared'>
+      <source>
+        <path>%(path)s</path>
+        <alignsize>%(alignsize)s</alignsize>
+        <pmem/>
+      </source>
+      <target>
+        <size>%(size)s</size>
+        <node>%(node)s</node>
+        <label>
+          <size>2097152</size>
+        </label>
+      </target>
+    </memory>
+            ''' % vpmem
 
         return '''<domain type='kvm'>
   <name>%(name)s</name>
@@ -1103,6 +1116,7 @@ class Domain(object):
                function='0x0'/>
     </memballoon>
     %(hostdevs)s
+    %(vpmems)s
   </devices>
 </domain>''' % {'name': self._def['name'],
                 'uuid': self._def['uuid'],
@@ -1111,7 +1125,8 @@ class Domain(object):
                 'arch': self._def['os']['arch'],
                 'disks': disks,
                 'nics': nics,
-                'hostdevs': hostdevs}
+                'hostdevs': hostdevs,
+                'vpmems': vpmems}
 
     def managedSave(self, flags):
         self._connection._mark_not_running(self)
@@ -1198,10 +1213,17 @@ class DomainSnapshot(object):
         del self._domain._snapshots[self._name]
 
 
+class Secret(object):
+    """A stub Secret class. Not currently returned by any test, but required to
+    exist for introspection.
+    """
+    pass
+
+
 class Connection(object):
     def __init__(self, uri=None, readonly=False, version=FAKE_LIBVIRT_VERSION,
                  hv_version=FAKE_QEMU_VERSION, host_info=None, pci_info=None,
-                 mdev_info=None):
+                 mdev_info=None, hostname=None):
         if not uri or uri == '':
             if allow_default_uri_connection:
                 uri = 'qemu:///session'
@@ -1239,6 +1261,7 @@ class Connection(object):
                                                        num_pfs=0,
                                                        num_vfs=0)
         self.mdev_info = mdev_info or []
+        self.hostname = hostname or 'compute1'
 
     def _add_filter(self, nwfilter):
         self._nwfilters[nwfilter._name] = nwfilter
@@ -1337,7 +1360,7 @@ class Connection(object):
         return self.fakeVersion
 
     def getHostname(self):
-        return 'compute1'
+        return self.hostname
 
     def domainEventRegisterAny(self, dom, eventid, callback, opaque):
         self._event_callbacks[eventid] = [callback, opaque]
@@ -1349,11 +1372,102 @@ class Connection(object):
         """Return calculated CPU map from HostInfo, by default showing 2
            online CPUs.
         """
-        active_cpus = self.host_info.cpus
-        total_cpus = active_cpus + len(self.host_info.disabled_cpus_list)
-        cpu_map = [True if cpu_num not in self.host_info.disabled_cpus_list
-                   else False for cpu_num in range(total_cpus)]
-        return (total_cpus, cpu_map, active_cpus)
+        total_cpus = self.host_info.cpus
+        cpu_map = [True for cpu_num in range(total_cpus)]
+        return (total_cpus, cpu_map, total_cpus)
+
+    def getDomainCapabilities(self, emulatorbin, arch, machine_type,
+                              virt_type, flags):
+        """Return spoofed domain capabilities."""
+        if arch in fake_libvirt_data.STATIC_DOMCAPABILITIES:
+            return fake_libvirt_data.STATIC_DOMCAPABILITIES[arch]
+
+        if arch == 'x86_64':
+            aliases = {'pc': 'pc-i440fx-2.11', 'q35': 'pc-q35-2.11'}
+            return fake_libvirt_data.DOMCAPABILITIES_X86_64_TEMPLATE % \
+                {'features': self._domain_capability_features,
+                 'mtype': aliases.get(machine_type, machine_type)}
+
+        raise Exception("fakelibvirt doesn't support getDomainCapabilities "
+                        "for %s architecture" % arch)
+
+    def getCPUModelNames(self, arch):
+        mapping = {
+            'x86_64': [
+                '486',
+                'pentium',
+                'pentium2',
+                'pentium3',
+                'pentiumpro',
+                'coreduo',
+                'n270',
+                'core2duo',
+                'qemu32',
+                'kvm32',
+                'cpu64-rhel5',
+                'cpu64-rhel6',
+                'qemu64',
+                'kvm64',
+                'Conroe',
+                'Penryn',
+                'Nehalem',
+                'Nehalem-IBRS',
+                'Westmere',
+                'Westmere-IBRS',
+                'SandyBridge',
+                'SandyBridge-IBRS',
+                'IvyBridge',
+                'IvyBridge-IBRS',
+                'Haswell-noTSX',
+                'Haswell-noTSX-IBRS',
+                'Haswell',
+                'Haswell-IBRS',
+                'Broadwell-noTSX',
+                'Broadwell-noTSX-IBRS',
+                'Broadwell',
+                'Broadwell-IBRS',
+                'Skylake-Client',
+                'Skylake-Client-IBRS',
+                'Skylake-Server',
+                'Skylake-Server-IBRS',
+                'Cascadelake-Server',
+                'Icelake-Client',
+                'Icelake-Server',
+                'athlon',
+                'phenom',
+                'Opteron_G1',
+                'Opteron_G2',
+                'Opteron_G3',
+                'Opteron_G4',
+                'Opteron_G5',
+                'EPYC',
+                'EPYC-IBPB'],
+            'ppc64': [
+                'POWER6',
+                'POWER7',
+                'POWER8',
+                'POWER9',
+                'POWERPC_e5500',
+                'POWERPC_e6500']
+        }
+        return mapping.get(arch, [])
+
+    # Features are kept separately so that the tests can patch this
+    # class variable with alternate values.
+    _domain_capability_features = '''  <features>
+    <gic supported='no'/>
+  </features>'''
+
+    _domain_capability_features_with_SEV = '''  <features>
+    <gic supported='no'/>
+    <sev supported='yes'>
+      <cbitpos>47</cbitpos>
+      <reducedPhysBits>1</reducedPhysBits>
+    </sev>
+  </features>'''
+
+    _domain_capability_features_with_SEV_unsupported = \
+        _domain_capability_features_with_SEV.replace('yes', 'no')
 
     def getCapabilities(self):
         """Return spoofed capabilities."""
@@ -1361,236 +1475,11 @@ class Connection(object):
         if isinstance(numa_topology, vconfig.LibvirtConfigCapsNUMATopology):
             numa_topology = numa_topology.to_xml()
 
-        return '''<capabilities>
-  <host>
-    <uuid>cef19ce0-0ca2-11df-855d-b19fbce37686</uuid>
-    <cpu>
-      <arch>x86_64</arch>
-      <model>Penryn</model>
-      <vendor>Intel</vendor>
-      <topology sockets='%(sockets)s' cores='%(cores)s' threads='%(threads)s'/>
-      <feature name='xtpr'/>
-      <feature name='tm2'/>
-      <feature name='est'/>
-      <feature name='vmx'/>
-      <feature name='ds_cpl'/>
-      <feature name='monitor'/>
-      <feature name='pbe'/>
-      <feature name='tm'/>
-      <feature name='ht'/>
-      <feature name='ss'/>
-      <feature name='acpi'/>
-      <feature name='ds'/>
-      <feature name='vme'/>
-    </cpu>
-    <migration_features>
-      <live/>
-      <uri_transports>
-        <uri_transport>tcp</uri_transport>
-      </uri_transports>
-    </migration_features>
-    %(topology)s
-    <secmodel>
-      <model>apparmor</model>
-      <doi>0</doi>
-    </secmodel>
-  </host>
-
-  <guest>
-    <os_type>hvm</os_type>
-    <arch name='i686'>
-      <wordsize>32</wordsize>
-      <emulator>/usr/bin/qemu</emulator>
-      <machine>pc-0.14</machine>
-      <machine canonical='pc-0.14'>pc</machine>
-      <machine>pc-0.13</machine>
-      <machine>pc-0.12</machine>
-      <machine>pc-0.11</machine>
-      <machine>pc-0.10</machine>
-      <machine>isapc</machine>
-      <domain type='qemu'>
-      </domain>
-      <domain type='kvm'>
-        <emulator>/usr/bin/kvm</emulator>
-        <machine>pc-0.14</machine>
-        <machine canonical='pc-0.14'>pc</machine>
-        <machine>pc-0.13</machine>
-        <machine>pc-0.12</machine>
-        <machine>pc-0.11</machine>
-        <machine>pc-0.10</machine>
-        <machine>isapc</machine>
-      </domain>
-    </arch>
-    <features>
-      <cpuselection/>
-      <deviceboot/>
-      <pae/>
-      <nonpae/>
-      <acpi default='on' toggle='yes'/>
-      <apic default='on' toggle='no'/>
-    </features>
-  </guest>
-
-  <guest>
-    <os_type>hvm</os_type>
-    <arch name='x86_64'>
-      <wordsize>64</wordsize>
-      <emulator>/usr/bin/qemu-system-x86_64</emulator>
-      <machine>pc-0.14</machine>
-      <machine canonical='pc-0.14'>pc</machine>
-      <machine>pc-0.13</machine>
-      <machine>pc-0.12</machine>
-      <machine>pc-0.11</machine>
-      <machine>pc-0.10</machine>
-      <machine>isapc</machine>
-      <domain type='qemu'>
-      </domain>
-      <domain type='kvm'>
-        <emulator>/usr/bin/kvm</emulator>
-        <machine>pc-0.14</machine>
-        <machine canonical='pc-0.14'>pc</machine>
-        <machine>pc-0.13</machine>
-        <machine>pc-0.12</machine>
-        <machine>pc-0.11</machine>
-        <machine>pc-0.10</machine>
-        <machine>isapc</machine>
-      </domain>
-    </arch>
-    <features>
-      <cpuselection/>
-      <deviceboot/>
-      <acpi default='on' toggle='yes'/>
-      <apic default='on' toggle='no'/>
-    </features>
-  </guest>
-
-  <guest>
-    <os_type>hvm</os_type>
-    <arch name='armv7l'>
-      <wordsize>32</wordsize>
-      <emulator>/usr/bin/qemu-system-arm</emulator>
-      <machine>integratorcp</machine>
-      <machine>vexpress-a9</machine>
-      <machine>syborg</machine>
-      <machine>musicpal</machine>
-      <machine>mainstone</machine>
-      <machine>n800</machine>
-      <machine>n810</machine>
-      <machine>n900</machine>
-      <machine>cheetah</machine>
-      <machine>sx1</machine>
-      <machine>sx1-v1</machine>
-      <machine>beagle</machine>
-      <machine>beaglexm</machine>
-      <machine>tosa</machine>
-      <machine>akita</machine>
-      <machine>spitz</machine>
-      <machine>borzoi</machine>
-      <machine>terrier</machine>
-      <machine>connex</machine>
-      <machine>verdex</machine>
-      <machine>lm3s811evb</machine>
-      <machine>lm3s6965evb</machine>
-      <machine>realview-eb</machine>
-      <machine>realview-eb-mpcore</machine>
-      <machine>realview-pb-a8</machine>
-      <machine>realview-pbx-a9</machine>
-      <machine>versatilepb</machine>
-      <machine>versatileab</machine>
-      <domain type='qemu'>
-      </domain>
-    </arch>
-    <features>
-      <deviceboot/>
-    </features>
-  </guest>
-
-  <guest>
-    <os_type>hvm</os_type>
-    <arch name='mips'>
-      <wordsize>32</wordsize>
-      <emulator>/usr/bin/qemu-system-mips</emulator>
-      <machine>malta</machine>
-      <machine>mipssim</machine>
-      <machine>magnum</machine>
-      <machine>pica61</machine>
-      <machine>mips</machine>
-      <domain type='qemu'>
-      </domain>
-    </arch>
-    <features>
-      <deviceboot/>
-    </features>
-  </guest>
-
-  <guest>
-    <os_type>hvm</os_type>
-    <arch name='mipsel'>
-      <wordsize>32</wordsize>
-      <emulator>/usr/bin/qemu-system-mipsel</emulator>
-      <machine>malta</machine>
-      <machine>mipssim</machine>
-      <machine>magnum</machine>
-      <machine>pica61</machine>
-      <machine>mips</machine>
-      <domain type='qemu'>
-      </domain>
-    </arch>
-    <features>
-      <deviceboot/>
-    </features>
-  </guest>
-
-  <guest>
-    <os_type>hvm</os_type>
-    <arch name='sparc'>
-      <wordsize>32</wordsize>
-      <emulator>/usr/bin/qemu-system-sparc</emulator>
-      <machine>SS-5</machine>
-      <machine>leon3_generic</machine>
-      <machine>SS-10</machine>
-      <machine>SS-600MP</machine>
-      <machine>SS-20</machine>
-      <machine>Voyager</machine>
-      <machine>LX</machine>
-      <machine>SS-4</machine>
-      <machine>SPARCClassic</machine>
-      <machine>SPARCbook</machine>
-      <machine>SS-1000</machine>
-      <machine>SS-2000</machine>
-      <machine>SS-2</machine>
-      <domain type='qemu'>
-      </domain>
-    </arch>
-  </guest>
-
-  <guest>
-    <os_type>hvm</os_type>
-    <arch name='ppc'>
-      <wordsize>32</wordsize>
-      <emulator>/usr/bin/qemu-system-ppc</emulator>
-      <machine>g3beige</machine>
-      <machine>virtex-ml507</machine>
-      <machine>mpc8544ds</machine>
-      <machine canonical='bamboo-0.13'>bamboo</machine>
-      <machine>bamboo-0.13</machine>
-      <machine>bamboo-0.12</machine>
-      <machine>ref405ep</machine>
-      <machine>taihu</machine>
-      <machine>mac99</machine>
-      <machine>prep</machine>
-      <domain type='qemu'>
-      </domain>
-    </arch>
-    <features>
-      <deviceboot/>
-    </features>
-  </guest>
-
-</capabilities>''' % {'sockets': self.host_info.cpu_sockets,
-                      'cores': self.host_info.cpu_cores,
-                      'threads': self.host_info.cpu_threads,
-                      'topology': numa_topology}
+        return (fake_libvirt_data.CAPABILITIES_TEMPLATE
+                % {'sockets': self.host_info.cpu_sockets,
+                   'cores': self.host_info.cpu_cores,
+                   'threads': self.host_info.cpu_threads,
+                   'topology': numa_topology})
 
     def compareCPU(self, xml, flags):
         tree = etree.fromstring(xml)
@@ -1603,6 +1492,14 @@ class Connection(object):
 
         model_node = tree.find('./model')
         if model_node is not None:
+            # arch_node may not present, therefore query all cpu models.
+            if model_node.text not in self.getCPUModelNames('x86_64') and \
+                model_node.text not in self.getCPUModelNames('ppc64'):
+                raise make_libvirtError(
+                    libvirtError,
+                    "internal error: Unknown CPU model %s" % model_node.text,
+                    error_code = VIR_ERR_INTERNAL_ERROR,
+                    error_domain=VIR_FROM_QEMU)
             if model_node.text != self.host_info.cpu_model:
                 return VIR_CPU_COMPARE_INCOMPATIBLE
 
@@ -1753,6 +1650,8 @@ virDomain = Domain
 virNodeDevice = NodeDevice
 
 virConnect = Connection
+virSecret = Secret
+virNWFilter = NWFilter
 
 
 class FakeLibvirtFixture(fixtures.Fixture):
@@ -1786,14 +1685,22 @@ class FakeLibvirtFixture(fixtures.Fixture):
             'nova.virt.libvirt.driver.LibvirtDriver'
             '._get_host_sysinfo_serial_os', return_value=uuids.machine_id))
 
+        # Stub out _log_host_capabilities since it logs a giant string at INFO
+        # and we don't want that to blow up the subunit parser in test runs.
+        self.useFixture(fixtures.MockPatch(
+            'nova.virt.libvirt.host.Host._log_host_capabilities'))
+
         disable_event_thread(self)
 
         if self.stub_os_vif:
-            # Make sure to never try and actually plug VIFs in os-vif unless
-            # we're explicitly testing that code and the test itself will
-            # handle the appropriate mocking.
+            # Make sure to never try and actually plug/unplug VIFs in os-vif
+            # unless we're explicitly testing that code and the test itself
+            # will handle the appropriate mocking.
             self.useFixture(fixtures.MonkeyPatch(
                 'nova.virt.libvirt.vif.LibvirtGenericVIFDriver._plug_os_vif',
+                lambda *a, **kw: None))
+            self.useFixture(fixtures.MonkeyPatch(
+                'nova.virt.libvirt.vif.LibvirtGenericVIFDriver._unplug_os_vif',
                 lambda *a, **kw: None))
 
         # os_vif.initialize is typically done in nova-compute startup

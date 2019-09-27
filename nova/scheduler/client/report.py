@@ -28,27 +28,28 @@ from oslo_middleware import request_id
 from oslo_utils import excutils
 from oslo_utils import versionutils
 import retrying
+import six
 
 from nova.compute import provider_tree
 import nova.conf
 from nova import exception
 from nova.i18n import _
 from nova import objects
-from nova.scheduler import utils as scheduler_utils
 from nova import utils
 
 
 CONF = nova.conf.CONF
 LOG = logging.getLogger(__name__)
 WARN_EVERY = 10
+NEGATIVE_MEMBER_OF_VERSION = '1.32'
 RESHAPER_VERSION = '1.30'
 CONSUMER_GENERATION_VERSION = '1.28'
-NESTED_AC_VERSION = '1.29'
 ALLOW_RESERVED_EQUAL_TOTAL_INVENTORY_VERSION = '1.26'
 POST_RPS_RETURNS_PAYLOAD_API_VERSION = '1.20'
 AGGREGATE_GENERATION_VERSION = '1.19'
 NESTED_PROVIDER_API_VERSION = '1.14'
 POST_ALLOCATIONS_API_VERSION = '1.13'
+GET_USAGES_VERSION = '1.9'
 
 AggInfo = collections.namedtuple('AggInfo', ['aggregates', 'generation'])
 TraitInfo = collections.namedtuple('TraitInfo', ['traits', 'generation'])
@@ -119,19 +120,6 @@ def retries(f):
                   f.__name__)
         return False
     return wrapper
-
-
-def _instance_to_allocations_dict(instance):
-    """Given an `objects.Instance` object, return a dict, keyed by resource
-    class of the amount used by the instance.
-
-    :param instance: `objects.Instance` object to translate
-    """
-    alloc_dict = scheduler_utils.resources_from_flavor(instance,
-        instance.flavor)
-
-    # Remove any zero allocations.
-    return {key: val for key, val in alloc_dict.items() if val}
 
 
 def _move_operation_alloc_request(source_allocs, dest_alloc_req):
@@ -238,43 +226,35 @@ class SchedulerReportClient(object):
         """Create the HTTP session accessing the placement service."""
         # Flush provider tree and associations so we start from a clean slate.
         self.clear_provider_cache(init=True)
-        client = self._adapter or utils.get_ksa_adapter('placement')
+        client = self._adapter or utils.get_sdk_adapter('placement')
         # Set accept header on every request to ensure we notify placement
         # service of our response body media type preferences.
         client.additional_headers = {'accept': 'application/json'}
         return client
 
     def get(self, url, version=None, global_request_id=None):
-        headers = ({request_id.INBOUND_HEADER: global_request_id}
-                   if global_request_id else {})
-        return self._client.get(url, microversion=version, headers=headers)
+        return self._client.get(url, microversion=version,
+                                global_request_id=global_request_id)
 
     def post(self, url, data, version=None, global_request_id=None):
-        headers = ({request_id.INBOUND_HEADER: global_request_id}
-                   if global_request_id else {})
         # NOTE(sdague): using json= instead of data= sets the
         # media type to application/json for us. Placement API is
         # more sensitive to this than other APIs in the OpenStack
         # ecosystem.
         return self._client.post(url, json=data, microversion=version,
-                                 headers=headers)
+                                 global_request_id=global_request_id)
 
     def put(self, url, data, version=None, global_request_id=None):
         # NOTE(sdague): using json= instead of data= sets the
         # media type to application/json for us. Placement API is
         # more sensitive to this than other APIs in the OpenStack
         # ecosystem.
-        kwargs = {'microversion': version,
-                  'headers': {request_id.INBOUND_HEADER:
-                              global_request_id} if global_request_id else {}}
-        if data is not None:
-            kwargs['json'] = data
-        return self._client.put(url, **kwargs)
+        return self._client.put(url, json=data, microversion=version,
+                                global_request_id=global_request_id)
 
     def delete(self, url, version=None, global_request_id=None):
-        headers = ({request_id.INBOUND_HEADER: global_request_id}
-                   if global_request_id else {})
-        return self._client.delete(url, microversion=version, headers=headers)
+        return self._client.delete(url, microversion=version,
+                                   global_request_id=global_request_id)
 
     @safe_connect
     def get_allocation_candidates(self, context, resources):
@@ -311,7 +291,7 @@ class SchedulerReportClient(object):
         """
         # Note that claim_resources() will use this version as well to
         # make allocations by `PUT /allocations/{consumer_uuid}`
-        version = NESTED_AC_VERSION
+        version = NEGATIVE_MEMBER_OF_VERSION
         qparams = resources.to_querystring()
         url = "/allocation_candidates?%s" % qparams
         resp = self.get(url, version=version,
@@ -489,8 +469,7 @@ class SchedulerReportClient(object):
         LOG.error(msg, args)
         raise exception.ResourceProviderRetrievalFailed(message=msg % args)
 
-    @safe_connect
-    def _get_providers_in_tree(self, context, uuid):
+    def get_providers_in_tree(self, context, uuid):
         """Queries the placement API for a list of the resource providers in
         the tree associated with the specified UUID.
 
@@ -499,6 +478,8 @@ class SchedulerReportClient(object):
         :return: A list of dicts of resource provider information, which may be
                  empty if no provider exists with the specified UUID.
         :raise: ResourceProviderRetrievalFailed on error.
+        :raise: keystoneauth1.exceptions.ClientException if placement API
+                communication fails.
         """
         resp = self.get("/resource_providers?in_tree=%s" % uuid,
                         version=NESTED_PROVIDER_API_VERSION,
@@ -626,6 +607,10 @@ class SchedulerReportClient(object):
                      value
         :param parent_provider_uuid: Optional UUID of the immediate parent,
                                      which must have been previously _ensured.
+        :raise ResourceProviderCreationFailed: If we expected to be creating
+                providers, but couldn't.
+        :raise: keystoneauth1.exceptions.ClientException if placement API
+                communication fails.
         """
         # NOTE(efried): We currently have no code path where we need to set the
         # parent_provider_uuid on a previously-parent-less provider - so we do
@@ -644,15 +629,15 @@ class SchedulerReportClient(object):
         # - "Cascading generations" - i.e. a change to a leaf node percolates
         #   generation bump up the tree so that we bounce 409 the next time we
         #   try to update anything and have to refresh.
-        if (self._provider_tree.exists(uuid)
-                and not self._associations_stale(uuid)):
+        if (self._provider_tree.exists(uuid) and
+                not self._associations_stale(uuid)):
             uuids_to_refresh = [
                 u for u in self._provider_tree.get_provider_uuids(uuid)
                 if self._associations_stale(u)]
         else:
             # We either don't have it locally or it's stale. Pull or create it.
             created_rp = None
-            rps_to_refresh = self._get_providers_in_tree(context, uuid)
+            rps_to_refresh = self.get_providers_in_tree(context, uuid)
             if not rps_to_refresh:
                 created_rp = self._create_resource_provider(
                     context, uuid, name or uuid,
@@ -1115,8 +1100,8 @@ class SchedulerReportClient(object):
         # Check whether aggregates need updating.  We can only do this if we
         # have a cache entry with a matching generation.
         try:
-            if (self._provider_tree.data(rp_uuid).generation == generation
-                    and not self._provider_tree.have_aggregates_changed(
+            if (self._provider_tree.data(rp_uuid).generation == generation and
+                    not self._provider_tree.have_aggregates_changed(
                         rp_uuid, aggregates)):
                 return
         except ValueError:
@@ -1524,13 +1509,16 @@ class SchedulerReportClient(object):
         return allocations.get(
             rp_uuid, {}).get('resources', {})
 
-    # NOTE(jaypipes): Currently, this method is ONLY used in two places:
+    # NOTE(jaypipes): Currently, this method is ONLY used in three places:
     # 1. By the scheduler to allocate resources on the selected destination
     #    hosts.
     # 2. By the conductor LiveMigrationTask to allocate resources on a forced
-    #    destination host. This is a short-term fix for Pike which should be
-    #    replaced in Queens by conductor calling the scheduler in the force
-    #    host case.
+    #    destination host. In this case, the source node allocations have
+    #    already been moved to the migration record so the instance should not
+    #    have allocations and _move_operation_alloc_request will not be called.
+    # 3. By the conductor ComputeTaskManager to allocate resources on a forced
+    #    destination host during evacuate. This case will call the
+    #    _move_operation_alloc_request method.
     # This method should not be called by the resource tracker.
     @safe_connect
     @retries
@@ -1546,10 +1534,7 @@ class SchedulerReportClient(object):
         host). In order to prevent compute nodes currently performing move
         operations from being scheduled to improperly, we create a "doubled-up"
         allocation that consumes resources on *both* the source and the
-        destination host during the move operation. When the move operation
-        completes, the destination host will end up setting allocations for the
-        instance only on the destination host thereby freeing up resources on
-        the source host appropriately.
+        destination host during the move operation.
 
         :param context: The security context
         :param consumer_uuid: The instance's UUID.
@@ -1799,7 +1784,7 @@ class SchedulerReportClient(object):
             # do anything with the return value except log
             return False
 
-        rps = self._get_providers_in_tree(context, root_rp_uuid)
+        rps = self.get_providers_in_tree(context, root_rp_uuid)
         rp_uuids = [rp['uuid'] for rp in rps]
 
         # go through the current allocations and remove every RP from it that
@@ -1928,27 +1913,17 @@ class SchedulerReportClient(object):
                      'text': r.text})
         return r.status_code == 204
 
+    # TODO(gibi): kill safe_connect
     @safe_connect
     @retries
-    def put_allocations(self, context, rp_uuid, consumer_uuid, alloc_data,
-                        project_id, user_id, consumer_generation):
-        """Creates allocation records for the supplied instance UUID against
-        the supplied resource provider.
-
-        :note Currently we only allocate against a single resource provider.
-              Once shared storage and things like NUMA allocations are a
-              reality, this will change to allocate against multiple providers.
+    def put_allocations(self, context, consumer_uuid, payload):
+        """Creates allocation records for the supplied consumer UUID based on
+        the provided allocation dict
 
         :param context: The security context
-        :param rp_uuid: The UUID of the resource provider to allocate against.
         :param consumer_uuid: The instance's UUID.
-        :param alloc_data: Dict, keyed by resource class, of amounts to
-                           consume.
-        :param project_id: The project_id associated with the allocations.
-        :param user_id: The user_id associated with the allocations.
-        :param consumer_generation: The current generation of the consumer or
-                                    None if this the initial allocation of the
-                                    consumer
+        :param payload: Dict in the format expected by the placement
+            PUT /allocations/{consumer_uuid} API
         :returns: True if the allocations were created, False otherwise.
         :raises: Retry if the operation should be retried due to a concurrent
                  resource provider update.
@@ -1956,14 +1931,6 @@ class SchedulerReportClient(object):
                                         generation conflict
         """
 
-        payload = {
-            'allocations': {
-                rp_uuid: {'resources': alloc_data},
-            },
-            'project_id': project_id,
-            'user_id': user_id,
-            'consumer_generation': consumer_generation
-        }
         r = self._put_allocations(context, consumer_uuid, payload)
         if r.status_code != 204:
             err = r.json()['errors'][0]
@@ -2017,7 +1984,8 @@ class SchedulerReportClient(object):
             # at the moment there is no way placement returns a failure so we
             # could even delete this code
             LOG.warning('Unable to delete allocation for %(consumer_type)s '
-                        '%(uuid)s: (%(code)i %(text)s)',
+                        '%(uuid)s. Got %(code)i while retrieving existing '
+                        'allocations: (%(text)s)',
                         {'consumer_type': consumer_type,
                          'uuid': uuid,
                          'code': r.status_code,
@@ -2169,10 +2137,16 @@ class SchedulerReportClient(object):
             # Delete any allocations for this resource provider.
             # Since allocations are by consumer, we get the consumers on this
             # host, which are its instances.
-            instances = objects.InstanceList.get_by_host_and_node(context,
-                    host, nodename)
-            for instance in instances:
-                self.delete_allocation_for_instance(context, instance.uuid)
+            # NOTE(mriedem): This assumes the only allocations on this node
+            # are instances, but there could be migration consumers if the
+            # node is deleted during a migration or allocations from an
+            # evacuated host (bug 1829479). Obviously an admin shouldn't
+            # do that but...you know. I guess the provider deletion should fail
+            # in that case which is what we'd want to happen.
+            instance_uuids = objects.InstanceList.get_uuids_by_host_and_node(
+                context, host, nodename)
+            for instance_uuid in instance_uuids:
+                self.delete_allocation_for_instance(context, instance_uuid)
         try:
             self._delete_provider(rp_uuid, global_request_id=context.global_id)
         except (exception.ResourceProviderInUse,
@@ -2181,8 +2155,7 @@ class SchedulerReportClient(object):
             # for backward compatibility.
             pass
 
-    @safe_connect
-    def _get_provider_by_name(self, context, name):
+    def get_provider_by_name(self, context, name):
         """Queries the placement API for resource provider information matching
         a supplied name.
 
@@ -2192,9 +2165,17 @@ class SchedulerReportClient(object):
                  provider's UUID and generation
         :raises: `exception.ResourceProviderNotFound` when no such provider was
                  found
+        :raises: PlacementAPIConnectFailure if there was an issue making the
+                 API call to placement.
         """
-        resp = self.get("/resource_providers?name=%s" % name,
-                        global_request_id=context.global_id)
+        try:
+            resp = self.get("/resource_providers?name=%s" % name,
+                            global_request_id=context.global_id)
+        except ks_exc.ClientException as ex:
+            LOG.error('Failed to get resource provider by name: %s. Error: %s',
+                      name, six.text_type(ex))
+            raise exception.PlacementAPIConnectFailure()
+
         if resp.status_code == 200:
             data = resp.json()
             records = data['resource_providers']
@@ -2219,7 +2200,8 @@ class SchedulerReportClient(object):
     @retrying.retry(stop_max_attempt_number=4,
                     retry_on_exception=lambda e: isinstance(
                         e, exception.ResourceProviderUpdateConflict))
-    def aggregate_add_host(self, context, agg_uuid, host_name):
+    def aggregate_add_host(self, context, agg_uuid, host_name=None,
+                           rp_uuid=None):
         """Looks up a resource provider by the supplied host name, and adds the
         aggregate with supplied UUID to that resource provider.
 
@@ -2230,7 +2212,10 @@ class SchedulerReportClient(object):
         :param context: The security context
         :param agg_uuid: UUID of the aggregate being modified
         :param host_name: Name of the nova-compute service worker to look up a
-                          resource provider for
+                          resource provider for. Either host_name or rp_uuid is
+                          required.
+        :param rp_uuid: UUID of the resource provider to add to the aggregate.
+                        Either host_name or rp_uuid is required.
         :raises: `exceptions.ResourceProviderNotFound` if no resource provider
                   matching the host name could be found from the placement API
         :raises: `exception.ResourceProviderAggregateRetrievalFailed` when
@@ -2239,15 +2224,13 @@ class SchedulerReportClient(object):
                  failure attempting to save the provider aggregates
         :raises: `exception.ResourceProviderUpdateConflict` if a concurrent
                  update to the provider was detected.
+        :raises: PlacementAPIConnectFailure if there was an issue making an
+                 API call to placement.
         """
-        rp = self._get_provider_by_name(context, host_name)
-        # NOTE(jaypipes): Unfortunately, due to @safe_connect,
-        # _get_provider_by_name() can return None. If that happens, raise an
-        # error so we can trap for it in the Nova API code and ignore in Rocky,
-        # blow up in Stein.
-        if rp is None:
-            raise exception.PlacementAPIConnectFailure()
-        rp_uuid = rp['uuid']
+        if host_name is None and rp_uuid is None:
+            raise ValueError(_("Either host_name or rp_uuid is required"))
+        if rp_uuid is None:
+            rp_uuid = self.get_provider_by_name(context, host_name)['uuid']
 
         # Now attempt to add the aggregate to the resource provider. We don't
         # want to overwrite any other aggregates the provider may be associated
@@ -2289,16 +2272,10 @@ class SchedulerReportClient(object):
                  failure attempting to save the provider aggregates
         :raises: `exception.ResourceProviderUpdateConflict` if a concurrent
                  update to the provider was detected.
+        :raises: PlacementAPIConnectFailure if there was an issue making an
+                 API call to placement.
         """
-        rp = self._get_provider_by_name(context, host_name)
-        # NOTE(jaypipes): Unfortunately, due to @safe_connect,
-        # _get_provider_by_name() can return None. If that happens, raise an
-        # error so we can trap for it in the Nova API code and ignore in Rocky,
-        # blow up in Stein.
-        if rp is None:
-            raise exception.PlacementAPIConnectFailure()
-        rp_uuid = rp['uuid']
-
+        rp_uuid = self.get_provider_by_name(context, host_name)['uuid']
         # Now attempt to remove the aggregate from the resource provider. We
         # don't want to overwrite any other aggregates the provider may be
         # associated with, however, so we first grab the list of aggregates for
@@ -2315,3 +2292,80 @@ class SchedulerReportClient(object):
         new_aggs = existing_aggs - set([agg_uuid])
         self.set_aggregates_for_provider(
             context, rp_uuid, new_aggs, use_cache=False, generation=gen)
+
+    @staticmethod
+    def _handle_usages_error_from_placement(resp, project_id, user_id=None):
+        msg = ('[%(placement_req_id)s] Failed to retrieve usages for project '
+               '%(project_id)s and user %(user_id)s. Got %(status_code)d: '
+               '%(err_text)s')
+        args = {'placement_req_id': get_placement_request_id(resp),
+                'project_id': project_id,
+                'user_id': user_id or 'N/A',
+                'status_code': resp.status_code,
+                'err_text': resp.text}
+        LOG.error(msg, args)
+        raise exception.UsagesRetrievalFailed(project_id=project_id,
+                                              user_id=user_id or 'N/A')
+
+    @retrying.retry(stop_max_attempt_number=4,
+                    retry_on_exception=lambda e: isinstance(
+                        e, ks_exc.ConnectFailure))
+    def _get_usages(self, context, project_id, user_id=None):
+        url = '/usages?project_id=%s' % project_id
+        if user_id:
+            url = ''.join([url, '&user_id=%s' % user_id])
+        return self.get(url, version=GET_USAGES_VERSION,
+                        global_request_id=context.global_id)
+
+    def get_usages_counts_for_quota(self, context, project_id, user_id=None):
+        """Get the usages counts for the purpose of counting quota usage.
+
+        :param context: The request context
+        :param project_id: The project_id to count across
+        :param user_id: The user_id to count across
+        :returns: A dict containing the project-scoped and user-scoped counts
+                  if user_id is specified. For example:
+                    {'project': {'cores': <count across project>,
+                                 'ram': <count across project>},
+                    {'user': {'cores': <count across user>,
+                              'ram': <count across user>},
+        :raises: `exception.UsagesRetrievalFailed` if a placement API call
+                 fails
+        """
+        def _get_core_usages(usages):
+            """For backward-compatible with existing behavior, the quota limit
+            on flavor.vcpus. That included the shared and dedicated CPU. So
+            we need to count both the orc.VCPU and orc.PCPU at here.
+            """
+            vcpus = usages['usages'].get(orc.VCPU, 0)
+            pcpus = usages['usages'].get(orc.PCPU, 0)
+            return vcpus + pcpus
+
+        total_counts = {'project': {}}
+        # First query counts across all users of a project
+        LOG.debug('Getting usages for project_id %s from placement',
+                  project_id)
+        resp = self._get_usages(context, project_id)
+        if resp:
+            data = resp.json()
+            # The response from placement will not contain a resource class if
+            # there is no usage. We can consider a missing class to be 0 usage.
+            cores = _get_core_usages(data)
+            ram = data['usages'].get(orc.MEMORY_MB, 0)
+            total_counts['project'] = {'cores': cores, 'ram': ram}
+        else:
+            self._handle_usages_error_from_placement(resp, project_id)
+        # If specified, second query counts across one user in the project
+        if user_id:
+            LOG.debug('Getting usages for project_id %s and user_id %s from '
+                      'placement', project_id, user_id)
+            resp = self._get_usages(context, project_id, user_id=user_id)
+            if resp:
+                data = resp.json()
+                cores = _get_core_usages(data)
+                ram = data['usages'].get(orc.MEMORY_MB, 0)
+                total_counts['user'] = {'cores': cores, 'ram': ram}
+            else:
+                self._handle_usages_error_from_placement(resp, project_id,
+                                                         user_id=user_id)
+        return total_counts

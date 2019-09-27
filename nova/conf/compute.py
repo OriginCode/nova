@@ -82,21 +82,20 @@ Possible values:
 Maximum number of devices that will result in a local image being
 created on the hypervisor node.
 
-A negative number means unlimited. Setting max_local_block_devices
+A negative number means unlimited. Setting ``max_local_block_devices``
 to 0 means that any request that attempts to create a local disk
 will fail. This option is meant to limit the number of local discs
-(so root local disc that is the result of --image being used, and
-any other ephemeral and swap disks). 0 does not mean that images
-will be automatically converted to volumes and boot instances from
-volumes - it just means that all requests that attempt to create a
-local disk will fail.
+(so root local disc that is the result of ``imageRef`` being used when
+creating a server, and any other ephemeral and swap disks). 0 does not
+mean that images will be automatically converted to volumes and boot
+instances from volumes - it just means that all requests that attempt
+to create a local disk will fail.
 
 Possible values:
 
 * 0: Creating a local disk is not allowed.
 * Negative number: Allows unlimited number of local discs.
 * Positive number: Allows only these many number of local discs.
-                       (Default value is 3).
 """),
     cfg.ListOpt('compute_monitors',
         default=[],
@@ -232,6 +231,9 @@ Possible values:
 Related options:
 
 * ``compute_driver``: Only the libvirt driver uses this option.
+* ``[libvirt]/images_type``: If images_type is rbd, setting this option
+  to False is not allowed. See the bug
+  https://bugs.launchpad.net/nova/+bug/1816686 for more details.
 """),
 # NOTE(yamahata): ListOpt won't work because the command may include a comma.
 # For example:
@@ -305,18 +307,41 @@ Related options:
 
 resource_tracker_opts = [
     cfg.StrOpt('vcpu_pin_set',
+        deprecated_for_removal=True,
+        deprecated_since='20.0.0',
+        deprecated_reason="""
+This option has been superseded by the ``[compute] cpu_dedicated_set`` and
+``[compute] cpu_shared_set`` options, which allow things like the co-existence
+of pinned and unpinned instances on the same host (for the libvirt driver).
+""",
         help="""
-Defines which physical CPUs (pCPUs) can be used by instance
-virtual CPUs (vCPUs).
+Mask of host CPUs that can be used for ``VCPU`` resources.
+
+The behavior of this option depends on the definition of the ``[compute]
+cpu_dedicated_set`` option and affects the behavior of the ``[compute]
+cpu_shared_set`` option.
+
+* If ``[compute] cpu_dedicated_set`` is defined, defining this option will
+  result in an error.
+
+* If ``[compute] cpu_dedicated_set`` is not defined, this option will be used
+  to determine inventory for ``VCPU`` resources and to limit the host CPUs
+  that both pinned and unpinned instances can be scheduled to, overriding the
+  ``[compute] cpu_shared_set`` option.
 
 Possible values:
 
 * A comma-separated list of physical CPU numbers that virtual CPUs can be
-  allocated to by default. Each element should be either a single CPU number,
-  a range of CPU numbers, or a caret followed by a CPU number to be
-  excluded from a previous range. For example::
+  allocated from. Each element should be either a single CPU number, a range of
+  CPU numbers, or a caret followed by a CPU number to be excluded from a
+  previous range. For example::
 
     vcpu_pin_set = "4-12,^8,15"
+
+Related options:
+
+* ``[compute] cpu_dedicated_set``
+* ``[compute] cpu_shared_set``
 """),
     cfg.MultiOpt('reserved_huge_pages',
         item_type=types.Dict(),
@@ -367,15 +392,26 @@ Possible values:
         default=0,
         min=0,
         help="""
-Number of physical CPUs to reserve for the host. The host resources usage is
-reported back to the scheduler continuously from nova-compute running on the
-compute node. To prevent the host CPU from being considered as available,
-this option is used to reserve random pCPU(s) for the host.
+Number of host CPUs to reserve for host processes.
+
+The host resources usage is reported back to the scheduler continuously from
+nova-compute running on the compute node. This value is used to determine the
+``reserved`` value reported to placement.
+
+This option cannot be set if the ``[compute] cpu_shared_set`` or ``[compute]
+cpu_dedicated_set`` config options have been defined. When these options are
+defined, any host CPUs not included in these values are considered reserved for
+the host.
 
 Possible values:
 
 * Any positive integer representing number of physical CPUs to reserve
   for the host.
+
+Related options:
+
+* ``[compute] cpu_shared_set``
+* ``[compute] cpu_dedicated_set``
 """),
 ]
 
@@ -384,23 +420,26 @@ allocation_ratio_opts = [
         default=None,
         min=0.0,
         help="""
-This option helps you specify virtual CPU to physical CPU allocation ratio.
+Virtual CPU to physical CPU allocation ratio.
 
-From Ocata (15.0.0) this is used to influence the hosts selected by
-the Placement API. Note that when Placement is used, the CoreFilter
-is redundant, because the Placement API will have already filtered
-out hosts that would have failed the CoreFilter.
+This option is used to influence the hosts selected by the Placement API by
+configuring the allocation ratio for ``VCPU`` inventory. In addition, the
+``AggregateCoreFilter`` (deprecated) will fall back to this configuration value
+if no per-aggregate setting is found.
 
-This configuration specifies ratio for CoreFilter which can be set
-per compute node. For AggregateCoreFilter, it will fall back to this
-configuration value if no per-aggregate setting is found.
+.. note::
 
-NOTE: If this option is set to something *other than* ``None`` or ``0.0``, the
-allocation ratio will be overwritten by the value of this option, otherwise,
-the allocation ratio will not change. Once set to a non-default value, it is
-not possible to "unset" the config to get back to the default behavior. If you
-want to reset back to the initial value, explicitly specify it to the value of
-``initial_cpu_allocation_ratio``.
+   This option does not affect ``PCPU`` inventory, which cannot be
+   overcommitted.
+
+.. note::
+
+   If this option is set to something *other than* ``None`` or ``0.0``, the
+   allocation ratio will be overwritten by the value of this option, otherwise,
+   the allocation ratio will not change. Once set to a non-default value, it is
+   not possible to "unset" the config to get back to the default behavior. If
+   you want to reset back to the initial value, explicitly specify it to the
+   value of ``initial_cpu_allocation_ratio``.
 
 Possible values:
 
@@ -414,24 +453,21 @@ Related options:
         default=None,
         min=0.0,
         help="""
-This option helps you specify virtual RAM to physical RAM
-allocation ratio.
+Virtual RAM to physical RAM allocation ratio.
 
-From Ocata (15.0.0) this is used to influence the hosts selected by
-the Placement API. Note that when Placement is used, the RamFilter
-is redundant, because the Placement API will have already filtered
-out hosts that would have failed the RamFilter.
+This option is used to influence the hosts selected by the Placement API by
+configuring the allocation ratio for ``MEMORY_MB`` inventory. In addition, the
+``AggregateRamFilter`` (deprecated) will fall back to this configuration value
+if no per-aggregate setting is found.
 
-This configuration specifies ratio for RamFilter which can be set
-per compute node. For AggregateRamFilter, it will fall back to this
-configuration value if no per-aggregate setting found.
+.. note::
 
-NOTE: If this option is set to something *other than* ``None`` or ``0.0``, the
-allocation ratio will be overwritten by the value of this option, otherwise,
-the allocation ratio will not change. Once set to a non-default value, it is
-not possible to "unset" the config to get back to the default behavior. If you
-want to reset back to the initial value, explicitly specify it to the value of
-``initial_ram_allocation_ratio``.
+   If this option is set to something *other than* ``None`` or ``0.0``, the
+   allocation ratio will be overwritten by the value of this option, otherwise,
+   the allocation ratio will not change. Once set to a non-default value, it is
+   not possible to "unset" the config to get back to the default behavior. If
+   you want to reset back to the initial value, explicitly specify it to the
+   value of ``initial_ram_allocation_ratio``.
 
 Possible values:
 
@@ -445,28 +481,33 @@ Related options:
         default=None,
         min=0.0,
         help="""
-This option helps you specify virtual disk to physical disk
-allocation ratio.
+Virtual disk to physical disk allocation ratio.
 
-From Ocata (15.0.0) this is used to influence the hosts selected by
-the Placement API. Note that when Placement is used, the DiskFilter
-is redundant, because the Placement API will have already filtered
-out hosts that would have failed the DiskFilter.
+This option is used to influence the hosts selected by the Placement API by
+configuring the allocation ratio for ``DISK_GB`` inventory. In addition, the
+``AggregateDiskFilter`` (deprecated) will fall back to this configuration value
+if no per-aggregate setting is found.
 
-A ratio greater than 1.0 will result in over-subscription of the
-available physical disk, which can be useful for more
-efficiently packing instances created with images that do not
-use the entire virtual disk, such as sparse or compressed
-images. It can be set to a value between 0.0 and 1.0 in order
-to preserve a percentage of the disk for uses other than
-instances.
+When configured, a ratio greater than 1.0 will result in over-subscription of
+the available physical disk, which can be useful for more efficiently packing
+instances created with images that do not use the entire virtual disk, such as
+sparse or compressed images. It can be set to a value between 0.0 and 1.0 in
+order to preserve a percentage of the disk for uses other than instances.
 
-NOTE: If this option is set to something *other than* ``None`` or ``0.0``, the
-allocation ratio will be overwritten by the value of this option, otherwise,
-the allocation ratio will not change. Once set to a non-default value, it is
-not possible to "unset" the config to get back to the default behavior. If you
-want to reset back to the initial value, explicitly specify it to the value of
-``initial_disk_allocation_ratio``.
+.. note::
+
+   If the value is set to ``>1``, we recommend keeping track of the free disk
+   space, as the value approaching ``0`` may result in the incorrect
+   functioning of instances using it at the moment.
+
+.. note::
+
+   If this option is set to something *other than* ``None`` or ``0.0``, the
+   allocation ratio will be overwritten by the value of this option, otherwise,
+   the allocation ratio will not change. Once set to a non-default value, it is
+   not possible to "unset" the config to get back to the default behavior. If
+   you want to reset back to the initial value, explicitly specify it to the
+   value of ``initial_disk_allocation_ratio``.
 
 Possible values:
 
@@ -480,8 +521,7 @@ Related options:
                  default=16.0,
                  min=0.0,
                  help="""
-This option helps you specify initial virtual CPU to physical CPU allocation
-ratio.
+Initial virtual CPU to physical CPU allocation ratio.
 
 This is only used when initially creating the ``computes_nodes`` table record
 for a given nova-compute service.
@@ -497,8 +537,7 @@ Related options:
                  default=1.5,
                  min=0.0,
                  help="""
-This option helps you specify initial virtual RAM to physical RAM allocation
-ratio.
+Initial virtual RAM to physical RAM allocation ratio.
 
 This is only used when initially creating the ``computes_nodes`` table record
 for a given nova-compute service.
@@ -514,8 +553,7 @@ Related options:
                  default=1.0,
                  min=0.0,
                  help="""
-This option helps you specify initial virtual disk to physical disk allocation
-ratio.
+Initial virtual disk to physical disk allocation ratio.
 
 This is only used when initially creating the ``computes_nodes`` table record
 for a given nova-compute service.
@@ -621,9 +659,9 @@ Possible Values:
 * 0 : treated as unlimited.
 * Any positive integer representing maximum concurrent builds.
 """),
-    # TODO(sfinucan): Add min parameter
     cfg.IntOpt('max_concurrent_live_migrations',
         default=1,
+        min=0,
         help="""
 Maximum number of live migrations to run concurrently. This limit is enforced
 to avoid outbound live migrations overwhelming the host/network and causing
@@ -633,24 +671,41 @@ that doing so is safe and stable in your environment.
 Possible values:
 
 * 0 : treated as unlimited.
-* Negative value defaults to 0.
 * Any positive integer representing maximum number of live migrations
   to run concurrently.
 """),
     cfg.IntOpt('block_device_allocate_retries',
         default=60,
+        min=0,
         help="""
-Number of times to retry block device allocation on failures. Starting with
-Liberty, Cinder can use image volume cache. This may help with block device
-allocation performance. Look at the cinder image_volume_cache_enabled
-configuration option.
+The number of times to check for a volume to be "available" before attaching
+it during server create.
+
+When creating a server with block device mappings where ``source_type`` is
+one of ``blank``, ``image`` or ``snapshot`` and the ``destination_type`` is
+``volume``, the ``nova-compute`` service will create a volume and then attach
+it to the server. Before the volume can be attached, it must be in status
+"available". This option controls how many times to check for the created
+volume to be "available" before it is attached.
+
+If the operation times out, the volume will be deleted if the block device
+mapping ``delete_on_termination`` value is True.
+
+It is recommended to configure the image cache in the block storage service
+to speed up this operation. See
+https://docs.openstack.org/cinder/latest/admin/blockstorage-image-volume-cache.html
+for details.
 
 Possible values:
 
 * 60 (default)
 * If value is 0, then one attempt is made.
-* Any negative value is treated as 0.
 * For any value > 0, total attempts are (value + 1)
+
+Related options:
+
+* ``block_device_allocate_retries_interval`` - controls the interval between
+  checks
 """),
     cfg.IntOpt('sync_power_state_pool_size',
         default=1000,
@@ -728,15 +783,75 @@ Possible values:
 """),
    cfg.StrOpt('cpu_shared_set',
         help="""
-Defines which physical CPUs (pCPUs) will be used for best-effort guest vCPU
-resources.
+Mask of host CPUs that can be used for ``VCPU`` resources and offloaded
+emulator threads.
 
-Currently only used by libvirt driver to place guest emulator threads when
-the flavor extra spec is set to ``hw:emulator_threads_policy=share``.
+The behavior of this option depends on the definition of the deprecated
+``vcpu_pin_set`` option.
 
-For example::
+* If ``vcpu_pin_set`` is not defined, ``[compute] cpu_shared_set`` will be be
+  used to provide ``VCPU`` inventory and to determine the host CPUs that
+  unpinned instances can be scheduled to. It will also be used to determine the
+  host CPUS that instance emulator threads should be offloaded to for instances
+  configured with the ``share`` emulator thread policy
+  (``hw:emulator_threads_policy=share``).
+
+* If ``vcpu_pin_set`` is defined, ``[compute] cpu_shared_set`` will only be
+  used to determine the host CPUs that instance emulator threads should be
+  offloaded to for instances configured with the ``share`` emulator thread
+  policy (``hw:emulator_threads_policy=share``). ``vcpu_pin_set`` will be used
+  to provide ``VCPU`` inventory and to determine the host CPUs that both pinned
+  and unpinned instances can be scheduled to.
+
+This behavior will be simplified in a future release when ``vcpu_pin_set`` is
+removed.
+
+Possible values:
+
+* A comma-separated list of physical CPU numbers that instance VCPUs can be
+  allocated from. Each element should be either a single CPU number, a range of
+  CPU numbers, or a caret followed by a CPU number to be excluded from a
+  previous range. For example::
 
     cpu_shared_set = "4-12,^8,15"
+
+Related options:
+
+* ``[compute] cpu_dedicated_set``: This is the counterpart option for defining
+  where ``PCPU`` resources should be allocated from.
+* ``vcpu_pin_set``: A legacy option whose definition may change the behavior of
+  this option.
+"""),
+   cfg.StrOpt('cpu_dedicated_set',
+        help="""
+Mask of host CPUs that can be used for ``PCPU`` resources.
+
+The behavior of this option affects the behavior of the deprecated
+``vcpu_pin_set`` option.
+
+* If this option is defined, defining ``vcpu_pin_set`` will result in an error.
+
+* If this option is not defined, ``vcpu_pin_set`` will be used to determine
+  inventory for ``VCPU`` resources and to limit the host CPUs that both pinned
+  and unpinned instances can be scheduled to.
+
+This behavior will be simplified in a future release when ``vcpu_pin_set`` is
+removed.
+
+Possible values:
+
+* A comma-separated list of physical CPU numbers that instance VCPUs can be
+  allocated from. Each element should be either a single CPU number, a range of
+  CPU numbers, or a caret followed by a CPU number to be excluded from a
+  previous range. For example::
+
+    cpu_dedicated_set = "4-12,^8,15"
+
+Related options:
+
+* ``[compute] cpu_shared_set``: This is the counterpart option for defining
+  where ``VCPU`` resources should be allocated from.
+* ``vcpu_pin_set``: A legacy option that this option partially replaces.
 """),
     cfg.BoolOpt('live_migration_wait_for_vif_plug',
         default=True,
@@ -1019,7 +1134,7 @@ Related options:
 Interval (in seconds) between block device allocation retries on failures.
 
 This option allows the user to specify the time interval between
-consecutive retries. 'block_device_allocate_retries' option specifies
+consecutive retries. The ``block_device_allocate_retries`` option specifies
 the maximum number of retries.
 
 Possible values:
@@ -1029,7 +1144,7 @@ Possible values:
 
 Related options:
 
-* ``block_device_allocate_retries`` in compute_manager_opts group.
+* ``block_device_allocate_retries`` - controls the number of retries
 """),
     cfg.IntOpt('scheduler_instance_sync_interval',
         default=120,
@@ -1269,7 +1384,7 @@ registered in the database as an enabled service. Sometimes it can be useful
 to register new compute services in disabled state and then enabled them at a
 later point in time. This option only sets this behavior for nova-compute
 services, it does not auto-disable other services like nova-conductor,
-nova-scheduler, nova-consoleauth, or nova-osapi_compute.
+nova-scheduler, or nova-osapi_compute.
 
 Possible values:
 

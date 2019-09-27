@@ -46,6 +46,7 @@ import sqlalchemy
 from sqlalchemy.engine import reflection
 import sqlalchemy.exc
 from sqlalchemy.sql import null
+import testtools
 
 from nova.db import migration
 from nova.db.sqlalchemy import migrate_repo
@@ -180,6 +181,10 @@ class NovaMigrationsCheckers(test_migrations.ModelsMigrationsSync,
         ocata_placeholders = list(range(348, 358))
         pike_placeholders = list(range(363, 373))
         queens_placeholders = list(range(379, 389))
+        # We forgot to add the rocky placeholder. We've also switched to 5
+        # placeholders per cycle since the rate of DB changes has dropped
+        # significantly
+        stein_placeholders = list(range(392, 397))
 
         return (special +
                 havana_placeholders +
@@ -191,7 +196,8 @@ class NovaMigrationsCheckers(test_migrations.ModelsMigrationsSync,
                 newton_placeholders +
                 ocata_placeholders +
                 pike_placeholders +
-                queens_placeholders)
+                queens_placeholders +
+                stein_placeholders)
 
     def migrate_up(self, version, with_data=False):
         if with_data:
@@ -782,7 +788,10 @@ class NovaMigrationsCheckers(test_migrations.ModelsMigrationsSync,
         def removed_column(element):
             # Define a whitelist of columns that would be removed from the
             # DB at a later release.
-            column_whitelist = {'instances': ['internal_id']}
+            # NOTE(Luyao) The vpmems column was added to the schema in train,
+            # and removed from the model in train.
+            column_whitelist = {'instances': ['internal_id'],
+                                'instance_extra': ['vpmems']}
 
             if element[0] != 'remove_column':
                 return False
@@ -1016,16 +1025,46 @@ class NovaMigrationsCheckers(test_migrations.ModelsMigrationsSync,
         self.assertColumnExists(engine, 'shadow_block_device_mapping',
                                 'volume_type')
 
+    def _check_397(self, engine, data):
+        for prefix in ('', 'shadow_'):
+            self.assertColumnExists(
+                engine, '%smigrations' % prefix, 'cross_cell_move')
+
+    def _check_398(self, engine, data):
+        self.assertColumnExists(engine, 'instance_extra', 'vpmems')
+        self.assertColumnExists(engine, 'shadow_instance_extra', 'vpmems')
+
+    def _check_399(self, engine, data):
+        for prefix in ('', 'shadow_'):
+            self.assertColumnExists(
+                engine, '%sinstances' % prefix, 'hidden')
+
+    def _check_400(self, engine, data):
+        # NOTE(mriedem): This is a dummy migration that just does a consistency
+        # check. The actual test for 400 is in TestServicesUUIDCheck.
+        pass
+
+    def _check_401(self, engine, data):
+        for prefix in ('', 'shadow_'):
+            self.assertColumnExists(
+                engine, '%smigrations' % prefix, 'user_id')
+            self.assertColumnExists(
+                engine, '%smigrations' % prefix, 'project_id')
+
+    def _check_402(self, engine, data):
+        self.assertColumnExists(engine, 'instance_extra', 'resources')
+        self.assertColumnExists(engine, 'shadow_instance_extra', 'resources')
+
 
 class TestNovaMigrationsSQLite(NovaMigrationsCheckers,
                                test_fixtures.OpportunisticDBTestMixin,
-                               test.NoDBTestCase):
+                               testtools.TestCase):
     pass
 
 
 class TestNovaMigrationsMySQL(NovaMigrationsCheckers,
                               test_fixtures.OpportunisticDBTestMixin,
-                              test.NoDBTestCase):
+                              testtools.TestCase):
     FIXTURE = test_fixtures.MySQLOpportunisticFixture
 
     def test_innodb_tables(self):
@@ -1053,7 +1092,7 @@ class TestNovaMigrationsMySQL(NovaMigrationsCheckers,
 
 class TestNovaMigrationsPostgreSQL(NovaMigrationsCheckers,
                                    test_fixtures.OpportunisticDBTestMixin,
-                                   test.NoDBTestCase):
+                                   testtools.TestCase):
     FIXTURE = test_fixtures.PostgresqlOpportunisticFixture
 
 

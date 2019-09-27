@@ -12,14 +12,13 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-
-import math
-
 import mock
 import os_resource_classes as orc
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import units
 
+from nova.compute import provider_tree
+from nova import conf
 from nova import exception
 from nova.objects import fields as obj_fields
 from nova.tests.unit.virt.xenapi import stubs
@@ -28,6 +27,8 @@ from nova.virt import fake
 from nova.virt import xenapi
 from nova.virt.xenapi import driver as xenapi_driver
 from nova.virt.xenapi import host
+
+CONF = conf.CONF
 
 
 class XenAPIDriverTestCase(stubs.XenAPITestBaseNoDB):
@@ -100,19 +101,6 @@ class XenAPIDriverTestCase(stubs.XenAPITestBaseNoDB):
             self.assertEqual('somename', resources['hypervisor_hostname'])
             self.assertEqual(1, resources['disk_available_least'])
             mock_get.assert_called_once_with(refresh=True)
-
-    def test_overhead(self):
-        driver = self._get_driver()
-        instance = {'memory_mb': 30720, 'vcpus': 4}
-
-        # expected memory overhead per:
-        # https://wiki.openstack.org/wiki/XenServer/Overhead
-        expected = ((instance['memory_mb'] * xenapi_driver.OVERHEAD_PER_MB) +
-                    (instance['vcpus'] * xenapi_driver.OVERHEAD_PER_VCPU) +
-                    xenapi_driver.OVERHEAD_BASE)
-        expected = math.ceil(expected)
-        overhead = driver.estimate_instance_overhead(instance)
-        self.assertEqual(expected, overhead['memory_mb'])
 
     def test_set_bootable(self):
         driver = self._get_driver()
@@ -250,25 +238,40 @@ class XenAPIDriverTestCase(stubs.XenAPITestBaseNoDB):
                                               'fake_block_device')
 
     @mock.patch.object(host.HostState, 'get_host_stats')
-    def test_get_inventory(self, mock_get_stats):
+    def test_update_provider_tree(self, mock_get_stats):
+        # Add a wrinkle such that cpu_allocation_ratio is configured to a
+        # non-default value and overrides initial_cpu_allocation_ratio.
+        self.flags(cpu_allocation_ratio=1.0)
+        # Add a wrinkle such that reserved_host_memory_mb is set to a
+        # non-default value.
+        self.flags(reserved_host_memory_mb=2048)
+        expected_reserved_disk = (
+            xenapi_driver.XenAPIDriver._get_reserved_host_disk_gb_from_config()
+        )
         expected_inv = {
             orc.VCPU: {
                 'total': 50,
                 'min_unit': 1,
                 'max_unit': 50,
                 'step_size': 1,
+                'allocation_ratio': CONF.cpu_allocation_ratio,
+                'reserved': CONF.reserved_host_cpus,
             },
             orc.MEMORY_MB: {
                 'total': 3,
                 'min_unit': 1,
                 'max_unit': 3,
                 'step_size': 1,
+                'allocation_ratio': CONF.initial_ram_allocation_ratio,
+                'reserved': CONF.reserved_host_memory_mb,
             },
             orc.DISK_GB: {
                 'total': 5,
                 'min_unit': 1,
                 'max_unit': 5,
                 'step_size': 1,
+                'allocation_ratio': CONF.initial_disk_allocation_ratio,
+                'reserved': expected_reserved_disk,
             },
             orc.VGPU: {
                 'total': 7,
@@ -280,20 +283,27 @@ class XenAPIDriverTestCase(stubs.XenAPITestBaseNoDB):
 
         mock_get_stats.side_effect = self.host_stats
         drv = self._get_driver()
-        inv = drv.get_inventory(mock.sentinel.nodename)
-
+        pt = provider_tree.ProviderTree()
+        nodename = 'fake-node'
+        pt.new_root(nodename, uuids.rp_uuid)
+        drv.update_provider_tree(pt, nodename)
+        inv = pt.data(nodename).inventory
         mock_get_stats.assert_called_once_with(refresh=True)
         self.assertEqual(expected_inv, inv)
 
     @mock.patch.object(host.HostState, 'get_host_stats')
-    def test_get_inventory_no_vgpu(self, mock_get_stats):
+    def test_update_provider_tree_no_vgpu(self, mock_get_stats):
         # Test when there are no vGPU resources in the inventory.
         host_stats = self.host_stats()
         host_stats.update(vgpu_stats={})
         mock_get_stats.return_value = host_stats
 
         drv = self._get_driver()
-        inv = drv.get_inventory(mock.sentinel.nodename)
+        pt = provider_tree.ProviderTree()
+        nodename = 'fake-node'
+        pt.new_root(nodename, uuids.rp_uuid)
+        drv.update_provider_tree(pt, nodename)
+        inv = pt.data(nodename).inventory
 
         # check if the inventory data does NOT contain VGPU.
         self.assertNotIn(orc.VGPU, inv)

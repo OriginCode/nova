@@ -23,7 +23,7 @@ from nova.api.openstack import common
 from nova.api.openstack.compute.schemas import attach_interfaces
 from nova.api.openstack import wsgi
 from nova.api import validation
-from nova import compute
+from nova.compute import api as compute
 from nova import exception
 from nova.i18n import _
 from nova import network
@@ -59,9 +59,9 @@ class InterfaceAttachmentController(wsgi.Controller):
     """The interface attachment API controller for the OpenStack API."""
 
     def __init__(self):
+        super(InterfaceAttachmentController, self).__init__()
         self.compute_api = compute.API()
         self.network_api = network.API()
-        super(InterfaceAttachmentController, self).__init__()
 
     @wsgi.expected_errors((404, 501))
     def index(self, req, server_id):

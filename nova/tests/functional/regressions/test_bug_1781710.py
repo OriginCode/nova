@@ -11,21 +11,12 @@
 # under the License.
 
 from nova.scheduler import filter_scheduler
-from nova.scheduler import weights
 from nova import test
 from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import integrated_helpers
 from nova.tests.unit.image import fake as image_fake
 from nova.tests.unit import policy_fixture
-from nova.virt import fake
-
-
-class HostNameWeigher(weights.BaseHostWeigher):
-    def _weigh_object(self, host_state, weight_properties):
-        """Prefer host1 over host2."""
-        weights = {'host1': 100, 'host2': 1}
-        return weights.get(host_state.host, 0)
 
 
 class AntiAffinityMultiCreateRequest(test.TestCase,
@@ -69,18 +60,13 @@ class AntiAffinityMultiCreateRequest(test.TestCase,
         self.admin_api.microversion = 'latest'
         self.api.microversion = 'latest'
 
-        # Add our custom weigher.
-        self.flags(weight_classes=[__name__ + '.HostNameWeigher'],
-                   group='filter_scheduler')
+        self.useFixture(nova_fixtures.HostNameWeigherFixture())
         # disable late check on compute node to mimic devstack.
         self.flags(disable_group_policy_check_upcall=True,
                    group='workarounds')
         self.start_service('scheduler')
 
-        fake.set_nodes(['host1'])
-        self.addCleanup(fake.restore_nodes)
         self.start_service('compute', host='host1')
-        fake.set_nodes(['host2'])
         self.start_service('compute', host='host2')
 
     def test_anti_affinity_multi_create(self):

@@ -90,6 +90,24 @@ IPV4Network = fields.IPV4Network
 IPV6Network = fields.IPV6Network
 
 
+class ResourceClass(fields.StringPattern):
+
+    PATTERN = r"^[A-Z0-9_]+$"
+    _REGEX = re.compile(PATTERN)
+
+    @staticmethod
+    def coerce(obj, attr, value):
+        if isinstance(value, six.string_types):
+            uppered = value.upper()
+            if ResourceClass._REGEX.match(uppered):
+                return uppered
+        raise ValueError(_("Malformed Resource Class %s") % value)
+
+
+class ResourceClassField(AutoTypedField):
+    AUTO_TYPE = ResourceClass()
+
+
 class SetOfStringsField(AutoTypedField):
     AUTO_TYPE = Set(fields.String())
 
@@ -319,6 +337,8 @@ class CPUFeaturePolicy(BaseNovaEnum):
 
 class DiskBus(BaseNovaEnum):
 
+    # NOTE(aspiers): If you change this, don't forget to update the
+    # docs and metadata for hw_*_bus in glance.
     FDC = "fdc"
     IDE = "ide"
     SATA = "sata"
@@ -505,8 +525,11 @@ class VideoModel(BaseNovaEnum):
     VGA = "vga"
     VMVGA = "vmvga"
     XEN = "xen"
+    VIRTIO = 'virtio'
+    GOP = 'gop'
+    NONE = 'none'
 
-    ALL = (CIRRUS, QXL, VGA, VMVGA, XEN)
+    ALL = (CIRRUS, QXL, VGA, VMVGA, XEN, VIRTIO, GOP, NONE)
 
 
 class VIFModel(BaseNovaEnum):
@@ -765,7 +788,11 @@ class NotificationSource(BaseNovaEnum):
     CONDUCTOR = 'nova-conductor'
     SCHEDULER = 'nova-scheduler'
     NETWORK = 'nova-network'
+    # TODO(stephenfin): Remove 'CONSOLEAUTH' when 'NotificationPublisher' is
+    # updated to version 3.0
     CONSOLEAUTH = 'nova-consoleauth'
+    # TODO(stephenfin): Remove when 'NotificationPublisher' object version is
+    # bumped to 3.0
     CELLS = 'nova-cells'
     CONSOLE = 'nova-console'
     METADATA = 'nova-metadata'
@@ -1252,6 +1279,10 @@ class ListOfListsOfStringsField(fields.AutoTypedField):
 
 
 # TODO(mriedem): Replace this with the version from oslo.versiondobjects
-# when https://review.openstack.org/#/c/634700/ is released.
+# when https://review.opendev.org/#/c/634700/ is released.
 class ListOfUUIDField(AutoTypedField):
     AUTO_TYPE = List(fields.UUID())
+
+
+class DictOfSetOfIntegersField(fields.AutoTypedField):
+    AUTO_TYPE = Dict(Set(fields.Integer()))

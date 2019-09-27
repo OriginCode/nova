@@ -21,6 +21,7 @@
 import copy
 import datetime
 
+from dateutil import parser as dateutil_parser
 import iso8601
 import mock
 import netaddr
@@ -138,6 +139,24 @@ def _quota_create(context, project_id, user_id):
                                                     user_id=user_id).hard_limit
 
 
+@sqlalchemy_api.pick_context_manager_reader
+def _assert_instance_id_mapping(_ctxt, tc, inst_uuid, expected_existing=False):
+    # NOTE(mriedem): We can't use ec2_instance_get_by_uuid to assert
+    # the instance_id_mappings record is gone because it hard-codes
+    # read_deleted='yes' and will read the soft-deleted record. So we
+    # do the model_query directly here. See bug 1061166.
+    inst_id_mapping = sqlalchemy_api.model_query(
+        _ctxt, models.InstanceIdMapping).filter_by(uuid=inst_uuid).first()
+    if not expected_existing:
+        tc.assertFalse(inst_id_mapping,
+                       'instance_id_mapping not deleted for '
+                       'instance: %s' % inst_uuid)
+    else:
+        tc.assertTrue(inst_id_mapping,
+                      'instance_id_mapping not found for '
+                      'instance: %s' % inst_uuid)
+
+
 class DbTestCase(test.TestCase):
     def setUp(self):
         super(DbTestCase, self).setUp()
@@ -170,6 +189,36 @@ class DbTestCase(test.TestCase):
         db.instance_system_metadata_update(self.context, instance_uuid,
                                            sys_meta, False)
         return meta, sys_meta
+
+
+class HelperTestCase(test.TestCase):
+    @mock.patch.object(sqlalchemy_api, 'joinedload')
+    def test_joinedload_helper(self, mock_jl):
+        query = sqlalchemy_api._joinedload_all('foo.bar.baz')
+
+        # We call sqlalchemy.orm.joinedload() on the first element
+        mock_jl.assert_called_once_with('foo')
+
+        # Then first.joinedload(second)
+        column2 = mock_jl.return_value
+        column2.joinedload.assert_called_once_with('bar')
+
+        # Then second.joinedload(third)
+        column3 = column2.joinedload.return_value
+        column3.joinedload.assert_called_once_with('baz')
+
+        self.assertEqual(column3.joinedload.return_value, query)
+
+    @mock.patch.object(sqlalchemy_api, 'joinedload')
+    def test_joinedload_helper_single(self, mock_jl):
+        query = sqlalchemy_api._joinedload_all('foo')
+
+        # We call sqlalchemy.orm.joinedload() on the first element
+        mock_jl.assert_called_once_with('foo')
+
+        # We should have gotten back just the result of the joinedload()
+        # call if there were no other elements
+        self.assertEqual(mock_jl.return_value, query)
 
 
 class DecoratorTestCase(test.TestCase):
@@ -308,13 +357,16 @@ class UnsupportedDbRegexpTestCase(DbTestCase):
                           self.context, {'display_name': '%test%'},
                           marker=uuidsentinel.uuid1)
 
-    def test_instance_get_all_uuids_by_host(self, mock_get_regexp):
+    def test_instance_get_all_uuids_by_hosts(self, mock_get_regexp):
         test1 = self.create_instance_with_args(display_name='test1')
         test2 = self.create_instance_with_args(display_name='test2')
         test3 = self.create_instance_with_args(display_name='test3')
         uuids = [i.uuid for i in (test1, test2, test3)]
-        found_uuids = db.instance_get_all_uuids_by_host(self.context,
-                                                        test1.host)
+        results = db.instance_get_all_uuids_by_hosts(
+            self.context, [test1.host])
+        self.assertEqual(1, len(results))
+        self.assertIn(test1.host, results)
+        found_uuids = results[test1.host]
         self.assertEqual(sorted(uuids), sorted(found_uuids))
 
     def _assert_equals_inst_order(self, correct_order, filters,
@@ -772,21 +824,33 @@ class SqlAlchemyDbApiTestCase(DbTestCase):
         self.assertNotIn('info_cache', instance)
         self.assertNotIn('security_groups', instance)
 
-    def test_instance_get_all_uuids_by_host(self):
+    def test_instance_get_all_uuids_by_hosts(self):
         ctxt = context.get_admin_context()
         self.create_instance_with_args()
         self.create_instance_with_args()
         self.create_instance_with_args(host='host2')
 
         @sqlalchemy_api.pick_context_manager_reader
-        def test(context):
-            return sqlalchemy_api._instance_get_all_uuids_by_host(
-                context, 'host1')
+        def test1(context):
+            return sqlalchemy_api._instance_get_all_uuids_by_hosts(
+                context, ['host1'])
 
-        result = test(ctxt)
+        @sqlalchemy_api.pick_context_manager_reader
+        def test2(context):
+            return sqlalchemy_api._instance_get_all_uuids_by_hosts(
+                context, ['host1', 'host2'])
+
+        result = test1(ctxt)
+
+        self.assertEqual(1, len(result))
+        self.assertEqual(2, len(result['host1']))
+        self.assertEqual(six.text_type, type(result['host1'][0]))
+
+        result = test2(ctxt)
 
         self.assertEqual(2, len(result))
-        self.assertEqual(six.text_type, type(result[0]))
+        self.assertEqual(2, len(result['host1']))
+        self.assertEqual(1, len(result['host2']))
 
     @mock.patch('oslo_utils.uuidutils.generate_uuid')
     def test_instance_get_active_by_window_joined_paging(self, mock_uuids):
@@ -912,6 +976,19 @@ class SqlAlchemyDbApiTestCase(DbTestCase):
                               self.context,
                               filters={},
                               sort_keys=keys)
+
+    def test_instance_get_all_by_filters_sort_hidden(self):
+        """Tests the default filtering behavior of the hidden column."""
+        # Create a hidden instance record.
+        self.create_instance_with_args(hidden=True)
+        # Get instances which by default will filter out the hidden instance.
+        instances = sqlalchemy_api.instance_get_all_by_filters_sort(
+            self.context, filters={}, limit=10)
+        self.assertEqual(0, len(instances))
+        # Now explicitly filter for hidden instances.
+        instances = sqlalchemy_api.instance_get_all_by_filters_sort(
+            self.context, filters={'hidden': True}, limit=10)
+        self.assertEqual(1, len(instances))
 
 
 class ProcessSortParamTestCase(test.TestCase):
@@ -1046,7 +1123,8 @@ class MigrationTestCase(test.TestCase):
     def _create(self, status='migrating', source_compute='host1',
                 source_node='a', dest_compute='host2', dest_node='b',
                 system_metadata=None, migration_type=None, uuid=None,
-                created_at=None, updated_at=None):
+                created_at=None, updated_at=None, user_id=None,
+                project_id=None):
 
         values = {'host': source_compute}
         instance = db.instance_create(self.ctxt, values)
@@ -1062,6 +1140,10 @@ class MigrationTestCase(test.TestCase):
             values['created_at'] = created_at
         if updated_at:
             values['updated_at'] = updated_at
+        if user_id:
+            values['user_id'] = user_id
+        if project_id:
+            values['project_id'] = project_id
         db.migration_create(self.ctxt, values)
         return values
 
@@ -1214,6 +1296,54 @@ class MigrationTestCase(test.TestCase):
             self.assertEqual(1, len(instance_migrations))
             self.assertEqual(migration['instance_uuid'],
                              instance_migrations[0]['instance_uuid'])
+
+    def test_get_migrations_by_filters_user_id(self):
+        # Create two migrations with different user_id
+        user_id1 = "fake_user_id"
+        self._create(user_id=user_id1)
+        user_id2 = "other_fake_user_id"
+        self._create(user_id=user_id2)
+        # Filter on only the first user_id
+        filters = {"user_id": user_id1}
+        migrations = db.migration_get_all_by_filters(self.ctxt, filters)
+        # We should only get one migration back because we filtered on only
+        # one of the two different user_id
+        self.assertEqual(1, len(migrations))
+        for migration in migrations:
+            self.assertEqual(filters['user_id'], migration['user_id'])
+
+    def test_get_migrations_by_filters_project_id(self):
+        # Create two migrations with different project_id
+        project_id1 = "fake_project_id"
+        self._create(project_id=project_id1)
+        project_id2 = "other_fake_project_id"
+        self._create(project_id=project_id2)
+        # Filter on only the first project_id
+        filters = {"project_id": project_id1}
+        migrations = db.migration_get_all_by_filters(self.ctxt, filters)
+        # We should only get one migration back because we filtered on only
+        # one of the two different project_id
+        self.assertEqual(1, len(migrations))
+        for migration in migrations:
+            self.assertEqual(filters['project_id'], migration['project_id'])
+
+    def test_get_migrations_by_filters_user_id_and_project_id(self):
+        # Create two migrations with different user_id and project_id
+        user_id1 = "fake_user_id"
+        project_id1 = "fake_project_id"
+        self._create(user_id=user_id1, project_id=project_id1)
+        user_id2 = "other_fake_user_id"
+        project_id2 = "other_fake_project_id"
+        self._create(user_id=user_id2, project_id=project_id2)
+        # Filter on only the first user_id and project_id
+        filters = {"user_id": user_id1, "project_id": project_id1}
+        migrations = db.migration_get_all_by_filters(self.ctxt, filters)
+        # We should only get one migration back because we filtered on only
+        # one of the two different user_id and project_id
+        self.assertEqual(1, len(migrations))
+        for migration in migrations:
+            self.assertEqual(filters['user_id'], migration['user_id'])
+            self.assertEqual(filters['project_id'], migration['project_id'])
 
     def test_migration_get_unconfirmed_by_dest_compute(self):
         # Ensure no migrations are returned.
@@ -1402,7 +1532,7 @@ class ModelsObjectComparatorMixin(object):
                          "Keys mismatch: %s" %
                           str(set(obj1.keys()) ^ set(obj2.keys())))
         for key, value in obj1.items():
-            self.assertEqual(value, obj2[key])
+            self.assertEqual(value, obj2[key], "Key mismatch: %s" % key)
 
     def _assertEqualListsOfObjects(self, objs1, objs2, ignored_keys=None):
         obj_to_dict = lambda o: self._dict_from_object(o, ignored_keys)
@@ -2219,6 +2349,19 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
                                                 {'host': 'host1'})
         self._assertEqualListsOfInstances([instance], result)
 
+    def test_instance_get_all_by_filters_locked_key_true(self):
+        instance = self.create_instance_with_args(locked=True)
+        self.create_instance_with_args(locked=False)
+        result = db.instance_get_all_by_filters(self.ctxt,
+                                                {'locked': True})
+        self._assertEqualListsOfInstances([instance], result)
+
+    def test_instance_get_all_by_filters_locked_key_false(self):
+        self.create_instance_with_args(locked=True)
+        result = db.instance_get_all_by_filters(self.ctxt,
+                                                {'locked': False})
+        self._assertEqualListsOfInstances([], result)
+
     def test_instance_get_all_by_filters_metadata(self):
         instance = self.create_instance_with_args(metadata={'foo': 'bar'})
         self.create_instance_with_args()
@@ -2574,6 +2717,21 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
 
         self.assertTrue(instance.deleted)
         self.assertEqual(0, len(migrations))
+
+    def test_delete_virtual_interfaces_on_instance_destroy(self):
+        # Create the instance.
+        ctxt = context.get_admin_context()
+        uuid = uuidsentinel.uuid1
+        db.instance_create(ctxt, {'uuid': uuid})
+        # Create the VirtualInterface.
+        db.virtual_interface_create(ctxt, {'instance_uuid': uuid})
+        # Make sure the vif is tied to the instance.
+        vifs = db.virtual_interface_get_by_instance(ctxt, uuid)
+        self.assertEqual(1, len(vifs))
+        # Destroy the instance and verify the vif is gone as well.
+        db.instance_destroy(ctxt, uuid)
+        self.assertEqual(
+            0, len(db.virtual_interface_get_by_instance(ctxt, uuid)))
 
     def test_instance_update_and_get_original(self):
         instance = self.create_instance_with_args(vm_state='building')
@@ -2963,19 +3121,7 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
         self.assertEqual([], db.instance_tag_get_by_instance_uuid(
             ctxt, inst_uuid))
 
-        @sqlalchemy_api.pick_context_manager_reader
-        def _assert_instance_id_mapping(_ctxt):
-            # NOTE(mriedem): We can't use ec2_instance_get_by_uuid to assert
-            # the instance_id_mappings record is gone because it hard-codes
-            # read_deleted='yes' and will read the soft-deleted record. So we
-            # do the model_query directly here. See bug 1061166.
-            inst_id_mapping = sqlalchemy_api.model_query(
-                _ctxt, models.InstanceIdMapping).filter_by(
-                uuid=inst_uuid).first()
-            self.assertFalse(inst_id_mapping,
-                             'instance_id_mapping not deleted for '
-                             'instance: %s' % inst_uuid)
-        _assert_instance_id_mapping(ctxt)
+        _assert_instance_id_mapping(ctxt, self, inst_uuid)
         ctxt.read_deleted = 'yes'
         self.assertEqual(values['system_metadata'],
                          db.instance_system_metadata_get(ctxt, inst_uuid))
@@ -2986,6 +3132,139 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
         db.instance_destroy(ctxt, instance['uuid'])
         self.assertRaises(exception.InstanceNotFound,
                           db.instance_destroy, ctxt, instance['uuid'])
+
+    def test_instance_destroy_hard(self):
+        ctxt = context.get_admin_context()
+        instance = self.create_instance_with_args()
+        uuid = instance['uuid']
+        utc_now = timeutils.utcnow()
+
+        action_values = {
+            'action': 'run_instance',
+            'instance_uuid': uuid,
+            'request_id': ctxt.request_id,
+            'user_id': ctxt.user_id,
+            'project_id': ctxt.project_id,
+            'start_time': utc_now,
+            'updated_at': utc_now,
+            'message': 'action-message'
+        }
+        action = db.action_start(ctxt, action_values)
+
+        action_event_values = {
+            'event': 'schedule',
+            'action_id': action['id'],
+            'instance_uuid': uuid,
+            'start_time': utc_now,
+            'request_id': ctxt.request_id,
+            'host': 'fake-host',
+        }
+        db.action_event_start(ctxt, action_event_values)
+
+        security_group_values = {
+            'name': 'fake_sec_group',
+            'user_id': ctxt.user_id,
+            'project_id': ctxt.project_id,
+            'instances': []
+            }
+        security_group = db.security_group_create(ctxt, security_group_values)
+        db.instance_add_security_group(ctxt, uuid, security_group['id'])
+
+        instance_fault_values = {
+            'message': 'message',
+            'details': 'detail',
+            'instance_uuid': uuid,
+            'code': 404,
+            'host': 'localhost'
+        }
+        db.instance_fault_create(ctxt, instance_fault_values)
+
+        bdm_values = {
+            'instance_uuid': uuid,
+            'device_name': '/dev/vda',
+            'source_type': 'volume',
+            'destination_type': 'volume',
+        }
+        block_dev = block_device.BlockDeviceDict(bdm_values)
+        db.block_device_mapping_create(self.ctxt, block_dev, legacy=False)
+
+        # Crate a second BDM that is soft-deleted to simulate that the
+        # volume was detached and the BDM was deleted before the instance
+        # was hard destroyed.
+        bdm2_values = {
+            'instance_uuid': uuid,
+            'device_name': '/dev/vdb',
+            'source_type': 'volume',
+            'destination_type': 'volume',
+        }
+        block_dev2 = block_device.BlockDeviceDict(bdm2_values)
+        bdm2 = db.block_device_mapping_create(
+            self.ctxt, block_dev2, legacy=False)
+        db.block_device_mapping_destroy(self.ctxt, bdm2.id)
+
+        migration_values = {
+            "status": "finished",
+            "instance_uuid": uuid,
+            "dest_compute": "fake_host2"
+        }
+        db.migration_create(self.ctxt, migration_values)
+
+        db.virtual_interface_create(ctxt, {'instance_uuid': uuid})
+
+        pool_values = {
+            'address': '192.168.10.10',
+            'username': 'user1',
+            'password': 'passwd1',
+            'console_type': 'type1',
+            'public_hostname': 'public_host1',
+            'host': 'host1',
+            'compute_host': 'compute_host1',
+        }
+        console_pool = db.console_pool_create(ctxt, pool_values)
+        console_values = {
+            'instance_name': instance['name'],
+            'instance_uuid': uuid,
+            'password': 'pass',
+            'port': 7878,
+            'pool_id': console_pool['id']
+        }
+        db.console_create(self.ctxt, console_values)
+
+        # Hard delete the instance
+        db.instance_destroy(ctxt, uuid, hard_delete=True)
+
+        # Check that related records are deleted
+        with utils.temporary_mutation(ctxt, read_deleted="yes"):
+            # Assert that all information related to the instance is not found
+            # even using a context that can read soft deleted records.
+            self.assertEqual(0, len(db.actions_get(ctxt, uuid)))
+            self.assertEqual(0, len(db.action_events_get(ctxt, action['id'])))
+            db_sg = db.security_group_get_by_name(
+                ctxt, ctxt.project_id, security_group_values['name'])
+            self.assertEqual(0, len(db_sg['instances']))
+            instance_faults = db.instance_fault_get_by_instance_uuids(
+                ctxt, [uuid])
+            self.assertEqual(0, len(instance_faults[uuid]))
+            inst_bdms = db.block_device_mapping_get_all_by_instance(ctxt, uuid)
+            self.assertEqual(0, len(inst_bdms))
+            filters = {"instance_uuid": uuid}
+            inst_migrations = db.migration_get_all_by_filters(ctxt, filters)
+            self.assertEqual(0, len(inst_migrations))
+            vifs = db.virtual_interface_get_by_instance(ctxt, uuid)
+            self.assertEqual(0, len(vifs))
+            self.assertIsNone(db.instance_info_cache_get(ctxt, uuid))
+            self.assertEqual({}, db.instance_metadata_get(ctxt, uuid))
+            self.assertIsNone(db.instance_extra_get_by_instance_uuid(
+                ctxt, uuid))
+            system_meta = db.instance_system_metadata_get(ctxt, uuid)
+            self.assertEqual({}, system_meta)
+            _assert_instance_id_mapping(ctxt, self, uuid)
+            self.assertRaises(exception.InstanceNotFound,
+                              db.instance_destroy, ctxt, uuid)
+            # NOTE(ttsiouts): Should these also be valid?
+            # instance_consoles = db.console_get_all_by_instance(ctxt, uuid)
+            # self.assertEqual(0, len(instance_consoles))
+            # Also FixedIp has the instance_uuid as a foreign key
 
     def test_check_instance_exists(self):
         instance = self.create_instance_with_args()
@@ -3093,6 +3372,7 @@ class InstanceExtraTestCase(test.TestCase):
         db.instance_extra_update_by_uuid(self.ctxt, self.instance['uuid'],
                                          {'numa_topology': 'changed',
                                           'trusted_certs': "['123', 'foo']",
+                                          'resources': "['res0', 'res1']",
                                           })
         inst_extra = db.instance_extra_get_by_instance_uuid(
             self.ctxt, self.instance['uuid'])
@@ -3100,6 +3380,7 @@ class InstanceExtraTestCase(test.TestCase):
         # NOTE(jackie-truong): trusted_certs is stored as a Text type in
         # instance_extra and read as a list of strings
         self.assertEqual("['123', 'foo']", inst_extra.trusted_certs)
+        self.assertEqual("['res0', 'res1']", inst_extra.resources)
 
     def test_instance_extra_update_by_uuid_and_create(self):
         @sqlalchemy_api.pick_context_manager_writer
@@ -3124,12 +3405,14 @@ class InstanceExtraTestCase(test.TestCase):
     def test_instance_extra_get_with_columns(self):
         extra = db.instance_extra_get_by_instance_uuid(
             self.ctxt, self.instance['uuid'],
-            columns=['numa_topology', 'vcpu_model', 'trusted_certs'])
+            columns=['numa_topology', 'vcpu_model', 'trusted_certs',
+                     'resources'])
         self.assertRaises(SQLAlchemyError,
                           extra.__getitem__, 'pci_requests')
         self.assertIn('numa_topology', extra)
         self.assertIn('vcpu_model', extra)
         self.assertIn('trusted_certs', extra)
+        self.assertIn('resources', extra)
 
 
 class ServiceTestCase(test.TestCase, ModelsObjectComparatorMixin):
@@ -7014,6 +7297,18 @@ class ComputeNodeTestCase(test.TestCase, ModelsObjectComparatorMixin):
         new_stats = jsonutils.loads(self.item['stats'])
         self.assertEqual(self.stats, new_stats)
 
+    def test_compute_node_create_duplicate_host_hypervisor_hostname(self):
+        """Tests to make sure that DBDuplicateEntry is raised when trying to
+        create a duplicate ComputeNode with the same host and
+        hypervisor_hostname values but different uuid values. This makes
+        sure that when _compute_node_get_and_update_deleted returns None
+        the DBDuplicateEntry is re-raised.
+        """
+        other_node = dict(self.compute_node_dict)
+        other_node['uuid'] = uuidutils.generate_uuid()
+        self.assertRaises(db_exc.DBDuplicateEntry,
+                          db.compute_node_create, self.ctxt, other_node)
+
     def test_compute_node_get_all(self):
         nodes = db.compute_node_get_all(self.ctxt)
         self.assertEqual(1, len(nodes))
@@ -7248,6 +7543,28 @@ class ComputeNodeTestCase(test.TestCase, ModelsObjectComparatorMixin):
         self.assertRaises(exception.ComputeHostNotFound,
                           db.compute_node_get_by_host_and_nodename,
                           self.ctxt, 'host1', 'wrong')
+
+    def test_compute_node_get_by_nodename(self):
+        # Create another node on top of the same service
+        compute_node_same_host = self.compute_node_dict.copy()
+        compute_node_same_host['uuid'] = uuidutils.generate_uuid()
+        compute_node_same_host['stats'] = jsonutils.dumps(self.stats)
+        compute_node_same_host['hypervisor_hostname'] = 'node_2'
+
+        node = db.compute_node_create(self.ctxt, compute_node_same_host)
+
+        expected = node
+        result = db.compute_node_get_by_nodename(
+            self.ctxt, 'node_2')
+
+        self._assertEqualObjects(expected, result,
+                    ignored_keys=self._ignored_keys +
+                                 ['stats', 'service'])
+
+    def test_compute_node_get_by_nodename_not_found(self):
+        self.assertRaises(exception.ComputeHostNotFound,
+                          db.compute_node_get_by_nodename,
+                          self.ctxt, 'wrong')
 
     def test_compute_node_get(self):
         compute_node_id = self.item['id']
@@ -7733,104 +8050,6 @@ class ConsoleTestCase(test.TestCase, ModelsObjectComparatorMixin):
                           uuidsentinel.uuid2)
 
 
-class CellTestCase(test.TestCase, ModelsObjectComparatorMixin):
-
-    _ignored_keys = ['id', 'deleted', 'deleted_at', 'created_at', 'updated_at']
-
-    def setUp(self):
-        super(CellTestCase, self).setUp()
-        self.ctxt = context.get_admin_context()
-
-    def _get_cell_base_values(self):
-        return {
-            'name': 'myname',
-            'api_url': 'apiurl',
-            'transport_url': 'transporturl',
-            'weight_offset': 0.5,
-            'weight_scale': 1.5,
-            'is_parent': True,
-        }
-
-    def _cell_value_modify(self, value, step):
-        if isinstance(value, six.string_types):
-            return value + str(step)
-        elif isinstance(value, float):
-            return value + step + 0.6
-        elif isinstance(value, bool):
-            return bool(step % 2)
-        elif isinstance(value, int):
-            return value + step
-
-    def _create_cells(self):
-        test_values = []
-        for x in range(1, 4):
-            modified_val = {k: self._cell_value_modify(v, x)
-                        for k, v in self._get_cell_base_values().items()}
-            db.cell_create(self.ctxt, modified_val)
-            test_values.append(modified_val)
-        return test_values
-
-    def test_cell_create(self):
-        cell = db.cell_create(self.ctxt, self._get_cell_base_values())
-        self.assertIsNotNone(cell['id'])
-        self._assertEqualObjects(cell, self._get_cell_base_values(),
-                                 ignored_keys=self._ignored_keys)
-
-    def test_cell_update(self):
-        db.cell_create(self.ctxt, self._get_cell_base_values())
-        new_values = {
-            'api_url': 'apiurl1',
-            'transport_url': 'transporturl1',
-            'weight_offset': 0.6,
-            'weight_scale': 1.6,
-            'is_parent': False,
-        }
-        test_cellname = self._get_cell_base_values()['name']
-        updated_cell = db.cell_update(self.ctxt, test_cellname, new_values)
-        self._assertEqualObjects(updated_cell, new_values,
-                                 ignored_keys=self._ignored_keys + ['name'])
-
-    def test_cell_delete(self):
-        new_cells = self._create_cells()
-        for cell in new_cells:
-            test_cellname = cell['name']
-            db.cell_delete(self.ctxt, test_cellname)
-            self.assertRaises(exception.CellNotFound, db.cell_get, self.ctxt,
-                              test_cellname)
-
-    def test_cell_get(self):
-        new_cells = self._create_cells()
-        for cell in new_cells:
-            cell_get = db.cell_get(self.ctxt, cell['name'])
-            self._assertEqualObjects(cell_get, cell,
-                                     ignored_keys=self._ignored_keys)
-
-    def test_cell_get_all(self):
-        new_cells = self._create_cells()
-        cells = db.cell_get_all(self.ctxt)
-        self.assertEqual(len(new_cells), len(cells))
-        cells_byname = {newcell['name']: newcell
-                        for newcell in new_cells}
-        for cell in cells:
-            self._assertEqualObjects(cell, cells_byname[cell['name']],
-                                     self._ignored_keys)
-
-    def test_cell_get_not_found(self):
-        self._create_cells()
-        self.assertRaises(exception.CellNotFound, db.cell_get, self.ctxt,
-                          'cellnotinbase')
-
-    def test_cell_update_not_found(self):
-        self._create_cells()
-        self.assertRaises(exception.CellNotFound, db.cell_update, self.ctxt,
-                          'cellnotinbase', self._get_cell_base_values())
-
-    def test_cell_create_exists(self):
-        db.cell_create(self.ctxt, self._get_cell_base_values())
-        self.assertRaises(exception.CellExists, db.cell_create,
-                          self.ctxt, self._get_cell_base_values())
-
-
 class ConsolePoolTestCase(test.TestCase, ModelsObjectComparatorMixin):
     def setUp(self):
         super(ConsolePoolTestCase, self).setUp()
@@ -8095,8 +8314,7 @@ class BwUsageTestCase(test.TestCase, ModelsObjectComparatorMixin):
                             'last_ctr_in': 54321,
                             'last_ctr_out': 67890,
                             'last_refreshed': now}
-        result = db.bw_usage_update(
-            self.ctxt, update_cells=False, **updated_bw_usage)
+        result = db.bw_usage_update(self.ctxt, **updated_bw_usage)
 
         # check that only bw_usage with ID 1 was updated
         self.assertEqual(1, result['id'])
@@ -8258,6 +8476,7 @@ class ArchiveTestCase(test.TestCase, ModelsObjectComparatorMixin):
     def setUp(self):
         super(ArchiveTestCase, self).setUp()
         self.engine = get_engine()
+        self.metadata = MetaData(self.engine)
         self.conn = self.engine.connect()
         self.instance_id_mappings = models.InstanceIdMapping.__table__
         self.shadow_instance_id_mappings = sqlalchemyutils.get_table(
@@ -8274,6 +8493,12 @@ class ArchiveTestCase(test.TestCase, ModelsObjectComparatorMixin):
         self.instances = models.Instance.__table__
         self.shadow_instances = sqlalchemyutils.get_table(
             self.engine, "shadow_instances")
+        self.instance_actions = models.InstanceAction.__table__
+        self.shadow_instance_actions = sqlalchemyutils.get_table(
+            self.engine, "shadow_instance_actions")
+        self.instance_actions_events = models.InstanceActionEvent.__table__
+        self.shadow_instance_actions_events = sqlalchemyutils.get_table(
+            self.engine, "shadow_instance_actions_events")
         self.migrations = models.Migration.__table__
         self.shadow_migrations = sqlalchemyutils.get_table(
             self.engine, "shadow_migrations")
@@ -8334,7 +8559,7 @@ class ArchiveTestCase(test.TestCase, ModelsObjectComparatorMixin):
         # Set 4 to deleted
         update_statement = self.instance_id_mappings.update().\
                 where(self.instance_id_mappings.c.uuid.in_(self.uuidstrs[:4]))\
-                .values(deleted=1)
+                .values(deleted=1, deleted_at=timeutils.utcnow())
         self.conn.execute(update_statement)
         qiim = sql.select([self.instance_id_mappings]).where(self.
                                 instance_id_mappings.c.uuid.in_(self.uuidstrs))
@@ -8382,6 +8607,89 @@ class ArchiveTestCase(test.TestCase, ModelsObjectComparatorMixin):
         self._assert_shadow_tables_empty_except(
             'shadow_instance_id_mappings')
 
+    def test_archive_deleted_rows_before(self):
+        # Add 6 rows to table
+        for uuidstr in self.uuidstrs:
+            ins_stmt = self.instances.insert().values(uuid=uuidstr)
+            self.conn.execute(ins_stmt)
+            ins_stmt = self.instance_actions.insert().\
+                    values(instance_uuid=uuidstr)
+            result = self.conn.execute(ins_stmt)
+            instance_action_uuid = result.inserted_primary_key[0]
+            ins_stmt = self.instance_actions_events.insert().\
+                    values(action_id=instance_action_uuid)
+            self.conn.execute(ins_stmt)
+
+        # Set 1 to deleted before 2017-01-01
+        deleted_at = timeutils.parse_strtime('2017-01-01T00:00:00.0')
+        update_statement = self.instances.update().\
+                where(self.instances.c.uuid.in_(self.uuidstrs[0:1]))\
+                .values(deleted=1, deleted_at=deleted_at)
+        self.conn.execute(update_statement)
+
+        # Set 1 to deleted before 2017-01-02
+        deleted_at = timeutils.parse_strtime('2017-01-02T00:00:00.0')
+        update_statement = self.instances.update().\
+                where(self.instances.c.uuid.in_(self.uuidstrs[1:2]))\
+                .values(deleted=1, deleted_at=deleted_at)
+        self.conn.execute(update_statement)
+
+        # Set 2 to deleted now
+        update_statement = self.instances.update().\
+                where(self.instances.c.uuid.in_(self.uuidstrs[2:4]))\
+                .values(deleted=1, deleted_at=timeutils.utcnow())
+        self.conn.execute(update_statement)
+        qiim = sql.select([self.instances]).where(self.
+                                instances.c.uuid.in_(self.uuidstrs))
+        qsiim = sql.select([self.shadow_instances]).\
+                where(self.shadow_instances.c.uuid.in_(self.uuidstrs))
+
+        # Verify we have 6 in main
+        rows = self.conn.execute(qiim).fetchall()
+        self.assertEqual(len(rows), 6)
+        # Make sure 'before' comparison is for < not <=, nothing deleted
+        before_date = dateutil_parser.parse('2017-01-01', fuzzy=True)
+        _, uuids, _ = db.archive_deleted_rows(max_rows=1, before=before_date)
+        self.assertEqual([], uuids)
+
+        # Archive rows deleted before 2017-01-02
+        before_date = dateutil_parser.parse('2017-01-02', fuzzy=True)
+        results = db.archive_deleted_rows(max_rows=100, before=before_date)
+        expected = dict(instances=1,
+                        instance_actions=1,
+                        instance_actions_events=1)
+        self._assertEqualObjects(expected, results[0])
+
+        # Archive 1 row deleted before 2017-01-03. instance_action_events
+        # should be the table with row deleted due to FK contraints
+        before_date = dateutil_parser.parse('2017-01-03', fuzzy=True)
+        results = db.archive_deleted_rows(max_rows=1, before=before_date)
+        expected = dict(instance_actions_events=1)
+        self._assertEqualObjects(expected, results[0])
+        # Archive all other rows deleted before 2017-01-03. This should
+        # delete row in instance_actions, then row in instances due to FK
+        # constraints
+        results = db.archive_deleted_rows(max_rows=100, before=before_date)
+        expected = dict(instances=1, instance_actions=1)
+        self._assertEqualObjects(expected, results[0])
+
+        # Verify we have 4 left in main
+        rows = self.conn.execute(qiim).fetchall()
+        self.assertEqual(len(rows), 4)
+        # Verify we have 2 in shadow
+        rows = self.conn.execute(qsiim).fetchall()
+        self.assertEqual(len(rows), 2)
+
+        # Archive everything else, make sure default operation without
+        # before argument didn't break
+        results = db.archive_deleted_rows(max_rows=1000)
+        # Verify we have 2 left in main
+        rows = self.conn.execute(qiim).fetchall()
+        self.assertEqual(len(rows), 2)
+        # Verify we have 4 in shadow
+        rows = self.conn.execute(qsiim).fetchall()
+        self.assertEqual(len(rows), 4)
+
     def test_archive_deleted_rows_for_every_uuid_table(self):
         tablenames = []
         for model_class in six.itervalues(models.__dict__):
@@ -8416,7 +8724,7 @@ class ArchiveTestCase(test.TestCase, ModelsObjectComparatorMixin):
         # Set 4 to deleted
         update_statement = main_table.update().\
                 where(main_table.c.uuid.in_(self.uuidstrs[:4]))\
-                .values(deleted=1)
+                .values(deleted=1, deleted_at=timeutils.utcnow())
         self.conn.execute(update_statement)
         qmt = sql.select([main_table]).where(main_table.c.uuid.in_(
                                              self.uuidstrs))
@@ -8429,7 +8737,10 @@ class ArchiveTestCase(test.TestCase, ModelsObjectComparatorMixin):
         # Verify we have 0 in shadow
         self.assertEqual(len(rows), 0)
         # Archive 2 rows
-        sqlalchemy_api._archive_deleted_rows_for_table(tablename, max_rows=2)
+        sqlalchemy_api._archive_deleted_rows_for_table(self.metadata,
+                                                       tablename,
+                                                       max_rows=2,
+                                                       before=None)
         # Verify we have 4 left in main
         rows = self.conn.execute(qmt).fetchall()
         self.assertEqual(len(rows), 4)
@@ -8437,7 +8748,10 @@ class ArchiveTestCase(test.TestCase, ModelsObjectComparatorMixin):
         rows = self.conn.execute(qst).fetchall()
         self.assertEqual(len(rows), 2)
         # Archive 2 more rows
-        sqlalchemy_api._archive_deleted_rows_for_table(tablename, max_rows=2)
+        sqlalchemy_api._archive_deleted_rows_for_table(self.metadata,
+                                                       tablename,
+                                                       max_rows=2,
+                                                       before=None)
         # Verify we have 2 left in main
         rows = self.conn.execute(qmt).fetchall()
         self.assertEqual(len(rows), 2)
@@ -8445,7 +8759,10 @@ class ArchiveTestCase(test.TestCase, ModelsObjectComparatorMixin):
         rows = self.conn.execute(qst).fetchall()
         self.assertEqual(len(rows), 4)
         # Try to archive more, but there are no deleted rows left.
-        sqlalchemy_api._archive_deleted_rows_for_table(tablename, max_rows=2)
+        sqlalchemy_api._archive_deleted_rows_for_table(self.metadata,
+                                                       tablename,
+                                                       max_rows=2,
+                                                       before=None)
         # Verify we still have 2 left in main
         rows = self.conn.execute(qmt).fetchall()
         self.assertEqual(len(rows), 2)
@@ -8460,7 +8777,7 @@ class ArchiveTestCase(test.TestCase, ModelsObjectComparatorMixin):
         self.conn.execute(ins_stmt)
         update_statement = self.dns_domains.update().\
                            where(self.dns_domains.c.domain == uuidstr0).\
-                           values(deleted=True)
+                           values(deleted=True, deleted_at=timeutils.utcnow())
         self.conn.execute(update_statement)
         qdd = sql.select([self.dns_domains], self.dns_domains.c.domain ==
                                             uuidstr0)
@@ -8528,24 +8845,32 @@ class ArchiveTestCase(test.TestCase, ModelsObjectComparatorMixin):
     def test_archive_deleted_rows_fk_constraint(self):
         # consoles.pool_id depends on console_pools.id
         self._check_sqlite_version_less_than_3_7()
-        ins_stmt = self.console_pools.insert().values(deleted=1)
+        ins_stmt = self.console_pools.insert().values(deleted=1,
+                                                deleted_at=timeutils.utcnow())
         result = self.conn.execute(ins_stmt)
         id1 = result.inserted_primary_key[0]
         ins_stmt = self.consoles.insert().values(deleted=1,
-                                                         pool_id=id1)
+                                                deleted_at=timeutils.utcnow(),
+                                                pool_id=id1)
         result = self.conn.execute(ins_stmt)
         result.inserted_primary_key[0]
         # The first try to archive console_pools should fail, due to FK.
-        num = sqlalchemy_api._archive_deleted_rows_for_table("console_pools",
-                                                             max_rows=None)
+        num = sqlalchemy_api._archive_deleted_rows_for_table(self.metadata,
+                                                             "console_pools",
+                                                             max_rows=None,
+                                                             before=None)
         self.assertEqual(num[0], 0)
         # Then archiving consoles should work.
-        num = sqlalchemy_api._archive_deleted_rows_for_table("consoles",
-                                                             max_rows=None)
+        num = sqlalchemy_api._archive_deleted_rows_for_table(self.metadata,
+                                                             "consoles",
+                                                             max_rows=None,
+                                                             before=None)
         self.assertEqual(num[0], 1)
         # Then archiving console_pools should work.
-        num = sqlalchemy_api._archive_deleted_rows_for_table("console_pools",
-                                                             max_rows=None)
+        num = sqlalchemy_api._archive_deleted_rows_for_table(self.metadata,
+                                                             "console_pools",
+                                                             max_rows=None,
+                                                             before=None)
         self.assertEqual(num[0], 1)
         self._assert_shadow_tables_empty_except(
             'shadow_console_pools',
@@ -8556,23 +8881,31 @@ class ArchiveTestCase(test.TestCase, ModelsObjectComparatorMixin):
         # migrations.instance_uuid depends on instances.uuid
         self._check_sqlite_version_less_than_3_7()
         instance_uuid = uuidsentinel.instance
-        ins_stmt = self.instances.insert().values(uuid=instance_uuid,
-                                                  deleted=1)
+        ins_stmt = self.instances.insert().values(
+                        uuid=instance_uuid,
+                        deleted=1,
+                        deleted_at=timeutils.utcnow())
         self.conn.execute(ins_stmt)
         ins_stmt = self.migrations.insert().values(instance_uuid=instance_uuid,
                                                    deleted=0)
         self.conn.execute(ins_stmt)
         # The first try to archive instances should fail, due to FK.
-        num = sqlalchemy_api._archive_deleted_rows_for_table("instances",
-                                                             max_rows=None)
+        num = sqlalchemy_api._archive_deleted_rows_for_table(self.metadata,
+                                                             "instances",
+                                                             max_rows=None,
+                                                             before=None)
         self.assertEqual(0, num[0])
         # Then archiving migrations should work.
-        num = sqlalchemy_api._archive_deleted_rows_for_table("migrations",
-                                                             max_rows=None)
+        num = sqlalchemy_api._archive_deleted_rows_for_table(self.metadata,
+                                                             "migrations",
+                                                             max_rows=None,
+                                                             before=None)
         self.assertEqual(1, num[0])
         # Then archiving instances should work.
-        num = sqlalchemy_api._archive_deleted_rows_for_table("instances",
-                                                             max_rows=None)
+        num = sqlalchemy_api._archive_deleted_rows_for_table(self.metadata,
+                                                             "instances",
+                                                             max_rows=None,
+                                                             before=None)
         self.assertEqual(1, num[0])
         self._assert_shadow_tables_empty_except(
             'shadow_instances',
@@ -8589,11 +8922,11 @@ class ArchiveTestCase(test.TestCase, ModelsObjectComparatorMixin):
         # Set 4 of each to deleted
         update_statement = self.instance_id_mappings.update().\
                 where(self.instance_id_mappings.c.uuid.in_(self.uuidstrs[:4]))\
-                .values(deleted=1)
+                .values(deleted=1, deleted_at=timeutils.utcnow())
         self.conn.execute(update_statement)
         update_statement2 = self.instances.update().\
                 where(self.instances.c.uuid.in_(self.uuidstrs[:4]))\
-                .values(deleted=1)
+                .values(deleted=1, deleted_at=timeutils.utcnow())
         self.conn.execute(update_statement2)
         # Verify we have 6 in each main table
         qiim = sql.select([self.instance_id_mappings]).where(
@@ -8996,7 +9329,7 @@ class TestDBInstanceTags(test.TestCase):
         db.instance_tag_set(self.context, uuid, [tag1, tag2])
 
         # Check insert() was called to insert 'tag1' and 'tag2'
-        mock_insert.assert_called_once_with()
+        mock_insert.assert_called_once_with(None)
 
         mock_insert.reset_mock()
         db.instance_tag_set(self.context, uuid, [tag1])
@@ -9591,6 +9924,35 @@ class ConsoleAuthTokenTestCase(test.TestCase):
         self.assertIsNotNone(db_obj1, "a valid token should be found here")
         self.assertEqual(hash1, db_obj1['token_hash'])
         self.assertIsNone(db_obj2, "the token uuid should not match")
+
+    def test_console_auth_token_destroy_expired(self):
+        uuid1 = uuidsentinel.uuid1
+        uuid2 = uuidsentinel.uuid2
+        uuid3 = uuidsentinel.uuid3
+        hash1 = utils.get_sha256_str(uuidsentinel.token1)
+        hash2 = utils.get_sha256_str(uuidsentinel.token2)
+        hash3 = utils.get_sha256_str(uuidsentinel.token3)
+        self.addCleanup(timeutils.clear_time_override)
+        timeutils.set_time_override(timeutils.utcnow())
+        self._create_instances([uuid1, uuid2, uuid3])
+
+        self._create(hash1, uuid1, 10)
+        self._create(hash2, uuid2, 10, host='other-host')
+        timeutils.advance_time_seconds(100)
+        self._create(hash3, uuid3, 10)
+
+        db.console_auth_token_destroy_expired(self.context)
+
+        # the api only supports getting unexpired tokens
+        # but by rolling back time we can see if a token that
+        # should be deleted is still there
+        timeutils.advance_time_seconds(-100)
+        db_obj1 = db.console_auth_token_get_valid(self.context, hash1, uuid1)
+        db_obj2 = db.console_auth_token_get_valid(self.context, hash2, uuid2)
+        db_obj3 = db.console_auth_token_get_valid(self.context, hash3, uuid3)
+        self.assertIsNone(db_obj1, "the token should have been deleted")
+        self.assertIsNone(db_obj2, "the token should have been deleted")
+        self.assertIsNotNone(db_obj3, "a valid token should be found here")
 
     def test_console_auth_token_destroy_expired_by_host(self):
         uuid1 = uuidsentinel.uuid1
