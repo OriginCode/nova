@@ -107,7 +107,7 @@ Build-Depends-Indep:
  python3-sphinx-feature-classification,
  python3-sphinxcontrib.actdiag,
  python3-sphinxcontrib.seqdiag,
- python3-sphinxcontrib-svg2pdfconverter,
+ python3-sphinxcontrib.svg2pdfconverter,
  python3-sqlalchemy (>= 1.2.19),
  python3-stestr,
  python3-stevedore,
