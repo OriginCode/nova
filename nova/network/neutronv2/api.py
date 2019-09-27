@@ -22,7 +22,6 @@ from keystoneauth1 import loading as ks_loading
 from neutronclient.common import exceptions as neutron_client_exc
 from neutronclient.v2_0 import client as clientv20
 from oslo_log import log as logging
-from oslo_middleware import request_id
 from oslo_utils import excutils
 from oslo_utils import strutils
 from oslo_utils import uuidutils

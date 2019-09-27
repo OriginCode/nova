@@ -246,9 +246,6 @@ class RequestContext(context.RequestContext):
                 raise
             return False
 
-    def default_target(self):
-        return {'project_id': self.project_id, 'user_id': self.user_id}
-
     def to_policy_values(self):
         policy = super(RequestContext, self).to_policy_values()
         policy['is_admin'] = self.is_admin

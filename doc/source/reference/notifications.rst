@@ -369,7 +369,6 @@ Existing versioned notifications
 .. This is a reference anchor used in the main index page.
 .. _versioned_notification_samples:
 
-.. versioned_notifications::
 
 .. [1] https://review.opendev.org/#/c/463001/
 .. [2] https://review.opendev.org/#/c/453077/

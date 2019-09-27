@@ -4305,49 +4305,6 @@ class ComputeManager(manager.Manager):
                 LOG.error('Timeout waiting for Neutron events: %s', events,
                           instance=instance)
 
-    def _finish_revert_resize_network_migrate_finish(self, context, instance,
-                                                     migration):
-        """Causes port binding to be updated. In some Neutron or port
-        configurations - see NetworkModel.get_bind_time_events() - we
-        expect the vif-plugged event from Neutron immediately and wait for it.
-        The rest of the time, the event is expected further along in the
-        virt driver, so we don't wait here.
-
-        :param context: The request context.
-        :param instance: The instance undergoing the revert resize.
-        :param migration: The Migration object of the resize being reverted.
-        :raises: eventlet.timeout.Timeout or
-                 exception.VirtualInterfacePlugException.
-        """
-        network_info = instance.get_network_info()
-        events = []
-        deadline = CONF.vif_plugging_timeout
-        if deadline and utils.is_neutron() and network_info:
-            events = network_info.get_bind_time_events(migration)
-            if events:
-                LOG.debug('Will wait for bind-time events: %s', events)
-        error_cb = self._neutron_failed_migration_callback
-        try:
-            with self.virtapi.wait_for_instance_event(instance, events,
-                                                      deadline=deadline,
-                                                      error_callback=error_cb):
-                # NOTE(hanrong): we need to change migration.dest_compute to
-                # source host temporarily.
-                # "network_api.migrate_instance_finish" will setup the network
-                # for the instance on the destination host. For revert resize,
-                # the instance will back to the source host, the setup of the
-                # network for instance should be on the source host. So set
-                # the migration.dest_compute to source host at here.
-                with utils.temporary_mutation(
-                        migration, dest_compute=migration.source_compute):
-                    self.network_api.migrate_instance_finish(context,
-                                                             instance,
-                                                             migration)
-        except eventlet.timeout.Timeout:
-            with excutils.save_and_reraise_exception():
-                LOG.error('Timeout waiting for Neutron events: %s', events,
-                          instance=instance)
-
     @wrap_exception()
     @reverts_task_state
     @wrap_instance_event(prefix='compute')

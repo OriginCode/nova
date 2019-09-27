@@ -247,8 +247,6 @@ class RequestSpec(base.NovaObject):
             policies = list(filter_properties.get('group_policies'))
             hosts = list(filter_properties.get('group_hosts'))
             members = list(filter_properties.get('group_members'))
-            # TODO(mriedem): We could try to get the group uuid from the
-            # group hint in the filter_properties.
             self.instance_group = objects.InstanceGroup(policy=policies[0],
                                                         hosts=hosts,
                                                         members=members)
