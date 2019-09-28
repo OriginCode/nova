@@ -1,2 +1,0 @@
-debian/nova-placement-api-uwsgi.ini	/etc/nova
-usr/bin/nova-placement-api
