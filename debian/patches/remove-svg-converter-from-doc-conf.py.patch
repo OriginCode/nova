@@ -1,0 +1,15 @@
+Description: Remove sphinxcontrib.rsvgconverter from doc conf.py
+Author: Thomas Goirand <zigo@debian.org>
+Forwarded: not-needed
+Last-Update: 2019-09-28
+
+--- nova-20.0.0~rc1.orig/doc/source/conf.py
++++ nova-20.0.0~rc1/doc/source/conf.py
+@@ -43,7 +43,6 @@ extensions = [
+     'ext.feature_matrix',
+     'sphinxcontrib.actdiag',
+     'sphinxcontrib.seqdiag',
+-    'sphinxcontrib.rsvgconverter',
+ ]
+ 
+ # openstackdocstheme options
