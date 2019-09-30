@@ -177,7 +177,6 @@ if [ "$1" = "configure" ] || [ "$1" = "reconfigure" ] ; then
 	pkgos_write_new_conf nova api-paste.ini
 	pkgos_write_new_conf nova logging.conf
 	pkgos_write_new_conf nova policy.json
-	pkgos_write_new_conf nova placement-policy.json
 
 	# Tweak config files depending on debconf answers
 	pkgos_rabbit_write_conf /etc/nova/nova.conf oslo_messaging_rabbit nova
