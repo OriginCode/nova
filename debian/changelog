@@ -1,3 +1,9 @@
+nova (2:20.0.0~rc1-3) experimental; urgency=medium
+
+  * Remove bpython, ipython and git build-depends (Closes: #939014).
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 09 Oct 2019 17:40:20 +0200
+
 nova (2:20.0.0~rc1-2) experimental; urgency=medium
 
   * Do not attempt to copy placement-policy.json in postinst.

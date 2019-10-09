@@ -17,9 +17,7 @@ Build-Depends:
  python3-sphinx,
 Build-Depends-Indep:
  bandit,
- bpython,
  genisoimage,
- ipython,
  libvirt-daemon-system,
  openssh-client,
  procps,
