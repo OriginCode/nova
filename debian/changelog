@@ -1,6 +1,7 @@
 nova (2:20.0.0~rc1-4) UNRELEASED; urgency=medium
 
   * Updated de.po debconf translation (Closes: #940260).
+  * Updated da.po debconf translation (Closes: #923121).
 
  -- Thomas Goirand <zigo@debian.org>  Wed, 16 Oct 2019 00:25:18 +0200
 

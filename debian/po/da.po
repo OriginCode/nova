@@ -1,14 +1,14 @@
 # Danish translation nova.
-# Copyright (C) 2016 nova & nedenstående oversættere.
+# Copyright (C) 2019 nova & nedenstående oversættere.
 # This file is distributed under the same license as the nova package.
-# Joe Hansen <joedalton2@yahoo.dk>, 2012, 2013, 2014, 2015, 2016.
+# Joe Hansen <joedalton2@yahoo.dk>, 2012, 2013, 2014, 2015, 2016, 2019.
 #
 msgid ""
 msgstr ""
 "Project-Id-Version: nova\n"
 "Report-Msgid-Bugs-To: nova@packages.debian.org\n"
-"POT-Creation-Date: 2019-08-09 10:06+0200\n"
-"PO-Revision-Date: 2016-07-09 23:51+0200\n"
+"POT-Creation-Date: 2018-11-11 11:15+0100\n"
+"PO-Revision-Date: 2019-02-24 23:51+0200\n"
 "Last-Translator: Joe Hansen <joedalton2@yahoo.dk>\n"
 "Language-Team: Danish <debian-l10n-danish@lists.debian.org>\n"
 "Language: da\n"
@@ -151,139 +151,84 @@ msgstr ""
 #. Description
 #: ../nova-common.templates.in:9001
 msgid "Cinder os region name:"
-msgstr ""
+msgstr "Cinder os-regionnavn:"
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:9001
-#, fuzzy
-#| msgid "Please enter the URL of the Neutron server."
 msgid "Please enter the region name for cinder service."
-msgstr "Indtast venligst adressen for Neutronserveren."
+msgstr "Indtast venligst regionnavnet for cindertjenesten."
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:10001
-#, fuzzy
-#| msgid "Neutron server URL:"
 msgid "Glance api server URL:"
-msgstr "Adresse for Neutronserver:"
+msgstr "Serveradresse for Glance api:"
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:10001
-#, fuzzy
-#| msgid "Please enter the URL of the Neutron server."
 msgid "Please enter the URL of the Glance api server."
-msgstr "Indtast venligst adressen for Neutronserveren."
+msgstr "Indtast venligst adressen for Glance api-serveren."
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:11001
-#, fuzzy
-#| msgid "Neutron admin tenant name:"
 msgid "Placement admin tenant name:"
-msgstr "Tenantnavn for Neutronadministrator:"
+msgstr "Tenantnavn for Placementadministrator:"
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:11001
-#, fuzzy
-#| msgid ""
-#| "Nova needs to be able to communicate with Neutron through Keystone. "
-#| "Therefore Nova needs to know the Neutron admin tenant, username and "
-#| "password."
 msgid ""
 "Nova needs to be able to communicate with Placement through Keystone. "
 "Therefore Nova needs to know the Placement admin tenant, username and "
 "password."
 msgstr ""
-"Nova skal kunne kommunikere med Neutron via Keystone. Derfor har Nova behov "
-"for at kende Neutrons administratortenant, brugernavn og adgangskode."
+"Nova skal kunne kommunikere med Placement via Keystone. Derfor har Nova behov "
+"for at kende Placements administratortenant, brugernavn og adgangskode."
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:11001
-#, fuzzy
-#| msgid "Please enter the name of the admin tenant for Neutron."
 msgid "Please enter the name of the admin tenant for Placement."
-msgstr "Indtast venligst navnet på administratortenanten for Neutron."
+msgstr "Indtast venligst navnet på administratortenanten for Placement."
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:12001
-#, fuzzy
-#| msgid "Neutron administrator username:"
 msgid "Placement administrator username:"
-msgstr "Brugernavn for Neutronadministratoren:"
+msgstr "Brugernavn for Placementadministratoren:"
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:12001
-#, fuzzy
-#| msgid "Please enter the username of the Neutron administrator."
 msgid "Please enter the username of the Placement administrator."
-msgstr "Indtast venligst brugernavnet for Neutronadministratoren."
+msgstr "Indtast venligst brugernavnet for Placementadministratoren."
 
 #. Type: password
 #. Description
 #: ../nova-common.templates.in:13001
-#, fuzzy
-#| msgid "Neutron administrator password:"
 msgid "Placement administrator password:"
-msgstr "Adgangskode for Neutronadministratoren:"
+msgstr "Adgangskode for Placementadministratoren:"
 
 #. Type: password
 #. Description
 #: ../nova-common.templates.in:13001
-#, fuzzy
-#| msgid "Please enter the password of the Neutron administrator."
 msgid "Please enter the password of the Placement administrator."
-msgstr "Indtast venligst adgangskoden for Neutronadministratoren."
+msgstr "Indtast venligst adgangskoden for Placementadministratoren."
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:14001
 msgid "Placement os region name:"
-msgstr ""
+msgstr "Placement os-regionsnavn:"
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:14001
-#, fuzzy
-#| msgid "Please enter the URL of the Neutron server."
 msgid "Please enter the region name for Placement service."
-msgstr "Indtast venligst adressen for Neutronserveren."
-
-#. Type: boolean
-#. Description
-#: ../nova-common.templates.in:15001
-msgid "Manage neutron config through debconf?"
-msgstr ""
-
-#. Type: boolean
-#. Description
-#: ../nova-common.templates.in:15001
-msgid ""
-"Nova service must contact Neutron, and this is configured through the "
-"[neutron] section of the configuration. Specify if you wish to handle this "
-"configuration through debconf."
-msgstr ""
-
-#. Type: boolean
-#. Description
-#: ../nova-common.templates.in:16001
-msgid "Manage placement config through debconf?"
-msgstr ""
-
-#. Type: boolean
-#. Description
-#: ../nova-common.templates.in:16001
-msgid ""
-"Nova service must contact Placement, and this is configured through the "
-"[placement] section of the configuration. Specify if you wish to handle this "
-"configuration through debconf."
-msgstr ""
+msgstr "Indtast venligst regionnavnet for Placementtjenesten."
 
 #. Type: boolean
 #. Description
