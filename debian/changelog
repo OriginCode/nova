@@ -1,3 +1,9 @@
+nova (2:20.0.0~rc1-4) UNRELEASED; urgency=medium
+
+  * Updated de.po debconf translation (Closes: #940260).
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 16 Oct 2019 00:25:18 +0200
+
 nova (2:20.0.0~rc1-3) experimental; urgency=medium
 
   * Remove bpython, ipython and git build-depends (Closes: #939014).
