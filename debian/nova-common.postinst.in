@@ -153,9 +153,22 @@ create_cell0_database (){
 		if [ "${dbc_dbtype}" = "mysql" ]; then
 			# Create nova_cell0 database
 			echo "===> nova-common: Creating ${dbc_dbname}_cell0 database:"
-			echo "CREATE DATABASE IF NOT EXISTS ${dbc_dbname}_cell0 CHARACTER SET utf8 COLLATE utf8_unicode_ci;" | mysql -h ${dbc_dbserver} -u ${dbc_dbadmin} -p${dbc_dbadmpass}
+			echo "dbc_dbname=${dbc_dbname} mysql -h \"${dbc_dbserver}\" -u ${dbc_dbadmin} -p$\"{dbc_dbadmpass}\""
+
+			# A small sanity check
+			if [ "${dbc_dbserver}" = ""  ];then
+			    dbc_dbserver="localhost";
+			fi
+			# Assume empty password is OK. If so then -p must be absent from mysql call
+			if [ "${dbc_dbadmpass}" = "" ];then
+			    l_dbc_dbadmpass=""
+			else
+			    l_dbc_dbadmpass="-p${dbc_dbadmpass}"
+			fi
+
+			echo "CREATE DATABASE IF NOT EXISTS ${dbc_dbname}_cell0 CHARACTER SET utf8 COLLATE utf8_unicode_ci;" | mysql -h ${dbc_dbserver} -u ${dbc_dbadmin} ${l_dbc_dbadmpass}
 			echo "===> nova-common: Granting permissions on ${dbc_dbname}_cell0.* to '${dbc_dbuser}'@'${dbc_dballow}'"
-			echo "GRANT ALL PRIVILEGES ON ${dbc_dbname}_cell0.* TO '${dbc_dbuser}'@'${dbc_dballow}';" | mysql -h ${dbc_dbserver} -u ${dbc_dbadmin} -p${dbc_dbadmpass}
+			echo "GRANT ALL PRIVILEGES ON ${dbc_dbname}_cell0.* TO '${dbc_dbuser}'@'${dbc_dballow}';" | mysql -h ${dbc_dbserver} -u ${dbc_dbadmin} ${l_dbc_dbadmpass}
 		elif [ "$RET" = "sqlite3" ]; then
 			echo "===> nova-common: Creation of database $sqlite3_db_name in sqlite3 is not currently supported. Please create database manually."
 		else
