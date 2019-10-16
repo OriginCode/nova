@@ -1,9 +1,17 @@
-nova (2:20.0.0~rc1-4) UNRELEASED; urgency=medium
+nova (2:20.0.0-1) experimental; urgency=medium
 
+  [ Thomas Goirand ]
   * Updated de.po debconf translation (Closes: #940260).
   * Updated da.po debconf translation (Closes: #923121).
 
- -- Thomas Goirand <zigo@debian.org>  Wed, 16 Oct 2019 00:25:18 +0200
+  [ Michal Arbet ]
+  * New upstream version
+
+  [ Svein-Erik Skjelbred ]
+  * Local changes to remedy errors/weknesses in nova-common.postinst.in
+    and nova-common.prerm (Closes: #930999).
+
+ -- Michal Arbet <michal.arbet@ultimum.io>  Wed, 16 Oct 2019 15:26:18 +0200
 
 nova (2:20.0.0~rc1-3) experimental; urgency=medium
 
