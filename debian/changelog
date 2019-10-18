@@ -1,6 +1,7 @@
 nova (2:20.0.0-2) UNRELEASED; urgency=medium
 
   * Run wrap-and-sort -bastk.
+  * Bump Standards-Version to 4.4.1.
 
  -- Ondřej Nový <onovy@debian.org>  Fri, 18 Oct 2019 16:32:28 +0200
 
