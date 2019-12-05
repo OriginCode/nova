@@ -1,3 +1,13 @@
+nova (2:20.0.0-3) unstable; urgency=medium
+
+  * Fix nova-xenvncproxy.init.in
+    - Missing Should-start
+    - Missing Should-stop
+    - Caused service unit file was generated
+      incorrect
+
+ -- Michal Arbet <michal.arbet@ultimum.io>  Thu, 05 Dec 2019 11:46:20 +0100
+
 nova (2:20.0.0-2) unstable; urgency=medium
 
   [ Ondřej Nový ]
