@@ -1,3 +1,9 @@
+nova (2:20.0.0-4) UNRELEASED; urgency=medium
+
+  * Updated nl.po debconf translations (Closes: #945027).
+
+ -- Thomas Goirand <zigo@debian.org>  Fri, 03 Jan 2020 11:19:54 +0100
+
 nova (2:20.0.0-3) unstable; urgency=medium
 
   * Fix nova-xenvncproxy.init.in
