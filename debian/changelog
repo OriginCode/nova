@@ -1,8 +1,10 @@
-nova (2:20.0.0-4) UNRELEASED; urgency=medium
+nova (2:20.0.0-4) unstable; urgency=medium
 
   * Updated nl.po debconf translations (Closes: #945027).
+  * Fallback to using hostname -i when searching for my-ip, as if using a
+    network setup with BGP, searching for default if doesn't work.
 
- -- Thomas Goirand <zigo@debian.org>  Fri, 03 Jan 2020 11:19:54 +0100
+ -- Thomas Goirand <zigo@debian.org>  Fri, 13 Mar 2020 10:39:59 +0100
 
 nova (2:20.0.0-3) unstable; urgency=medium
 
