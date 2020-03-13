@@ -1,3 +1,10 @@
+nova (2:20.0.0-5) unstable; urgency=medium
+
+  * Do not fail nova-common.config when searching for DEFROUTE_IP and none is
+    found.
+
+ -- Thomas Goirand <zigo@debian.org>  Fri, 13 Mar 2020 11:11:06 +0100
+
 nova (2:20.0.0-4) unstable; urgency=medium
 
   * Updated nl.po debconf translations (Closes: #945027).
