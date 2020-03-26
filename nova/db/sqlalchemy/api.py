@@ -397,12 +397,13 @@ def service_destroy(context, service_id):
                 filter_by(id=service_id).\
                 soft_delete(synchronize_session=False)
 
-    # TODO(sbauza): Remove the service_id filter in a later release
-    # once we are sure that all compute nodes report the host field
-    model_query(context, models.ComputeNode).\
-                filter(or_(models.ComputeNode.service_id == service_id,
-                           models.ComputeNode.host == service['host'])).\
-                soft_delete(synchronize_session=False)
+    if service.binary == 'nova-compute':
+        # TODO(sbauza): Remove the service_id filter in a later release
+        # once we are sure that all compute nodes report the host field
+        model_query(context, models.ComputeNode).\
+                    filter(or_(models.ComputeNode.service_id == service_id,
+                               models.ComputeNode.host == service['host'])).\
+                    soft_delete(synchronize_session=False)
 
 
 @pick_context_manager_reader
@@ -1753,7 +1754,7 @@ def instance_create(context, values):
     values - dict containing column values.
     """
 
-    security_group_ensure_default(context)
+    default_group = security_group_ensure_default(context)
 
     values = values.copy()
     values['metadata'] = _metadata_refs(
@@ -1782,21 +1783,19 @@ def instance_create(context, values):
     instance_ref['extra'].update(values.pop('extra', {}))
     instance_ref.update(values)
 
-    def _get_sec_group_models(security_groups):
-        models = []
-        default_group = _security_group_ensure_default(context)
-        if 'default' in security_groups:
-            models.append(default_group)
-            # Generate a new list, so we don't modify the original
-            security_groups = [x for x in security_groups if x != 'default']
-        if security_groups:
-            models.extend(_security_group_get_by_names(
-                context, security_groups))
-        return models
+    # Gather the security groups for the instance
+    sg_models = []
+    if 'default' in security_groups:
+        sg_models.append(default_group)
+        # Generate a new list, so we don't modify the original
+        security_groups = [x for x in security_groups if x != 'default']
+    if security_groups:
+        sg_models.extend(_security_group_get_by_names(
+            context, security_groups))
 
     if 'hostname' in values:
         _validate_unique_server_name(context, values['hostname'])
-    instance_ref.security_groups = _get_sec_group_models(security_groups)
+    instance_ref.security_groups = sg_models
     context.session.add(instance_ref)
 
     # create the instance uuid to ec2_id mapping entry for instance
@@ -2258,9 +2257,15 @@ def instance_get_all_by_filters_sort(context, filters, limit=None, marker=None,
         else:
             filters['user_id'] = context.user_id
 
-    if 'hidden' not in filters:
-        # Filter out hidden instances by default.
-        filters['hidden'] = False
+    if filters.pop('hidden', False):
+        query_prefix = query_prefix.filter(models.Instance.hidden == true())
+    else:
+        # If the query should not include hidden instances, then
+        # filter instances with hidden=False or hidden=NULL because
+        # older records may have no value set.
+        query_prefix = query_prefix.filter(or_(
+            models.Instance.hidden == false(),
+            models.Instance.hidden == null()))
 
     # Filters for exact matches that we can do along with the SQL query...
     # For other filters that don't match this, we will do regexp matching

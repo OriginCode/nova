@@ -67,6 +67,7 @@ INVALID_FLAVOR_IMAGE_EXCEPTIONS = (
     exception.ImageNUMATopologyForbidden,
     exception.ImageNUMATopologyIncomplete,
     exception.ImageNUMATopologyMemoryOutOfRange,
+    exception.ImageNUMATopologyRebuildConflict,
     exception.ImagePMUConflict,
     exception.ImageSerialPortNumberExceedFlavorValue,
     exception.ImageSerialPortNumberInvalid,
@@ -941,7 +942,7 @@ class ServersController(wsgi.Controller):
                             'project_id': instance.project_id})
 
         if common.instance_has_port_with_resource_request(
-                context, instance_id, self.network_api):
+                instance_id, self.network_api):
             # TODO(gibi): Remove when nova only supports compute newer than
             # Train
             source_service = objects.Service.get_by_host_and_binary(

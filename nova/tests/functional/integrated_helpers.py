@@ -93,7 +93,8 @@ class _IntegratedTestBase(test.TestCase):
             return None
         self.stub_out('nova.privsep.linux_net.bind_ip', fake_noop)
 
-        nova.tests.unit.image.fake.stub_out_image_service(self)
+        self.fake_image_service =\
+            nova.tests.unit.image.fake.stub_out_image_service(self)
 
         self.useFixture(cast_as_call.CastAsCall(self))
         placement = self.useFixture(func_fixtures.PlacementFixture())
@@ -426,7 +427,7 @@ class ProviderUsageBaseTestCase(test.TestCase, InstanceHelperMixin):
         self.flags(compute_driver=self.compute_driver)
         super(ProviderUsageBaseTestCase, self).setUp()
 
-        self.useFixture(policy_fixture.RealPolicyFixture())
+        self.policy = self.useFixture(policy_fixture.RealPolicyFixture())
         self.neutron = self.useFixture(nova_fixtures.NeutronFixture(self))
         self.useFixture(nova_fixtures.AllServicesCurrent())
 
@@ -843,6 +844,18 @@ class ProviderUsageBaseTestCase(test.TestCase, InstanceHelperMixin):
             server, request=request, old_flavor=flavor, new_flavor=flavor,
             source_rp_uuid=source_rp_uuid, dest_rp_uuid=dest_rp_uuid)
 
+    def _resize_and_check_allocations(self, server, old_flavor, new_flavor,
+                                      source_rp_uuid, dest_rp_uuid):
+        request = {
+            'resize': {
+                'flavorRef': new_flavor['id']
+            }
+        }
+        self._move_and_check_allocations(
+            server, request=request, old_flavor=old_flavor,
+            new_flavor=new_flavor, source_rp_uuid=source_rp_uuid,
+            dest_rp_uuid=dest_rp_uuid)
+
     def _resize_to_same_host_and_check_allocations(self, server, old_flavor,
                                                    new_flavor, rp_uuid):
         # Resize the server to the same host and check usages in VERIFY_RESIZE
@@ -928,4 +941,16 @@ class ProviderUsageBaseTestCase(test.TestCase, InstanceHelperMixin):
         self._wait_for_instance_action_event(
             self.api, server, instance_actions.CONFIRM_RESIZE,
             'compute_confirm_resize', 'success')
+        return server
+
+    def _revert_resize(self, server):
+        self.api.post_server_action(server['id'], {'revertResize': None})
+        server = self._wait_for_state_change(self.api, server, 'ACTIVE')
+        self._wait_for_migration_status(server, ['reverted'])
+        # Note that the migration status is changed to "reverted" in the
+        # dest host revert_resize method but the allocations are cleaned up
+        # in the source host finish_revert_resize method so we need to wait
+        # for the finish_revert_resize method to complete.
+        fake_notifier.wait_for_versioned_notifications(
+            'instance.resize_revert.end')
         return server

@@ -684,16 +684,6 @@ explained above.
 Impermanent limitations
 -----------------------
 
-The following image metadata options are incompatible with the feature due to
-`bug #1845986 <https://bugs.launchpad.net/nova/+bug/1845986>`__.
-
-- ``hw_scsi_model=virtio-scsi`` and either ``hw_disk_bus=scsi`` or
-  ``hw_cdrom_bus=scsi``
-- ``hw_video_model=virtio``
-- ``hw_qemu_guest_agent=yes``
-
-This limitation will be resolved in the future.
-
 The following limitations may be removed in the future as the
 hardware, firmware, and various layers of software receive new
 features:
@@ -709,10 +699,12 @@ features:
 
   __ https://wiki.qemu.org/Features/VirtioVhostUser
 
-- The boot disk of SEV-encrypted VMs can only be ``virtio-blk`` on
-  newer kernels which contain the necessary fixes.  Using
-  ``virtio-scsi`` or SATA for the boot disk works as expected, as does
-  ``virtio-blk`` for non-boot disks.
+- The boot disk of SEV-encrypted VMs can only be ``virtio``.
+  (``virtio-blk`` is typically the default for libvirt disks on x86,
+  but can also be explicitly set e.g. via the image property
+  ``hw_disk_bus=virtio``). Valid alternatives for the disk
+  include using ``hw_disk_bus=scsi`` with
+  ``hw_scsi_model=virtio-scsi`` , or ``hw_disk_bus=sata``.
 
 - QEMU and libvirt cannot yet expose the number of slots available for
   encrypted guests in the memory controller on SEV hardware.  Until

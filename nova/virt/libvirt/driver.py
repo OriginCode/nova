@@ -5148,9 +5148,22 @@ class LibvirtDriver(driver.ComputeDriver):
         rng_device.backend = rng_path
         guest.add_device(rng_device)
 
+    def _add_virtio_serial_controller(self, guest, instance):
+        virtio_controller = vconfig.LibvirtConfigGuestController()
+        virtio_controller.type = 'virtio-serial'
+        guest.add_device(virtio_controller)
+
     def _set_qemu_guest_agent(self, guest, flavor, instance, image_meta):
         # Enable qga only if the 'hw_qemu_guest_agent' is equal to yes
         if image_meta.properties.get('hw_qemu_guest_agent', False):
+            # a virtio-serial controller is required for qga. If it is not
+            # created explicitly, libvirt will do it by itself. But in case
+            # of AMD SEV, any virtio device should use iommu driver, and
+            # libvirt does not know about it. That is why the controller
+            # should be created manually.
+            if self._sev_enabled(flavor, image_meta):
+                self._add_virtio_serial_controller(guest, instance)
+
             LOG.debug("Qemu guest agent is enabled through image "
                       "metadata", instance=instance)
             self._add_qga_device(guest, instance)
@@ -5670,9 +5683,6 @@ class LibvirtDriver(driver.ComputeDriver):
                 disk_mapping['root']['dev'])
         else:
             root_device_name = None
-
-        if root_device_name:
-            instance.root_device_name = root_device_name
 
         guest.os_type = (fields.VMMode.get_from_instance(instance) or
                 self._get_guest_os_type(virt_type))
@@ -9332,15 +9342,25 @@ class LibvirtDriver(driver.ComputeDriver):
 
     def post_live_migration(self, context, instance, block_device_info,
                             migrate_data=None):
-        # Disconnect from volume server
+        # NOTE(mdbooth): The block_device_info we were passed was initialized
+        # with BDMs from the source host before they were updated to point to
+        # the destination. We can safely use this to disconnect the source
+        # without re-fetching.
         block_device_mapping = driver.block_device_info_get_mapping(
                 block_device_info)
+
         for vol in block_device_mapping:
-            # NOTE(mdbooth): The block_device_info we were passed was
-            # initialized with BDMs from the source host before they were
-            # updated to point to the destination. We can safely use this to
-            # disconnect the source without re-fetching.
-            self._disconnect_volume(context, vol['connection_info'], instance)
+            connection_info = vol['connection_info']
+            # NOTE(lyarwood): Ignore exceptions here to avoid the instance
+            # being left in an ERROR state and still marked on the source.
+            try:
+                self._disconnect_volume(context, connection_info, instance)
+            except Exception as ex:
+                volume_id = driver_block_device.get_volume_id(connection_info)
+                LOG.exception("Ignoring exception while attempting to "
+                              "disconnect volume %s from the source host "
+                              "during post_live_migration", volume_id,
+                              instance=instance)
 
     def post_live_migration_at_source(self, context, instance, network_info):
         """Unplug VIFs from networks at source.
