@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova 2:19.0.2-2\n"
 "Report-Msgid-Bugs-To: nova@packages.debian.org\n"
-"POT-Creation-Date: 2019-08-09 10:06+0200\n"
+"POT-Creation-Date: 2020-03-26 12:45+0100\n"
 "PO-Revision-Date: 2019-09-14 18:47+0200\n"
 "Last-Translator: Helge Kreutzmann <debian@helgefjell.de>\n"
 "Language-Team: German <debian-l10n-german@lists.debian.org>\n"
@@ -18,70 +18,39 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=2; plural=(n != 1);\n"
 
-#. Type: multiselect
-#. Description
-#: ../nova-common.templates.in:2001
-msgid "API to activate:"
-msgstr "API, die aktiviert werden soll:"
-
-#. Type: multiselect
-#. Description
-#: ../nova-common.templates.in:2001
-msgid ""
-"Openstack Nova supports different API services, each of them binding on a "
-"different port. Select which one nova-api should support."
-msgstr ""
-"Openstack Nova unterstützt verschiedene API-Dienste, von denen jeder "
-"einzelne an einen anderen Port gebunden ist. Wählen Sie aus, welche von "
-"»nova-api« unterstützt werden sollen."
-
-#. Type: multiselect
-#. Description
-#: ../nova-common.templates.in:2001
-msgid ""
-"If it is a compute node that you are setting-up, then you only need to run "
-"the metadata API server. If you run Cinder, then you don't need osapi_volume "
-"(you cannot run osapi_volume and cinder-api on the same server: they bind on "
-"the same port)."
-msgstr ""
-"Falls Sie einen Rechenknoten einrichten, müssen Sie nur den Metadaten-API-"
-"Server ausführen. Falls Sie Cinder ausführen, benötigen Sie »osapi_volume« "
-"nicht (Sie können »osapi_volume« und »cinder-api« nicht auf demselben Server "
-"ausführen, sie binden sich an den selben Port)."
-
 #. Type: string
 #. Description
-#: ../nova-common.templates.in:3001
+#: ../nova-common.templates.in:2001
 msgid "Value for my_ip:"
 msgstr "Wert für »my_ip«:"
 
 #. Type: string
 #. Description
-#: ../nova-common.templates.in:3001
+#: ../nova-common.templates.in:2001
 msgid "This value will be stored in the my_ip directive of nova.conf."
 msgstr "Dieser Wert wird im Eintrag »my_ip« der »nova.conf« gespeichert."
 
 #. Type: string
 #. Description
-#: ../nova-common.templates.in:4001
+#: ../nova-common.templates.in:3001
 msgid "Neutron server URL:"
 msgstr "URL des Neutron-Servers:"
 
 #. Type: string
 #. Description
-#: ../nova-common.templates.in:4001
+#: ../nova-common.templates.in:3001
 msgid "Please enter the URL of the Neutron server."
 msgstr "Bitte geben Sie die URL des Neutron-Servers ein."
 
 #. Type: string
 #. Description
-#: ../nova-common.templates.in:5001
+#: ../nova-common.templates.in:4001
 msgid "Neutron admin tenant name:"
 msgstr "Tenant-Name des Neutron-Administrators:"
 
 #. Type: string
 #. Description
-#: ../nova-common.templates.in:5001
+#: ../nova-common.templates.in:4001
 msgid ""
 "Nova needs to be able to communicate with Neutron through Keystone. "
 "Therefore Nova needs to know the Neutron admin tenant, username and password."
@@ -91,43 +60,43 @@ msgstr ""
 
 #. Type: string
 #. Description
-#: ../nova-common.templates.in:5001
+#: ../nova-common.templates.in:4001
 msgid "Please enter the name of the admin tenant for Neutron."
 msgstr "Bitte geben Sie den Namen des Administrator-Tenants für Neutron ein."
 
 #. Type: string
 #. Description
-#: ../nova-common.templates.in:6001
+#: ../nova-common.templates.in:5001
 msgid "Neutron administrator username:"
 msgstr "Benutzername des Neutron-Administrators:"
 
 #. Type: string
 #. Description
-#: ../nova-common.templates.in:6001
+#: ../nova-common.templates.in:5001
 msgid "Please enter the username of the Neutron administrator."
 msgstr "Bitte geben Sie den Benutzernamen des Neutron-Administrators ein."
 
 #. Type: password
 #. Description
-#: ../nova-common.templates.in:7001
+#: ../nova-common.templates.in:6001
 msgid "Neutron administrator password:"
 msgstr "Passwort des Neutron-Administrators:"
 
 #. Type: password
 #. Description
-#: ../nova-common.templates.in:7001
+#: ../nova-common.templates.in:6001
 msgid "Please enter the password of the Neutron administrator."
 msgstr "Bitte geben Sie das Passwort des Neutron-Administrators ein."
 
 #. Type: password
 #. Description
-#: ../nova-common.templates.in:8001
+#: ../nova-common.templates.in:7001
 msgid "Metadata proxy shared secret:"
 msgstr "Gemeinsam benutztes Geheimnis des Metadaten-Proxys:"
 
 #. Type: password
 #. Description
-#: ../nova-common.templates.in:8001
+#: ../nova-common.templates.in:7001
 msgid ""
 "VM instances using Neutron to handle networking retrieve their metadata "
 "through the Neutron metadata agent, which serves as a proxy to the Nova "
@@ -139,7 +108,7 @@ msgstr ""
 
 #. Type: password
 #. Description
-#: ../nova-common.templates.in:8001
+#: ../nova-common.templates.in:7001
 msgid ""
 "Please enter the password that should be used to protect communications "
 "between the Neutron metadata proxy agent and the Nova metadata server. The "
@@ -153,25 +122,25 @@ msgstr ""
 
 #. Type: string
 #. Description
-#: ../nova-common.templates.in:9001
+#: ../nova-common.templates.in:8001
 msgid "Cinder os region name:"
 msgstr "OpenStack-Regionsname von Cinder:"
 
 #. Type: string
 #. Description
-#: ../nova-common.templates.in:9001
+#: ../nova-common.templates.in:8001
 msgid "Please enter the region name for cinder service."
 msgstr "Bitte geben Sie den Regionsnamen des Cinder-Dienstes ein."
 
 #. Type: string
 #. Description
-#: ../nova-common.templates.in:10001
+#: ../nova-common.templates.in:9001
 msgid "Glance api server URL:"
 msgstr "URL des Glance-API-Servers:"
 
 #. Type: string
 #. Description
-#: ../nova-common.templates.in:10001
+#: ../nova-common.templates.in:9001
 msgid "Please enter the URL of the Glance api server."
 msgstr "Bitte geben Sie die URL des Glance-API-Servers ein."
 
@@ -180,13 +149,13 @@ msgstr "Bitte geben Sie die URL des Glance-API-Servers ein."
 #                                                  nova-controller-install.html
 #. Type: string
 #. Description
-#: ../nova-common.templates.in:11001
+#: ../nova-common.templates.in:10001
 msgid "Placement admin tenant name:"
 msgstr "Tenant-Name des Placement-Administrators:"
 
 #. Type: string
 #. Description
-#: ../nova-common.templates.in:11001
+#: ../nova-common.templates.in:10001
 msgid ""
 "Nova needs to be able to communicate with Placement through Keystone. "
 "Therefore Nova needs to know the Placement admin tenant, username and "
@@ -197,55 +166,55 @@ msgstr ""
 
 #. Type: string
 #. Description
-#: ../nova-common.templates.in:11001
+#: ../nova-common.templates.in:10001
 msgid "Please enter the name of the admin tenant for Placement."
 msgstr "Bitte geben Sie den Namen des Administrator-Tenants für Placement ein."
 
 #. Type: string
 #. Description
-#: ../nova-common.templates.in:12001
+#: ../nova-common.templates.in:11001
 msgid "Placement administrator username:"
 msgstr "Benutzername des Placement-Administrators:"
 
 #. Type: string
 #. Description
-#: ../nova-common.templates.in:12001
+#: ../nova-common.templates.in:11001
 msgid "Please enter the username of the Placement administrator."
 msgstr "Bitte geben Sie den Benutzernamen des Placement-Administrators ein."
 
 #. Type: password
 #. Description
-#: ../nova-common.templates.in:13001
+#: ../nova-common.templates.in:12001
 msgid "Placement administrator password:"
 msgstr "Passwort des Placement-Administrators:"
 
 #. Type: password
 #. Description
-#: ../nova-common.templates.in:13001
+#: ../nova-common.templates.in:12001
 msgid "Please enter the password of the Placement administrator."
 msgstr "Bitte geben Sie das Passwort des Placement-Administrators ein."
 
 #. Type: string
 #. Description
-#: ../nova-common.templates.in:14001
+#: ../nova-common.templates.in:13001
 msgid "Placement os region name:"
 msgstr "OpenStack-Regionsname des Placements:"
 
 #. Type: string
 #. Description
-#: ../nova-common.templates.in:14001
+#: ../nova-common.templates.in:13001
 msgid "Please enter the region name for Placement service."
 msgstr "Bitte geben Sie den Regionsnamen des Placement-Dienstes ein."
 
 #. Type: boolean
 #. Description
-#: ../nova-common.templates.in:15001
+#: ../nova-common.templates.in:14001
 msgid "Manage neutron config through debconf?"
 msgstr "Neutron-Konfiguration mittels Debconf verwalten?"
 
 #. Type: boolean
 #. Description
-#: ../nova-common.templates.in:15001
+#: ../nova-common.templates.in:14001
 msgid ""
 "Nova service must contact Neutron, and this is configured through the "
 "[neutron] section of the configuration. Specify if you wish to handle this "
@@ -257,13 +226,13 @@ msgstr ""
 
 #. Type: boolean
 #. Description
-#: ../nova-common.templates.in:16001
+#: ../nova-common.templates.in:15001
 msgid "Manage placement config through debconf?"
 msgstr "Placement-Konfiguration mittels Debconf verwalten?"
 
 #. Type: boolean
 #. Description
-#: ../nova-common.templates.in:16001
+#: ../nova-common.templates.in:15001
 msgid ""
 "Nova service must contact Placement, and this is configured through the "
 "[placement] section of the configuration. Specify if you wish to handle this "
@@ -351,3 +320,25 @@ msgstr ""
 #: ../nova-consoleproxy.templates:1001
 msgid "This can later be edited in /etc/default/nova-consoleproxy."
 msgstr "Dies kann später in /etc/default/nova-consoleproxy geändert werden."
+
+#~ msgid "API to activate:"
+#~ msgstr "API, die aktiviert werden soll:"
+
+#~ msgid ""
+#~ "Openstack Nova supports different API services, each of them binding on a "
+#~ "different port. Select which one nova-api should support."
+#~ msgstr ""
+#~ "Openstack Nova unterstützt verschiedene API-Dienste, von denen jeder "
+#~ "einzelne an einen anderen Port gebunden ist. Wählen Sie aus, welche von "
+#~ "»nova-api« unterstützt werden sollen."
+
+#~ msgid ""
+#~ "If it is a compute node that you are setting-up, then you only need to "
+#~ "run the metadata API server. If you run Cinder, then you don't need "
+#~ "osapi_volume (you cannot run osapi_volume and cinder-api on the same "
+#~ "server: they bind on the same port)."
+#~ msgstr ""
+#~ "Falls Sie einen Rechenknoten einrichten, müssen Sie nur den Metadaten-API-"
+#~ "Server ausführen. Falls Sie Cinder ausführen, benötigen Sie "
+#~ "»osapi_volume« nicht (Sie können »osapi_volume« und »cinder-api« nicht "
+#~ "auf demselben Server ausführen, sie binden sich an den selben Port)."
