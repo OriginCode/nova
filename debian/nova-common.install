@@ -1,7 +1,6 @@
 etc/nova/api-paste.ini	usr/share/nova-common
 etc/nova/rootwrap.conf	etc/nova
 usr/bin/nova-api-wsgi
-usr/bin/nova-dhcpbridge
 usr/bin/nova-manage
 usr/bin/nova-metadata-wsgi
 usr/bin/nova-policy
