@@ -7,6 +7,8 @@ nova (2:21.0.0~rc1-1) experimental; urgency=medium
   * Kill the xenvnc console proxy from nova-consoleproxy, and the nova-console
     package, as these are gone from upstream.
   * Kill some remainings of nova-network.
+  * Removed installation of etc/nova/rootwrap.d/api-metadata.filters, as file
+    doesn't exist anymore (probably switched to privsep).
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 24 Apr 2020 10:52:19 +0200
 
