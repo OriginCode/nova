@@ -126,7 +126,7 @@ class FlavorAccessTestV21(test.NoDBTestCase):
     api_version = "2.1"
     FlavorAccessController = flavor_access_v21.FlavorAccessController
     FlavorActionController = flavor_access_v21.FlavorActionController
-    _prefix = "/v2/fake"
+    _prefix = "/v2/%s" % fakes.FAKE_PROJECT_ID
     validation_ex = exception.ValidationError
 
     def setUp(self):
@@ -139,8 +139,8 @@ class FlavorAccessTestV21(test.NoDBTestCase):
                       lambda ctx, project_id: True)
 
         self.req = FakeRequest()
-        self.req.environ = {"nova.context": context.RequestContext('fake_user',
-                                                                   'fake')}
+        self.req.environ = {"nova.context": context.RequestContext(
+            'fake_user', fakes.FAKE_PROJECT_ID)}
         self.stub_out('nova.objects.Flavor._flavor_get_by_flavor_id_from_db',
                       fake_get_flavor_by_flavor_id)
         self.stub_out('nova.objects.flavor._flavor_get_all_from_db',
@@ -364,47 +364,3 @@ class FlavorAccessTestV21(test.NoDBTestCase):
                           req, '2', body=body)
         mock_verify.assert_called_once_with(
             req.environ['nova.context'], 'proj2')
-
-
-class FlavorAccessPolicyEnforcementV21(test.NoDBTestCase):
-
-    def setUp(self):
-        super(FlavorAccessPolicyEnforcementV21, self).setUp()
-        self.act_controller = flavor_access_v21.FlavorActionController()
-        self.access_controller = flavor_access_v21.FlavorAccessController()
-        self.req = fakes.HTTPRequest.blank('')
-
-    def test_add_tenant_access_policy_failed(self):
-        rule_name = "os_compute_api:os-flavor-access:add_tenant_access"
-        self.policy.set_rules({rule_name: "project:non_fake"})
-        exc = self.assertRaises(
-            exception.PolicyNotAuthorized,
-            self.act_controller._add_tenant_access, self.req, fakes.FAKE_UUID,
-            body={'addTenantAccess': {'tenant': fakes.FAKE_UUID}})
-        self.assertEqual(
-            "Policy doesn't allow %s to be performed." % rule_name,
-            exc.format_message())
-
-    def test_remove_tenant_access_policy_failed(self):
-        rule_name = ("os_compute_api:os-flavor-access:"
-                     "remove_tenant_access")
-        self.policy.set_rules({rule_name: "project:non_fake"})
-        exc = self.assertRaises(
-            exception.PolicyNotAuthorized,
-            self.act_controller._remove_tenant_access, self.req,
-            fakes.FAKE_UUID,
-            body={'removeTenantAccess': {'tenant': fakes.FAKE_UUID}})
-        self.assertEqual(
-            "Policy doesn't allow %s to be performed." % rule_name,
-            exc.format_message())
-
-    def test_index_policy_failed(self):
-        rule_name = "os_compute_api:os-flavor-access"
-        self.policy.set_rules({rule_name: "project:non_fake"})
-        exc = self.assertRaises(
-            exception.PolicyNotAuthorized,
-            self.access_controller.index, self.req,
-            fakes.FAKE_UUID)
-        self.assertEqual(
-            "Policy doesn't allow %s to be performed." % rule_name,
-            exc.format_message())

@@ -279,9 +279,9 @@ class VolumeAttachmentController(wsgi.Controller):
     def index(self, req, server_id):
         """Returns the list of volume attachments for a given instance."""
         context = req.environ['nova.context']
-        context.can(va_policies.POLICY_ROOT % 'index')
-
         instance = common.get_instance(self.compute_api, context, server_id)
+        context.can(va_policies.POLICY_ROOT % 'index',
+                    target={'project_id': instance.project_id})
 
         bdms = objects.BlockDeviceMappingList.get_by_instance_uuid(
                 context, instance.uuid)
@@ -304,10 +304,11 @@ class VolumeAttachmentController(wsgi.Controller):
     def show(self, req, server_id, id):
         """Return data about the given volume attachment."""
         context = req.environ['nova.context']
-        context.can(va_policies.POLICY_ROOT % 'show')
+        instance = common.get_instance(self.compute_api, context, server_id)
+        context.can(va_policies.POLICY_ROOT % 'show',
+                    target={'project_id': instance.project_id})
 
         volume_id = id
-        instance = common.get_instance(self.compute_api, context, server_id)
 
         try:
             bdm = objects.BlockDeviceMapping.get_by_volume_and_instance(
@@ -334,15 +335,15 @@ class VolumeAttachmentController(wsgi.Controller):
     def create(self, req, server_id, body):
         """Attach a volume to an instance."""
         context = req.environ['nova.context']
-        context.can(va_policies.POLICY_ROOT % 'create')
+        instance = common.get_instance(self.compute_api, context, server_id)
+        context.can(va_policies.POLICY_ROOT % 'create',
+                    target={'project_id': instance.project_id})
 
         volume_id = body['volumeAttachment']['volumeId']
         device = body['volumeAttachment'].get('device')
         tag = body['volumeAttachment'].get('tag')
         delete_on_termination = body['volumeAttachment'].get(
             'delete_on_termination', False)
-
-        instance = common.get_instance(self.compute_api, context, server_id)
 
         if instance.vm_state in (vm_states.SHELVED,
                                  vm_states.SHELVED_OFFLOADED):
@@ -390,13 +391,8 @@ class VolumeAttachmentController(wsgi.Controller):
             attachment['delete_on_termination'] = delete_on_termination
         return {'volumeAttachment': attachment}
 
-    @wsgi.response(202)
-    @wsgi.expected_errors((400, 404, 409))
-    @validation.schema(volumes_schema.update_volume_attachment)
-    def update(self, req, server_id, id, body):
+    def _update_volume_swap(self, req, instance, id, body):
         context = req.environ['nova.context']
-        context.can(va_policies.POLICY_ROOT % 'update')
-
         old_volume_id = id
         try:
             old_volume = self.volume_api.get(context, old_volume_id)
@@ -416,8 +412,6 @@ class VolumeAttachmentController(wsgi.Controller):
             # NotFound response if that is not existent.
             raise exc.HTTPBadRequest(explanation=e.format_message())
 
-        instance = common.get_instance(self.compute_api, context, server_id)
-
         try:
             self.compute_api.swap_volume(context, instance, old_volume,
                                          new_volume)
@@ -430,19 +424,84 @@ class VolumeAttachmentController(wsgi.Controller):
             raise exc.HTTPConflict(explanation=e.format_message())
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
-                    'swap_volume', server_id)
+                    'swap_volume', instance.uuid)
+
+    def _update_volume_regular(self, req, instance, id, body):
+        context = req.environ['nova.context']
+        att = body['volumeAttachment']
+        # NOTE(danms): We may be doing an update of regular parameters in
+        # the midst of a swap operation, so to find the original BDM, we need
+        # to use the old volume ID, which is the one in the path.
+        volume_id = id
+
+        try:
+            bdm = objects.BlockDeviceMapping.get_by_volume_and_instance(
+                context, volume_id, instance.uuid)
+
+            # NOTE(danms): The attachment id is just the (current) volume id
+            if 'id' in att and att['id'] != volume_id:
+                raise exc.HTTPBadRequest(explanation='The id property is '
+                                         'not mutable')
+            if 'serverId' in att and att['serverId'] != instance.uuid:
+                raise exc.HTTPBadRequest(explanation='The serverId property '
+                                         'is not mutable')
+            if 'device' in att and att['device'] != bdm.device_name:
+                raise exc.HTTPBadRequest(explanation='The device property is '
+                                         'not mutable')
+            if 'tag' in att and att['tag'] != bdm.tag:
+                raise exc.HTTPBadRequest(explanation='The tag property is '
+                                         'not mutable')
+            if 'delete_on_termination' in att:
+                bdm.delete_on_termination = strutils.bool_from_string(
+                        att['delete_on_termination'], strict=True)
+            bdm.save()
+        except exception.VolumeBDMNotFound as e:
+            raise exc.HTTPNotFound(explanation=e.format_message())
+
+    @wsgi.response(202)
+    @wsgi.expected_errors((400, 404, 409))
+    @validation.schema(volumes_schema.update_volume_attachment, '2.0', '2.84')
+    @validation.schema(volumes_schema.update_volume_attachment_v285,
+                       min_version='2.85')
+    def update(self, req, server_id, id, body):
+        context = req.environ['nova.context']
+        instance = common.get_instance(self.compute_api, context, server_id)
+        attachment = body['volumeAttachment']
+        volume_id = attachment['volumeId']
+        only_swap = not api_version_request.is_supported(req, '2.85')
+
+        # NOTE(brinzhang): If the 'volumeId' requested by the user is
+        # different from the 'id' in the url path, or only swap is allowed by
+        # the microversion, we should check the swap volume policy.
+        # otherwise, check the volume update policy.
+        if only_swap or id != volume_id:
+            context.can(va_policies.POLICY_ROOT % 'swap', target={})
+        else:
+            context.can(va_policies.POLICY_ROOT % 'update',
+                        target={'project_id': instance.project_id})
+
+        if only_swap:
+            # NOTE(danms): Original behavior is always call swap on PUT
+            self._update_volume_swap(req, instance, id, body)
+        else:
+            # NOTE(danms): New behavior is update any supported attachment
+            # properties first, and then call swap if volumeId differs
+            self._update_volume_regular(req, instance, id, body)
+            if id != volume_id:
+                self._update_volume_swap(req, instance, id, body)
 
     @wsgi.response(202)
     @wsgi.expected_errors((400, 403, 404, 409))
     def delete(self, req, server_id, id):
         """Detach a volume from an instance."""
         context = req.environ['nova.context']
-        context.can(va_policies.POLICY_ROOT % 'delete')
+        instance = common.get_instance(self.compute_api, context, server_id,
+                                       expected_attrs=['device_metadata'])
+        context.can(va_policies.POLICY_ROOT % 'delete',
+                    target={'project_id': instance.project_id})
 
         volume_id = id
 
-        instance = common.get_instance(self.compute_api, context, server_id,
-                                       expected_attrs=['device_metadata'])
         if instance.vm_state in (vm_states.SHELVED,
                                  vm_states.SHELVED_OFFLOADED):
             _check_request_version(req, '2.20', 'detach_volume',

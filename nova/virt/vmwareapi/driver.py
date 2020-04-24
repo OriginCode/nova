@@ -70,6 +70,7 @@ class VMwareVCDriver(driver.ComputeDriver):
         "supports_multiattach": False,
         "supports_trusted_certs": False,
         "supports_pcpus": False,
+        "supports_accelerators": False,
 
         # Image type support flags
         "supports_image_type_aki": False,
@@ -82,6 +83,7 @@ class VMwareVCDriver(driver.ComputeDriver):
         "supports_image_type_vhd": False,
         "supports_image_type_vhdx": False,
         "supports_image_type_vmdk": True,
+        "supports_image_type_ploop": False,
     }
 
     # Legacy nodename is of the form: <mo id>(<cluster name>)
@@ -199,6 +201,13 @@ class VMwareVCDriver(driver.ComputeDriver):
                 self._datastore_regex = None
 
     def init_host(self, host):
+        LOG.warning('The vmwareapi driver is deprecated and may be removed in '
+                    'a future release. The driver is not tested by the '
+                    'OpenStack project nor does it have clear maintainer(s) '
+                    'and thus its quality can not be ensured. If you are '
+                    'using the driver in production please let us know in '
+                    'freenode IRC and/or the openstack-discuss mailing list.')
+
         vim = self._session.vim
         if vim is None:
             self._session._create_session()
@@ -278,14 +287,11 @@ class VMwareVCDriver(driver.ComputeDriver):
 
     def finish_migration(self, context, migration, instance, disk_info,
                          network_info, image_meta, resize_instance,
-                         block_device_info=None, power_on=True):
+                         allocations, block_device_info=None, power_on=True):
         """Completes a resize, turning on the migrated instance."""
         self._vmops.finish_migration(context, migration, instance, disk_info,
                                      network_info, image_meta, resize_instance,
                                      block_device_info, power_on)
-
-    def ensure_filtering_rules_for_instance(self, instance, network_info):
-        pass
 
     def pre_live_migration(self, context, instance, block_device_info,
                            network_info, disk_info, migrate_data):
@@ -337,9 +343,6 @@ class VMwareVCDriver(driver.ComputeDriver):
         data.cluster_name = CONF.vmware.cluster_name
         data.datastore_regex = CONF.vmware.datastore_regex
         return data
-
-    def unfilter_instance(self, instance, network_info):
-        pass
 
     def rollback_live_migration_at_destination(self, context, instance,
                                                network_info,
@@ -538,7 +541,7 @@ class VMwareVCDriver(driver.ComputeDriver):
 
     def spawn(self, context, instance, image_meta, injected_files,
               admin_password, allocations, network_info=None,
-              block_device_info=None, power_on=True):
+              block_device_info=None, power_on=True, accel_info=None):
         """Create VM instance."""
         self._vmops.spawn(context, instance, image_meta, injected_files,
                           admin_password, network_info, block_device_info)
@@ -568,7 +571,8 @@ class VMwareVCDriver(driver.ComputeDriver):
         self._vmops.snapshot(context, instance, image_id, update_task_state)
 
     def reboot(self, context, instance, network_info, reboot_type,
-               block_device_info=None, bad_volumes_callback=None):
+               block_device_info=None, bad_volumes_callback=None,
+               accel_info=None):
         """Reboot VM instance."""
         self._vmops.reboot(instance, network_info, reboot_type)
 
@@ -642,7 +646,7 @@ class VMwareVCDriver(driver.ComputeDriver):
         self._vmops.resume(instance)
 
     def rescue(self, context, instance, network_info, image_meta,
-               rescue_password):
+               rescue_password, block_device_info):
         """Rescue the specified instance."""
         self._vmops.rescue(context, instance, network_info, image_meta)
 
@@ -655,7 +659,7 @@ class VMwareVCDriver(driver.ComputeDriver):
         self._vmops.power_off(instance, timeout, retry_interval)
 
     def power_on(self, context, instance, network_info,
-                 block_device_info=None):
+                 block_device_info=None, accel_info=None):
         """Power on the specified instance."""
         self._vmops.power_on(instance)
 

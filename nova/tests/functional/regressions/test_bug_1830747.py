@@ -68,10 +68,8 @@ class MissingReqSpecInstanceGroupUUIDTestCase(
         self.start_service('scheduler')
         # Start two computes, one where the server will be created and another
         # where we'll cold migrate it.
-        self.computes = {}  # keep track of the compute services per host name
-        for host in ('host1', 'host2'):
-            compute_service = self.start_service('compute', host=host)
-            self.computes[host] = compute_service
+        self._start_compute('host1')
+        self._start_compute('host2')
 
     def test_cold_migrate_reschedule(self):
         # Create an anti-affinity group for the server.
@@ -86,12 +84,10 @@ class MissingReqSpecInstanceGroupUUIDTestCase(
 
         # Create a server in the group which should land on host1 due to our
         # custom weigher.
-        server = self._build_minimal_create_server_request(
-            self.api, 'test_cold_migrate_reschedule')
-        body = dict(server=server)
+        body = {'server': self._build_server()}
         body['os:scheduler_hints'] = {'group': group_id}
         server = self.api.post_server(body)
-        server = self._wait_for_state_change(self.api, server, 'ACTIVE')
+        server = self._wait_for_state_change(server, 'ACTIVE')
         self.assertEqual('host1', server['OS-EXT-SRV-ATTR:host'])
 
         # Verify the group uuid is set in the request spec.
@@ -129,8 +125,7 @@ class MissingReqSpecInstanceGroupUUIDTestCase(
         with mock.patch.dict(host1_driver.capabilities,
                              supports_migrate_to_same_host=False):
             self.api.post_server_action(server['id'], {'migrate': None})
-            server = self._wait_for_state_change(
-                self.api, server, 'VERIFY_RESIZE')
+            server = self._wait_for_state_change(server, 'VERIFY_RESIZE')
             self.assertEqual('host2', server['OS-EXT-SRV-ATTR:host'])
 
         # The RequestSpec.instance_group.uuid should still be set.

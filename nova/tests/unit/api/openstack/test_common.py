@@ -29,7 +29,7 @@ from nova.compute import task_states
 from nova.compute import vm_states
 from nova import context
 from nova import exception
-from nova import network
+from nova.network import neutron as network
 from nova import test
 from nova.tests.unit.api.openstack import fakes
 
@@ -597,7 +597,7 @@ class UrlJoinTest(test.NoDBTestCase):
 
 
 class ViewBuilderLinkTest(test.NoDBTestCase):
-    project_id = "fake"
+    project_id = fakes.FAKE_PROJECT_ID
     api_version = "2.1"
 
     def setUp(self):

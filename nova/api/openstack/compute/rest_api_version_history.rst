@@ -10,7 +10,7 @@ user documentation.
 ---
 
 This is the initial version of the v2.1 API which supports
-microversions. The V2.1 API is from the REST API users's point of
+microversions. The V2.1 API is from the REST API users' point of
 view exactly the same as v2.0 except with strong input validation.
 
 A user can specify a header in the API request::
@@ -206,7 +206,6 @@ migration to complete added::
 
 From this version of the API users can get the migration summary list by
 index API or the information of a specific migration by get API.
-And the old top-level resource ``/os-migrations`` won't be extended anymore.
 Add ``migration_type`` for old ``/os-migrations`` API, also add ``ref`` link to
 the ``/servers/{uuid}/migrations/{id}`` for it when the migration is an
 in-progress live-migration.
@@ -416,11 +415,37 @@ API endpoints as below::
   '/os-baremetal-nodes'
   '/os-fping'
 
-.. note:: A `regression`_ was introduced in this microversion which broke the
+.. note::
+
+    A `regression`__ was introduced in this microversion which broke the
     ``force`` parameter in the ``PUT /os-quota-sets`` API. The fix will have
     to be applied to restore this functionality.
 
-.. _regression: https://bugs.launchpad.net/nova/+bug/1733886
+    __ https://bugs.launchpad.net/nova/+bug/1733886
+
+.. versionchanged:: 18.0.0
+
+    The ``os-fping`` API was completely removed in the 18.0.0 (Rocky) release.
+    On deployments newer than this, the API will return HTTP 410 (Gone)
+    regardless of the requested microversion.
+
+.. versionchanged:: 21.0.0
+
+    The ``os-security-group-default-rules`` API was completely removed in the
+    21.0.0 (Ussuri) release. On deployments newer than this, the APIs will
+    return HTTP 410 (Gone) regardless of the requested microversion.
+
+.. versionchanged:: 21.0.0
+
+    The ``os-networks`` API was partially removed in the 21.0.0 (Ussuri)
+    release. On deployments newer than this, some endpoints of the API will
+    return HTTP 410 (Gone) regardless of the requested microversion.
+
+.. versionchanged:: 21.0.0
+
+    The ``os-tenant-networks`` API was partially removed in the 21.0.0 (Ussuri)
+    release. On deployments newer than this, some endpoints of the API will
+    return HTTP 410 (Gone) regardless of the requested microversion.
 
 2.37
 ----
@@ -1022,10 +1047,96 @@ API microversion 2.79 adds support for specifying the ``delete_on_termination``
 field in the request body when attaching a volume to a server, to support
 configuring whether to delete the data volume when the server is destroyed.
 Also, ``delete_on_termination`` is added to the GET responses when showing
-attached volumes.
+attached volumes, and the ``delete_on_termination`` field is contained
+in the POST API response body when attaching a volume.
 
 The affected APIs are as follows:
 
 * ``POST /servers/{server_id}/os-volume_attachments``
 * ``GET /servers/{server_id}/os-volume_attachments``
 * ``GET /servers/{server_id}/os-volume_attachments/{volume_id}``
+
+2.80
+----
+
+Microversion 2.80 changes the list migrations APIs and the os-migrations API.
+
+Expose the ``user_id`` and ``project_id`` fields in the following APIs:
+
+* ``GET /os-migrations``
+* ``GET /servers/{server_id}/migrations``
+* ``GET /servers/{server_id}/migrations/{migration_id}``
+
+The ``GET /os-migrations`` API will also have optional ``user_id`` and
+``project_id`` query parameters for filtering migrations by user and/or
+project, for example:
+
+* ``GET /os-migrations?user_id=ef9d34b4-45d0-4530-871b-3fb535988394``
+* ``GET /os-migrations?project_id=011ee9f4-8f16-4c38-8633-a254d420fd54``
+* ``GET /os-migrations?user_id=ef9d34b4-45d0-4530-871b-3fb535988394&project_id=011ee9f4-8f16-4c38-8633-a254d420fd54``
+
+2.81
+----
+
+Adds support for image cache management by aggregate by adding
+``POST /os-aggregates/{aggregate_id}/images``.
+
+2.82
+----
+
+Adds ``accelerator-request-bound`` event to ``os-server-external-events``
+API. This event is sent by Cyborg to indicate completion of the binding
+event for one accelerator request (ARQ) associated with an instance.
+
+2.83
+----
+
+Allow the following filter parameters for ``GET /servers/detail``
+and ``GET /servers`` for non-admin :
+
+* ``availability_zone``
+* ``config_drive``
+* ``key_name``
+* ``created_at``
+* ``launched_at``
+* ``terminated_at``
+* ``power_state``
+* ``task_state``
+* ``vm_state``
+* ``progress``
+* ``user_id``
+
+2.84
+----
+
+The ``GET /servers/{server_id}/os-instance-actions/{request_id}`` API returns
+a ``details`` parameter for each failed event with a fault message, similar to
+the server ``fault.message`` parameter in ``GET /servers/{server_id}`` for a
+server with status ``ERROR``.
+
+2.85
+----
+
+Adds the ability to specify ``delete_on_termination`` in the
+``PUT /servers/{server_id}/os-volume_attachments/{volume_id}`` API, which
+allows changing the behavior of volume deletion on instance deletion.
+
+2.86
+----
+
+Add support for validation of known extra specs. This is enabled by default
+for the following APIs:
+
+* ``POST /flavors/{flavor_id}/os-extra_specs``
+* ``PUT /flavors/{flavor_id}/os-extra_specs/{id}``
+
+Validation is only used for recognized extra spec namespaces, currently:
+``accel``, ``aggregate_instance_extra_specs``, ``capabilities``, ``hw``,
+``hw_rng``, ``hw_video``, ``os``, ``pci_passthrough``, ``powervm``, ``quota``,
+``resources``, ``trait``, and ``vmware``.
+
+2.87 (Maximum in Ussuri)
+------------------------
+
+Adds support for rescuing boot from volume instances when the compute host
+reports the ``COMPUTE_BFV_RESCUE`` capability trait.

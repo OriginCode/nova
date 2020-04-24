@@ -21,7 +21,6 @@ import tempfile
 import eventlet
 import fixtures
 from keystoneauth1 import adapter as ks_adapter
-from keystoneauth1 import exceptions as ks_exc
 from keystoneauth1.identity import base as ks_identity
 from keystoneauth1 import session as ks_session
 import mock
@@ -584,16 +583,6 @@ class ValidateIntegerTestCase(test.NoDBTestCase):
                           max_value=1000)
 
 
-class ValidateNeutronConfiguration(test.NoDBTestCase):
-    def test_nova_network(self):
-        self.flags(use_neutron=False)
-        self.assertFalse(utils.is_neutron())
-
-    def test_neutron(self):
-        self.flags(use_neutron=True)
-        self.assertTrue(utils.is_neutron())
-
-
 class AutoDiskConfigUtilTestCase(test.NoDBTestCase):
     def test_is_auto_disk_config_disabled(self):
         self.assertTrue(utils.is_auto_disk_config_disabled("Disabled "))
@@ -1054,119 +1043,6 @@ class GetEndpointTestCase(test.NoDBTestCase):
         self.assertEqual('url', utils.get_endpoint(self.adap))
         self.adap.get_endpoint_data.assert_not_called()
         self.adap.get_endpoint.assert_called_once_with()
-
-    def test_nonimage_try_interfaces(self):
-        self.adap.get_endpoint.side_effect = (ks_exc.EndpointNotFound, 'url')
-        self.assertEqual('url', utils.get_endpoint(self.adap))
-        self.adap.get_endpoint_data.assert_not_called()
-        self.assertEqual(2, self.adap.get_endpoint.call_count)
-        self.assertEqual('admin', self.adap.interface)
-
-    def test_nonimage_try_interfaces_fail(self):
-        self.adap.get_endpoint.side_effect = ks_exc.EndpointNotFound
-        self.assertRaises(ks_exc.EndpointNotFound,
-                          utils.get_endpoint, self.adap)
-        self.adap.get_endpoint_data.assert_not_called()
-        self.assertEqual(3, self.adap.get_endpoint.call_count)
-        self.assertEqual('public', self.adap.interface)
-
-
-class RunOnceTests(test.NoDBTestCase):
-
-    fake_logger = mock.MagicMock()
-
-    @utils.run_once("already ran once", fake_logger)
-    def dummy_test_func(self, fail=False):
-        if fail:
-            raise ValueError()
-        return True
-
-    def setUp(self):
-        super(RunOnceTests, self).setUp()
-        self.dummy_test_func.reset()
-        RunOnceTests.fake_logger.reset_mock()
-
-    def test_wrapped_funtions_called_once(self):
-        self.assertFalse(self.dummy_test_func.called)
-        result = self.dummy_test_func()
-        self.assertTrue(result)
-        self.assertTrue(self.dummy_test_func.called)
-
-        # assert that on second invocation no result
-        # is returned and that the logger is invoked.
-        result = self.dummy_test_func()
-        RunOnceTests.fake_logger.assert_called_once()
-        self.assertIsNone(result)
-
-    def test_wrapped_funtions_called_once_raises(self):
-        self.assertFalse(self.dummy_test_func.called)
-        self.assertRaises(ValueError, self.dummy_test_func, fail=True)
-        self.assertTrue(self.dummy_test_func.called)
-
-        # assert that on second invocation no result
-        # is returned and that the logger is invoked.
-        result = self.dummy_test_func()
-        RunOnceTests.fake_logger.assert_called_once()
-        self.assertIsNone(result)
-
-    def test_wrapped_funtions_can_be_reset(self):
-        # assert we start with a clean state
-        self.assertFalse(self.dummy_test_func.called)
-        result = self.dummy_test_func()
-        self.assertTrue(result)
-
-        self.dummy_test_func.reset()
-        # assert we restored a clean state
-        self.assertFalse(self.dummy_test_func.called)
-        result = self.dummy_test_func()
-        self.assertTrue(result)
-
-        # assert that we never called the logger
-        RunOnceTests.fake_logger.assert_not_called()
-
-    def test_reset_calls_cleanup(self):
-        mock_clean = mock.Mock()
-
-        @utils.run_once("already ran once", self.fake_logger,
-                        cleanup=mock_clean)
-        def f():
-            pass
-
-        f()
-        self.assertTrue(f.called)
-
-        f.reset()
-        self.assertFalse(f.called)
-        mock_clean.assert_called_once_with()
-
-    def test_clean_is_not_called_at_reset_if_wrapped_not_called(self):
-        mock_clean = mock.Mock()
-
-        @utils.run_once("already ran once", self.fake_logger,
-                        cleanup=mock_clean)
-        def f():
-            pass
-
-        self.assertFalse(f.called)
-
-        f.reset()
-        self.assertFalse(f.called)
-        self.assertFalse(mock_clean.called)
-
-    def test_reset_works_even_if_cleanup_raises(self):
-        mock_clean = mock.Mock(side_effect=ValueError())
-
-        @utils.run_once("already ran once", self.fake_logger,
-                        cleanup=mock_clean)
-        def f():
-            pass
-
-        f()
-        self.assertTrue(f.called)
-
-        self.assertRaises(ValueError, f.reset)
-        self.assertFalse(f.called)
-        mock_clean.assert_called_once_with()
 
 
 class TestResourceClassNormalize(test.NoDBTestCase):

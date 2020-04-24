@@ -12,9 +12,11 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from keystoneauth1 import exceptions as ks_exc
 from oslo_log import log as logging
 from oslo_utils import strutils
 from oslo_utils import uuidutils
+import six
 import webob.exc
 
 from nova.api.openstack import api_version_request
@@ -62,7 +64,6 @@ class ServiceController(wsgi.Controller):
         api_services = ('nova-osapi_compute', 'nova-metadata')
 
         context = req.environ['nova.context']
-        context.can(services_policies.BASE_POLICY_NAME)
 
         cell_down_support = api_version_request.is_supported(
             req, min_version=PARTIAL_CONSTRUCT_FOR_CELL_DOWN_MIN_VERSION)
@@ -216,7 +217,6 @@ class ServiceController(wsgi.Controller):
     def _perform_action(self, req, id, body, actions):
         """Calculate action dictionary dependent on provided fields"""
         context = req.environ['nova.context']
-        context.can(services_policies.BASE_POLICY_NAME)
 
         try:
             action = actions[id]
@@ -231,7 +231,7 @@ class ServiceController(wsgi.Controller):
     def delete(self, req, id):
         """Deletes the specified service."""
         context = req.environ['nova.context']
-        context.can(services_policies.BASE_POLICY_NAME)
+        context.can(services_policies.BASE_POLICY_NAME % 'delete', target={})
 
         if api_version_request.is_supported(
                 req, min_version=UUID_FOR_ID_MIN_VERSION):
@@ -283,8 +283,14 @@ class ServiceController(wsgi.Controller):
                 # remember that an ironic compute service can manage multiple
                 # nodes
                 for compute_node in compute_nodes:
-                    self.placementclient.delete_resource_provider(
-                        context, compute_node, cascade=True)
+                    try:
+                        self.placementclient.delete_resource_provider(
+                            context, compute_node, cascade=True)
+                    except ks_exc.ClientException as e:
+                        LOG.error(
+                            "Failed to delete compute node resource provider "
+                            "for compute node %s: %s",
+                            compute_node.uuid, six.text_type(e))
                 # remove the host_mapping of this host.
                 try:
                     hm = objects.HostMapping.get_by_host(context, service.host)
@@ -340,6 +346,8 @@ class ServiceController(wsgi.Controller):
         """Return a list of all running services. Filter by host & service
         name
         """
+        context = req.environ['nova.context']
+        context.can(services_policies.BASE_POLICY_NAME % 'list', target={})
         if api_version_request.is_supported(req, min_version='2.11'):
             _services = self._get_services_list(req, ['forced_down'])
         else:
@@ -359,6 +367,8 @@ class ServiceController(wsgi.Controller):
         service ID passed on the path, just the action, for example
         PUT /os-services/disable.
         """
+        context = req.environ['nova.context']
+        context.can(services_policies.BASE_POLICY_NAME % 'update', target={})
         if api_version_request.is_supported(req, min_version='2.11'):
             actions = self.actions.copy()
             actions["force-down"] = self._forced_down
@@ -385,7 +395,7 @@ class ServiceController(wsgi.Controller):
 
         # Validate the request context against the policy.
         context = req.environ['nova.context']
-        context.can(services_policies.BASE_POLICY_NAME)
+        context.can(services_policies.BASE_POLICY_NAME % 'update', target={})
 
         # Get the service by uuid.
         try:

@@ -47,6 +47,7 @@ DictOfStringsField = fields.DictOfStringsField
 DictOfNullableStringsField = fields.DictOfNullableStringsField
 DictOfIntegersField = fields.DictOfIntegersField
 ListOfStringsField = fields.ListOfStringsField
+ListOfUUIDField = fields.ListOfUUIDField
 SetOfIntegersField = fields.SetOfIntegersField
 ListOfSetsOfIntegersField = fields.ListOfSetsOfIntegersField
 ListOfDictOfNullableStringsField = fields.ListOfDictOfNullableStringsField
@@ -479,6 +480,20 @@ class OSType(BaseNovaEnum):
 
 class RNGModel(BaseNovaEnum):
 
+    # NOTE(kchamart): Along with "virtio", we may need to extend this (if a
+    # good reason shows up) to allow two more values for VirtIO
+    # transitional and non-transitional devices (available since libvirt
+    # 5.2.0):
+    #
+    #   - virtio-transitional
+    #   - virtio-nontransitional
+    #
+    # This allows one to choose whether you want to have compatibility
+    # with older guest operating systems.  The value you select will in
+    # turn decide the kind of PCI topology the guest will get.
+    #
+    # Details:
+    # https://libvirt.org/formatdomain.html#elementsVirtioTransitional
     VIRTIO = "virtio"
 
     ALL = (VIRTIO,)
@@ -768,8 +783,9 @@ class NotificationPhase(BaseNovaEnum):
     START = 'start'
     END = 'end'
     ERROR = 'error'
+    PROGRESS = 'progress'
 
-    ALL = (START, END, ERROR)
+    ALL = (START, END, ERROR, PROGRESS)
 
 
 class NotificationSource(BaseNovaEnum):
@@ -787,6 +803,8 @@ class NotificationSource(BaseNovaEnum):
     API = 'nova-api'
     CONDUCTOR = 'nova-conductor'
     SCHEDULER = 'nova-scheduler'
+    # TODO(stephenfin): Remove 'NETWORK' when 'NotificationPublisher' is
+    # updated to version 3.0
     NETWORK = 'nova-network'
     # TODO(stephenfin): Remove 'CONSOLEAUTH' when 'NotificationPublisher' is
     # updated to version 3.0
@@ -794,6 +812,8 @@ class NotificationSource(BaseNovaEnum):
     # TODO(stephenfin): Remove when 'NotificationPublisher' object version is
     # bumped to 3.0
     CELLS = 'nova-cells'
+    # TODO(stephenfin): Remove when 'NotificationPublisher' object version is
+    # bumped to 3.0
     CONSOLE = 'nova-console'
     METADATA = 'nova-metadata'
 
@@ -864,6 +884,7 @@ class NotificationAction(BaseNovaEnum):
     BUILD_INSTANCES = 'build_instances'
     MIGRATE_SERVER = 'migrate_server'
     REBUILD_SERVER = 'rebuild_server'
+    IMAGE_CACHE = 'cache_images'
 
     ALL = (UPDATE, EXCEPTION, DELETE, PAUSE, UNPAUSE, RESIZE, VOLUME_SWAP,
            SUSPEND, POWER_ON, REBOOT, SHUTDOWN, SNAPSHOT, INTERFACE_ATTACH,
@@ -877,7 +898,7 @@ class NotificationAction(BaseNovaEnum):
            REMOVE_HOST, ADD_MEMBER, UPDATE_METADATA, LOCK, UNLOCK,
            REBUILD_SCHEDULED, UPDATE_PROP, LIVE_MIGRATION_FORCE_COMPLETE,
            CONNECT, USAGE, BUILD_INSTANCES, MIGRATE_SERVER, REBUILD_SERVER,
-           SELECT_DESTINATIONS)
+           SELECT_DESTINATIONS, IMAGE_CACHE)
 
 
 # TODO(rlrossit): These should be changed over to be a StateMachine enum from
@@ -1274,15 +1295,9 @@ class InstancePowerStateField(BaseEnumField):
     AUTO_TYPE = InstancePowerState()
 
 
-class ListOfListsOfStringsField(fields.AutoTypedField):
+class ListOfListsOfStringsField(AutoTypedField):
     AUTO_TYPE = List(List(fields.String()))
 
 
-# TODO(mriedem): Replace this with the version from oslo.versiondobjects
-# when https://review.opendev.org/#/c/634700/ is released.
-class ListOfUUIDField(AutoTypedField):
-    AUTO_TYPE = List(fields.UUID())
-
-
-class DictOfSetOfIntegersField(fields.AutoTypedField):
+class DictOfSetOfIntegersField(AutoTypedField):
     AUTO_TYPE = Dict(Set(fields.Integer()))

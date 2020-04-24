@@ -53,7 +53,16 @@ def pipeline_factory(loader, global_conf, **local_conf):
 
 def pipeline_factory_v21(loader, global_conf, **local_conf):
     """A paste pipeline replica that keys off of auth_strategy."""
-    return _load_pipeline(loader, local_conf[CONF.api.auth_strategy].split())
+    auth_strategy = CONF.api.auth_strategy
+    if auth_strategy == 'noauth2':
+        versionutils.report_deprecated_feature(
+            LOG,
+            "'[api]auth_strategy=noauth2' is deprecated as of the 21.0.0 "
+            "Ussuri release and will be removed in a future release. Please "
+            "remove any 'noauth2' entries from api-paste.ini; only the "
+            "'keystone' pipeline is supported."
+        )
+    return _load_pipeline(loader, local_conf[auth_strategy].split())
 
 
 class InjectContext(wsgi.Middleware):
@@ -71,6 +80,14 @@ class InjectContext(wsgi.Middleware):
 
 class NovaKeystoneContext(wsgi.Middleware):
     """Make a request context from keystone headers."""
+
+    @staticmethod
+    def _create_context(env, **kwargs):
+        """Create a context from a request environ.
+
+        This exists to make test stubbing easier.
+        """
+        return context.RequestContext.from_environ(env, **kwargs)
 
     @webob.dec.wsgify(RequestClass=wsgi.Request)
     def __call__(self, req):
@@ -92,7 +109,7 @@ class NovaKeystoneContext(wsgi.Middleware):
         # middleware in newer versions.
         user_auth_plugin = req.environ.get('keystone.token_auth')
 
-        ctx = context.RequestContext.from_environ(
+        ctx = self._create_context(
             req.environ,
             user_auth_plugin=user_auth_plugin,
             remote_address=remote_address,

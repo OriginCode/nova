@@ -20,7 +20,6 @@ from oslo_serialization import jsonutils
 import six
 import webob
 
-from nova.api.openstack import api_version_request
 from nova.api.openstack.compute import flavor_access as flavor_access_v21
 from nova.api.openstack.compute import flavor_manage as flavormanage_v21
 from nova.compute import flavors
@@ -61,7 +60,7 @@ def fake_create_without_swap(newflavor):
 class FlavorManageTestV21(test.NoDBTestCase):
     controller = flavormanage_v21.FlavorManageController()
     validation_error = exception.ValidationError
-    base_url = '/v2/fake/flavors'
+    base_url = '/v2/%s/flavors' % fakes.FAKE_PROJECT_ID
     microversion = '2.1'
 
     def setUp(self):
@@ -507,9 +506,8 @@ class FlavorManageTestV2_75(FlavorManageTestV2_61):
         flavor = self._create_flavor_success_case(self.request_body,
                                                 version='2.74')['flavor']
         mock_get.return_value = self.FLAVOR_WITH_NO_SWAP
-        req = fakes.HTTPRequest.blank(
-            '/fake/flavors',
-            version='2.74')
+        req = fakes.HTTPRequest.blank('/%s/flavors' % fakes.FAKE_PROJECT_ID,
+                                      version='2.74')
         req.method = 'PUT'
         response = self.controller._update(
             req, flavor['id'],
@@ -530,9 +528,8 @@ class FlavorManageTestV2_75(FlavorManageTestV2_61):
         del self.request_body['flavor']['swap']
         mock_get.return_value = self.FLAVOR_WITH_NO_SWAP
         flavor = self._create_flavor_success_case(self.request_body)['flavor']
-        req = fakes.HTTPRequest.blank(
-            '/fake/flavors',
-            version=self.microversion)
+        req = fakes.HTTPRequest.blank('/%s/flavors' % fakes.FAKE_PROJECT_ID,
+                                      version=self.microversion)
         response = self.controller._update(
             req, flavor['id'],
             body={'flavor': {'description': None}})['flavor']
@@ -541,7 +538,7 @@ class FlavorManageTestV2_75(FlavorManageTestV2_61):
 
 class PrivateFlavorManageTestV21(test.TestCase):
     controller = flavormanage_v21.FlavorManageController()
-    base_url = '/v2/fake/flavors'
+    base_url = '/v2/%s/flavors' % fakes.FAKE_PROJECT_ID
 
     def setUp(self):
         super(PrivateFlavorManageTestV21, self).setUp()
@@ -586,7 +583,7 @@ class PrivateFlavorManageTestV21(test.TestCase):
             fakes.HTTPRequest.blank('', use_admin_context=True),
             body["flavor"]["id"])
         expected_flavor_access_body = {
-            "tenant_id": 'fake',
+            "tenant_id": fakes.FAKE_PROJECT_ID,
             "flavor_id": "%s" % body["flavor"]["id"]
         }
         self.assertNotIn(expected_flavor_access_body,
@@ -597,60 +594,3 @@ class PrivateFlavorManageTestV21(test.TestCase):
         body = self._get_response()
         for key in self.expected["flavor"]:
             self.assertEqual(body["flavor"][key], self.expected["flavor"][key])
-
-
-class FlavorManagerPolicyEnforcementV21(test.TestCase):
-
-    def setUp(self):
-        super(FlavorManagerPolicyEnforcementV21, self).setUp()
-        self.controller = flavormanage_v21.FlavorManageController()
-        self.adm_req = fakes.HTTPRequest.blank('', use_admin_context=True)
-        self.req = fakes.HTTPRequest.blank('')
-
-    def test_create_policy_failed(self):
-        rule_name = "os_compute_api:os-flavor-manage:create"
-        self.policy.set_rules({rule_name: "project:non_fake"})
-        exc = self.assertRaises(
-            exception.PolicyNotAuthorized,
-            self.controller._create, self.req,
-            body={"flavor": {
-                "name": "test",
-                "ram": 512,
-                "vcpus": 2,
-                "disk": 1,
-                "swap": 512,
-                "rxtx_factor": 1,
-            }})
-        # The deprecated action is being enforced since the rule that is
-        # configured is different than the default rule
-        self.assertEqual(
-            "Policy doesn't allow %s to be performed." % rule_name,
-            exc.format_message())
-
-    def test_delete_policy_failed(self):
-        rule_name = "os_compute_api:os-flavor-manage:delete"
-        self.policy.set_rules({rule_name: "project:non_fake"})
-        exc = self.assertRaises(
-            exception.PolicyNotAuthorized,
-            self.controller._delete, self.req,
-            fakes.FAKE_UUID)
-        # The deprecated action is being enforced since the rule that is
-        # configured is different than the default rule
-        self.assertEqual(
-            "Policy doesn't allow %s to be performed." % rule_name,
-            exc.format_message())
-
-    def test_flavor_update_non_admin_fails(self):
-        """Tests that trying to update a flavor as a non-admin fails.
-        """
-        rule_name = "os_compute_api:os-flavor-manage:update"
-        self.policy.set_rules({rule_name: "is_admin:True"})
-        self.req.api_version_request = api_version_request.APIVersionRequest(
-            '2.55')
-        exc = self.assertRaises(
-            exception.PolicyNotAuthorized,
-            self.controller._update, self.req, 'fake_id',
-            body={"flavor": {"description": "not authorized"}})
-        self.assertEqual(
-            "Policy doesn't allow os_compute_api:os-flavor-manage:update to "
-            "be performed.", exc.format_message())

@@ -12,7 +12,7 @@
         },
         "floating_ips": {
             "in_use": 0,
-            "limit": 10,
+            "limit": -1,
             "reserved": 0
         },
         "id": "fake_tenant",
@@ -53,12 +53,12 @@
         },
         "security_group_rules": {
             "in_use": 0,
-            "limit": 20,
+            "limit": -1,
             "reserved": 0
         },
         "security_groups": {
             "in_use": 0,
-            "limit": 10,
+            "limit": -1,
             "reserved": 0
         },
         "server_group_members": {
@@ -69,11 +69,6 @@
         "server_groups": {
             "in_use": 0,
             "limit": 10,
-            "reserved": 0
-        },
-        "networks": {
-            "in_use": 2,
-            "limit": 3,
             "reserved": 0
         }
     }

@@ -55,11 +55,9 @@ def _verify_list_fulfillment(context, instance_uuid):
 
 
 class VirtualInterfaceListMigrationTestCase(
-    integrated_helpers._IntegratedTestBase,
-    integrated_helpers.InstanceHelperMixin):
+        integrated_helpers._IntegratedTestBase):
 
     ADMIN_API = True
-    USE_NEUTRON = True
     api_major_version = 'v2.1'
 
     _image_ref_parameter = 'imageRef'
@@ -72,9 +70,7 @@ class VirtualInterfaceListMigrationTestCase(
         fake_network.set_stub_network_methods(self)
         self.cells = objects.CellMappingList.get_all(self.context)
 
-        compute_cell0 = self.start_service(
-            'compute', host='compute2', cell='cell0')
-        self.computes = [compute_cell0, self.compute]
+        self._start_compute('compute2')
         self.instances = []
 
     def _create_instances(self, pre_newton=2, deleted=0, total=5,
@@ -95,7 +91,7 @@ class VirtualInterfaceListMigrationTestCase(
                     flavor=flavor,
                     created_at=datetime.datetime(1985, 10, 25, 1, 21, 0),
                     launched_at=datetime.datetime(1985, 10, 25, 1, 22, 0),
-                    host=self.computes[0].host,
+                    host=self.computes['compute2'].host,
                     hostname='%s-inst%i' % (target_cell.name, i))
                 inst.create()
 

@@ -16,7 +16,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova VERSION\n"
 "Report-Msgid-Bugs-To: https://bugs.launchpad.net/openstack-i18n/\n"
-"POT-Creation-Date: 2019-11-16 00:56+0000\n"
+"POT-Creation-Date: 2019-12-08 15:51+0000\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
@@ -116,10 +116,6 @@ msgid "'rxtx_factor' argument must be a float between 0 and %g"
 msgstr "'rxtx_factor' 인수는 0에서 %g 까지의 부동수여야 함 "
 
 #, python-format
-msgid "/%s should be specified as single address(es) not in cidr format"
-msgstr "/%s이(가) cidr 형식이 아니라 단일 주소로 지정되어야 함"
-
-#, python-format
 msgid "A NetworkModel is required in field %s"
 msgstr "NetworkModel이 필드 %s에 필요함"
 
@@ -162,9 +158,6 @@ msgstr ""
 msgid "Add metadata failed for aggregate %(id)s after %(retries)s retries"
 msgstr ""
 "%(retries)s 재시도 후 %(id)s 집합에 대한 메타데이터 추가를 실패했습니다"
-
-msgid "Address could not be converted."
-msgstr "주소를 변환할 수 없습니다. "
 
 msgid "Affinity instance group policy was violated."
 msgstr "선호도 인스턴스 그룹 정책을 위반했습니다. "
@@ -586,43 +579,12 @@ msgid "Connection to the hypervisor is broken on host: %(host)s"
 msgstr "하이퍼바이저 연결이 호스트에서 끊겼습니다: %(host)s"
 
 #, python-format
-msgid "Console %(console_id)s could not be found."
-msgstr "%(console_id)s 콘솔을 찾을 수 없습니다. "
-
-#, python-format
-msgid "Console for instance %(instance_uuid)s could not be found."
-msgstr "%(instance_uuid)s 인스턴스에 대한 콘솔을 찾을 수 없습니다. "
-
-#, python-format
-msgid ""
-"Console for instance %(instance_uuid)s in pool %(pool_id)s could not be "
-"found."
-msgstr ""
-"%(pool_id)s 풀에 있는 %(instance_uuid)s 인스턴스의 콘솔을 찾을 수 없습니다."
-
-#, python-format
 msgid ""
 "Console log output could not be retrieved for instance %(instance_id)s. "
 "Reason: %(reason)s"
 msgstr ""
 "%(instance_id)s 인스턴스의 콘솔 로그 출력을 검색할 수 없습니다. 이유: "
 "%(reason)s"
-
-#, python-format
-msgid ""
-"Console pool of type %(console_type)s for compute host %(compute_host)s on "
-"proxy host %(host)s not found."
-msgstr ""
-"프록시 호스트 %(host)s의 계산 호스트 %(compute_host)s에 대해 "
-"%(console_type)s 유형의 콘솔 풀을 찾을 수 없음"
-
-#, python-format
-msgid ""
-"Console pool with host %(host)s, console_type %(console_type)s and "
-"compute_host %(compute_host)s already exists."
-msgstr ""
-"호스트 %(host)s, 콘솔 유형 %(console_type)s, 컴퓨트 호스트 %(compute_host)s"
-"인 콘솔 풀이 이미 존재합니다."
 
 msgid "Constraint not met."
 msgstr "제한조건이 만족되지 않았습니다. "
@@ -677,17 +639,8 @@ msgstr "%(image_id)s 이미지를 업로드할 수 없음"
 msgid "Couldn't get Link Local IP of %(interface)s :%(ex)s"
 msgstr "%(interface)s의 링크 로컬 IP를 가져올 수 없음 :%(ex)s"
 
-msgid "Create networks failed"
-msgstr "네트워크 작성 실패"
-
 msgid "Creation of virtual interface with unique mac address failed"
 msgstr "고유 MAC 주소가 있는 가상 인터페이 생성에 실패했습니다"
-
-msgid "DNS1"
-msgstr "DNS1"
-
-msgid "DNS2"
-msgstr "DNS2"
 
 #, python-format
 msgid "Datastore regex %s did not match any datastores"
@@ -764,19 +717,6 @@ msgstr "드라이버 오류: %s"
 #, python-format
 msgid "Duplicate networks (%s) are not allowed"
 msgstr "중복 네트워크(%s)는 허용되지 않음"
-
-msgid ""
-"ERROR: Network commands are not supported when using the Neutron API.  Use "
-"python-neutronclient instead."
-msgstr ""
-"오류: Neutron API를 사용할 때 네트워크 명령이 지원되지 않습니다. 대신 python-"
-"neutronclient를 사용하십시오."
-
-msgid ""
-"ESX SOAP server returned an empty port group for the host system in its "
-"response"
-msgstr ""
-"ESX SOAP 서버가 응답에서 호스트 시스템에 대해 비어 있는 포트 그룹을 리턴함"
 
 #, python-format
 msgid ""
@@ -1317,12 +1257,6 @@ msgstr "%s 풀에서 IP 할당이 할당량을 초과했습니다."
 
 msgid "IP allocation over quota."
 msgstr "IP 할당이 할당량을 초과했습니다."
-
-msgid "IPv4"
-msgstr "IPv4"
-
-msgid "IPv6"
-msgstr "IPv6"
 
 #, python-format
 msgid "IPv6 netmask \"%s\" must be a netmask or integral prefix"
@@ -2070,10 +2004,6 @@ msgid ""
 msgstr "인스턴스를 부팅하려면 %(network_uuid)s 네트워크에 서브넷이 필요합니다."
 
 #, python-format
-msgid "Network adapter %(adapter)s could not be found."
-msgstr "%(adapter)s 네트워크 어댑터를 찾을 수 없습니다. "
-
-#, python-format
 msgid "Network could not be found for bridge %(bridge)s"
 msgstr "%(bridge)s 브릿지에 대한 네트워크를 찾을 수 없음"
 
@@ -2088,9 +2018,6 @@ msgstr "UUID %(uuid)s에 대한 네트워크를 찾을 수 없음"
 #, python-format
 msgid "Network could not be found with cidr %(cidr)s."
 msgstr "cidr %(cidr)s에 대한 네트워크를 찾을 수 없습니다. "
-
-msgid "Network driver does not support this function."
-msgstr "네트워크 드라이버가 이 기능을 지원하지 않습니다."
 
 #, python-format
 msgid "Network host %(host)s has zero fixed IPs in network %(network_id)s."
@@ -2166,9 +2093,6 @@ msgstr "ID %(id)s과(와) 연관된 고정 IP가 없습니다. "
 msgid "No fixed IPs associated to instance"
 msgstr "인스턴스와 연관된 Fixed IP가 없음"
 
-msgid "No floating IP addresses have been defined."
-msgstr "정의된 부동 IP 주소가 없습니다. "
-
 msgid "No free nbd devices"
 msgstr "여유 nbd 디바이스 없음"
 
@@ -2216,9 +2140,6 @@ msgstr "%(image)s의 %(root)s에 마운트 지점이 없음"
 
 msgid "No networks defined."
 msgstr "정의된 네트워크가 없습니다. "
-
-msgid "No networks found"
-msgstr "네트워크를 찾을 수 없음"
 
 #, python-format
 msgid "No operating system found in %s"
@@ -2422,9 +2343,6 @@ msgstr ""
 msgid "Physical network is missing for network %(network_uuid)s"
 msgstr "%(network_uuid)s 네트워크의 실제 네트워크가 누락됨"
 
-msgid "Please specify either fixed_range or uuid"
-msgstr "고정 범위 또는 UUID를 지정하십시오. "
-
 #, python-format
 msgid "Policy doesn't allow %(action)s to be performed."
 msgstr "%(action)s 정책이 수행되도록 허용되지 않았습니다."
@@ -2502,9 +2420,6 @@ msgstr "자원에 대한 할당량 초과: %(overs)s"
 
 msgid "Quota exceeded, too many key pairs."
 msgstr "할당량 초과. 키 쌍이 너무 많습니다. "
-
-msgid "Quota exceeded, too many networks."
-msgstr "할당량 초과. 네트워크가 너무 많습니다. "
 
 msgid "Quota exceeded, too many security group rules."
 msgstr "할당량 초과. 보안 그룹 규칙이 너무 많습니다. "
@@ -2627,9 +2542,6 @@ msgstr ""
 "요청된 인스턴스 NUMA 토폴로지와 요청된 PCI 디바이스를 함께 제공된 호스트 "
 "NUMA 토폴로지에 맞출 수 없음"
 
-msgid "Requested network does not contain enough (2+) usable hosts"
-msgstr "요청된 네트워크에 충분한(2+) 가용 호스트가 없음"
-
 #, python-format
 msgid ""
 "Requested vCPU limits %(sockets)d:%(cores)d:%(threads)d are impossible to "
@@ -2726,10 +2638,6 @@ msgstr "%s 보안 그룹이 이미 존재함"
 #, python-format
 msgid "Security group %s is not a string or unicode"
 msgstr "%s 보안 그룹이 문자열 또는 Unicode가 아님"
-
-#, python-format
-msgid "Security group default rule (%rule_id)s not found."
-msgstr "보안 그룹 기본 규칙 (%rule_id)s을(를) 찾을 수 없습니다."
 
 msgid "Security group id should be integer"
 msgstr "보안 그룹 ID는 정수여야 함"
@@ -2949,9 +2857,6 @@ msgstr ""
 "네트워크 범위가 %(num_networks)s에 맞추기에는 충분히 크지 않습니다. 네트워크 "
 "크기는 %(network_size)s입니다."
 
-msgid "The networks quota is disabled"
-msgstr "네트워크 할당이 비활성화 되어 있습니다."
-
 #, python-format
 msgid "The number of defined ports: %(ports)d is over the limit: %(quota)d"
 msgstr "정의된 포트 수 %(ports)d이(가) 한계를 초과함: %(quota)d"
@@ -3088,9 +2993,6 @@ msgstr ""
 "이 컴퓨트 노드의 하이퍼바이저가 지원되는 최소 버전 %(version)s보다 이전입니"
 "다."
 
-msgid "This default rule already exists."
-msgstr "이 기본 규칙은 이미 존재합니다."
-
 msgid "This domU must be running on the host specified by connection_url"
 msgstr "이 domU가 connection_url로 지정되는 호스트에서 실행 중이어야 함"
 
@@ -3136,13 +3038,6 @@ msgstr "발신 및 수신 포트는 정수여야 함"
 
 msgid "Token not found"
 msgstr "토큰을 찾을 수 없음"
-
-#, python-format
-msgid ""
-"Too many IP addresses will be generated.  Please increase /%s to reduce the "
-"number generated."
-msgstr ""
-"너무 많은 IP 주소가 생성됩니다. 생성된 숫자를 줄이려면 /%s을(를)늘리십시오. "
 
 msgid "Triggering crash dump is not supported"
 msgstr "충돌 덤프 트리거가 지원되지 않음"
@@ -3465,14 +3360,6 @@ msgstr "VHD 합병 시도가 (%d)을(를) 초과했음, 포기하는 중..."
 
 #, python-format
 msgid ""
-"VLAN tag is not appropriate for the port group %(bridge)s. Expected VLAN tag "
-"is %(tag)s, but the one associated with the port group is %(pgroup)s."
-msgstr ""
-"VLAN 태그가 포트 그룹 %(bridge)s에 적합하지 않습니다. 예상 VLAN 태그는 "
-"%(tag)s이지만 포트 그룹과 연관된 태그는 %(pgroup)s입니다."
-
-#, python-format
-msgid ""
 "Value (%(value)s) for parameter Group%(property)s is invalid. Content "
 "limited to '%(allowed)s'."
 msgstr ""
@@ -3507,16 +3394,8 @@ msgid "Virtual machine mode '%s' is not valid"
 msgstr "가상 머신 모드 '%s'이(가) 올바르지 않음"
 
 #, python-format
-msgid ""
-"Virtual switch associated with the network adapter %(adapter)s not found."
-msgstr "%(adapter)s 네트워크 어댑터와 연관된 가상 스위치를 찾을 수 없습니다. "
-
-#, python-format
 msgid "Virtualization type '%(virt)s' is not supported by this compute driver"
 msgstr "이 컴퓨터 드라이버가 가상화 유형 '%(virt)s'을(를) 지원하지 않음"
-
-msgid "VlanID"
-msgstr "VlanID"
 
 #, python-format
 msgid "Volume %(volume_id)s could not be attached. Reason: %(reason)s"
@@ -3707,9 +3586,6 @@ msgstr "fmt=%(fmt)s 백업: %(backing_file)s"
 msgid "href %s does not contain version"
 msgstr "href %s에 버전이 없음"
 
-msgid "id"
-msgstr "ID"
-
 msgid "image already mounted"
 msgstr "이미지가 이미 마운트되었음"
 
@@ -3819,9 +3695,6 @@ msgstr "공백이 아닌 문자가 하나 이상 포함된 인쇄 가능한 문�
 msgid "printable characters. Can not start or end with whitespace."
 msgstr "인쇄 가능한 문자입니다. 공백으로 시작하거나 종료할 수 없습니다."
 
-msgid "project"
-msgstr "프로젝트"
-
 #, python-format
 msgid "qemu-img failed to execute on %(path)s : %(exp)s"
 msgstr "qemu-img가 %(path)s에서 실행하는 데 실패 : %(exp)s"
@@ -3863,9 +3736,6 @@ msgstr "%s 스냅샷"
 msgid "snapshot_id required in create_info"
 msgstr "create_info에 snapshot_id가 필요함"
 
-msgid "start address"
-msgstr "시작 주소"
-
 msgid "token not provided"
 msgstr "토큰이 제공되지 않음"
 
@@ -3874,18 +3744,6 @@ msgstr "본문 키가 너무 많음"
 
 msgid "unpause not supported for vmwareapi"
 msgstr "vmwareapi에 대한 일시정지 해제는 지원되지 않음"
-
-msgid "uuid"
-msgstr "uuid"
-
-#, python-format
-msgid ""
-"vSwitch which contains the port group %(bridge)s is not associated with the "
-"desired physical adapter. Expected vSwitch is %(expected)s, but the one "
-"associated is %(actual)s."
-msgstr ""
-"포트 그룹 %(bridge)s이(가) 포함된 vSwitch가 예상된 실제 어댑터와 연관되지 않"
-"습니다. 예상 vSwitch는 %(expected)s이지만 연관된 것은 %(actual)s입니다."
 
 msgid "version should be an integer"
 msgstr "버전은 정수여야 함"

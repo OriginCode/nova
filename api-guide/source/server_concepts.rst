@@ -69,13 +69,14 @@ server status is one of the following values:
    expires, the server will be deleted permanently.
 
 -  ``SUSPENDED``: The server is suspended, either by request or
-   necessity. This status appears for only the following hypervisors:
-   XenServer/XCP, KVM, and ESXi. Administrative users may suspend a
-   server if it is infrequently used or to perform system maintenance.
-   When you suspend a server, its state is stored on disk, all
-   memory is written to disk, and the server is stopped.
-   Suspending a server is similar to placing a device in hibernation;
-   memory and vCPUs become available to create other servers.
+   necessity. See the
+   :nova-doc:`feature support matrix <user/support-matrix.html#operation_suspend>`
+   for supported compute drivers. When you suspend a server, its state is stored
+   on disk, all memory is written to disk, and the server is stopped.
+   Suspending a server is similar to placing a device in hibernation and its
+   occupied resource will not be freed but rather kept for when the server is
+   resumed. If an instance is infrequently used and the occupied resource needs
+   to be freed to create other servers, it should be shelved.
 
 -  ``UNKNOWN``: The state of the server is unknown. It could be because a part
    of the infrastructure is temporarily down (see :doc:`down_cells`
@@ -84,7 +85,7 @@ server status is one of the following values:
 -  ``VERIFY_RESIZE``: System is awaiting confirmation that the server is
    operational after a move or resize.
 
-Server status is caculated from vm_state and task_state, which
+Server status is calculated from vm_state and task_state, which
 are exposed to administrators:
 
 - vm_state describes a VM's current stable (not transition) state. That is, if
@@ -105,11 +106,17 @@ Status Transition:
 
 - ``BUILD``
 
-  .. todo:: Add more details.
+  While the server is building there are several task state transitions that
+  can occur:
+
+  - ``scheduling``: The request is being scheduled to a compute node.
+  - ``networking``: Setting up network interfaces asynchronously.
+  - ``block_device_mapping``: Preparing block devices (local disks, volumes).
+  - ``spawning``: Creating the guest in the hypervisor.
 
 - ``ACTIVE``
 
-  .. todo:: Add more details.
+  The terminal state for a successfully built and running server.
 
 - ``ERROR`` (on error)
 
@@ -152,6 +159,17 @@ For different user roles, the user has different query options set:
   - ``tags-any`` (New in version 2.26)
   - ``changes-before`` (New in version 2.66)
   - ``locked`` (New in version 2.73)
+  - ``availability_zone`` (New in version 2.83)
+  - ``config_drive`` (New in version 2.83)
+  - ``key_name`` (New in version 2.83)
+  - ``created_at`` (New in version 2.83)
+  - ``launched_at`` (New in version 2.83)
+  - ``terminated_at`` (New in version 2.83)
+  - ``power_state`` (New in version 2.83)
+  - ``task_state`` (New in version 2.83)
+  - ``vm_state`` (New in version 2.83)
+  - ``progress`` (New in version 2.83)
+  - ``user_id`` (New in version 2.83)
 
   Other options will be ignored by nova silently.
 
@@ -170,12 +188,12 @@ Precondition: there are 2 servers existing in cloud with following info::
       "servers": [
           {
               "name": "t1",
-              "OS-EXT-STS:vm_state": "active",
+              "OS-EXT-SRV-ATTR:host": "devstack1",
               ...
           },
           {
               "name": "t2",
-              "OS-EXT-STS:vm_state": "stopped",
+              "OS-EXT-SRV-ATTR:host": "devstack2",
               ...
           }
       ]
@@ -183,13 +201,13 @@ Precondition: there are 2 servers existing in cloud with following info::
 
 **Example: General user query server with administrator only options**
 
-Request with non-administrator context: ``GET /servers/detail?vm_state=active``
+Request with non-administrator context: ``GET /servers/detail?host=devstack1``
 
 .. note::
 
-  The ``vm_state`` query parameter is only for administrator users and
+  The ``host`` query parameter is only for administrator users and
   the query parameter is ignored if specified by non-administrator users.
-  Thus the API returns servers of both ``active`` and ``stopped``
+  Thus the API returns servers of both ``devstack1`` and ``devstack2``
   in this example.
 
 Response::
@@ -209,7 +227,7 @@ Response::
 
 **Example: Administrator query server with administrator only options**
 
-Request with administrator context: ``GET /servers/detail?vm_state=active``
+Request with administrator context: ``GET /servers/detail?host=devstack1``
 
 Response::
 
@@ -776,12 +794,11 @@ Server Consoles
 Server Consoles can also be supplied after server launched. There are several
 server console services available. First, users can get the console output
 from the specified server and can limit the lines of console text by setting
-the length. Second, users can access multiple types of remote consoles. The
-user can use novnc, xvpvnc, rdp-html5, spice-html5, serial, and webmks(start
-from microversion 2.8) through either the OpenStack dashboard or the command
-line. Refer to :nova-doc:`Configure remote console access
-<admin/remote-console-access.html>`.  Specifically for Xenserver, it provides
-the ability to create, delete, detail, list specified server vnc consoles.
+the length. Secondly, users can access multiple types of remote consoles. The
+user can use ``novnc``, ``rdp-html5``, ``spice-html5``, ``serial``, and
+``webmks`` (starting from microversion 2.8) through either the OpenStack
+dashboard or the command line. Refer to :nova-doc:`Configure remote console
+access <admin/remote-console-access.html>`.
 
 Server networks
 ~~~~~~~~~~~~~~~
@@ -790,28 +807,6 @@ Networks to which the server connects can also be supplied at launch
 time. One or more networks can be specified. User can also specify a
 specific port on the network or the fixed IP address to assign to the
 server interface.
-
-Considerations
-~~~~~~~~~~~~~~
-
--  The maximum limit refers to the number of bytes in the decoded data
-   and not the number of characters in the encoded data.
-
--  The maximum number of file path/content pairs that you can supply is
-   also determined by the compute provider and is defined by the
-   maxPersonality absolute limit.
-
--  The absolute limit, maxPersonalitySize, is a byte limit that is
-   guaranteed to apply to all images in the deployment. Providers can
-   set additional per-image personality limits.
-
--  The file injection might not occur until after the server is built and
-   booted.
-
--  After file injection, personality files are accessible by only system
-   administrators. For example, on Linux, all files have root and the root
-   group as the owner and group owner, respectively, and allow user and
-   group read access only (octal 440).
 
 Server access addresses
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -1083,3 +1078,24 @@ Follow these guidelines when you inject files:
 -  Encode the file contents as a Base64 string. The maximum size of the
    file contents is determined by the compute provider and may vary
    based on the image that is used to create the server.
+
+Considerations:
+
+-  The maximum limit refers to the number of bytes in the decoded data
+   and not the number of characters in the encoded data.
+
+-  The maximum number of file path/content pairs that you can supply is
+   also determined by the compute provider and is defined by the
+   maxPersonality absolute limit.
+
+-  The absolute limit, maxPersonalitySize, is a byte limit that is
+   guaranteed to apply to all images in the deployment. Providers can
+   set additional per-image personality limits.
+
+-  The file injection might not occur until after the server is built and
+   booted.
+
+-  After file injection, personality files are accessible by only system
+   administrators. For example, on Linux, all files have root and the root
+   group as the owner and group owner, respectively, and allow user and
+   group read access only (octal 440).

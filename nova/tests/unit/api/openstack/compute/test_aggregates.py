@@ -116,11 +116,6 @@ class AggregateTestCaseV21(test.NoDBTestCase):
             self._assert_agg_data(AGGREGATE_LIST, _make_agg_list(result))
             self.assertTrue(mock_list.called)
 
-    def test_index_no_admin(self):
-        self.assertRaises(exception.PolicyNotAuthorized,
-                          self.controller.index,
-                          self.user_req)
-
     def test_create(self):
         with mock.patch.object(self.controller.api, 'create_aggregate',
                                return_value=AGGREGATE) as mock_create:
@@ -130,12 +125,6 @@ class AggregateTestCaseV21(test.NoDBTestCase):
             result = _transform_aggregate_az(result['aggregate'])
             self._assert_agg_data(FORMATTED_AGGREGATE, _make_agg_obj(result))
             mock_create.assert_called_once_with(self.context, 'test', 'nova1')
-
-    def test_create_no_admin(self):
-        self.assertRaises(exception.PolicyNotAuthorized,
-                          self.controller.create, self.user_req,
-                          body={"aggregate": {"name": "test",
-                                              "availability_zone": "nova1"}})
 
     def test_create_with_duplicate_aggregate_name(self):
         side_effect = exception.AggregateNameExists(aggregate_name="test")
@@ -294,18 +283,17 @@ class AggregateTestCaseV21(test.NoDBTestCase):
             self._assert_agg_data(AGGREGATE, _make_agg_obj(aggregate))
             mock_get.assert_called_once_with(self.context, '1')
 
-    def test_show_no_admin(self):
-        self.assertRaises(exception.PolicyNotAuthorized,
-                          self.controller.show,
-                          self.user_req, "1")
-
-    def test_show_with_invalid_id(self):
+    def test_show_with_bad_aggregate(self):
         side_effect = exception.AggregateNotFound(aggregate_id='2')
         with mock.patch.object(self.controller.api, 'get_aggregate',
                                side_effect=side_effect) as mock_get:
             self.assertRaises(exc.HTTPNotFound, self.controller.show,
                               self.req, "2")
             mock_get.assert_called_once_with(self.context, '2')
+
+    def test_show_with_invalid_id(self):
+        self.assertRaises(exc.HTTPBadRequest, self.controller.show,
+                          self.req, 'foo')
 
     def test_update(self):
         body = {"aggregate": {"name": "new_name",
@@ -318,12 +306,6 @@ class AggregateTestCaseV21(test.NoDBTestCase):
             self._assert_agg_data(AGGREGATE, _make_agg_obj(result))
             mock_update.assert_called_once_with(self.context, '1',
                                                 body["aggregate"])
-
-    def test_update_no_admin(self):
-        body = {"aggregate": {"availability_zone": "nova"}}
-        self.assertRaises(exception.PolicyNotAuthorized,
-                          self.controller.update,
-                          self.user_req, "1", body=body)
 
     def test_update_with_only_name(self):
         body = {"aggregate": {"name": "new_name"}}
@@ -390,10 +372,11 @@ class AggregateTestCaseV21(test.NoDBTestCase):
 
     @mock.patch('nova.compute.api.AggregateAPI.update_aggregate')
     def test_update_with_none_availability_zone(self, mock_update_agg):
-        agg_id = uuidsentinel.aggregate
+        agg_id = 173
         mock_update_agg.return_value = objects.Aggregate(self.context,
                                                          name='test',
-                                                         uuid=agg_id,
+                                                         uuid=uuidsentinel.agg,
+                                                         id=agg_id,
                                                          hosts=[],
                                                          metadata={})
         body = {"aggregate": {"name": "test",
@@ -414,6 +397,11 @@ class AggregateTestCaseV21(test.NoDBTestCase):
             mock_update.assert_called_once_with(self.context, '2',
                                                 body["aggregate"])
 
+    def test_update_with_invalid_id(self):
+        body = {"aggregate": {"name": "test_name"}}
+        self.assertRaises(exc.HTTPBadRequest, self.controller.update,
+                          self.req, 'foo', body=body)
+
     def test_update_with_duplicated_name(self):
         body = {"aggregate": {"name": "test_name"}}
         side_effect = exception.AggregateNameExists(aggregate_name="test_name")
@@ -433,7 +421,7 @@ class AggregateTestCaseV21(test.NoDBTestCase):
     def test_update_with_invalid_action(self):
         with mock.patch.object(self.controller.api, "update_aggregate",
             side_effect=exception.InvalidAggregateAction(
-                action='invalid', aggregate_id='agg1', reason= "not empty")):
+                action='invalid', aggregate_id='1', reason= "not empty")):
             body = {"aggregate": {"availability_zone": "nova"}}
             self.assertRaises(exc.HTTPBadRequest, self.controller.update,
                               self.req, "1", body=body)
@@ -449,12 +437,6 @@ class AggregateTestCaseV21(test.NoDBTestCase):
             self._assert_agg_data(AGGREGATE, _make_agg_obj(aggregate))
             mock_add.assert_called_once_with(self.context, "1", "host1")
 
-    def test_add_host_no_admin(self):
-        self.assertRaises(exception.PolicyNotAuthorized,
-                          eval(self.add_host),
-                          self.user_req, "1",
-                          body={"add_host": {"host": "host1"}})
-
     def test_add_host_with_already_added_host(self):
         side_effect = exception.AggregateHostExists(aggregate_id="1",
                                                     host="host1")
@@ -467,14 +449,19 @@ class AggregateTestCaseV21(test.NoDBTestCase):
 
     def test_add_host_with_bad_aggregate(self):
         side_effect = exception.AggregateNotFound(
-            aggregate_id="bogus_aggregate")
+            aggregate_id="2")
         with mock.patch.object(self.controller.api, 'add_host_to_aggregate',
                                side_effect=side_effect) as mock_add:
             self.assertRaises(exc.HTTPNotFound, eval(self.add_host),
-                              self.req, "bogus_aggregate",
+                              self.req, "2",
                               body={"add_host": {"host": "host1"}})
-            mock_add.assert_called_once_with(self.context, "bogus_aggregate",
+            mock_add.assert_called_once_with(self.context, "2",
                                              "host1")
+
+    def test_add_host_with_invalid_id(self):
+        body = {"add_host": {"host": "host1"}}
+        self.assertRaises(exc.HTTPBadRequest, eval(self.add_host),
+                          self.req, 'foo', body=body)
 
     def test_add_host_with_bad_host(self):
         side_effect = exception.ComputeHostNotFound(host="bogus_host")
@@ -526,23 +513,22 @@ class AggregateTestCaseV21(test.NoDBTestCase):
                                    body={"remove_host": {"host": "host1"}})
             mock_rem.assert_called_once_with(self.context, "1", "host1")
 
-    def test_remove_host_no_admin(self):
-        self.assertRaises(exception.PolicyNotAuthorized,
-                          eval(self.remove_host),
-                          self.user_req, "1",
-                          body={"remove_host": {"host": "host1"}})
-
     def test_remove_host_with_bad_aggregate(self):
         side_effect = exception.AggregateNotFound(
-            aggregate_id="bogus_aggregate")
+            aggregate_id="2")
         with mock.patch.object(self.controller.api,
                                'remove_host_from_aggregate',
                                side_effect=side_effect) as mock_rem:
             self.assertRaises(exc.HTTPNotFound, eval(self.remove_host),
-                              self.req, "bogus_aggregate",
+                              self.req, "2",
                               body={"remove_host": {"host": "host1"}})
-            mock_rem.assert_called_once_with(self.context, "bogus_aggregate",
+            mock_rem.assert_called_once_with(self.context, "2",
                                              "host1")
+
+    def test_remove_host_with_invalid_id(self):
+        body = {"remove_host": {"host": "host1"}}
+        self.assertRaises(exc.HTTPBadRequest, eval(self.remove_host),
+                          self.req, 'foo', body=body)
 
     def test_remove_host_with_host_not_in_aggregate(self):
         side_effect = exception.AggregateHostNotFound(aggregate_id="1",
@@ -563,6 +549,9 @@ class AggregateTestCaseV21(test.NoDBTestCase):
             self.assertRaises(exc.HTTPNotFound, eval(self.remove_host),
                 self.req, "1", body={"remove_host": {"host": "bogushost"}})
             mock_rem.assert_called_once_with(self.context, "1", "bogushost")
+        self.assertIn('Failed to remove host bogushost from aggregate 1. '
+                      'Error: Compute host bogushost could not be found.',
+                      self.stdlog.logger.output)
 
     def test_remove_host_with_missing_host(self):
         self.assertRaises(self.bad_request, eval(self.remove_host),
@@ -588,6 +577,21 @@ class AggregateTestCaseV21(test.NoDBTestCase):
                           eval(self.remove_host),
                 self.req, "1", body={"remove_host": {}})
 
+    def test_remove_host_resource_provider_update_conflict(self):
+        """Tests that ResourceProviderUpdateConflict is handled as a 409."""
+        side_effect = exception.ResourceProviderUpdateConflict(
+            uuid=uuidsentinel.provider_id, generation=1, error='try again!')
+        with mock.patch.object(self.controller.api,
+                               'remove_host_from_aggregate',
+                               side_effect=side_effect) as mock_rem:
+            self.assertRaises(exc.HTTPConflict, eval(self.remove_host),
+                              self.req, "1",
+                              body={"remove_host": {"host": "bogushost"}})
+            mock_rem.assert_called_once_with(self.context, "1", "bogushost")
+        self.assertIn('Failed to remove host bogushost from aggregate 1. '
+                      'Error: A conflict was encountered attempting to update '
+                      'resource provider', self.stdlog.logger.output)
+
     def test_set_metadata(self):
         body = {"set_metadata": {"metadata": {"foo": "bar"}}}
         with mock.patch.object(self.controller.api,
@@ -612,24 +616,22 @@ class AggregateTestCaseV21(test.NoDBTestCase):
         mocked.assert_called_once_with(self.context, "1",
                                        body["set_metadata"]["metadata"])
 
-    def test_set_metadata_no_admin(self):
-        self.assertRaises(exception.PolicyNotAuthorized,
-                          eval(self.set_metadata),
-                          self.user_req, "1",
-                          body={"set_metadata": {"metadata":
-                                                    {"foo": "bar"}}})
-
     def test_set_metadata_with_bad_aggregate(self):
         body = {"set_metadata": {"metadata": {"foo": "bar"}}}
-        side_effect = exception.AggregateNotFound(aggregate_id="bad_aggregate")
+        side_effect = exception.AggregateNotFound(aggregate_id="2")
 
         with mock.patch.object(self.controller.api,
                                'update_aggregate_metadata',
                                side_effect=side_effect) as mock_update:
             self.assertRaises(exc.HTTPNotFound, eval(self.set_metadata),
-                self.req, "bad_aggregate", body=body)
-            mock_update.assert_called_once_with(self.context, "bad_aggregate",
+                self.req, "2", body=body)
+            mock_update.assert_called_once_with(self.context, "2",
                 body["set_metadata"]['metadata'])
+
+    def test_set_metadata_with_invalid_id(self):
+        body = {"set_metadata": {"metadata": {"foo": "bar"}}}
+        self.assertRaises(exc.HTTPBadRequest, eval(self.set_metadata),
+                          self.req, 'foo', body=body)
 
     def test_set_metadata_with_missing_metadata(self):
         body = {"asdf": {"foo": "bar"}}
@@ -672,28 +674,27 @@ class AggregateTestCaseV21(test.NoDBTestCase):
             self.controller.delete(self.req, "1")
             mock_del.assert_called_once_with(self.context, "1")
 
-    def test_delete_aggregate_no_admin(self):
-        self.assertRaises(exception.PolicyNotAuthorized,
-                          self.controller.delete,
-                          self.user_req, "1")
-
     def test_delete_aggregate_with_bad_aggregate(self):
         side_effect = exception.AggregateNotFound(
-            aggregate_id="bogus_aggregate")
+            aggregate_id="2")
         with mock.patch.object(self.controller.api, 'delete_aggregate',
                                side_effect=side_effect) as mock_del:
             self.assertRaises(exc.HTTPNotFound, self.controller.delete,
-                self.req, "bogus_aggregate")
-            mock_del.assert_called_once_with(self.context, "bogus_aggregate")
+                self.req, "2")
+            mock_del.assert_called_once_with(self.context, "2")
+
+    def test_delete_with_invalid_id(self):
+        self.assertRaises(exc.HTTPBadRequest, self.controller.delete,
+                          self.req, 'foo')
 
     def test_delete_aggregate_with_host(self):
         with mock.patch.object(self.controller.api, "delete_aggregate",
                                side_effect=exception.InvalidAggregateAction(
-                               action="delete", aggregate_id="agg1",
+                               action="delete", aggregate_id="2",
                                reason="not empty")):
             self.assertRaises(exc.HTTPBadRequest,
                               self.controller.delete,
-                              self.req, "agg1")
+                              self.req, "2")
 
     def test_marshall_aggregate(self):
         # _marshall_aggregate() just basically turns the aggregate returned
@@ -728,3 +729,11 @@ class AggregateTestCaseV21(test.NoDBTestCase):
     def _assert_agg_data(self, expected, actual):
         self.assertTrue(obj_base.obj_equal_prims(expected, actual),
                         "The aggregate objects were not equal")
+
+    def test_images_with_invalid_id(self):
+        body = {'cache': [{'id': uuidsentinel.cache}]}
+        req = fakes.HTTPRequest.blank('/v2/os-aggregates',
+                                      use_admin_context=True,
+                                      version='2.81')
+        self.assertRaises(exc.HTTPBadRequest, self.controller.images,
+                          req, 'foo', body=body)

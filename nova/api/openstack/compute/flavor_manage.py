@@ -32,11 +32,11 @@ class FlavorManageController(wsgi.Controller):
     # 204 as this operation complete the deletion of aggregate resource and
     # return no response body.
     @wsgi.response(202)
-    @wsgi.expected_errors((404))
+    @wsgi.expected_errors(404)
     @wsgi.action("delete")
     def _delete(self, req, id):
         context = req.environ['nova.context']
-        context.can(fm_policies.POLICY_ROOT % 'delete')
+        context.can(fm_policies.POLICY_ROOT % 'delete', target={})
 
         flavor = objects.Flavor(context=context, flavorid=id)
         try:
@@ -54,7 +54,7 @@ class FlavorManageController(wsgi.Controller):
                        flavors_view.FLAVOR_DESCRIPTION_MICROVERSION)
     def _create(self, req, body):
         context = req.environ['nova.context']
-        context.can(fm_policies.POLICY_ROOT % 'create')
+        context.can(fm_policies.POLICY_ROOT % 'create', target={})
 
         vals = body['flavor']
 
@@ -108,7 +108,7 @@ class FlavorManageController(wsgi.Controller):
     def _update(self, req, id, body):
         # Validate the policy.
         context = req.environ['nova.context']
-        context.can(fm_policies.POLICY_ROOT % 'update')
+        context.can(fm_policies.POLICY_ROOT % 'update', target={})
 
         # Get the flavor and update the description.
         try:

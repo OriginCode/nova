@@ -139,13 +139,12 @@ body. The possible server status values are:
 - ``SOFT_DELETED``. The server is marked as deleted but the disk
   images are still available to restore.
 - ``SUSPENDED``. The server is suspended, either by request or
-  necessity. This status appears for only the XenServer/XCP, KVM, and
-  ESXi hypervisors. Administrative users can suspend an instance if it
-  is infrequently used or to perform system maintenance. When you
-  suspend an instance, its VM state is stored on disk, all memory is
-  written to disk, and the virtual machine is stopped. Suspending an
-  instance is similar to placing a device in hibernation; memory and
-  vCPUs become available to create other instances.
+  necessity. When you suspend a server, its state is stored
+  on disk, all memory is written to disk, and the server is stopped.
+  Suspending a server is similar to placing a device in hibernation and its
+  occupied resource will not be freed but rather kept for when the server is
+  resumed. If a server is infrequently used and the occupied resource needs
+  to be freed to create other servers, it should be shelved.
 - ``UNKNOWN``. The state of the server is unknown. Contact your cloud
   provider.
 - ``VERIFY_RESIZE``. System is awaiting confirmation that the server
@@ -174,7 +173,17 @@ whitelist will be silently ignored.
   - ``tags-any`` (New in version 2.26)
   - ``changes-before`` (New in version 2.66)
   - ``locked`` (New in version 2.73)
-
+  - ``availability_zone`` (New in version 2.83)
+  - ``config_drive`` (New in version 2.83)
+  - ``key_name`` (New in version 2.83)
+  - ``created_at`` (New in version 2.83)
+  - ``launched_at`` (New in version 2.83)
+  - ``terminated_at`` (New in version 2.83)
+  - ``power_state`` (New in version 2.83)
+  - ``task_state`` (New in version 2.83)
+  - ``vm_state`` (New in version 2.83)
+  - ``progress`` (New in version 2.83)
+  - ``user_id`` (New in version 2.83)
 
 - For admin user, whitelist includes all filter keys mentioned in
   :ref:`list-server-request` Section.
@@ -634,8 +643,6 @@ Response
   - os-extended-volumes:volumes_attached.delete_on_termination: os-extended-volumes:volumes_attached.delete_on_termination
   - OS-SRV-USG:launched_at: OS-SRV-USG:launched_at
   - OS-SRV-USG:terminated_at: OS-SRV-USG:terminated_at
-  - security_groups: security_groups_obj
-  - security_group.name: name
   - status: server_status
   - tenant_id: tenant_id_body
   - updated: updated
@@ -646,6 +653,8 @@ Response
   - fault.message: fault_message
   - fault.details: fault_details
   - progress: progress
+  - security_groups: security_groups_obj_optional
+  - security_group.name: name
   - servers_links: servers_links
   - OS-EXT-SRV-ATTR:hostname: server_hostname
   - OS-EXT-SRV-ATTR:reservation_id: server_reservation_id
@@ -758,8 +767,6 @@ Response
   - os-extended-volumes:volumes_attached.delete_on_termination: os-extended-volumes:volumes_attached.delete_on_termination
   - OS-SRV-USG:launched_at: OS-SRV-USG:launched_at
   - OS-SRV-USG:terminated_at: OS-SRV-USG:terminated_at
-  - security_groups: security_groups_obj
-  - security_group.name: name
   - status: server_status
   - tenant_id: tenant_id_body
   - updated: updated
@@ -770,6 +777,8 @@ Response
   - fault.message: fault_message
   - fault.details: fault_details
   - progress: progress
+  - security_groups: security_groups_obj_optional
+  - security_group.name: name
   - OS-EXT-SRV-ATTR:hostname: server_hostname
   - OS-EXT-SRV-ATTR:reservation_id: server_reservation_id
   - OS-EXT-SRV-ATTR:launch_index: server_launch_index

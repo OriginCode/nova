@@ -16,7 +16,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova VERSION\n"
 "Report-Msgid-Bugs-To: https://bugs.launchpad.net/openstack-i18n/\n"
-"POT-Creation-Date: 2019-10-01 18:30+0000\n"
+"POT-Creation-Date: 2019-12-08 15:51+0000\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
@@ -118,12 +118,6 @@ msgid "'rxtx_factor' argument must be a float between 0 and %g"
 msgstr "El argumento 'rxtx_factor' debe ser un flotante entre 0 y %g"
 
 #, python-format
-msgid "/%s should be specified as single address(es) not in cidr format"
-msgstr ""
-"/%s se debe especificar como dirección (direcciones) única(s) no en formato "
-"cidr"
-
-#, python-format
 msgid "A NetworkModel is required in field %s"
 msgstr "Se requiere un NetworkModel en campo %s"
 
@@ -162,9 +156,6 @@ msgid "Add metadata failed for aggregate %(id)s after %(retries)s retries"
 msgstr ""
 "Fallo en adición de metadata para el agregado %(id)s después de %(retries)s "
 "intentos"
-
-msgid "Address could not be converted."
-msgstr "La dirección no se ha podido convertir."
 
 msgid "Affinity instance group policy was violated."
 msgstr "Se ha infringido la política de afinidad de instancia de grupo "
@@ -610,45 +601,12 @@ msgid "Connection to the hypervisor is broken on host: %(host)s"
 msgstr "La conexión al hipervisor está perdida en el anfitrión: %(host)s"
 
 #, python-format
-msgid "Console %(console_id)s could not be found."
-msgstr "No se ha podido encontrar la consola %(console_id)s."
-
-#, python-format
-msgid "Console for instance %(instance_uuid)s could not be found."
-msgstr ""
-"No se ha podido encontrar la consola para la instancia %(instance_uuid)s."
-
-#, python-format
-msgid ""
-"Console for instance %(instance_uuid)s in pool %(pool_id)s could not be "
-"found."
-msgstr ""
-"No se ha podido encontrar la consola para la instancia %(instance_uuid)s en "
-"la agrupación %(pool_id)s."
-
-#, python-format
 msgid ""
 "Console log output could not be retrieved for instance %(instance_id)s. "
 "Reason: %(reason)s"
 msgstr ""
 "No se ha podido recuperar la salida del registro de la consola para la "
 "instancia %(instance_id)s. Motivo: %(reason)s"
-
-#, python-format
-msgid ""
-"Console pool of type %(console_type)s for compute host %(compute_host)s on "
-"proxy host %(host)s not found."
-msgstr ""
-"No se ha encontrado la agrupación de consolas de tipo %(console_type)s para "
-"el host de cálculo %(compute_host)s en el host de proxy %(host)s."
-
-#, python-format
-msgid ""
-"Console pool with host %(host)s, console_type %(console_type)s and "
-"compute_host %(compute_host)s already exists."
-msgstr ""
-"El pool de consolas con host %(host)s, console_type %(console_type)s y "
-"compute_host %(compute_host)s ya existe."
 
 msgid "Constraint not met."
 msgstr "Restricción no cumplida."
@@ -707,17 +665,8 @@ msgstr "No se ha podido cargar la imagen %(image_id)s"
 msgid "Couldn't get Link Local IP of %(interface)s :%(ex)s"
 msgstr "No se pudo obtener enlace de la ip local de %(interface)s :%(ex)s"
 
-msgid "Create networks failed"
-msgstr "Ha fallado la creación de redes"
-
 msgid "Creation of virtual interface with unique mac address failed"
 msgstr "La creación de la interfaz virtual con dirección MAC única ha fallado"
-
-msgid "DNS1"
-msgstr "DNS1"
-
-msgid "DNS2"
-msgstr "DNS2"
 
 #, python-format
 msgid "Datastore regex %s did not match any datastores"
@@ -795,20 +744,6 @@ msgstr "Error de dispositivo: %s"
 #, python-format
 msgid "Duplicate networks (%s) are not allowed"
 msgstr "Las redes duplicadas (%s) no están permitidas"
-
-msgid ""
-"ERROR: Network commands are not supported when using the Neutron API.  Use "
-"python-neutronclient instead."
-msgstr ""
-"ERROR: comandos de red no están soportados al utilizar la API neutron. "
-"Utiliza python-neutronclient en su lugar."
-
-msgid ""
-"ESX SOAP server returned an empty port group for the host system in its "
-"response"
-msgstr ""
-"El servidor ESX SOAP ha devuelto un grupo de puertos vacío para el sistema "
-"host en su respuesta"
 
 #, python-format
 msgid ""
@@ -1324,12 +1259,6 @@ msgstr "La asignación IP excede la capacidad en pool %s."
 
 msgid "IP allocation over quota."
 msgstr "La asignación IP excede la capacidad."
-
-msgid "IPv4"
-msgstr "IPv4"
-
-msgid "IPv6"
-msgstr "IPv6"
 
 #, python-format
 msgid "IPv6 netmask \"%s\" must be a netmask or integral prefix"
@@ -2097,10 +2026,6 @@ msgstr ""
 "La red %(network_uuid)s requiere una subred para poder arrancar instancias."
 
 #, python-format
-msgid "Network adapter %(adapter)s could not be found."
-msgstr "No se ha podido encontrar el adaptador de red %(adapter)s."
-
-#, python-format
 msgid "Network could not be found for bridge %(bridge)s"
 msgstr "No se ha podido encontrar la red para el puente %(bridge)s"
 
@@ -2115,9 +2040,6 @@ msgstr "No se ha podido encontrar la red para el uuid %(uuid)s"
 #, python-format
 msgid "Network could not be found with cidr %(cidr)s."
 msgstr "No se ha podido encontrar la red con cidr %(cidr)s."
-
-msgid "Network driver does not support this function."
-msgstr "El controlador de red no soporta esta función."
 
 #, python-format
 msgid "Network host %(host)s has zero fixed IPs in network %(network_id)s."
@@ -2198,9 +2120,6 @@ msgstr "No hay ninguna dirección IP fija asociada con el id %(id)s."
 msgid "No fixed IPs associated to instance"
 msgstr "No hay IP fijas asociadas a la instancia "
 
-msgid "No floating IP addresses have been defined."
-msgstr "No se han definido direcciones IP flotantes."
-
 msgid "No free nbd devices"
 msgstr "No hay dispositivos nbd libres"
 
@@ -2250,9 +2169,6 @@ msgstr "No se han encontrado puntos de montaje en %(root)s de %(image)s"
 
 msgid "No networks defined."
 msgstr "No se han definido redes."
-
-msgid "No networks found"
-msgstr "No se han encontrado redes"
 
 #, python-format
 msgid "No operating system found in %s"
@@ -2455,9 +2371,6 @@ msgstr ""
 msgid "Physical network is missing for network %(network_uuid)s"
 msgstr "La red física no esta disponible para la red %(network_uuid)s"
 
-msgid "Please specify either fixed_range or uuid"
-msgstr "Por favor especifique fixed_range o uuid"
-
 #, python-format
 msgid "Policy doesn't allow %(action)s to be performed."
 msgstr "La política no permite que la %(action)s se realice"
@@ -2532,9 +2445,6 @@ msgstr "Cuota superada para recursos: %(overs)s"
 
 msgid "Quota exceeded, too many key pairs."
 msgstr "Cuota superada, demasiados pares de claves."
-
-msgid "Quota exceeded, too many networks."
-msgstr "Se ha superado la cuota, demasiadas redes."
 
 msgid "Quota exceeded, too many security group rules."
 msgstr "Cuota superada, demasiadas reglas de grupo de seguridad "
@@ -2656,9 +2566,6 @@ msgstr ""
 "La topología de instancia NUMA solicitada junto con los dispositivos PCI "
 "solicitados no son compatibles con la topología de host NUMA proporcionada"
 
-msgid "Requested network does not contain enough (2+) usable hosts"
-msgstr "La red solicitada no contiene suficientes hosts utilizables (2+) "
-
 #, python-format
 msgid ""
 "Requested vCPU limits %(sockets)d:%(cores)d:%(threads)d are impossible to "
@@ -2757,12 +2664,6 @@ msgstr "El grupo de seguridad %s ya existe"
 #, python-format
 msgid "Security group %s is not a string or unicode"
 msgstr "El grupo de seguridad %s no es una serie o Unicode "
-
-#, python-format
-msgid "Security group default rule (%rule_id)s not found."
-msgstr ""
-"La regla predeterminada (%rule_id)s del grupo de seguridad no se ha "
-"encontrado."
 
 msgid "Security group id should be integer"
 msgstr "El id de grupo de seguridad debe ser un entero"
@@ -3114,9 +3015,6 @@ msgstr ""
 "El hipervisor de este nodo de cálculo es anterior a la versión mínima "
 "soportada:  %(version)s."
 
-msgid "This default rule already exists."
-msgstr "Esta regla predeterminada ya existe."
-
 msgid "This domU must be running on the host specified by connection_url"
 msgstr ""
 "Este domU debe estar en ejecución en el anfitrión especificado por "
@@ -3165,14 +3063,6 @@ msgstr "Puertos De y Hacia deben ser enteros"
 
 msgid "Token not found"
 msgstr "Token no encontrado"
-
-#, python-format
-msgid ""
-"Too many IP addresses will be generated.  Please increase /%s to reduce the "
-"number generated."
-msgstr ""
-"Se generarán demasiadas direcciones IP. Por favor incremente /%s para "
-"disminuir el número generado."
 
 msgid "Triggering crash dump is not supported"
 msgstr "No se da soporte a desecadenar un volcado de memoria"
@@ -3499,15 +3389,6 @@ msgstr ""
 
 #, python-format
 msgid ""
-"VLAN tag is not appropriate for the port group %(bridge)s. Expected VLAN tag "
-"is %(tag)s, but the one associated with the port group is %(pgroup)s."
-msgstr ""
-"La etiqueta VLAN no es adecuada para el grupo de puertos %(bridge)s. La "
-"etiqueta VLAN que se espera es %(tag)s, pero la asociada con el grupo de "
-"puertos es %(pgroup)s."
-
-#, python-format
-msgid ""
 "Value (%(value)s) for parameter Group%(property)s is invalid. Content "
 "limited to '%(allowed)s'."
 msgstr ""
@@ -3537,20 +3418,10 @@ msgid "Virtual machine mode '%s' is not valid"
 msgstr "El modo de máquina virtual '%s' no es válido"
 
 #, python-format
-msgid ""
-"Virtual switch associated with the network adapter %(adapter)s not found."
-msgstr ""
-"No se ha encontrado ningún conmutador virtual asociado con el adaptador de "
-"red %(adapter)s."
-
-#, python-format
 msgid "Virtualization type '%(virt)s' is not supported by this compute driver"
 msgstr ""
 "El tipo de virtualización '%(virt)s' no está soportado por este controlador "
 "de cálculo"
-
-msgid "VlanID"
-msgstr "ID de Vlan"
 
 #, python-format
 msgid "Volume %(volume_id)s could not be attached. Reason: %(reason)s"
@@ -3740,9 +3611,6 @@ msgstr "fmt=%(fmt)s respaldado por: %(backing_file)s"
 msgid "href %s does not contain version"
 msgstr "href %s no contiene la versión"
 
-msgid "id"
-msgstr "id"
-
 msgid "image already mounted"
 msgstr "imagen ya montada"
 
@@ -3857,9 +3725,6 @@ msgstr ""
 "caracteres imprimibles. No pueden comenzar ni terminar con un espacio en "
 "blanco."
 
-msgid "project"
-msgstr "proyecto"
-
 #, python-format
 msgid "qemu-img failed to execute on %(path)s : %(exp)s"
 msgstr "No se ha podido ejecutar qemu-img en %(path)s : %(exp)s"
@@ -3902,9 +3767,6 @@ msgstr "instantánea para %s "
 msgid "snapshot_id required in create_info"
 msgstr "snapshot_id es requerido en create_info"
 
-msgid "start address"
-msgstr "dirección de inicio"
-
 msgid "token not provided"
 msgstr "token no proporcionado"
 
@@ -3913,19 +3775,6 @@ msgstr "demasiadas claves de cuerpo"
 
 msgid "unpause not supported for vmwareapi"
 msgstr "cancelación de pausa no soportada para vmwareapi"
-
-msgid "uuid"
-msgstr "uuid"
-
-#, python-format
-msgid ""
-"vSwitch which contains the port group %(bridge)s is not associated with the "
-"desired physical adapter. Expected vSwitch is %(expected)s, but the one "
-"associated is %(actual)s."
-msgstr ""
-"El vSwitch que contiene el grupo de puertos %(bridge)s no está asociado con "
-"el adaptador físico deseado. El vSwitch esperado es %(expected)s, pero el "
-"asociado es %(actual)s."
 
 msgid "version should be an integer"
 msgstr "la versión debe ser un entero"

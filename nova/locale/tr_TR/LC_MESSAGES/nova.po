@@ -10,7 +10,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova VERSION\n"
 "Report-Msgid-Bugs-To: https://bugs.launchpad.net/openstack-i18n/\n"
-"POT-Creation-Date: 2019-10-01 18:30+0000\n"
+"POT-Creation-Date: 2019-12-08 15:51+0000\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
@@ -90,10 +90,6 @@ msgstr ""
 "'rxtx_factor' bağımsız değişkeni 0 ve %g arasında kesirli bir sayı olmalı "
 
 #, python-format
-msgid "/%s should be specified as single address(es) not in cidr format"
-msgstr "/%s tekli adres(ler) şeklinde belirtilmelidir cidr biçiminde değil"
-
-#, python-format
 msgid "A NetworkModel is required in field %s"
 msgstr "%s alanında bir AğModeli gerekli"
 
@@ -131,9 +127,6 @@ msgstr "Eylem: '%(action)s', çağıran metod: %(meth)s, gövde: %(body)s"
 msgid "Add metadata failed for aggregate %(id)s after %(retries)s retries"
 msgstr ""
 "Metadata ekleme %(id)s takımı için %(retries)s denemeden sonra başarısız oldu"
-
-msgid "Address could not be converted."
-msgstr "Adres dönüştürülemedi."
 
 msgid "Affinity instance group policy was violated."
 msgstr "İlişki sunucu grubu ilkesi ihlal edildi."
@@ -462,37 +455,6 @@ msgstr "libvirt bağlantısı kayboldu: %s"
 msgid "Connection to the hypervisor is broken on host: %(host)s"
 msgstr "Hipervizör bağlantısı istemci üzerinde bozuk: %(host)s"
 
-#, python-format
-msgid "Console %(console_id)s could not be found."
-msgstr "%(console_id)s konsolu bulunamadı."
-
-#, python-format
-msgid "Console for instance %(instance_uuid)s could not be found."
-msgstr "%(instance_uuid)s sunucusu için konsol bulunamadı."
-
-#, python-format
-msgid ""
-"Console for instance %(instance_uuid)s in pool %(pool_id)s could not be "
-"found."
-msgstr ""
-"%(instance_uuid)s sunucusu için %(pool_id)s havuzunda konsol bulunamadı."
-
-#, python-format
-msgid ""
-"Console pool of type %(console_type)s for compute host %(compute_host)s on "
-"proxy host %(host)s not found."
-msgstr ""
-"%(host)s roxy sunucusundaki %(compute_host)s hesaplama sunucusu için "
-"%(console_type)s türünün konsol havuzu bulunamadı."
-
-#, python-format
-msgid ""
-"Console pool with host %(host)s, console_type %(console_type)s and "
-"compute_host %(compute_host)s already exists."
-msgstr ""
-"%(host)s istemcisi, %(console_type)s konsol türü ve %(compute_host)s hesap "
-"istemcisine sahip konsol havuzu zaten mevcut."
-
 msgid "Constraint not met."
 msgstr "Kısıtlama karşılanmadı."
 
@@ -546,17 +508,8 @@ msgstr "İmaj %(image_id)s yüklenemedi"
 msgid "Couldn't get Link Local IP of %(interface)s :%(ex)s"
 msgstr "Couldn't get Link Local IP of %(interface)s :%(ex)s"
 
-msgid "Create networks failed"
-msgstr "Ağ oluşturma başarısız"
-
 msgid "Creation of virtual interface with unique mac address failed"
 msgstr "Benzersiz mac adresine sahip sanal arayüzün oluşturulması başarısız"
-
-msgid "DNS1"
-msgstr "DNS1"
-
-msgid "DNS2"
-msgstr "DNS2"
 
 #, python-format
 msgid "Datastore regex %s did not match any datastores"
@@ -623,20 +576,6 @@ msgstr "Sürücü Hatası: %s"
 #, python-format
 msgid "Duplicate networks (%s) are not allowed"
 msgstr "Tekrarlanan ağlara (%s) izin verilmiyor"
-
-msgid ""
-"ERROR: Network commands are not supported when using the Neutron API.  Use "
-"python-neutronclient instead."
-msgstr ""
-"HATA: Neutron API'si kullanılırken ağ komutları desteklenmiyor.  Bunun "
-"yerine python-neutronclient kullanın."
-
-msgid ""
-"ESX SOAP server returned an empty port group for the host system in its "
-"response"
-msgstr ""
-"ESX SOAP sunucu yanıtında istemci sistem için boş bağlantı noktası grubu "
-"döndürdü"
 
 #, python-format
 msgid ""
@@ -1019,12 +958,6 @@ msgstr "%s havuzundaki IP ayırma kota üzerinde."
 
 msgid "IP allocation over quota."
 msgstr "IP ayırma kota üzerinde."
-
-msgid "IPv4"
-msgstr "IPv4"
-
-msgid "IPv6"
-msgstr "IPv6"
 
 #, python-format
 msgid "IPv6 netmask \"%s\" must be a netmask or integral prefix"
@@ -1672,10 +1605,6 @@ msgstr ""
 "Ağ %(network_uuid)s sunucuları başlatmak için alt ağlara ihtiyaç duyar."
 
 #, python-format
-msgid "Network adapter %(adapter)s could not be found."
-msgstr "%(adapter)s ağ bağdaştırıcısı bulunamadı."
-
-#, python-format
 msgid "Network could not be found for bridge %(bridge)s"
 msgstr " %(bridge)s köprüsü için ağ bulunamadı."
 
@@ -1690,9 +1619,6 @@ msgstr "%(uuid)s UUID'si için bir ağ bulunamadı"
 #, python-format
 msgid "Network could not be found with cidr %(cidr)s."
 msgstr "%(cidr)s CIDR ile bir ağ bulunamadı."
-
-msgid "Network driver does not support this function."
-msgstr "Ağ sürücüsü bu fonksiyonu desteklemiyor."
 
 #, python-format
 msgid ""
@@ -1757,9 +1683,6 @@ msgstr "Şu ağ için kullanılabilir sabit UP adresleri yok: %(net)s"
 msgid "No fixed IP associated with id %(id)s."
 msgstr "%(id)s ile ilişkilendirilmiş bir dinamik IP yok."
 
-msgid "No floating IP addresses have been defined."
-msgstr "Hiçbir değişken IP adresi tanımlanmamış."
-
 msgid "No free nbd devices"
 msgstr "Boş nbd aygıtı yok"
 
@@ -1789,9 +1712,6 @@ msgstr "%(image)s %(root)s içinde bağlantı noktası bulunmadı"
 
 msgid "No networks defined."
 msgstr "Tanımlı bir ağ yok."
-
-msgid "No networks found"
-msgstr "Ağ bulunamadı"
 
 #, python-format
 msgid "No operating system found in %s"
@@ -1942,9 +1862,6 @@ msgstr "Kişisel dosya limiti aşıldı"
 msgid "Physical network is missing for network %(network_uuid)s"
 msgstr "%(network_uuid)s ağı için fiziksel ağ eksik"
 
-msgid "Please specify either fixed_range or uuid"
-msgstr "Lütfen fixed_range veya uuid belirtin"
-
 #, python-format
 msgid "Policy doesn't allow %(action)s to be performed."
 msgstr "%(action)s uygulanmasına izin verilmiyor."
@@ -2000,9 +1917,6 @@ msgstr "Kaynaklar için kota aşıldı: %(overs)s"
 
 msgid "Quota exceeded, too many key pairs."
 msgstr "Kota aşıldı, çok fazla anahtar çifti."
-
-msgid "Quota exceeded, too many networks."
-msgstr "Kota aşıldı, çok fazla ağ."
 
 msgid "Quota exceeded, too many security group rules."
 msgstr "Kota aşıldı, çok fazla güvenlik grubu kuralı."
@@ -2095,9 +2009,6 @@ msgstr ""
 "İstenen NUMA topolojisi istenen PCI aygıtlarıyla birlikte istemci NUMA "
 "topolojisine uymuyor"
 
-msgid "Requested network does not contain enough (2+) usable hosts"
-msgstr "İstenen ağ yeterince (2+) kullanılabilir istemci içermiyor"
-
 #, python-format
 msgid ""
 "Requested vCPU limits %(sockets)d:%(cores)d:%(threads)d are impossible to "
@@ -2188,10 +2099,6 @@ msgstr "%s güvenlik grubu zaten var"
 #, python-format
 msgid "Security group %s is not a string or unicode"
 msgstr "%s güvenlik grubu string veya unicode değil"
-
-#, python-format
-msgid "Security group default rule (%rule_id)s not found."
-msgstr "Güvenlik grubu varsayılan kuralı (%rule_id)s bulunamadı."
 
 msgid "Security group id should be integer"
 msgstr "Güvenlik grup id'si integer olmak zorunda"
@@ -2479,9 +2386,6 @@ msgstr "Böyle bir işlem yok: %s"
 msgid "There were no records found where instance_uuid was NULL."
 msgstr "instance_uuid'in NULL olduğu kayıt bulunamadı."
 
-msgid "This default rule already exists."
-msgstr "Bu varsayılan kural zaten mevcut."
-
 msgid "This domU must be running on the host specified by connection_url"
 msgstr "Bu domU connection_url ile belirtilen istemcide çalışıyor olmalı"
 
@@ -2507,14 +2411,6 @@ msgstr "Hedef ve Kaynak bağlantı noktaları tam sayı olmalı"
 
 msgid "Token not found"
 msgstr "Jeton bulunamadı"
-
-#, python-format
-msgid ""
-"Too many IP addresses will be generated.  Please increase /%s to reduce the "
-"number generated."
-msgstr ""
-"Çok fazla IP adresi üretilecek. Lütfen üretilen sayıyı azaltmak için /%s'i "
-"artırın."
 
 msgid "Type and Code must be integers for ICMP protocol type"
 msgstr "ICMP iletişim kuralı türü için Tür ve Kod tam sayı olmalı"
@@ -2783,14 +2679,6 @@ msgstr "VHD ergitme girişimi aşıldı (%d), vaz geçiliyor..."
 
 #, python-format
 msgid ""
-"VLAN tag is not appropriate for the port group %(bridge)s. Expected VLAN tag "
-"is %(tag)s, but the one associated with the port group is %(pgroup)s."
-msgstr ""
-"VLAN etiketi %(bridge)s port grubu için uygun değil. Beklenen VLAN etiketi "
-"%(tag)s'dir, fakat tek ilişkili port grubu %(pgroup)s'dir."
-
-#, python-format
-msgid ""
 "Value (%(value)s) for parameter Group%(property)s is invalid. Content "
 "limited to '%(allowed)s'."
 msgstr ""
@@ -2820,18 +2708,9 @@ msgid "Virtual machine mode '%s' is not valid"
 msgstr "Sanal makine kipi '%s' geçerli değil"
 
 #, python-format
-msgid ""
-"Virtual switch associated with the network adapter %(adapter)s not found."
-msgstr ""
-"%(adapter)s ağ bağdaştırıcısı ile ilişkilendirilen sanal anahtar bulunamadı."
-
-#, python-format
 msgid "Virtualization type '%(virt)s' is not supported by this compute driver"
 msgstr ""
 "Sanallaştırma türü '%(virt)s' bu hesaplama sürücüsü tarafından desteklenmiyor"
-
-msgid "VlanID"
-msgstr "VlanID"
 
 #, python-format
 msgid "Volume %(volume_id)s could not be found."
@@ -2971,9 +2850,6 @@ msgstr "%(backing_file)s tarafından desteklenen fmt=%(fmt)s"
 msgid "href %s does not contain version"
 msgstr "%s referansı versiyon içermiyor"
 
-msgid "id"
-msgstr "id"
-
 msgid "image already mounted"
 msgstr "imaj zaten bağlanmış"
 
@@ -3061,9 +2937,6 @@ msgstr "bölüm arama %s ile desteklenmiyor"
 msgid "pause not supported for vmwareapi"
 msgstr "vmwareapi için duraklatma desteklenmiyor"
 
-msgid "project"
-msgstr "proje"
-
 #, python-format
 msgid "qemu-nbd error: %s"
 msgstr "qemu-nbd hatası: %s"
@@ -3102,9 +2975,6 @@ msgstr "%s için anlık görüntü"
 msgid "snapshot_id required in create_info"
 msgstr "create_info'da snapshot_id gerekiyor"
 
-msgid "start address"
-msgstr "Başlangıç adresi"
-
 msgid "token not provided"
 msgstr "jeton sağlanmamış"
 
@@ -3113,19 +2983,6 @@ msgstr "Çok sayıda gövde anahtarları"
 
 msgid "unpause not supported for vmwareapi"
 msgstr "vmwareapi için sürdürme desteklenmiyor"
-
-msgid "uuid"
-msgstr "uuid"
-
-#, python-format
-msgid ""
-"vSwitch which contains the port group %(bridge)s is not associated with the "
-"desired physical adapter. Expected vSwitch is %(expected)s, but the one "
-"associated is %(actual)s."
-msgstr ""
-"%(bridge)s port grubunu içeren vSwitch istenilen fiziksel adaptörü ile "
-"ilişkilendirilmemiştir. Beklenen vSwitch %(expected)s'dir, fakat "
-"ilişkilendirilen ise %(actual)s'dir."
 
 msgid "version should be an integer"
 msgstr "Sürüm tam sayı olmak zorunda"

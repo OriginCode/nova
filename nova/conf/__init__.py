@@ -29,23 +29,23 @@ from nova.conf import conductor
 from nova.conf import configdrive
 from nova.conf import console
 from nova.conf import consoleauth
+from nova.conf import cyborg
 from nova.conf import database
 from nova.conf import devices
 from nova.conf import ephemeral_storage
 from nova.conf import glance
 from nova.conf import guestfs
 from nova.conf import hyperv
+from nova.conf import imagecache
 from nova.conf import ironic
 from nova.conf import key_manager
 from nova.conf import keystone
 from nova.conf import libvirt
 from nova.conf import mks
 from nova.conf import netconf
-from nova.conf import network
 from nova.conf import neutron
 from nova.conf import notifications
 from nova.conf import novnc
-from nova.conf import osapi_v21
 from nova.conf import paths
 from nova.conf import pci
 from nova.conf import placement
@@ -67,7 +67,6 @@ from nova.conf import vnc
 from nova.conf import workarounds
 from nova.conf import wsgi
 from nova.conf import xenserver
-from nova.conf import xvp
 from nova.conf import zvm
 
 CONF = cfg.CONF
@@ -82,6 +81,7 @@ conductor.register_opts(CONF)
 configdrive.register_opts(CONF)
 console.register_opts(CONF)
 consoleauth.register_opts(CONF)
+cyborg.register_opts(CONF)
 database.register_opts(CONF)
 devices.register_opts(CONF)
 ephemeral_storage.register_opts(CONF)
@@ -89,16 +89,15 @@ glance.register_opts(CONF)
 guestfs.register_opts(CONF)
 hyperv.register_opts(CONF)
 mks.register_opts(CONF)
+imagecache.register_opts(CONF)
 ironic.register_opts(CONF)
 key_manager.register_opts(CONF)
 keystone.register_opts(CONF)
 libvirt.register_opts(CONF)
 netconf.register_opts(CONF)
-network.register_opts(CONF)
 neutron.register_opts(CONF)
 notifications.register_opts(CONF)
 novnc.register_opts(CONF)
-osapi_v21.register_opts(CONF)
 paths.register_opts(CONF)
 pci.register_opts(CONF)
 placement.register_opts(CONF)
@@ -119,7 +118,6 @@ vnc.register_opts(CONF)
 workarounds.register_opts(CONF)
 wsgi.register_opts(CONF)
 xenserver.register_opts(CONF)
-xvp.register_opts(CONF)
 zvm.register_opts(CONF)
 
 remote_debug.register_cli_opts(CONF)

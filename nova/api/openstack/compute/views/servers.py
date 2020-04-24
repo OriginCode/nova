@@ -27,8 +27,9 @@ from nova.compute import api as compute
 from nova.compute import vm_states
 from nova import context as nova_context
 from nova import exception
-from nova.network.security_group import openstack_driver
+from nova.network import security_group_api
 from nova import objects
+from nova.objects import fields
 from nova.objects import virtual_interface
 from nova.policies import extended_server_attributes as esa_policies
 from nova.policies import flavor_extra_specs as fes_policies
@@ -69,8 +70,6 @@ class ViewBuilder(common.ViewBuilder):
         self._image_builder = views_images.ViewBuilder()
         self._flavor_builder = views_flavors.ViewBuilder()
         self.compute_api = compute.API()
-        self.security_group_api = (
-            openstack_driver.get_openstack_security_group_driver())
 
     def create(self, request, instance):
         """View that should be returned when an instance is created."""
@@ -184,6 +183,42 @@ class ViewBuilder(common.ViewBuilder):
                                                              context, instance)
         return ret
 
+    @staticmethod
+    def _get_host_status_unknown_only(context, instance=None):
+        """We will use the unknown_only variable to tell us what host status we
+        can show, if any:
+          * unknown_only = False means we can show any host status.
+          * unknown_only = True means that we can only show host
+            status: UNKNOWN. If the host status is anything other than
+            UNKNOWN, we will not include the host_status field in the
+            response.
+          * unknown_only = None means we cannot show host status at all and
+            we will not include the host_status field in the response.
+        """
+        unknown_only = None
+        # Check show:host_status policy first because if it passes, we know we
+        # can show any host status and need not check the more restrictive
+        # show:host_status:unknown-only policy.
+        # Keeping target as None (which means policy will default these target
+        # to context.project_id) for now which is case of 'detail' API which
+        # policy is default to system and project reader.
+        target = None
+        if instance is not None:
+            target = {'project_id': instance.project_id}
+        if context.can(
+                servers_policies.SERVERS % 'show:host_status',
+                fatal=False, target=target):
+            unknown_only = False
+        # If we are not allowed to show any/all host status, check if we can at
+        # least show only the host status: UNKNOWN.
+        elif context.can(
+                servers_policies.SERVERS %
+                'show:host_status:unknown-only',
+                fatal=False,
+                target=target):
+            unknown_only = True
+        return unknown_only
+
     def show(self, request, instance, extend_address=True,
              show_extra_specs=None, show_AZ=True, show_config_drive=True,
              show_extended_attr=None, show_host_status=None,
@@ -276,7 +311,8 @@ class ViewBuilder(common.ViewBuilder):
 
         if show_extended_attr is None:
             show_extended_attr = context.can(
-                esa_policies.BASE_POLICY_NAME, fatal=False)
+                esa_policies.BASE_POLICY_NAME, fatal=False,
+                target={'project_id': instance.project_id})
         if show_extended_attr:
             properties = ['host', 'name', 'node']
             if api_version_request.is_supported(request, min_version='2.3'):
@@ -330,12 +366,22 @@ class ViewBuilder(common.ViewBuilder):
                                           add_delete_on_termination)
         if (api_version_request.is_supported(request, min_version='2.16')):
             if show_host_status is None:
-                show_host_status = context.can(
-                    servers_policies.SERVERS % 'show:host_status', fatal=False)
-            if show_host_status:
-                host_status = self.compute_api.get_instance_host_status(
-                                  instance)
-                server["server"]['host_status'] = host_status
+                unknown_only = self._get_host_status_unknown_only(
+                    context, instance)
+                # If we're not allowed by policy to show host status at all,
+                # don't bother requesting instance host status from the compute
+                # API.
+                if unknown_only is not None:
+                    host_status = self.compute_api.get_instance_host_status(
+                                      instance)
+                    # If we are allowed to show host status of some kind, set
+                    # the host status field only if:
+                    #   * unknown_only = False, meaning we can show any status
+                    # OR
+                    #   * if unknown_only = True and host_status == UNKNOWN
+                    if (not unknown_only or
+                            host_status == fields.HostStatus.UNKNOWN):
+                        server["server"]['host_status'] = host_status
 
         if api_version_request.is_supported(request, min_version="2.9"):
             server["server"]["locked"] = (True if instance["locked_by"]
@@ -402,10 +448,13 @@ class ViewBuilder(common.ViewBuilder):
                                        bdms=bdms,
                                        cell_down_support=cell_down_support)
 
-        if (api_version_request.is_supported(request, min_version='2.16') and
-                context.can(servers_policies.SERVERS % 'show:host_status',
-                            fatal=False)):
-            self._add_host_status(list(servers_dict["servers"]), instances)
+        if api_version_request.is_supported(request, min_version='2.16'):
+            unknown_only = self._get_host_status_unknown_only(context)
+            # If we're not allowed by policy to show host status at all, don't
+            # bother requesting instance host status from the compute API.
+            if unknown_only is not None:
+                self._add_host_status(list(servers_dict["servers"]), instances,
+                                      unknown_only=unknown_only)
 
         self._add_security_grps(request, list(servers_dict["servers"]),
                                 instances)
@@ -575,7 +624,7 @@ class ViewBuilder(common.ViewBuilder):
 
         return fault_dict
 
-    def _add_host_status(self, servers, instances):
+    def _add_host_status(self, servers, instances, unknown_only=False):
         """Adds the ``host_status`` field to the list of servers
 
         This method takes care to filter instances from down cells since they
@@ -585,6 +634,7 @@ class ViewBuilder(common.ViewBuilder):
             body; this list is modified by reference by updating the server
             dicts within the list
         :param instances: list of Instance objects
+        :param unknown_only: whether to show only UNKNOWN host status
         """
         # Filter out instances from down cells which do not have a host field.
         instances = [instance for instance in instances if 'host' in instance]
@@ -594,48 +644,43 @@ class ViewBuilder(common.ViewBuilder):
             # Filter out anything that is not in the resulting dict because
             # we had to filter the list of instances above for down cells.
             if server['id'] in host_statuses:
-                server['host_status'] = host_statuses[server['id']]
+                host_status = host_statuses[server['id']]
+                if unknown_only and host_status != fields.HostStatus.UNKNOWN:
+                    # Filter servers that are not allowed by policy to see
+                    # host_status values other than UNKNOWN.
+                    continue
+                server['host_status'] = host_status
 
     def _add_security_grps(self, req, servers, instances,
                            create_request=False):
         if not len(servers):
             return
-        if not openstack_driver.is_neutron_security_groups():
-            instances = {inst['uuid']: inst for inst in instances}
-            for server in servers:
-                instance = instances[server['id']]
-                groups = instance.get('security_groups')
-                if groups:
-                    server['security_groups'] = [{"name": group.name}
-                                                 for group in groups]
-        else:
-            # If request is a POST create server we get the security groups
-            # intended for an instance from the request. The reason for this
-            # is if using neutron security groups the requested security
-            # groups for the instance are not in the db and have not been
-            # sent to neutron yet.
-            # Starting from microversion 2.75, security groups is returned in
-            # PUT and POST Rebuild response also.
-            if not create_request:
-                context = req.environ['nova.context']
-                sg_instance_bindings = (
-                    self.security_group_api
-                    .get_instances_security_groups_bindings(context,
-                                                            servers))
-                for server in servers:
-                    groups = sg_instance_bindings.get(server['id'])
-                    if groups:
-                        server['security_groups'] = groups
 
-            # This section is for POST create server request. There can be
-            # only one security group for POST create server request.
-            else:
-                # try converting to json
-                req_obj = jsonutils.loads(req.body)
-                # Add security group to server, if no security group was in
-                # request add default since that is the group it is part of
-                servers[0]['security_groups'] = req_obj['server'].get(
-                    'security_groups', [{'name': 'default'}])
+        # If request is a POST create server we get the security groups
+        # intended for an instance from the request. This is necessary because
+        # the requested security groups for the instance have not yet been sent
+        # to neutron.
+        # Starting from microversion 2.75, security groups is returned in
+        # PUT and POST Rebuild response also.
+        if not create_request:
+            context = req.environ['nova.context']
+            sg_instance_bindings = (
+                security_group_api.get_instances_security_groups_bindings(
+                    context, servers))
+            for server in servers:
+                groups = sg_instance_bindings.get(server['id'])
+                if groups:
+                    server['security_groups'] = groups
+
+        # This section is for POST create server request. There can be
+        # only one security group for POST create server request.
+        else:
+            # try converting to json
+            req_obj = jsonutils.loads(req.body)
+            # Add security group to server, if no security group was in
+            # request add default since that is the group it is part of
+            servers[0]['security_groups'] = req_obj['server'].get(
+                'security_groups', [{'name': 'default'}])
 
     @staticmethod
     def _get_instance_bdms_in_multiple_cells(ctxt, instance_uuids):

@@ -13,7 +13,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova VERSION\n"
 "Report-Msgid-Bugs-To: https://bugs.launchpad.net/openstack-i18n/\n"
-"POT-Creation-Date: 2019-10-01 18:30+0000\n"
+"POT-Creation-Date: 2019-12-08 15:51+0000\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
@@ -117,11 +117,6 @@ msgstr ""
 "'rxtx_factor' 引数は 0 から %g の範囲内の浮動小数点数でなければなりません"
 
 #, python-format
-msgid "/%s should be specified as single address(es) not in cidr format"
-msgstr ""
-"/%s は CIDR 形式で指定せずに、単一のアドレスとして指定する必要があります。"
-
-#, python-format
 msgid "A NetworkModel is required in field %s"
 msgstr "フィールド %s に NetworkModel が必要です"
 
@@ -160,9 +155,6 @@ msgid "Add metadata failed for aggregate %(id)s after %(retries)s retries"
 msgstr ""
 "アグリゲート %(id)s にメタデータを追加しようと %(retries)s 回再試行しました"
 "が、追加できませんでした"
-
-msgid "Address could not be converted."
-msgstr "アドレスを変換できませんでした。"
 
 msgid "Affinity instance group policy was violated."
 msgstr "Affinity インスタンスグループポリシーに違反しました"
@@ -596,44 +588,12 @@ msgid "Connection to the hypervisor is broken on host: %(host)s"
 msgstr "ホスト %(host)s でハイパーバイザーへの接続がおかしくなっています"
 
 #, python-format
-msgid "Console %(console_id)s could not be found."
-msgstr "コンソール %(console_id)s が見つかりませんでした。"
-
-#, python-format
-msgid "Console for instance %(instance_uuid)s could not be found."
-msgstr "インスタンス %(instance_uuid)s 用のコンソールが見つかりませんでした。"
-
-#, python-format
-msgid ""
-"Console for instance %(instance_uuid)s in pool %(pool_id)s could not be "
-"found."
-msgstr ""
-"プール %(pool_id)s 内のインスタンス %(instance_uuid)s 用のコンソールが見つか"
-"りませんでした。"
-
-#, python-format
 msgid ""
 "Console log output could not be retrieved for instance %(instance_id)s. "
 "Reason: %(reason)s"
 msgstr ""
 "インスタンス %(instance_id)s についてコンソールログの出力を取得できませんでし"
 "た。理由: %(reason)s"
-
-#, python-format
-msgid ""
-"Console pool of type %(console_type)s for compute host %(compute_host)s on "
-"proxy host %(host)s not found."
-msgstr ""
-"プロキシーホスト %(host)s 上でコンピュートホスト %(compute_host)s 用の、タイ"
-"プが %(console_type)s のコンソールプールが見つかりません。"
-
-#, python-format
-msgid ""
-"Console pool with host %(host)s, console_type %(console_type)s and "
-"compute_host %(compute_host)s already exists."
-msgstr ""
-"ホスト %(host)s、コンソールタイプ %(console_type)s、コンピュートホスト "
-"%(compute_host)s のコンソールプールは既に存在します。"
 
 msgid "Constraint not met."
 msgstr "制約が満たされていません。"
@@ -690,17 +650,8 @@ msgstr "イメージ %(image_id)s をアップロードできませんでした"
 msgid "Couldn't get Link Local IP of %(interface)s :%(ex)s"
 msgstr "%(interface)s のローカル IP アドレスのリンクが取得できません:%(ex)s"
 
-msgid "Create networks failed"
-msgstr "ネットワークの作成に失敗しました"
-
 msgid "Creation of virtual interface with unique mac address failed"
 msgstr "一意な MAC アドレスを持つ仮想インターフェースを作成できませんでした"
-
-msgid "DNS1"
-msgstr "DNS1"
-
-msgid "DNS2"
-msgstr "DNS2"
 
 #, python-format
 msgid "Datastore regex %s did not match any datastores"
@@ -775,19 +726,6 @@ msgstr "ドライバーエラー: %s"
 #, python-format
 msgid "Duplicate networks (%s) are not allowed"
 msgstr "ネットワークの重複 (%s) は許可されません"
-
-msgid ""
-"ERROR: Network commands are not supported when using the Neutron API.  Use "
-"python-neutronclient instead."
-msgstr ""
-"エラー: Neutron API を使用する場合、ネットワークコマンドはサポートされませ"
-"ん。代わりに python-neutronclient を使用してください。"
-
-msgid ""
-"ESX SOAP server returned an empty port group for the host system in its "
-"response"
-msgstr ""
-"ESX SOAP サーバーが返した応答で、そのホストシステムのポートグループが空でした"
 
 #, python-format
 msgid ""
@@ -1311,12 +1249,6 @@ msgstr "IP の割り当て量がプール %s 内のクォータを超えてい�
 
 msgid "IP allocation over quota."
 msgstr "IP の割り当て量がクォータを超えています。"
-
-msgid "IPv4"
-msgstr "IPv4"
-
-msgid "IPv6"
-msgstr "IPv6"
 
 #, python-format
 msgid "IPv6 netmask \"%s\" must be a netmask or integral prefix"
@@ -2079,10 +2011,6 @@ msgstr ""
 "要です。"
 
 #, python-format
-msgid "Network adapter %(adapter)s could not be found."
-msgstr "ネットワークアダプター %(adapter)s が見つかりませんでした。"
-
-#, python-format
 msgid "Network could not be found for bridge %(bridge)s"
 msgstr "ブリッジ %(bridge)s のネットワークが見つかりませんでした"
 
@@ -2097,9 +2025,6 @@ msgstr "UUID %(uuid)s のネットワークが見つかりませんでした"
 #, python-format
 msgid "Network could not be found with cidr %(cidr)s."
 msgstr "CIDR が %(cidr)s のネットワークが見つかりませんでした。"
-
-msgid "Network driver does not support this function."
-msgstr "ネットワークドライバーではこの関数はサポートされません。"
 
 #, python-format
 msgid "Network host %(host)s has zero fixed IPs in network %(network_id)s."
@@ -2178,9 +2103,6 @@ msgstr "ID %(id)s に関連付けられた Fixed IP がありません。"
 msgid "No fixed IPs associated to instance"
 msgstr "Fixed IP がインスタンスに割り当てられていません"
 
-msgid "No floating IP addresses have been defined."
-msgstr "Floating IP アドレスが定義されていません。"
-
 msgid "No free nbd devices"
 msgstr "空きの nbd デバイスがありません"
 
@@ -2228,9 +2150,6 @@ msgstr "%(image)s の %(root)s にマウントポイントが見つかりませ�
 
 msgid "No networks defined."
 msgstr "ネットワークが定義されていません。"
-
-msgid "No networks found"
-msgstr "ネットワークが見つかりません"
 
 #, python-format
 msgid "No operating system found in %s"
@@ -2432,9 +2351,6 @@ msgstr ""
 msgid "Physical network is missing for network %(network_uuid)s"
 msgstr "ネットワーク %(network_uuid)s に対応する物理ネットワークがありません"
 
-msgid "Please specify either fixed_range or uuid"
-msgstr "fixed_range または UUID のいずれかを指定してください"
-
 #, python-format
 msgid "Policy doesn't allow %(action)s to be performed."
 msgstr "ポリシーにより %(action)s の実行が許可されていません"
@@ -2510,9 +2426,6 @@ msgstr "リソース %(overs)s がクォータを超過しました"
 
 msgid "Quota exceeded, too many key pairs."
 msgstr "クォータを超過しました。キーペアが多すぎます。"
-
-msgid "Quota exceeded, too many networks."
-msgstr "クォータを超過しました。ネットワークが多すぎます。"
 
 msgid "Quota exceeded, too many security group rules."
 msgstr "クォータを超過しました。セキュリティーグループルールが多すぎます。"
@@ -2632,9 +2545,6 @@ msgstr ""
 "PCI デバイスとともに要求されたインスタンスの NUMA トポロジーは、指定されたホ"
 "ストの NUMA トポロジーに適合できません"
 
-msgid "Requested network does not contain enough (2+) usable hosts"
-msgstr "要求されたネットワークには十分な (2 以上) 使用可能なホストがありません"
-
 #, python-format
 msgid ""
 "Requested vCPU limits %(sockets)d:%(cores)d:%(threads)d are impossible to "
@@ -2733,10 +2643,6 @@ msgstr "セキュリティーグループ %s は既に存在します"
 #, python-format
 msgid "Security group %s is not a string or unicode"
 msgstr "セキュリティーグループ %s が文字列でも Unicode でもありません"
-
-#, python-format
-msgid "Security group default rule (%rule_id)s not found."
-msgstr "セキュリティーグループのデフォルトルール (%rule_id) が見つかりません。"
 
 msgid "Security group id should be integer"
 msgstr "セキュリティーグループ ID は整数でなければなりません"
@@ -3080,9 +2986,6 @@ msgstr ""
 "このコンピュートノードのハイパーバイザーがサポートされる最小バージョンよりも"
 "古くなっています: %(version)s。"
 
-msgid "This default rule already exists."
-msgstr "このデフォルトルールは既に存在します。"
-
 msgid "This domU must be running on the host specified by connection_url"
 msgstr ""
 "この domU は、connection_url で指定されたホスト上で実行されている必要がありま"
@@ -3130,14 +3033,6 @@ msgstr "開始ポートと終了ポートは整数でなければなりません
 
 msgid "Token not found"
 msgstr "トークンが見つかりません"
-
-#, python-format
-msgid ""
-"Too many IP addresses will be generated.  Please increase /%s to reduce the "
-"number generated."
-msgstr ""
-"生成される IP アドレスが多すぎます。/%s の値を増やして、生成される数を減らし"
-"てください。"
 
 msgid "Triggering crash dump is not supported"
 msgstr "クラッシュダンプのトリガーはサポートされません"
@@ -3458,14 +3353,6 @@ msgstr "VHD 統合の試行時に (%d) を超過したため、中止します..
 
 #, python-format
 msgid ""
-"VLAN tag is not appropriate for the port group %(bridge)s. Expected VLAN tag "
-"is %(tag)s, but the one associated with the port group is %(pgroup)s."
-msgstr ""
-"ポートグループ %(bridge)s の VLAN タグが適切ではありません。必要な VLAN タグ"
-"は %(tag)s ですが、ポートグループに関連付けられているのは %(pgroup)s です。"
-
-#, python-format
-msgid ""
 "Value (%(value)s) for parameter Group%(property)s is invalid. Content "
 "limited to '%(allowed)s'."
 msgstr ""
@@ -3495,19 +3382,9 @@ msgid "Virtual machine mode '%s' is not valid"
 msgstr "仮想マシンモード '%s' が有効ではありません"
 
 #, python-format
-msgid ""
-"Virtual switch associated with the network adapter %(adapter)s not found."
-msgstr ""
-"ネットワークアダプター %(adapter)s に関連付けられた仮想スイッチが見つかりませ"
-"ん。"
-
-#, python-format
 msgid "Virtualization type '%(virt)s' is not supported by this compute driver"
 msgstr ""
 "このコンピュートドライバーでは仮想化タイプ '%(virt)s' はサポートされません"
-
-msgid "VlanID"
-msgstr "VLAN ID"
 
 #, python-format
 msgid "Volume %(volume_id)s could not be attached. Reason: %(reason)s"
@@ -3697,9 +3574,6 @@ msgstr "fmt=%(fmt)s は %(backing_file)s でサポートされています"
 msgid "href %s does not contain version"
 msgstr "href %s にバージョンが含まれていません"
 
-msgid "id"
-msgstr "ID"
-
 msgid "image already mounted"
 msgstr "イメージは既にマウントされています"
 
@@ -3815,9 +3689,6 @@ msgstr "1 つ以上のスペースではない文字を含む印刷可能な文�
 msgid "printable characters. Can not start or end with whitespace."
 msgstr "印刷可能な文字。空白で開始または終了することはできません。"
 
-msgid "project"
-msgstr "プロジェクト"
-
 #, python-format
 msgid "qemu-img failed to execute on %(path)s : %(exp)s"
 msgstr "%(path)s で qemu-img を実行できませんでした: %(exp)s"
@@ -3859,9 +3730,6 @@ msgstr "%s のスナップショット"
 msgid "snapshot_id required in create_info"
 msgstr "create_info には snapshot_id が必要です"
 
-msgid "start address"
-msgstr "開始アドレス"
-
 msgid "token not provided"
 msgstr "トークンが指定されていません"
 
@@ -3870,19 +3738,6 @@ msgstr "本文にキーが多すぎます"
 
 msgid "unpause not supported for vmwareapi"
 msgstr "vmwareapi では一時停止解除はサポートされていません"
-
-msgid "uuid"
-msgstr "UUID"
-
-#, python-format
-msgid ""
-"vSwitch which contains the port group %(bridge)s is not associated with the "
-"desired physical adapter. Expected vSwitch is %(expected)s, but the one "
-"associated is %(actual)s."
-msgstr ""
-"ポートグループ %(bridge)s を含む vSwitch が目的の物理アダプターに関連付けられ"
-"ていません。必要な vSwitch は %(expected)s ですが、関連付けられているのは "
-"%(actual)s です。"
 
 msgid "version should be an integer"
 msgstr "バージョンは整数でなければなりません"

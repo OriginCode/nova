@@ -13,7 +13,6 @@
 
 import io
 import mock
-import time
 
 from oslo_config import cfg
 from oslo_log import log as logging
@@ -30,17 +29,6 @@ LOG = logging.getLogger(__name__)
 
 
 class VGPUReshapeTests(base.ServersTestBase):
-    # the minimum libvirt version needed for vgpu
-    MIN_LIBVIRT_MDEV_SUPPORT = 3004000
-
-    def _wait_for_state_change(self, server, expected_status):
-        for i in range(0, 50):
-            server = self.api.get_server(server['id'])
-            if server['status'] == expected_status:
-                return server
-            time.sleep(.1)
-        self.assertEqual(expected_status, server['status'])
-        return server
 
     @mock.patch('nova.virt.libvirt.LibvirtDriver._get_local_gb_info',
                 return_value={'total': 128,
@@ -71,11 +59,28 @@ class VGPUReshapeTests(base.ServersTestBase):
         # the old tree as that would be a bad time for reshape. Later when the
         # compute service is restarted the driver will do the reshape.
 
+        mdevs = {
+            'mdev_4b20d080_1b54_4048_85b3_a6a62d165c01':
+                fakelibvirt.FakeMdevDevice(
+                    dev_name='mdev_4b20d080_1b54_4048_85b3_a6a62d165c01',
+                    type_id=fakelibvirt.NVIDIA_11_VGPU_TYPE,
+                    parent=fakelibvirt.PGPU1_PCI_ADDR),
+            'mdev_4b20d080_1b54_4048_85b3_a6a62d165c02':
+                fakelibvirt.FakeMdevDevice(
+                    dev_name='mdev_4b20d080_1b54_4048_85b3_a6a62d165c02',
+                    type_id=fakelibvirt.NVIDIA_11_VGPU_TYPE,
+                    parent=fakelibvirt.PGPU2_PCI_ADDR),
+            'mdev_4b20d080_1b54_4048_85b3_a6a62d165c03':
+                fakelibvirt.FakeMdevDevice(
+                    dev_name='mdev_4b20d080_1b54_4048_85b3_a6a62d165c03',
+                    type_id=fakelibvirt.NVIDIA_11_VGPU_TYPE,
+                    parent=fakelibvirt.PGPU3_PCI_ADDR),
+        }
+
         fake_connection = self._get_connection(
             # We need more RAM or the 3rd server won't be created
             host_info=fakelibvirt.HostInfo(kB_mem=8192),
-            libvirt_version=self.MIN_LIBVIRT_MDEV_SUPPORT,
-            mdev_info=fakelibvirt.HostMdevDevicesInfo())
+            mdev_info=fakelibvirt.HostMdevDevicesInfo(devices=mdevs))
         self.mock_conn.return_value = fake_connection
 
         # start a compute with vgpu support disabled so the driver will
@@ -100,11 +105,21 @@ class VGPUReshapeTests(base.ServersTestBase):
             '/resource_providers/%s/inventories' % compute_rp_uuid,
             inventories)
 
+        # enabled vgpu support
+        self.flags(
+            enabled_vgpu_types=fakelibvirt.NVIDIA_11_VGPU_TYPE,
+            group='devices')
+        # We don't want to restart the compute service or it would call for
+        # a reshape but we still want to accept some vGPU types so we call
+        # directly the needed method
+        self.compute.driver.supported_vgpu_types = (
+            self.compute.driver._get_supported_vgpu_types())
+
         # now we boot two servers with vgpu
         extra_spec = {"resources:VGPU": 1}
         flavor_id = self._create_flavor(extra_spec=extra_spec)
 
-        server_req = self._build_server(flavor_id)
+        server_req = self._build_server(flavor_id=flavor_id)
 
         # NOTE(gibi): during instance_claim() there is a
         # driver.update_provider_tree() call that would detect the old tree and
@@ -152,10 +167,6 @@ class VGPUReshapeTests(base.ServersTestBase):
                 {'DISK_GB': 20, 'MEMORY_MB': 2048, 'VCPU': 2, 'VGPU': 1},
                 allocations[compute_rp_uuid]['resources'])
 
-        # enabled vgpu support
-        self.flags(
-            enabled_vgpu_types=fakelibvirt.NVIDIA_11_VGPU_TYPE,
-            group='devices')
         # restart compute which will trigger a reshape
         self.compute = self.restart_compute_service(self.compute)
 

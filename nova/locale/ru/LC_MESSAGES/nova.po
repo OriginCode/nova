@@ -16,7 +16,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova VERSION\n"
 "Report-Msgid-Bugs-To: https://bugs.launchpad.net/openstack-i18n/\n"
-"POT-Creation-Date: 2019-10-01 18:30+0000\n"
+"POT-Creation-Date: 2019-12-08 15:51+0000\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
@@ -121,10 +121,6 @@ msgstr ""
 "0 до %g"
 
 #, python-format
-msgid "/%s should be specified as single address(es) not in cidr format"
-msgstr "/%s должен быть указан как одинарный адрес не в формате cidr"
-
-#, python-format
 msgid "A NetworkModel is required in field %s"
 msgstr "В поле %s требуется NetworkModel "
 
@@ -163,9 +159,6 @@ msgid "Add metadata failed for aggregate %(id)s after %(retries)s retries"
 msgstr ""
 "Добавление метаданных не выполнено для множества %(id)s после %(retries)s "
 "попыток"
-
-msgid "Address could not be converted."
-msgstr "Невозможно преобразовать адрес."
 
 msgid "Affinity instance group policy was violated."
 msgstr "Нарушена стратегия группы экземпляров привязки."
@@ -604,43 +597,12 @@ msgid "Connection to the hypervisor is broken on host: %(host)s"
 msgstr "Соединение с гипервизором разорвано на хосте: %(host)s"
 
 #, python-format
-msgid "Console %(console_id)s could not be found."
-msgstr "Консоль %(console_id)s не найдена."
-
-#, python-format
-msgid "Console for instance %(instance_uuid)s could not be found."
-msgstr "Консоль для экземпляра %(instance_uuid)s не найдена."
-
-#, python-format
-msgid ""
-"Console for instance %(instance_uuid)s in pool %(pool_id)s could not be "
-"found."
-msgstr ""
-"Консоль для экземпляра %(instance_uuid)s в пуле %(pool_id)s не найдена."
-
-#, python-format
 msgid ""
 "Console log output could not be retrieved for instance %(instance_id)s. "
 "Reason: %(reason)s"
 msgstr ""
 "Не удается получить вывод протокола консоли %(instance_id)s. Причина: "
 "%(reason)s"
-
-#, python-format
-msgid ""
-"Console pool of type %(console_type)s for compute host %(compute_host)s on "
-"proxy host %(host)s not found."
-msgstr ""
-"Пул консолей типа %(console_type)s для хоста вычисления %(compute_host)s на "
-"хосте прокси %(host)s не найден."
-
-#, python-format
-msgid ""
-"Console pool with host %(host)s, console_type %(console_type)s and "
-"compute_host %(compute_host)s already exists."
-msgstr ""
-"Пул консолей с хостом %(host)s, console_type %(console_type)s и compute_host "
-"%(compute_host)s уже существует."
 
 msgid "Constraint not met."
 msgstr "Ограничение не выполнено."
@@ -695,18 +657,9 @@ msgstr "Невозможно передать образ %(image_id)s"
 msgid "Couldn't get Link Local IP of %(interface)s :%(ex)s"
 msgstr "Не удалось получить локальный IP-адрес ссылки %(interface)s :%(ex)s"
 
-msgid "Create networks failed"
-msgstr "Не удалось создать сети"
-
 msgid "Creation of virtual interface with unique mac address failed"
 msgstr ""
 "Не удалось создать виртуальный интерфейс с помощью уникального MAC-адреса"
-
-msgid "DNS1"
-msgstr "DNS1"
-
-msgid "DNS2"
-msgstr "DNS2"
 
 #, python-format
 msgid "Datastore regex %s did not match any datastores"
@@ -783,18 +736,6 @@ msgstr "Ошибка драйвера: %s"
 #, python-format
 msgid "Duplicate networks (%s) are not allowed"
 msgstr "Дубликаты сетей (%s) не разрешены"
-
-msgid ""
-"ERROR: Network commands are not supported when using the Neutron API.  Use "
-"python-neutronclient instead."
-msgstr ""
-"ОШИБКА: сетевые команды не поддерживаются при использовании Neutron API.  "
-"Используйте python-neutronclient вместо него."
-
-msgid ""
-"ESX SOAP server returned an empty port group for the host system in its "
-"response"
-msgstr "Сервер ESX SOAP вернул пустую группу портов для хоста в своем ответе"
 
 #, python-format
 msgid ""
@@ -1313,12 +1254,6 @@ msgstr "Превышение квоты выделения IP-адресов в 
 
 msgid "IP allocation over quota."
 msgstr "Превышение квоты выделения IP-адресов."
-
-msgid "IPv4"
-msgstr "IPv4"
-
-msgid "IPv6"
-msgstr "IPv6"
 
 #, python-format
 msgid "IPv6 netmask \"%s\" must be a netmask or integral prefix"
@@ -2065,10 +2000,6 @@ msgid ""
 msgstr "Сети %(network_uuid)s требуется подсеть для загрузки экземпляров."
 
 #, python-format
-msgid "Network adapter %(adapter)s could not be found."
-msgstr "Сетевой адаптер %(adapter)s не может быть найден."
-
-#, python-format
 msgid "Network could not be found for bridge %(bridge)s"
 msgstr "Сеть не может быть найдена для моста %(bridge)s"
 
@@ -2083,9 +2014,6 @@ msgstr "Сеть не может быть найдена для uuid %(uuid)s"
 #, python-format
 msgid "Network could not be found with cidr %(cidr)s."
 msgstr "Сеть не найдена с cidr %(cidr)s."
-
-msgid "Network driver does not support this function."
-msgstr "Сетевой драйвер не поддерживает данную функцию"
 
 #, python-format
 msgid "Network host %(host)s has zero fixed IPs in network %(network_id)s."
@@ -2161,9 +2089,6 @@ msgstr "С id %(id)s не связано фиксированных IP"
 msgid "No fixed IPs associated to instance"
 msgstr "Нет фиксированных IP, связанных с экземпляром"
 
-msgid "No floating IP addresses have been defined."
-msgstr "Нефиксированные IP-адреса не были определены."
-
 msgid "No free nbd devices"
 msgstr "Нет свободных устройств nbd"
 
@@ -2211,9 +2136,6 @@ msgstr "Точки монтирования не найдены в %(root)s из
 
 msgid "No networks defined."
 msgstr "Сети не определены."
-
-msgid "No networks found"
-msgstr "Сети не найдены"
 
 #, python-format
 msgid "No operating system found in %s"
@@ -2411,9 +2333,6 @@ msgstr ""
 msgid "Physical network is missing for network %(network_uuid)s"
 msgstr "Отсутствует физическая сеть для сети %(network_uuid)s"
 
-msgid "Please specify either fixed_range or uuid"
-msgstr "Укажите fixed_range или uuid"
-
 #, python-format
 msgid "Policy doesn't allow %(action)s to be performed."
 msgstr "Политика не допускает выполнения %(action)s."
@@ -2489,9 +2408,6 @@ msgstr "Квота превышена для ресурсов: %(overs)s"
 
 msgid "Quota exceeded, too many key pairs."
 msgstr "Квота превышена, слишком много пар ключей."
-
-msgid "Quota exceeded, too many networks."
-msgstr "Квота превышена, слишком много сетей."
 
 msgid "Quota exceeded, too many security group rules."
 msgstr "Квота превышена, слишком много правил групп защиты."
@@ -2607,11 +2523,6 @@ msgstr ""
 "Запрошенная топология NUMA экземпляра и запрошенные устройства PCI не "
 "помещаются в заданной топологии NUMA хоста"
 
-msgid "Requested network does not contain enough (2+) usable hosts"
-msgstr ""
-"Запрошенная сеть не содержит достаточное количество (2+) пригодных к "
-"использованию хостов"
-
 #, python-format
 msgid ""
 "Requested vCPU limits %(sockets)d:%(cores)d:%(threads)d are impossible to "
@@ -2706,10 +2617,6 @@ msgstr "Группа безопасности %s уже существует"
 #, python-format
 msgid "Security group %s is not a string or unicode"
 msgstr "Группа защиты %s не является строкой или unicode"
-
-#, python-format
-msgid "Security group default rule (%rule_id)s not found."
-msgstr "Правило по умолчанию для группы защиты (%rule_id)s не найдено."
 
 msgid "Security group id should be integer"
 msgstr "ИД группы защиты должен быть целым числом"
@@ -3046,9 +2953,6 @@ msgid ""
 "%(version)s."
 msgstr "Версия гипервизора этого узла ниже минимально допустимой: %(version)s."
 
-msgid "This default rule already exists."
-msgstr "Это правило по умолчанию уже существует."
-
 msgid "This domU must be running on the host specified by connection_url"
 msgstr "Этот domU должен быть запущен на хосте, указанном в connection_url"
 
@@ -3094,14 +2998,6 @@ msgstr "Порты От и К должны быть целыми числами"
 
 msgid "Token not found"
 msgstr "Маркер не найден"
-
-#, python-format
-msgid ""
-"Too many IP addresses will be generated.  Please increase /%s to reduce the "
-"number generated."
-msgstr ""
-"Будет сгенерировано слишком много IP-адресов.  Увеличьте /%s для сокращения "
-"количества сгенерированных адресов."
 
 msgid "Triggering crash dump is not supported"
 msgstr "Активация дампа сбоя не поддерживается"
@@ -3422,14 +3318,6 @@ msgstr "Число попыток объединения VHD превысило 
 
 #, python-format
 msgid ""
-"VLAN tag is not appropriate for the port group %(bridge)s. Expected VLAN tag "
-"is %(tag)s, but the one associated with the port group is %(pgroup)s."
-msgstr ""
-"Тег VLAN не подходит для группы портов %(bridge)s. Ожидался тег VLAN "
-"%(tag)s, но с группой портов связан %(pgroup)s."
-
-#, python-format
-msgid ""
 "Value (%(value)s) for parameter Group%(property)s is invalid. Content "
 "limited to '%(allowed)s'."
 msgstr ""
@@ -3459,19 +3347,9 @@ msgid "Virtual machine mode '%s' is not valid"
 msgstr "Недопустимый режим виртуальной машины '%s'"
 
 #, python-format
-msgid ""
-"Virtual switch associated with the network adapter %(adapter)s not found."
-msgstr ""
-"Не найден виртуальный переключатель ассоциированный с сетевым адаптером "
-"%(adapter)s."
-
-#, python-format
 msgid "Virtualization type '%(virt)s' is not supported by this compute driver"
 msgstr ""
 "Тип виртуализации '%(virt)s' не поддерживается этим драйвером вычисления"
-
-msgid "VlanID"
-msgstr "VlanID"
 
 #, python-format
 msgid "Volume %(volume_id)s could not be attached. Reason: %(reason)s"
@@ -3652,9 +3530,6 @@ msgstr "fmt=%(fmt)s backed by: %(backing_file)s"
 msgid "href %s does not contain version"
 msgstr "href %s не содержит версию"
 
-msgid "id"
-msgstr "ID"
-
 msgid "image already mounted"
 msgstr "образ уже присоединён"
 
@@ -3768,9 +3643,6 @@ msgstr "печатаемые символы хотя бы один символ,
 msgid "printable characters. Can not start or end with whitespace."
 msgstr "печатаемые символы. Не может начинаться или заканчиваться пробелом."
 
-msgid "project"
-msgstr "проект"
-
 #, python-format
 msgid "qemu-img failed to execute on %(path)s : %(exp)s"
 msgstr "qemu-img не выполнен в %(path)s : %(exp)s"
@@ -3815,9 +3687,6 @@ msgstr "моментальная копия для %s"
 msgid "snapshot_id required in create_info"
 msgstr "snapshot_id обязателен в create_info"
 
-msgid "start address"
-msgstr "начальный адрес"
-
 msgid "token not provided"
 msgstr "маркер не указан"
 
@@ -3826,19 +3695,6 @@ msgstr "слишком много ключей тела"
 
 msgid "unpause not supported for vmwareapi"
 msgstr "отмена остановки не поддерживается для vmwareapi"
-
-msgid "uuid"
-msgstr "uuid"
-
-#, python-format
-msgid ""
-"vSwitch which contains the port group %(bridge)s is not associated with the "
-"desired physical adapter. Expected vSwitch is %(expected)s, but the one "
-"associated is %(actual)s."
-msgstr ""
-"vSwitch, который содержит группу портов %(bridge)s, не связан с "
-"предпочитаемым физическим адаптером. Ожидаемым vSwitch является "
-"%(expected)s, но связан %(actual)s."
 
 msgid "version should be an integer"
 msgstr "версия должна быть целым числом"

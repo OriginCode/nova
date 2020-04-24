@@ -22,16 +22,15 @@ from nova.db import api as db
 from nova import exception
 from nova import quota
 from nova import test
-from nova.tests import fixtures as nova_fixtures
 from nova.tests.unit.api.openstack import fakes
 
 
 def quota_set(id, include_server_group_quotas=True):
     res = {'quota_set': {'id': id, 'metadata_items': 128,
-           'ram': 51200, 'floating_ips': 10, 'fixed_ips': -1,
+           'ram': 51200, 'floating_ips': -1, 'fixed_ips': -1,
            'instances': 10, 'injected_files': 5, 'cores': 20,
            'injected_file_content_bytes': 10240,
-           'security_groups': 10, 'security_group_rules': 20,
+           'security_groups': -1, 'security_group_rules': -1,
            'key_pairs': 100, 'injected_file_path_bytes': 255}}
     if include_server_group_quotas:
         res['quota_set']['server_groups'] = 10
@@ -67,14 +66,14 @@ class QuotaSetsTestV21(BaseQuotaSetsTest):
             'instances': 10,
             'cores': 20,
             'ram': 51200,
-            'floating_ips': 10,
+            'floating_ips': -1,
             'fixed_ips': -1,
             'metadata_items': 128,
             'injected_files': 5,
             'injected_file_path_bytes': 255,
             'injected_file_content_bytes': 10240,
-            'security_groups': 10,
-            'security_group_rules': 20,
+            'security_groups': -1,
+            'security_group_rules': -1,
             'key_pairs': 100,
         }
         if self.include_server_group_quotas:
@@ -97,14 +96,14 @@ class QuotaSetsTestV21(BaseQuotaSetsTest):
         self.assertEqual(qs['instances'], 10)
         self.assertEqual(qs['cores'], 20)
         self.assertEqual(qs['ram'], 51200)
-        self.assertEqual(qs['floating_ips'], 10)
+        self.assertEqual(qs['floating_ips'], -1)
         self.assertEqual(qs['fixed_ips'], -1)
         self.assertEqual(qs['metadata_items'], 128)
         self.assertEqual(qs['injected_files'], 5)
         self.assertEqual(qs['injected_file_path_bytes'], 255)
         self.assertEqual(qs['injected_file_content_bytes'], 10240)
-        self.assertEqual(qs['security_groups'], 10)
-        self.assertEqual(qs['security_group_rules'], 20)
+        self.assertEqual(qs['security_groups'], -1)
+        self.assertEqual(qs['security_group_rules'], -1)
         self.assertEqual(qs['key_pairs'], 100)
         if self.include_server_group_quotas:
             self.assertEqual(qs['server_groups'], 10)
@@ -160,11 +159,12 @@ class QuotaSetsTestV21(BaseQuotaSetsTest):
                           resource, db.MAX_INT + 1, -1, -1)
 
     def test_quotas_defaults(self):
-        uri = '/v2/fake_tenant/os-quota-sets/fake_tenant/defaults'
+        uri = '/v2/%s/os-quota-sets/%s/defaults' % (
+                fakes.FAKE_PROJECT_ID, fakes.FAKE_PROJECT_ID)
 
         req = fakes.HTTPRequest.blank(uri)
-        res_dict = self.controller.defaults(req, 'fake_tenant')
-        self.default_quotas.update({'id': 'fake_tenant'})
+        res_dict = self.controller.defaults(req, fakes.FAKE_PROJECT_ID)
+        self.default_quotas.update({'id': fakes.FAKE_PROJECT_ID})
         expected = {'quota_set': self.default_quotas}
 
         self.assertEqual(res_dict, expected)
@@ -212,13 +212,13 @@ class QuotaSetsTestV21(BaseQuotaSetsTest):
 
     def test_quotas_update_zero_value(self):
         body = {'quota_set': {'instances': 0, 'cores': 0,
-                              'ram': 0, 'floating_ips': 0,
+                              'ram': 0, 'floating_ips': -1,
                               'metadata_items': 0,
                               'injected_files': 0,
                               'injected_file_content_bytes': 0,
                               'injected_file_path_bytes': 0,
-                              'security_groups': 0,
-                              'security_group_rules': 0,
+                              'security_groups': -1,
+                              'security_group_rules': -1,
                               'key_pairs': 100, 'fixed_ips': -1}}
         if self.include_server_group_quotas:
             body['quota_set']['server_groups'] = 10
@@ -282,18 +282,6 @@ class QuotaSetsTestV21(BaseQuotaSetsTest):
         self.assertEqual(202, self.get_delete_status_int(res))
         mock_destroy_all_by_project.assert_called_once_with(
             req.environ['nova.context'], 1234)
-
-    def test_update_network_quota_disabled(self):
-        self.flags(enable_network_quota=False)
-        self.assertRaises(webob.exc.HTTPBadRequest, self.controller.update,
-                          self._get_http_request(),
-                          1234, body={'quota_set': {'networks': 1}})
-
-    def test_update_network_quota_enabled(self):
-        self.flags(enable_network_quota=True)
-        self.useFixture(nova_fixtures.RegisterNetworkQuota())
-        self.controller.update(self._get_http_request(),
-                               1234, body={'quota_set': {'networks': 1}})
 
     def test_duplicate_quota_filter(self):
         query_string = 'user_id=1&user_id=2'
@@ -401,8 +389,9 @@ class ExtendedQuotasTestV21(BaseQuotaSetsTest):
     def test_quotas_update_good_data(self, mock_createlimit):
         body = {'quota_set': {'cores': 1,
                               'instances': 1}}
-        req = fakes.HTTPRequest.blank('/v2/fake4/os-quota-sets/update_me',
-                                      use_admin_context=True)
+        req = fakes.HTTPRequest.blank(
+                '/v2/%s/os-quota-sets/update_me' % fakes.FAKE_PROJECT_ID,
+                use_admin_context=True)
         self.controller.update(req, 'update_me', body=body)
         self.assertEqual(2,
                          len(mock_createlimit.mock_calls))
@@ -414,8 +403,9 @@ class ExtendedQuotasTestV21(BaseQuotaSetsTest):
                               'instances': 1}}
 
         mock_gsq.side_effect = self.fake_get_settable_quotas
-        req = fakes.HTTPRequest.blank('/v2/fake4/os-quota-sets/update_me',
-                                      use_admin_context=True)
+        req = fakes.HTTPRequest.blank(
+                '/v2/%s/os-quota-sets/update_me' % fakes.FAKE_PROJECT_ID,
+                use_admin_context=True)
         self.assertRaises(webob.exc.HTTPBadRequest, self.controller.update,
                           req, 'update_me', body=body)
         self.assertEqual(0,
@@ -437,26 +427,30 @@ class UserQuotasTestV21(BaseQuotaSetsTest):
         self.controller = self.plugin.QuotaSetsController()
 
     def test_user_quotas_show(self):
-        req = self._get_http_request('/v2/fake4/os-quota-sets/1234?user_id=1')
-        res_dict = self.controller.show(req, 1234)
-        ref_quota_set = quota_set('1234', self.include_server_group_quotas)
+        req = self._get_http_request(
+                '/v2/%s/os-quota-sets/%s?user_id=1' % (fakes.FAKE_PROJECT_ID,
+                                                       fakes.FAKE_PROJECT_ID))
+        res_dict = self.controller.show(req, fakes.FAKE_PROJECT_ID)
+        ref_quota_set = quota_set(fakes.FAKE_PROJECT_ID,
+                                  self.include_server_group_quotas)
         self.assertEqual(res_dict, ref_quota_set)
 
     def test_user_quotas_update(self):
         body = {'quota_set': {'instances': 10, 'cores': 20,
-                              'ram': 51200, 'floating_ips': 10,
+                              'ram': 51200, 'floating_ips': -1,
                               'fixed_ips': -1, 'metadata_items': 128,
                               'injected_files': 5,
                               'injected_file_content_bytes': 10240,
                               'injected_file_path_bytes': 255,
-                              'security_groups': 10,
-                              'security_group_rules': 20,
+                              'security_groups': -1,
+                              'security_group_rules': -1,
                               'key_pairs': 100}}
         if self.include_server_group_quotas:
             body['quota_set']['server_groups'] = 10
             body['quota_set']['server_group_members'] = 10
 
-        url = '/v2/fake4/os-quota-sets/update_me?user_id=1'
+        url = ('/v2/%s/os-quota-sets/update_me?user_id=1' %
+               fakes.FAKE_PROJECT_ID)
         req = self._get_http_request(url)
         res_dict = self.controller.update(req, 'update_me', body=body)
 
@@ -465,19 +459,21 @@ class UserQuotasTestV21(BaseQuotaSetsTest):
     def test_user_quotas_update_exceed_project(self):
         body = {'quota_set': {'instances': 20}}
 
-        url = '/v2/fake4/os-quota-sets/update_me?user_id=1'
+        url = ('/v2/%s/os-quota-sets/update_me?user_id=1' %
+               fakes.FAKE_PROJECT_ID)
         req = self._get_http_request(url)
         self.assertRaises(webob.exc.HTTPBadRequest, self.controller.update,
                           req, 'update_me', body=body)
 
     @mock.patch('nova.objects.Quotas.destroy_all_by_project_and_user')
     def test_user_quotas_delete(self, mock_destroy_all_by_project_and_user):
-        url = '/v2/fake4/os-quota-sets/1234?user_id=1'
+        url = '/v2/%s/os-quota-sets/%s?user_id=1' % (fakes.FAKE_PROJECT_ID,
+                                                     fakes.FAKE_PROJECT_ID)
         req = self._get_http_request(url)
-        res = self.controller.delete(req, 1234)
+        res = self.controller.delete(req, fakes.FAKE_PROJECT_ID)
         self.assertEqual(202, self.get_delete_status_int(res))
         mock_destroy_all_by_project_and_user.assert_called_once_with(
-            req.environ['nova.context'], 1234, '1'
+            req.environ['nova.context'], fakes.FAKE_PROJECT_ID, '1'
         )
 
     @mock.patch('nova.objects.Quotas.create_limit')
@@ -485,7 +481,8 @@ class UserQuotasTestV21(BaseQuotaSetsTest):
         body = {'quota_set': {'instances': 1,
                               'cores': 1}}
 
-        url = '/v2/fake4/os-quota-sets/update_me?user_id=1'
+        url = ('/v2/%s/os-quota-sets/update_me?user_id=1' %
+               fakes.FAKE_PROJECT_ID)
         req = fakes.HTTPRequest.blank(url, use_admin_context=True)
         self.controller.update(req, 'update_me', body=body)
         self.assertEqual(2,
@@ -496,71 +493,13 @@ class UserQuotasTestV21(BaseQuotaSetsTest):
         body = {'quota_set': {'instances': 20,
                               'cores': 1}}
 
-        url = '/v2/fake4/os-quota-sets/update_me?user_id=1'
+        url = ('/v2/%s/os-quota-sets/update_me?user_id=1' %
+               fakes.FAKE_PROJECT_ID)
         req = fakes.HTTPRequest.blank(url, use_admin_context=True)
         self.assertRaises(webob.exc.HTTPBadRequest, self.controller.update,
                           req, 'update_me', body=body)
         self.assertEqual(0,
                          len(mock_createlimit.mock_calls))
-
-
-class QuotaSetsPolicyEnforcementV21(test.NoDBTestCase):
-
-    def setUp(self):
-        super(QuotaSetsPolicyEnforcementV21, self).setUp()
-        self.controller = quotas_v21.QuotaSetsController()
-        self.req = fakes.HTTPRequest.blank('')
-
-    def test_delete_policy_failed(self):
-        rule_name = "os_compute_api:os-quota-sets:delete"
-        self.policy.set_rules({rule_name: "project_id:non_fake"})
-        exc = self.assertRaises(
-            exception.PolicyNotAuthorized,
-            self.controller.delete, self.req, fakes.FAKE_UUID)
-        self.assertEqual(
-            "Policy doesn't allow %s to be performed." % rule_name,
-            exc.format_message())
-
-    def test_defaults_policy_failed(self):
-        rule_name = "os_compute_api:os-quota-sets:defaults"
-        self.policy.set_rules({rule_name: "project_id:non_fake"})
-        exc = self.assertRaises(
-            exception.PolicyNotAuthorized,
-            self.controller.defaults, self.req, fakes.FAKE_UUID)
-        self.assertEqual(
-            "Policy doesn't allow %s to be performed." % rule_name,
-            exc.format_message())
-
-    def test_show_policy_failed(self):
-        rule_name = "os_compute_api:os-quota-sets:show"
-        self.policy.set_rules({rule_name: "project_id:non_fake"})
-        exc = self.assertRaises(
-            exception.PolicyNotAuthorized,
-            self.controller.show, self.req, fakes.FAKE_UUID)
-        self.assertEqual(
-            "Policy doesn't allow %s to be performed." % rule_name,
-            exc.format_message())
-
-    def test_detail_policy_failed(self):
-        rule_name = "os_compute_api:os-quota-sets:detail"
-        self.policy.set_rules({rule_name: "project_id:non_fake"})
-        exc = self.assertRaises(
-            exception.PolicyNotAuthorized,
-            self.controller.detail, self.req, fakes.FAKE_UUID)
-        self.assertEqual(
-            "Policy doesn't allow %s to be performed." % rule_name,
-            exc.format_message())
-
-    def test_update_policy_failed(self):
-        rule_name = "os_compute_api:os-quota-sets:update"
-        self.policy.set_rules({rule_name: "project_id:non_fake"})
-        exc = self.assertRaises(
-            exception.PolicyNotAuthorized,
-            self.controller.update, self.req, fakes.FAKE_UUID,
-            body={'quota_set': {}})
-        self.assertEqual(
-            "Policy doesn't allow %s to be performed." % rule_name,
-            exc.format_message())
 
 
 class QuotaSetsTestV236(test.NoDBTestCase):
@@ -574,42 +513,38 @@ class QuotaSetsTestV236(test.NoDBTestCase):
         self.stub_out('nova.api.openstack.identity.verify_project_id',
                       lambda ctx, project_id: True)
 
-        self.flags(enable_network_quota=True)
-        self.useFixture(nova_fixtures.RegisterNetworkQuota())
         self.old_req = fakes.HTTPRequest.blank('', version='2.1')
-        self.filtered_quotas = ['fixed_ips', 'floating_ips', 'networks',
+        self.filtered_quotas = ['fixed_ips', 'floating_ips',
             'security_group_rules', 'security_groups']
         self.quotas = {
             'cores': {'limit': 20},
             'fixed_ips': {'limit': -1},
-            'floating_ips': {'limit': 10},
+            'floating_ips': {'limit': -1},
             'injected_file_content_bytes': {'limit': 10240},
             'injected_file_path_bytes': {'limit': 255},
             'injected_files': {'limit': 5},
             'instances': {'limit': 10},
             'key_pairs': {'limit': 100},
             'metadata_items': {'limit': 128},
-            'networks': {'limit': 3},
             'ram': {'limit': 51200},
-            'security_group_rules': {'limit': 20},
-            'security_groups': {'limit': 10},
+            'security_group_rules': {'limit': -1},
+            'security_groups': {'limit': -1},
             'server_group_members': {'limit': 10},
             'server_groups': {'limit': 10}
         }
         self.defaults = {
             'cores': 20,
             'fixed_ips': -1,
-            'floating_ips': 10,
+            'floating_ips': -1,
             'injected_file_content_bytes': 10240,
             'injected_file_path_bytes': 255,
             'injected_files': 5,
             'instances': 10,
             'key_pairs': 100,
             'metadata_items': 128,
-            'networks': 3,
             'ram': 51200,
-            'security_group_rules': 20,
-            'security_groups': 10,
+            'security_group_rules': -1,
+            'security_groups': -1,
             'server_group_members': 10,
             'server_groups': 10
         }

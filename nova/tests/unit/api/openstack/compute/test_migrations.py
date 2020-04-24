@@ -156,7 +156,8 @@ migrations_obj = base.obj_make_list(
 
 
 class FakeRequest(object):
-    environ = {"nova.context": context.RequestContext('fake_user', 'fake',
+    environ = {"nova.context": context.RequestContext('fake_user',
+                                                      fakes.FAKE_PROJECT_ID,
                                                       is_admin=True)}
     GET = {}
 
@@ -448,30 +449,58 @@ class MigrationTestCaseV266(MigrationsTestCaseV259):
             {'instance_uuid': uuids.instance_uuid})
 
 
-class MigrationsPolicyEnforcement(test.NoDBTestCase):
-    def setUp(self):
-        super(MigrationsPolicyEnforcement, self).setUp()
-        self.controller = migrations_v21.MigrationsController()
-        self.req = fakes.HTTPRequest.blank('')
+class MigrationsTestCaseV280(MigrationTestCaseV266):
+    wsgi_api_version = '2.80'
 
-    def test_list_policy_failed(self):
-        rule_name = "os_compute_api:os-migrations:index"
-        self.policy.set_rules({rule_name: "project_id:non_fake"})
-        exc = self.assertRaises(
-            exception.PolicyNotAuthorized,
-            self.controller.index, self.req)
-        self.assertEqual(
-            "Policy doesn't allow %s to be performed." % rule_name,
-            exc.format_message())
+    def test_index(self):
+        migrations = {'migrations': self.controller._output(
+                                        self.req, migrations_obj,
+                                        add_link=True, add_uuid=True,
+                                        add_user_project=True)}
 
+        for i, mig in enumerate(migrations['migrations']):
+            # first item is in-progress live migration
+            if i == 0:
+                self.assertIn('links', mig)
+            else:
+                self.assertNotIn('links', mig)
 
-class MigrationsPolicyEnforcementV223(MigrationsPolicyEnforcement):
-    wsgi_api_version = '2.23'
+            self.assertIn('migration_type', mig)
+            self.assertIn('id', mig)
+            self.assertIn('uuid', mig)
+            self.assertIn('user_id', mig)
+            self.assertIn('project_id', mig)
+            self.assertNotIn('deleted', mig)
+            self.assertNotIn('deleted_at', mig)
 
-    def setUp(self):
-        super(MigrationsPolicyEnforcementV223, self).setUp()
-        self.req = fakes.HTTPRequest.blank('', version=self.wsgi_api_version)
+        with mock.patch.object(self.controller.compute_api,
+                               'get_migrations_sorted') as m_get:
+            m_get.return_value = migrations_obj
+            response = self.controller.index(self.req)
+            self.assertEqual(migrations, response)
+            self.assertIn('links', response['migrations'][0])
+            self.assertIn('migration_type', response['migrations'][0])
 
+    def test_index_filter_by_user_id_pre_v280(self):
+        """Tests that the migrations by user_id query parameter
+        is not allowed before microversion 2.80.
+        """
+        req = fakes.HTTPRequest.blank(
+            '/os-migrations?user_id=%s' % uuids.user_id,
+            version='2.79', use_admin_context=True)
+        ex = self.assertRaises(exception.ValidationError,
+                               self.controller.index, req)
+        self.assertIn('Additional properties are not allowed',
+                      six.text_type(ex))
 
-class MigrationsPolicyEnforcementV259(MigrationsPolicyEnforcementV223):
-    wsgi_api_version = '2.59'
+    def test_index_filter_by_project_id_pre_v280(self):
+        """Tests that the migrations by project_id query parameter
+        is not allowed before microversion 2.80.
+        """
+        req = fakes.HTTPRequest.blank(
+            '/os-migrations?project_id=%s' % uuids.project_id,
+            version='2.79', use_admin_context=True)
+        ex = self.assertRaises(exception.ValidationError,
+                               self.controller.index, req)
+        self.assertIn('Additional properties are not allowed',
+                      six.text_type(ex))

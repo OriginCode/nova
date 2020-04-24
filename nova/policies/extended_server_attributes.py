@@ -23,9 +23,9 @@ BASE_POLICY_NAME = 'os_compute_api:os-extended-server-attributes'
 
 extended_server_attributes_policies = [
     policy.DocumentedRuleDefault(
-        BASE_POLICY_NAME,
-        base.RULE_ADMIN_API,
-        """Return extended attributes for server.
+        name=BASE_POLICY_NAME,
+        check_str=base.SYSTEM_ADMIN,
+        description="""Return extended attributes for server.
 
 This rule will control the visibility for a set of servers attributes:
 
@@ -38,8 +38,12 @@ This rule will control the visibility for a set of servers attributes:
 - ``OS-EXT-SRV-ATTR:ramdisk_id`` (since microversion 2.3)
 - ``OS-EXT-SRV-ATTR:root_device_name`` (since microversion 2.3)
 - ``OS-EXT-SRV-ATTR:user_data`` (since microversion 2.3)
+
+Microvision 2.75 added the above attributes in the ``PUT /servers/{server_id}``
+and ``POST /servers/{server_id}/action (rebuild)`` API responses which are
+also controlled by this policy rule, like the ``GET /servers*`` APIs.
 """,
-        [
+        operations=[
             {
                 'method': 'GET',
                 'path': '/servers/{id}'
@@ -47,8 +51,17 @@ This rule will control the visibility for a set of servers attributes:
             {
                 'method': 'GET',
                 'path': '/servers/detail'
+            },
+            {
+                'method': 'PUT',
+                'path': '/servers/{server_id}'
+            },
+            {
+                'method': 'POST',
+                'path': '/servers/{server_id}/action (rebuild)'
             }
-        ]
+        ],
+        scope_types=['system', 'project']
     ),
 ]
 

@@ -30,7 +30,6 @@ import shutil
 import tempfile
 
 import eventlet
-from keystoneauth1 import exceptions as ks_exc
 from keystoneauth1 import loading as ks_loading
 import netaddr
 from openstack import connection
@@ -51,10 +50,10 @@ from oslo_utils import units
 import six
 from six.moves import range
 
+from nova import block_device
 import nova.conf
 from nova import exception
 from nova.i18n import _, _LE, _LW
-import nova.network
 from nova import safe_utils
 
 profiler = importutils.try_import('osprofiler.profiler')
@@ -63,8 +62,6 @@ profiler = importutils.try_import('osprofiler.profiler')
 CONF = nova.conf.CONF
 
 LOG = logging.getLogger(__name__)
-
-_IS_NEUTRON = None
 
 synchronized = lockutils.synchronized_with_prefix('nova-')
 
@@ -361,19 +358,17 @@ def make_dev_path(dev, partition=None, base='/dev'):
 
 
 def sanitize_hostname(hostname, default_name=None):
-    """Return a hostname which conforms to RFC-952 and RFC-1123 specs except
-       the length of hostname.
+    """Sanitize a given hostname.
 
-       Window, Linux, and Dnsmasq has different limitation:
+    Return a hostname which conforms to RFC-952 and RFC-1123 specs except the
+    length of hostname. Window, Linux, and dnsmasq has different limitation:
 
-       Windows: 255 (net_bios limits to 15, but window will truncate it)
-       Linux: 64
-       Dnsmasq: 63
+    - Windows: 255 (net_bios limits to 15, but window will truncate it)
+    - Linux: 64
+    - dnsmasq: 63
 
-       Due to nova-network will leverage dnsmasq to set hostname, so we chose
-       63.
-
-       """
+    We choose the lowest of these (so 63).
+    """
 
     def truncate_hostname(name):
         if len(name) > 63:
@@ -712,16 +707,6 @@ def is_none_string(val):
     return val.lower() == 'none'
 
 
-def is_neutron():
-    global _IS_NEUTRON
-
-    if _IS_NEUTRON is not None:
-        return _IS_NEUTRON
-
-    _IS_NEUTRON = nova.network.is_neutron()
-    return _IS_NEUTRON
-
-
 def is_auto_disk_config_disabled(auto_disk_config_raw):
     auto_disk_config_disabled = False
     if auto_disk_config_raw is not None:
@@ -796,6 +781,61 @@ def get_image_from_system_metadata(system_meta):
     image_meta['properties'] = properties
 
     return image_meta
+
+
+def get_bdm_image_metadata(context, image_api, volume_api,
+                           block_device_mapping, legacy_bdm=True):
+    """Attempt to retrive image metadata from a given block_device_mapping.
+
+    If we are booting from a volume, we need to get the volume details from
+    Cinder and make sure we pass the metadata back accordingly.
+
+    :param context: request context
+    :param image_api: Image API
+    :param volume_api: Volume API
+    :param block_device_mapping:
+    :param legacy_bdm:
+    """
+    if not block_device_mapping:
+        return {}
+
+    for bdm in block_device_mapping:
+        if (legacy_bdm and
+                block_device.get_device_letter(
+                   bdm.get('device_name', '')) != 'a'):
+            continue
+        elif not legacy_bdm and bdm.get('boot_index') != 0:
+            continue
+
+        volume_id = bdm.get('volume_id')
+        snapshot_id = bdm.get('snapshot_id')
+        if snapshot_id:
+            # NOTE(alaski): A volume snapshot inherits metadata from the
+            # originating volume, but the API does not expose metadata
+            # on the snapshot itself.  So we query the volume for it below.
+            snapshot = volume_api.get_snapshot(context, snapshot_id)
+            volume_id = snapshot['volume_id']
+
+        if bdm.get('image_id'):
+            try:
+                image_id = bdm['image_id']
+                image_meta = image_api.get(context, image_id)
+                return image_meta
+            except Exception:
+                raise exception.InvalidBDMImage(id=image_id)
+        elif volume_id:
+            try:
+                volume = volume_api.get(context, volume_id)
+            except exception.CinderConnectionFailed:
+                raise
+            except Exception:
+                raise exception.InvalidBDMVolume(id=volume_id)
+
+            if not volume.get('bootable', True):
+                raise exception.InvalidBDMVolumeNotBootable(id=volume_id)
+
+            return get_image_metadata_from_volume(volume)
+    return {}
 
 
 def get_image_metadata_from_volume(volume):
@@ -1066,30 +1106,7 @@ def get_endpoint(ksa_adapter):
             # ksa_adapter.auth is a _ContextAuthPlugin, which doesn't have
             # get_endpoint_data.  Fall through to using get_endpoint().
             pass
-    # TODO(efried): The remainder of this method reduces to
-    # TODO(efried):     return ksa_adapter.get_endpoint()
-    # TODO(efried): once bug #1709118 is fixed.
-    # NOTE(efried): Id9bd19cca68206fc64d23b0eaa95aa3e5b01b676 may also do the
-    #               trick, once it's in a ksa release.
-    # The EndpointNotFound exception happens when _ContextAuthPlugin is in play
-    # because its get_endpoint() method isn't yet set up to handle interface as
-    # a list.  (It could also happen with a real auth if the endpoint isn't
-    # there; but that's covered below.)
-    try:
-        return ksa_adapter.get_endpoint()
-    except ks_exc.EndpointNotFound:
-        pass
-
-    interfaces = list(ksa_adapter.interface)
-    for interface in interfaces:
-        ksa_adapter.interface = interface
-        try:
-            return ksa_adapter.get_endpoint()
-        except ks_exc.EndpointNotFound:
-            pass
-    raise ks_exc.EndpointNotFound(
-        "Could not find requested endpoint for any of the following "
-        "interfaces: %s" % interfaces)
+    return ksa_adapter.get_endpoint()
 
 
 def generate_hostid(host, project_id):
@@ -1116,49 +1133,6 @@ else:
     def nested_contexts(*contexts):
         with contextlib.ExitStack() as stack:
             yield [stack.enter_context(c) for c in contexts]
-
-
-def run_once(message, logger, cleanup=None):
-    """This is a utility function decorator to ensure a function
-    is run once and only once in an interpreter instance.
-    The decorated function object can be reset by calling its
-    reset function. All exceptions raised by the wrapped function,
-    logger and cleanup function will be propagated to the caller.
-    """
-    def outer_wrapper(func):
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            if not wrapper.called:
-                # Note(sean-k-mooney): the called state is always
-                # updated even if the wrapped function completes
-                # by raising an exception. If the caller catches
-                # the exception it is their responsibility to call
-                # reset if they want to re-execute the wrapped function.
-                try:
-                    return func(*args, **kwargs)
-                finally:
-                    wrapper.called = True
-            else:
-                logger(message)
-
-        wrapper.called = False
-
-        def reset(wrapper, *args, **kwargs):
-            # Note(sean-k-mooney): we conditionally call the
-            # cleanup function if one is provided only when the
-            # wrapped function has been called previously. We catch
-            # and reraise any exception that may be raised and update
-            # the called state in a finally block to ensure its
-            # always updated if reset is called.
-            try:
-                if cleanup and wrapper.called:
-                    return cleanup(*args, **kwargs)
-            finally:
-                wrapper.called = False
-
-        wrapper.reset = functools.partial(reset, wrapper)
-        return wrapper
-    return outer_wrapper
 
 
 def normalize_rc_name(rc_name):

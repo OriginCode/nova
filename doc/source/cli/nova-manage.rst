@@ -2,6 +2,8 @@
 nova-manage
 ===========
 
+.. program:: nova-manage
+
 -------------------------------------------
 Control and manage cloud computer instances
 -------------------------------------------
@@ -24,23 +26,143 @@ Description
 :program:`nova-manage` controls cloud computing instances by managing various
 admin-only aspects of Nova.
 
-Options
-=======
+The standard pattern for executing a :program:`nova-manage` command is::
 
-The standard pattern for executing a nova-manage command is::
-
-  nova-manage <category> <command> [<args>]
+    nova-manage <category> <command> [<args>]
 
 Run without arguments to see a list of available command categories::
 
-  nova-manage
+    nova-manage
 
-You can also run with a category argument such as user to see a list of all
+You can also run with a category argument such as ``db`` to see a list of all
 commands in that category::
 
-  nova-manage db
+    nova-manage db
 
-These sections describe the available categories and arguments for nova-manage.
+These sections describe the available categories and arguments for
+:program:`nova-manage`.
+
+Options
+=======
+
+These options apply to all commands and may be given in any order, before or
+after commands. Individual commands may provide additional options. Options
+without an argument can be combined after a single dash.
+
+.. option:: -h, --help
+
+    Show a help message and exit
+
+.. option:: --config-dir DIR
+
+    Path to a config directory to pull ``*.conf`` files from. This file set is
+    sorted, so as to provide a predictable parse order if individual options
+    are over-ridden. The set is parsed after the file(s) specified via previous
+    :option:`--config-file`, arguments hence over-ridden options in the
+    directory take precedence.  This option must be set from the command-line.
+
+.. option:: --config-file PATH
+
+    Path to a config file to use. Multiple config files can be specified, with
+    values in later files taking precedence. Defaults to None. This option must
+    be set from the command-line.
+
+.. option:: --debug, -d
+
+    If set to true, the logging level will be set to DEBUG instead of the
+    default INFO level.
+
+.. option:: --log-config-append PATH, --log-config PATH, --log_config PATH
+
+    The name of a logging configuration file. This file is appended to any
+    existing logging configuration files.  For details about logging
+    configuration files, see the Python logging module documentation. Note that
+    when logging configuration files are used then all logging configuration is
+    set in the configuration file and other logging configuration options are
+    ignored (for example, :option:`--log-date-format`).
+
+.. option:: --log-date-format DATE_FORMAT
+
+    Defines the format string for ``%(asctime)s`` in log records. Default:
+    None. This option is ignored if :option:`--log-config-append` is set.
+
+.. option:: --log-dir LOG_DIR, --logdir LOG_DIR
+
+    (Optional) The base directory used for relative log_file paths. This option
+    is ignored if :option:`--log-config-append` is set.
+
+.. option:: --log-file PATH, --logfile PATH
+
+    (Optional) Name of log file to send logging output to.  If no default is
+    set, logging will go to stderr as defined by use_stderr. This option is
+    ignored if :option:`--log-config-append` is set.
+
+.. option:: --nodebug
+
+    The inverse of :option:`--debug`.
+
+.. option:: --nopost-mortem
+
+    The inverse of :option:`--post-mortem`.
+
+.. option:: --nouse-journal
+
+    The inverse of :option:`--use-journal`.
+
+.. option:: --nouse-json
+
+    The inverse of :option:`--use-json`.
+
+.. option:: --nouse-syslog
+
+    The inverse of :option:`--use-syslog`.
+
+.. option:: --nowatch-log-file
+
+    The inverse of :option:`--watch-log-file`.
+
+.. option:: --post-mortem
+
+    Allow post-mortem debugging
+
+.. option:: --syslog-log-facility SYSLOG_LOG_FACILITY
+
+    Syslog facility to receive log lines. This option is ignored if
+    :option:`--log-config-append` is set.
+
+.. option:: --use-journal
+
+    Enable journald for logging. If running in a systemd environment you may
+    wish to enable journal support.  Doing so will use the journal native
+    protocol which includes structured metadata in addition to log
+    messages. This option is ignored if :option:`--log-config-append` is
+    set.
+
+.. option:: --use-json
+
+    Use JSON formatting for logging. This option is ignored if
+    :option:`--log-config-append` is set.
+
+.. option:: --use-syslog
+
+    Use syslog for logging. Existing syslog format is DEPRECATED and will be
+    changed later to honor RFC5424.  This option is ignored if
+    :option:`--log-config-append` is set.
+
+.. option:: --version
+
+    Show program's version number and exit
+
+.. option:: --watch-log-file
+
+    Uses logging handler designed to watch file system.  When log file is moved
+    or removed this handler will open a new log file with specified path
+    instantaneously. It makes sense only if :option:`--log-file` option is
+    specified and Linux platform is used. This option is ignored if
+    :option:`--log-config-append` is set.
+
+Commands
+========
 
 Nova Database
 ~~~~~~~~~~~~~
@@ -48,16 +170,16 @@ Nova Database
 ``nova-manage db version``
     Print the current main database version.
 
-``nova-manage db sync [--version <version>] [--local_cell]``
+``nova-manage db sync [--local_cell] [VERSION]``
     Upgrade the main database schema up to the most recent version or
-    ``--version`` if specified. By default, this command will also attempt to
+    ``VERSION`` if specified. By default, this command will also attempt to
     upgrade the schema for the cell0 database if it is mapped (see the
     ``map_cell0`` or ``simple_cell_setup`` commands for more details on mapping
     the cell0 database). If ``--local_cell`` is specified, then only the main
     database in the current cell is upgraded. The local database connection is
     determined by :oslo.config:option:`database.connection` in the
-    configuration file passed to nova-manage. This command should be run after
-    ``nova-manage api_db sync``.
+    configuration file, passed to nova-manage using the ``--config-file``
+    option(s). This command should be run after ``nova-manage api_db sync``.
 
     Returns exit code 0 if the database schema was synced successfully, or 1 if
     cell0 cannot be accessed.
@@ -157,7 +279,6 @@ Nova Database
      |     populate_missing_availability_zones     |      0       |     0     |
      |          populate_queued_for_delete         |      2       |     2     |
      |                populate_uuids               |      0       |     0     |
-     |     service_uuids_online_data_migration     |      0       |     0     |
      +---------------------------------------------+--------------+-----------+
 
    In the above example, the ``migrate_instances_add_request_spec`` migration
@@ -222,7 +343,7 @@ Nova API Database
 
 ``nova-manage api_db sync [VERSION]``
     Upgrade the API database schema up to the most recent version or
-    ``[VERSION]`` if specified. This command does not create the API
+    ``VERSION`` if specified. This command does not create the API
     database, it runs schema migration scripts. The API database connection is
     determined by :oslo.config:option:`api_database.connection` in the
     configuration file passed to nova-manage.
@@ -423,7 +544,9 @@ Nova Cells v2
 Placement
 ~~~~~~~~~
 
-``nova-manage placement heal_allocations [--max-count <max_count>] [--verbose] [--skip-port-allocations] [--dry-run] [--instance <instance_uuid>]``
+.. _heal_allocations_cli:
+
+``nova-manage placement heal_allocations [--max-count <max_count>] [--verbose] [--skip-port-allocations] [--dry-run] [--instance <instance_uuid>] [--cell <cell_uuid]``
     Iterates over non-cell0 cells looking for instances which do not have
     allocations in the Placement service and which are not undergoing a task
     state transition. For each instance found, allocations are created against
@@ -480,6 +603,9 @@ Placement
     ports for each instance can be avoided with this flag.
     *(Since 20.0.0 Train)*
 
+    Specify ``--cell`` to  process heal allocations within a specific cell.
+    This is mutually exclusive with the ``--instance`` option.
+
     This command requires that the
     :oslo.config:option:`api_database.connection` and
     :oslo.config:group:`placement` configuration options are set. Placement API
@@ -520,6 +646,8 @@ Placement
        * - 255
          - An unexpected error occurred.
 
+.. _sync_aggregates_cli:
+
 ``nova-manage placement sync_aggregates [--verbose]``
     Mirrors compute host aggregates to resource provider aggregates
     in the Placement service. Requires the :oslo.config:group:`api_database`
@@ -559,6 +687,41 @@ Placement
          - Resource provider not found by uuid for a given host
        * - 255
          - An unexpected error occurred.
+
+``nova-manage placement audit [--verbose] [--delete] [--resource_provider <uuid>]``
+    Iterates over all the Resource Providers (or just one if you provide the
+    UUID) and then verifies if the compute allocations are either related to
+    an existing instance or a migration UUID.
+    If not, it will tell which allocations are orphaned.
+
+    You can also ask to delete all the orphaned allocations by specifying
+    ``-delete``.
+
+    Specify ``--verbose`` to get detailed progress output during execution.
+
+    This command requires that the
+    :oslo.config:option:`api_database.connection` and
+    :oslo.config:group:`placement` configuration options are set. Placement API
+    >= 1.14 is required.
+
+    **Return Codes**
+
+    .. list-table::
+       :widths: 20 80
+       :header-rows: 1
+
+       * - Return code
+         - Description
+       * - 0
+         - No orphaned allocations were found
+       * - 1
+         - An unexpected error occurred
+       * - 3
+         - Orphaned allocations were found
+       * - 4
+         - All found orphaned allocations were deleted
+       * - 127
+         - Invalid input
 
 
 See Also

@@ -184,6 +184,12 @@ class ImageBackendFixture(fixtures.Fixture):
         # class.
         image_init.SUPPORTS_CLONE = False
 
+        # Ditto for the 'is_shared_block_storage' function
+        def is_shared_block_storage():
+            return False
+
+        setattr(image_init, 'is_shared_block_storage', is_shared_block_storage)
+
         return image_init
 
     def _fake_cache(self, fetch_func, filename, size=None, *args, **kwargs):
@@ -201,7 +207,8 @@ class ImageBackendFixture(fixtures.Fixture):
             self.imported_files.append((local_filename, remote_filename))
 
     def _fake_libvirt_info(self, mock_disk, disk_info, cache_mode,
-                           extra_specs, hypervisor_version, disk_unit=None):
+                           extra_specs, hypervisor_version, disk_unit=None,
+                           boot_order=None):
         # For tests in test_virt_drivers which expect libvirt_info to be
         # functional
         info = config.LibvirtConfigGuestDisk()
@@ -212,4 +219,6 @@ class ImageBackendFixture(fixtures.Fixture):
         info.driver_cache = cache_mode
         info.driver_format = 'raw'
         info.source_path = mock_disk.path
+        if boot_order:
+            info.boot_order = boot_order
         return info

@@ -10,18 +10,23 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import mock
 import six
 
 from nova import context
 from nova import objects
+from nova import test
 from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional.api import client as api_client
+from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import integrated_helpers
 from nova.tests.functional import test_servers
+from nova.tests.unit.image import fake as fake_image
+from nova.tests.unit import policy_fixture
 
 
-class BootFromVolumeTest(integrated_helpers.InstanceHelperMixin,
-                         test_servers.ServersTestBase):
+class BootFromVolumeTest(test_servers.ServersTestBase):
+
     def _get_hypervisor_stats(self):
         response = self.admin_api.api_get('/os-hypervisors/statistics')
         return response.body['hypervisor_statistics']
@@ -63,8 +68,7 @@ class BootFromVolumeTest(integrated_helpers.InstanceHelperMixin,
 
         # Boot a server with a flavor disk larger than the available local
         # disk. It should succeed for boot from volume.
-        server = self._build_server(flavor_id)
-        server['imageRef'] = ''
+        server = self._build_server(image_uuid='', flavor_id=flavor_id)
         volume_uuid = nova_fixtures.CinderFixture.IMAGE_BACKED_VOL
         bdm = {'boot_index': 0,
                'uuid': volume_uuid,
@@ -73,7 +77,7 @@ class BootFromVolumeTest(integrated_helpers.InstanceHelperMixin,
         server['block_device_mapping_v2'] = [bdm]
         created_server = self.api.post_server({"server": server})
         server_id = created_server['id']
-        self._wait_for_state_change(self.api, created_server, 'ACTIVE')
+        self._wait_for_state_change(created_server, 'ACTIVE')
 
         # Check that hypervisor local disk reporting is still 0
         self._verify_zero_local_gb_used()
@@ -88,7 +92,7 @@ class BootFromVolumeTest(integrated_helpers.InstanceHelperMixin,
         # Resize
         post_data = {'resize': {'flavorRef': flavor_id_alt}}
         self.api.post_server_action(server_id, post_data)
-        self._wait_for_state_change(self.api, created_server, 'VERIFY_RESIZE')
+        self._wait_for_state_change(created_server, 'VERIFY_RESIZE')
 
         # Check that hypervisor local disk reporting is still 0
         self._verify_zero_local_gb_used()
@@ -100,7 +104,7 @@ class BootFromVolumeTest(integrated_helpers.InstanceHelperMixin,
         # Confirm the resize
         post_data = {'confirmResize': None}
         self.api.post_server_action(server_id, post_data)
-        self._wait_for_state_change(self.api, created_server, 'ACTIVE')
+        self._wait_for_state_change(created_server, 'ACTIVE')
 
         # Check that hypervisor local disk reporting is still 0
         self._verify_zero_local_gb_used()
@@ -112,8 +116,7 @@ class BootFromVolumeTest(integrated_helpers.InstanceHelperMixin,
         # Shelve
         post_data = {'shelve': None}
         self.api.post_server_action(server_id, post_data)
-        self._wait_for_state_change(self.api, created_server,
-                                    'SHELVED_OFFLOADED')
+        self._wait_for_state_change(created_server, 'SHELVED_OFFLOADED')
 
         # Check that hypervisor local disk reporting is still 0
         self._verify_zero_local_gb_used()
@@ -125,7 +128,7 @@ class BootFromVolumeTest(integrated_helpers.InstanceHelperMixin,
         # Unshelve
         post_data = {'unshelve': None}
         self.api.post_server_action(server_id, post_data)
-        self._wait_for_state_change(self.api, created_server, 'ACTIVE')
+        self._wait_for_state_change(created_server, 'ACTIVE')
 
         # Check that hypervisor local disk reporting is still 0
         self._verify_zero_local_gb_used()
@@ -140,7 +143,7 @@ class BootFromVolumeTest(integrated_helpers.InstanceHelperMixin,
         image_uuid = '155d900f-4e14-4e4c-a73d-069cbf4541e6'
         post_data = {'rebuild': {'imageRef': image_uuid}}
         self.api.post_server_action(server_id, post_data)
-        self._wait_for_state_change(self.api, created_server, 'ACTIVE')
+        self._wait_for_state_change(created_server, 'ACTIVE')
 
         # Check that hypervisor local disk reporting is still 0
         self._verify_zero_local_gb_used()
@@ -154,11 +157,71 @@ class BootFromVolumeTest(integrated_helpers.InstanceHelperMixin,
         a user cannot boot from image, they must boot from volume.
         """
         self.flags(max_local_block_devices=0)
-        server = self._build_minimal_create_server_request(
-            self.admin_api, 'test_max_local_block_devices_0_force_bfv')
+        server = self._build_server()
         ex = self.assertRaises(api_client.OpenStackApiException,
                                self.admin_api.post_server,
                                {'server': server})
         self.assertEqual(400, ex.response.status_code)
         self.assertIn('You specified more local devices than the limit allows',
                       six.text_type(ex))
+
+
+class BootFromVolumeLargeRequestTest(test.TestCase,
+                                     integrated_helpers.InstanceHelperMixin):
+
+    def setUp(self):
+        super(BootFromVolumeLargeRequestTest, self).setUp()
+        self.useFixture(policy_fixture.RealPolicyFixture())
+        self.useFixture(nova_fixtures.NeutronFixture(self))
+        self.useFixture(nova_fixtures.CinderFixture(self))
+        self.useFixture(func_fixtures.PlacementFixture())
+        self.image_service = fake_image.stub_out_image_service(self)
+        self.addCleanup(fake_image.FakeImageService_reset)
+
+        self.api = self.useFixture(nova_fixtures.OSAPIFixture(
+            api_version='v2.1')).admin_api
+        # The test cases will handle starting compute/conductor/scheduler
+        # services if they need them.
+
+    def test_boot_from_volume_10_servers_255_volumes_2_images(self):
+        """Create 10 servers with 255 BDMs each using the same image for 200
+        of the BDMs and another image for 55 other BDMs. This is a bit silly
+        but it just shows that it's possible and there is no rate limiting
+        involved in this type of very heavy request.
+        """
+        # We only care about API performance in this test case so stub out
+        # conductor to not do anything.
+        self.useFixture(nova_fixtures.NoopConductorFixture())
+        # NOTE(gibi): Do not use 'c905cedb-7281-47e4-8a62-f26bc5fc4c77' image
+        # as that is defined with a separate kernel image, leading to one extra
+        # call to nova.image.glance.API.get from compute.api
+        # _handle_kernel_and_ramdisk()
+        image1 = 'a2459075-d96c-40d5-893e-577ff92e721c'
+        image2 = '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6'
+        server = self._build_server()
+        server.pop('imageRef')
+        server['min_count'] = 10
+        bdms = []
+        # Create 200 BDMs using image1 and 55 using image2.
+        for boot_index in range(255):
+            image_uuid = image2 if boot_index >= 200 else image1
+            bdms.append({
+                'source_type': 'image',
+                'destination_type': 'volume',
+                'delete_on_termination': True,
+                'volume_size': 1,
+                'boot_index': boot_index,
+                'uuid': image_uuid
+            })
+        server['block_device_mapping_v2'] = bdms
+
+        # Wrap the image service get method to check how many times it was
+        # called.
+        with mock.patch('nova.image.glance.API.get',
+                        wraps=self.image_service.show) as mock_image_get:
+            self.api.post_server({'server': server})
+            # Assert that there was caching of the GET /v2/images/{image_id}
+            # calls. The expected total in this case is 3: one for validating
+            # the root BDM image, one for image1 and one for image2 during bdm
+            # validation - only the latter two cases use a cache.
+            self.assertEqual(3, mock_image_get.call_count)

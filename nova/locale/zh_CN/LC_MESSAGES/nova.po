@@ -36,7 +36,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova VERSION\n"
 "Report-Msgid-Bugs-To: https://bugs.launchpad.net/openstack-i18n/\n"
-"POT-Creation-Date: 2019-10-01 18:30+0000\n"
+"POT-Creation-Date: 2019-12-08 15:51+0000\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
@@ -136,10 +136,6 @@ msgid "'rxtx_factor' argument must be a float between 0 and %g"
 msgstr "'rxtx_factor'参数必须是0和%g之间的浮点数"
 
 #, python-format
-msgid "/%s should be specified as single address(es) not in cidr format"
-msgstr "应该将 %s 指定为不采用 cidr 格式的单个地址"
-
-#, python-format
 msgid "A NetworkModel is required in field %s"
 msgstr "在字段%s中网络模型是必须的"
 
@@ -172,9 +168,6 @@ msgstr "操作：“%(action)s”，调用方法：%(meth)s，主体：%(body)s"
 #, python-format
 msgid "Add metadata failed for aggregate %(id)s after %(retries)s retries"
 msgstr "在%(retries)s尝试后，为聚合%(id)s 添加元数据"
-
-msgid "Address could not be converted."
-msgstr "未能转换地址。"
 
 msgid "Affinity instance group policy was violated."
 msgstr "违反亲和力实例组策略。"
@@ -581,40 +574,10 @@ msgid "Connection to the hypervisor is broken on host: %(host)s"
 msgstr "在主机: %(host)s上面，监测器的连接断开。"
 
 #, python-format
-msgid "Console %(console_id)s could not be found."
-msgstr "控制台%(console_id)s 没有找到。"
-
-#, python-format
-msgid "Console for instance %(instance_uuid)s could not be found."
-msgstr "找不到用于实例 %(instance_uuid)s 的控制台。"
-
-#, python-format
-msgid ""
-"Console for instance %(instance_uuid)s in pool %(pool_id)s could not be "
-"found."
-msgstr "找不到池 %(pool_id)s 中用于实例 %(instance_uuid)s 的控制台。"
-
-#, python-format
 msgid ""
 "Console log output could not be retrieved for instance %(instance_id)s. "
 "Reason: %(reason)s"
 msgstr "无法检索实例 %(instance_id)s 控制台日志输出。原因：%(reason)s"
-
-#, python-format
-msgid ""
-"Console pool of type %(console_type)s for compute host %(compute_host)s on "
-"proxy host %(host)s not found."
-msgstr ""
-"没有找到类型是 %(console_type)s 的控制台池针对计算主机 %(compute_host)s 在代"
-"理主机 %(host)s 上。"
-
-#, python-format
-msgid ""
-"Console pool with host %(host)s, console_type %(console_type)s and "
-"compute_host %(compute_host)s already exists."
-msgstr ""
-"主机%(host)s,控制台类型 %(console_type)s 和计算主机 %(compute_host)s的控制台"
-"池已经存在。"
 
 msgid "Constraint not met."
 msgstr "未符合约束。"
@@ -675,17 +638,8 @@ msgstr "无法连接到 %(interface)s 的本地IP：%(ex)s"
 msgid "Couldn't unmount the Quobyte Volume at %s"
 msgstr "不能卸载在%s的Quobyte卷"
 
-msgid "Create networks failed"
-msgstr "创建网络失败"
-
 msgid "Creation of virtual interface with unique mac address failed"
 msgstr "为使用特殊MAC地址的vm的创建失败"
-
-msgid "DNS1"
-msgstr "DNS1"
-
-msgid "DNS2"
-msgstr "DNS2"
 
 msgid "Database Connection"
 msgstr "数据库连接"
@@ -764,17 +718,6 @@ msgstr "驱动错误：%s"
 #, python-format
 msgid "Duplicate networks (%s) are not allowed"
 msgstr "不允许重复的网络(%s)"
-
-msgid ""
-"ERROR: Network commands are not supported when using the Neutron API.  Use "
-"python-neutronclient instead."
-msgstr ""
-"错误：当使用Neutron API时，网络命令不支持。使用python-neutronclient 代替。"
-
-msgid ""
-"ESX SOAP server returned an empty port group for the host system in its "
-"response"
-msgstr "ESX SOAP 服务器在响应里为托管系统返回一个空的端口组"
 
 #, python-format
 msgid ""
@@ -1292,12 +1235,6 @@ msgstr "IP分配操作池%s的配额。"
 
 msgid "IP allocation over quota."
 msgstr "IP分配超过配额。"
-
-msgid "IPv4"
-msgstr "IPv4"
-
-msgid "IPv6"
-msgstr "IPv6"
 
 #, python-format
 msgid "IPv6 netmask \"%s\" must be a netmask or integral prefix"
@@ -2025,10 +1962,6 @@ msgid ""
 msgstr "网络%(network_uuid)s需要一个子网，以便启动实例。"
 
 #, python-format
-msgid "Network adapter %(adapter)s could not be found."
-msgstr "未找到网络适配器 %(adapter)s。"
-
-#, python-format
 msgid "Network could not be found for bridge %(bridge)s"
 msgstr "无法为桥 %(bridge)s 找到网络"
 
@@ -2043,9 +1976,6 @@ msgstr "无法为uuid %(uuid)s 找到网络"
 #, python-format
 msgid "Network could not be found with cidr %(cidr)s."
 msgstr "无法为cidr %(cidr)s 找到网络。"
-
-msgid "Network driver does not support this function."
-msgstr "网络驱动程序不支持此功能。"
 
 #, python-format
 msgid "Network host %(host)s has zero fixed IPs in network %(network_id)s."
@@ -2116,9 +2046,6 @@ msgstr "没有固定IP与id %(id)s 关联。"
 msgid "No fixed IPs associated to instance"
 msgstr "没有固定 IP 与实例相关联"
 
-msgid "No floating IP addresses have been defined."
-msgstr "没有定义浮动IP。"
-
 msgid "No free nbd devices"
 msgstr "没有空闲NBD设备"
 
@@ -2166,9 +2093,6 @@ msgstr "在%(image)s的%(root)s没有找到挂载点"
 
 msgid "No networks defined."
 msgstr "没有网络定义。"
-
-msgid "No networks found"
-msgstr "没有找到网络"
 
 #, python-format
 msgid "No operating system found in %s"
@@ -2376,9 +2300,6 @@ msgstr ""
 msgid "Physical network is missing for network %(network_uuid)s"
 msgstr "网络%(network_uuid)s的物理网络丢失"
 
-msgid "Please specify either fixed_range or uuid"
-msgstr "请指定fixed_range或uuid"
-
 #, python-format
 msgid "Policy doesn't allow %(action)s to be performed."
 msgstr "政策不允许 %(action)s 被执行。"
@@ -2456,9 +2377,6 @@ msgstr "对于资源，已超过配额：%(overs)s"
 
 msgid "Quota exceeded, too many key pairs."
 msgstr "已超过配额，密钥对太多。"
-
-msgid "Quota exceeded, too many networks."
-msgstr "已超过配额，网络太多。"
 
 msgid "Quota exceeded, too many security group rules."
 msgstr "已超过配额，安全组规则太多。"
@@ -2560,9 +2478,6 @@ msgid ""
 "fit the given host NUMA topology"
 msgstr "与在PCI设备请求一起的NUMA拓扑请求不能满足给定主机的NUMA拓扑"
 
-msgid "Requested network does not contain enough (2+) usable hosts"
-msgstr "所请求网络没有包含足够（超过两台）可用主机"
-
 #, python-format
 msgid ""
 "Requested vCPU limits %(sockets)d:%(cores)d:%(threads)d are impossible to "
@@ -2648,10 +2563,6 @@ msgstr "安全组 %s 已经存在"
 #, python-format
 msgid "Security group %s is not a string or unicode"
 msgstr "安全组 %s 既不是字符串也不是unicode"
-
-#, python-format
-msgid "Security group default rule (%rule_id)s not found."
-msgstr "找不到安全组缺省规则 (%rule_id)s。"
 
 msgid "Security group id should be integer"
 msgstr "安全组id应该是整数"
@@ -2865,9 +2776,6 @@ msgid ""
 msgstr ""
 "网络范围不够大，无法容纳 %(num_networks)s 个网络。网络大小为 %(network_size)s"
 
-msgid "The networks quota is disabled"
-msgstr "网络配额被禁用"
-
 #, python-format
 msgid "The number of defined ports: %(ports)d is over the limit: %(quota)d"
 msgstr "定义的端口数量：%(ports)d 超过限制：%(quota)d"
@@ -2996,9 +2904,6 @@ msgid ""
 "%(version)s."
 msgstr "此计算节点的 hypervisor 的版本低于最低受支持版本：%(version)s。"
 
-msgid "This default rule already exists."
-msgstr "此缺省规则已存在。"
-
 msgid "This domU must be running on the host specified by connection_url"
 msgstr "这个domU 必须运行在connection_url指定的主机上"
 
@@ -3043,12 +2948,6 @@ msgstr "目的和源端口必须是整数"
 
 msgid "Token not found"
 msgstr "找不到令牌"
-
-#, python-format
-msgid ""
-"Too many IP addresses will be generated.  Please increase /%s to reduce the "
-"number generated."
-msgstr "要生成的IP地址太多。请减少/%s 来减少生成的数目。"
 
 msgid "Triggering crash dump is not supported"
 msgstr "触发崩溃转储不受支持"
@@ -3390,14 +3289,6 @@ msgstr "VHD coalesce 尝试超过(%d)，放弃。。。"
 
 #, python-format
 msgid ""
-"VLAN tag is not appropriate for the port group %(bridge)s. Expected VLAN tag "
-"is %(tag)s, but the one associated with the port group is %(pgroup)s."
-msgstr ""
-"VLAN标签对于端口组%(bridge)s 是不适合的。预计的VLAN标签是 %(tag)s，但与端口组"
-"关联的是 %(pgroup)s。"
-
-#, python-format
-msgid ""
 "Value (%(value)s) for parameter Group%(property)s is invalid. Content "
 "limited to '%(allowed)s'."
 msgstr "参数组%(property)s的值 (%(value)s)无效。内容限制为 '%(allowed)s'。"
@@ -3424,16 +3315,8 @@ msgid "Virtual machine mode '%s' is not valid"
 msgstr "虚拟机模式 '%s'无效"
 
 #, python-format
-msgid ""
-"Virtual switch associated with the network adapter %(adapter)s not found."
-msgstr "未找到与网络适配器 %(adapter)s 关联的虚拟交换机。"
-
-#, python-format
 msgid "Virtualization type '%(virt)s' is not supported by this compute driver"
 msgstr "此计算驱动程序不支持虚拟化类型“%(virt)s”"
-
-msgid "VlanID"
-msgstr "VlanID"
 
 #, python-format
 msgid "Volume %(volume_id)s could not be attached. Reason: %(reason)s"
@@ -3627,9 +3510,6 @@ msgstr "fmt=%(fmt)s 由 %(backing_file)s 支持"
 msgid "href %s does not contain version"
 msgstr "href %s 不包含版本"
 
-msgid "id"
-msgstr "id"
-
 msgid "image already mounted"
 msgstr "镜像已经挂载"
 
@@ -3739,9 +3619,6 @@ msgstr "可显示字符，带有至少一个非空格字符"
 msgid "printable characters. Can not start or end with whitespace."
 msgstr "可显示字符。不能以空格开头或结尾。"
 
-msgid "project"
-msgstr "项目"
-
 #, python-format
 msgid "qemu-img failed to execute on %(path)s : %(exp)s"
 msgstr "对 %(path)s 执行 qemu-img 失败：%(exp)s"
@@ -3779,9 +3656,6 @@ msgstr "%s 的快照"
 msgid "snapshot_id required in create_info"
 msgstr "在create_info中必须有snapshot_id"
 
-msgid "start address"
-msgstr "起始地址"
-
 msgid "stopped"
 msgstr "已停止"
 
@@ -3793,18 +3667,6 @@ msgstr "过多主体密钥"
 
 msgid "unpause not supported for vmwareapi"
 msgstr "vmwareapi 不支持取消暂停"
-
-msgid "uuid"
-msgstr "uuid"
-
-#, python-format
-msgid ""
-"vSwitch which contains the port group %(bridge)s is not associated with the "
-"desired physical adapter. Expected vSwitch is %(expected)s, but the one "
-"associated is %(actual)s."
-msgstr ""
-"包含端口组 %(bridge)s 的vSwitch没有与预计的物理适配器关联。预计的vSwitch是 "
-"%(expected)s，但关联的是 %(actual)s。"
 
 msgid "version should be an integer"
 msgstr "version应该是整数"

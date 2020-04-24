@@ -25,7 +25,6 @@ from oslo_serialization import jsonutils
 from oslo_utils import timeutils
 import six
 
-from nova.api.ec2 import ec2utils
 from nova.api.metadata import password
 from nova.api.metadata import vendordata_dynamic
 from nova.api.metadata import vendordata_json
@@ -33,8 +32,8 @@ from nova import block_device
 import nova.conf
 from nova import context
 from nova import exception
-from nova import network
-from nova.network.security_group import openstack_driver
+from nova.network import neutron
+from nova.network import security_group_api
 from nova import objects
 from nova.objects import virt_device_metadata as metadata_obj
 from nova import utils
@@ -141,8 +140,7 @@ class InstanceMetadata(object):
 
         self.availability_zone = instance.get('availability_zone')
 
-        secgroup_api = openstack_driver.get_openstack_security_group_driver()
-        self.security_groups = secgroup_api.get_instance_security_groups(
+        self.security_groups = security_group_api.get_instance_security_groups(
             ctxt, instance)
 
         self.mappings = _format_instance_mapping(ctxt, instance)
@@ -174,8 +172,7 @@ class InstanceMetadata(object):
         else:
             self.network_metadata = network_metadata
 
-        self.ip_info = \
-                ec2utils.get_ip_info_for_instance_from_nw_info(network_info)
+        self.ip_info = netutils.get_ec2_ip_info(network_info)
 
         self.network_config = None
         cfg = netutils.get_injected_network_template(network_info)
@@ -647,7 +644,7 @@ class RouteConfiguration(object):
 
 def get_metadata_by_address(address):
     ctxt = context.get_admin_context()
-    fixed_ip = network.API().get_fixed_ip_by_address(ctxt, address)
+    fixed_ip = neutron.API().get_fixed_ip_by_address(ctxt, address)
     LOG.info('Fixed IP %(ip)s translates to instance UUID %(uuid)s',
              {'ip': address, 'uuid': fixed_ip['instance_uuid']})
 

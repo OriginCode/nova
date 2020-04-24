@@ -247,6 +247,86 @@ necessary on new or upgraded deployments where the new configuration has been
 set on all hosts. By setting this option, the second lookup is disabled and the
 scheduler will only request ``PCPU``-based allocations.
 """),
+    cfg.BoolOpt(
+        'never_download_image_if_on_rbd',
+        default=False,
+        help="""
+When booting from an image on a ceph-backed compute node, if the image does not
+already reside on the ceph cluster (as would be the case if glance is
+also using the same cluster), nova will download the image from glance and
+upload it to ceph itself. If using multiple ceph clusters, this may cause nova
+to unintentionally duplicate the image in a non-COW-able way in the local
+ceph deployment, wasting space.
+
+For more information, refer to the bug report:
+
+https://bugs.launchpad.net/nova/+bug/1858877
+
+Enabling this option will cause nova to *refuse* to boot an instance if it
+would require downloading the image from glance and uploading it to ceph
+itself.
+
+Related options:
+
+* ``compute_driver`` (libvirt)
+* ``[libvirt]/images_type`` (rbd)
+"""),
+    # TODO(lyarwood): Remove this workaround in the W release once all
+    # supported distros have rebased to a version of libgcrypt that does not
+    # have the performance issues listed below.
+    cfg.BoolOpt(
+        'disable_native_luksv1',
+        default=False,
+        help="""
+When attaching encrypted LUKSv1 Cinder volumes to instances the Libvirt driver
+configures the encrypted disks to be natively decrypted by QEMU.
+
+A performance issue has been discovered in the libgcrypt library used by QEMU
+that serverly limits the I/O performance in this scenario.
+
+For more information please refer to the following bug report:
+
+RFE: hardware accelerated AES-XTS mode
+https://bugzilla.redhat.com/show_bug.cgi?id=1762765
+
+Enabling this workaround option will cause Nova to use the legacy dm-crypt
+based os-brick encryptor to decrypt the LUKSv1 volume.
+
+Note that enabling this option while using volumes that do not provide a host
+block device such as Ceph will result in a failure to boot from or attach the
+volume to an instance. See the ``[workarounds]/rbd_block_device`` option for a
+way to avoid this for RBD.
+
+Related options:
+
+* ``compute_driver`` (libvirt)
+* ``rbd_block_device`` (workarounds)
+"""),
+    # TODO(lyarwood): Remove this workaround in the W release when the
+    # above disable_native_luksv1 configurable is removed.
+    cfg.BoolOpt('rbd_volume_local_attach',
+                default=False,
+                help="""
+Attach RBD Cinder volumes to the compute as host block devices.
+
+When enabled this option instructs os-brick to connect RBD volumes locally on
+the compute host as block devices instead of natively through QEMU.
+
+This workaround does not currently support extending attached volumes.
+
+This can be used with the disable_native_luksv1 workaround configuration
+option to avoid the recently discovered performance issues found within the
+libgcrypt library.
+
+This workaround is temporary and will be removed during the W release once
+all impacted distributions have been able to update their versions of the
+libgcrypt library.
+
+Related options:
+
+* ``compute_driver`` (libvirt)
+* ``disable_qemu_native_luksv1`` (workarounds)
+"""),
 ]
 
 

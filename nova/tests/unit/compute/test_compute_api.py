@@ -20,6 +20,7 @@ import ddt
 import fixtures
 import iso8601
 import mock
+import os_traits as ot
 from oslo_messaging import exceptions as oslo_exceptions
 from oslo_serialization import jsonutils
 from oslo_utils import fixture as utils_fixture
@@ -41,10 +42,10 @@ import nova.conf
 from nova import context
 from nova.db import api as db
 from nova import exception
-from nova.image import api as image_api
+from nova.image import glance as image_api
+from nova.network import constants
 from nova.network import model
-from nova.network.neutronv2 import api as neutron_api
-from nova.network.neutronv2 import constants
+from nova.network import neutron as neutron_api
 from nova import objects
 from nova.objects import base as obj_base
 from nova.objects import block_device as block_device_obj
@@ -57,6 +58,7 @@ from nova.tests import fixtures as nova_fixtures
 from nova.tests.unit import fake_block_device
 from nova.tests.unit import fake_build_request
 from nova.tests.unit import fake_instance
+from nova.tests.unit import fake_request_spec
 from nova.tests.unit import fake_volume
 from nova.tests.unit.image import fake as fake_image
 from nova.tests.unit import matchers
@@ -118,8 +120,14 @@ class _ComputeAPIUnitTestMixIn(object):
                  }
         if updates:
             flavor.update(updates)
+
+        expected_attrs = None
+        if 'extra_specs' in updates and updates['extra_specs']:
+            expected_attrs = ['extra_specs']
+
         return objects.Flavor._from_db_object(
-            self.context, objects.Flavor(extra_specs={}), flavor)
+            self.context, objects.Flavor(extra_specs={}), flavor,
+            expected_attrs=expected_attrs)
 
     def _create_instance_obj(self, params=None, flavor=None):
         """Create a test instance."""
@@ -162,6 +170,7 @@ class _ComputeAPIUnitTestMixIn(object):
         instance.info_cache = objects.InstanceInfoCache()
         instance.flavor = flavor
         instance.old_flavor = instance.new_flavor = None
+        instance.numa_topology = None
 
         if params:
             instance.update(params)
@@ -314,11 +323,10 @@ class _ComputeAPIUnitTestMixIn(object):
         max_count = 3
         self._test_create_max_net_count(max_net_count, min_count, max_count)
 
-    def test_specified_port_and_multiple_instances_neutronv2(self):
+    def test_specified_port_and_multiple_instances(self):
         # Tests that if port is specified there is only one instance booting
         # (i.e max_count == 1) as we can't share the same port across multiple
         # instances.
-        self.flags(use_neutron=True)
         port = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
         address = '10.0.0.1'
         min_count = 1
@@ -344,16 +352,6 @@ class _ComputeAPIUnitTestMixIn(object):
             requested_networks=requested_networks)
 
     def test_specified_ip_and_multiple_instances(self):
-        network = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-        address = '10.0.0.1'
-        requested_networks = objects.NetworkRequestList(
-            objects=[objects.NetworkRequest(network_id=network,
-                                            address=address)])
-        self._test_specified_ip_and_multiple_instances_helper(
-            requested_networks)
-
-    def test_specified_ip_and_multiple_instances_neutronv2(self):
-        self.flags(use_neutron=True)
         network = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
         address = '10.0.0.1'
         requested_networks = objects.NetworkRequestList(
@@ -1299,6 +1297,26 @@ class _ComputeAPIUnitTestMixIn(object):
 
         mock_dealloc.assert_called_once_with(self.context, inst)
 
+    @mock.patch.object(compute_utils, 'notify_about_instance_action')
+    @mock.patch.object(objects.BlockDeviceMapping, 'destroy')
+    @mock.patch.object(cinder.API, 'detach')
+    @mock.patch.object(compute_utils, 'notify_about_instance_usage')
+    @mock.patch.object(neutron_api.API, 'deallocate_for_instance')
+    @mock.patch.object(context.RequestContext, 'elevated')
+    @mock.patch.object(objects.Instance, 'destroy')
+    @mock.patch.object(compute_utils, 'delete_arqs_if_needed')
+    def test_local_delete_for_arqs(
+            self, mock_del_arqs, mock_inst_destroy, mock_elevated,
+            mock_dealloc, mock_notify_legacy, mock_detach,
+            mock_bdm_destroy, mock_notify):
+        inst = self._create_instance_obj()
+        inst._context = self.context
+        mock_elevated.return_value = self.context
+        bdms = []
+        self.compute_api._local_delete(self.context, inst, bdms,
+                                       'delete', self._fake_do_delete)
+        mock_del_arqs.assert_called_once_with(self.context, inst)
+
     @mock.patch.object(objects.BlockDeviceMapping, 'destroy')
     def test_local_cleanup_bdm_volumes_stashed_connector(self, mock_destroy):
         """Tests that we call volume_api.terminate_connection when we found
@@ -1650,9 +1668,9 @@ class _ComputeAPIUnitTestMixIn(object):
     def test_confirm_resize_with_migration_ref(self):
         self._test_confirm_resize(mig_ref_passed=True)
 
-    @mock.patch('nova.network.neutronv2.api.API.'
-                'get_requested_resource_for_instance',
-                return_value=mock.sentinel.res_req)
+    @mock.patch('nova.virt.hardware.numa_get_constraints')
+    @mock.patch('nova.network.neutron.API.get_requested_resource_for_instance',
+                return_value=[])
     @mock.patch('nova.availability_zones.get_host_availability_zone',
                 return_value='nova')
     @mock.patch('nova.objects.Quotas.check_deltas')
@@ -1661,33 +1679,60 @@ class _ComputeAPIUnitTestMixIn(object):
     @mock.patch('nova.objects.RequestSpec.get_by_instance_uuid')
     def _test_revert_resize(
             self, mock_get_reqspec, mock_elevated, mock_get_migration,
-            mock_check, mock_get_host_az, mock_get_requested_resources):
+            mock_check, mock_get_host_az, mock_get_requested_resources,
+            mock_get_numa, same_flavor):
         params = dict(vm_state=vm_states.RESIZED)
         fake_inst = self._create_instance_obj(params=params)
         fake_inst.info_cache.network_info = model.NetworkInfo([
             model.VIF(id=uuids.port1, profile={'allocation': uuids.rp})])
-        fake_inst.old_flavor = fake_inst.flavor
         fake_mig = objects.Migration._from_db_object(
                 self.context, objects.Migration(),
                 test_migration.fake_db_migration())
+        fake_reqspec = objects.RequestSpec()
+        fake_reqspec.flavor = fake_inst.flavor
+        fake_numa_topology = objects.InstanceNUMATopology(cells=[
+            objects.InstanceNUMACell(
+                id=0, cpuset=set([0]), memory=512, pagesize=None,
+                cpu_pinning_raw=None, cpuset_reserved=None, cpu_policy=None,
+                cpu_thread_policy=None)])
+
+        if same_flavor:
+            fake_inst.old_flavor = fake_inst.flavor
+        else:
+            fake_inst.old_flavor = self._create_flavor(
+                id=200, flavorid='new-flavor-id', name='new_flavor',
+                disabled=False, extra_specs={'hw:numa_nodes': '1'})
 
         mock_elevated.return_value = self.context
         mock_get_migration.return_value = fake_mig
+        mock_get_reqspec.return_value = fake_reqspec
+        mock_get_numa.return_value = fake_numa_topology
+
+        def _check_reqspec():
+            if same_flavor:
+                assert_func = self.assertNotEqual
+            else:
+                assert_func = self.assertEqual
+
+            assert_func(fake_numa_topology, fake_reqspec.numa_topology)
+            assert_func(fake_inst.old_flavor, fake_reqspec.flavor)
 
         def _check_state(expected_task_state=None):
             self.assertEqual(task_states.RESIZE_REVERTING,
                              fake_inst.task_state)
 
-        def _check_mig(expected_task_state=None):
+        def _check_mig():
             self.assertEqual('reverting', fake_mig.status)
 
         with test.nested(
+            mock.patch.object(fake_reqspec, 'save',
+                              side_effect=_check_reqspec),
             mock.patch.object(fake_inst, 'save', side_effect=_check_state),
             mock.patch.object(fake_mig, 'save', side_effect=_check_mig),
             mock.patch.object(self.compute_api, '_record_action_start'),
             mock.patch.object(self.compute_api.compute_rpcapi, 'revert_resize')
-        ) as (mock_inst_save, mock_mig_save, mock_record_action,
-              mock_revert_resize):
+        ) as (mock_reqspec_save, mock_inst_save, mock_mig_save,
+              mock_record_action, mock_revert_resize):
             self.compute_api.revert_resize(self.context, fake_inst)
 
             mock_elevated.assert_called_once_with()
@@ -1697,7 +1742,15 @@ class _ComputeAPIUnitTestMixIn(object):
             mock_mig_save.assert_called_once_with()
             mock_get_reqspec.assert_called_once_with(
                 self.context, fake_inst.uuid)
-            mock_get_reqspec.return_value.save.assert_called_once_with()
+            if same_flavor:
+                # if we are not changing flavors through the revert, we
+                # shouldn't attempt to rebuild the NUMA topology since it won't
+                # have changed
+                mock_get_numa.assert_not_called()
+            else:
+                # not so if the flavor *has* changed though
+                mock_get_numa.assert_called_once_with(
+                    fake_inst.old_flavor, mock.ANY)
             mock_record_action.assert_called_once_with(self.context, fake_inst,
                                                        'revertResize')
             mock_revert_resize.assert_called_once_with(
@@ -1706,14 +1759,19 @@ class _ComputeAPIUnitTestMixIn(object):
             mock_get_requested_resources.assert_called_once_with(
                 self.context, fake_inst.uuid)
             self.assertEqual(
-                mock.sentinel.res_req,
+                [],
                 mock_get_reqspec.return_value.requested_resources)
 
     def test_revert_resize(self):
-        self._test_revert_resize()
+        self._test_revert_resize(same_flavor=False)
 
-    @mock.patch('nova.network.neutronv2.api.API.'
-                'get_requested_resource_for_instance')
+    def test_revert_resize_same_flavor(self):
+        """Test behavior when reverting a migration or a resize to the same
+        flavor.
+        """
+        self._test_revert_resize(same_flavor=True)
+
+    @mock.patch('nova.network.neutron.API.get_requested_resource_for_instance')
     @mock.patch('nova.availability_zones.get_host_availability_zone',
                 return_value='nova')
     @mock.patch('nova.objects.Quotas.check_deltas')
@@ -1752,6 +1810,10 @@ class _ComputeAPIUnitTestMixIn(object):
             mock_inst_save.assert_called_once_with(expected_task_state=[None])
             mock_get_requested_resources.assert_not_called()
 
+    @mock.patch('nova.compute.api.API.get_instance_host_status',
+                new=mock.Mock(return_value=fields_obj.HostStatus.UP))
+    @mock.patch('nova.virt.hardware.numa_get_constraints')
+    @mock.patch('nova.compute.api.API._allow_resize_to_same_host')
     @mock.patch('nova.compute.utils.is_volume_backed_instance',
                 return_value=False)
     @mock.patch('nova.compute.api.API._validate_flavor_image_nostatus')
@@ -1768,6 +1830,8 @@ class _ComputeAPIUnitTestMixIn(object):
                      mock_get_by_instance_uuid, mock_get_flavor, mock_upsize,
                      mock_inst_save, mock_count, mock_limit, mock_record,
                      mock_migration, mock_validate, mock_is_vol_backed,
+                     mock_allow_resize_to_same_host,
+                     mock_get_numa,
                      flavor_id_passed=True,
                      same_host=False, allow_same_host=False,
                      project_id=None,
@@ -1775,19 +1839,27 @@ class _ComputeAPIUnitTestMixIn(object):
                      clean_shutdown=True,
                      host_name=None,
                      request_spec=True,
-                     requested_destination=False):
+                     requested_destination=False,
+                     allow_cross_cell_resize=False):
 
         self.flags(allow_resize_to_same_host=allow_same_host)
+        mock_allow_resize_to_same_host.return_value = allow_same_host
 
         params = {}
         if project_id is not None:
             # To test instance w/ different project id than context (admin)
             params['project_id'] = project_id
         fake_inst = self._create_instance_obj(params=params)
+        fake_numa_topology = objects.InstanceNUMATopology(cells=[
+            objects.InstanceNUMACell(
+                id=0, cpuset=set([0]), memory=512, pagesize=None,
+                cpu_pinning_raw=None, cpuset_reserved=None, cpu_policy=None,
+                cpu_thread_policy=None)])
 
         mock_resize = self.useFixture(
             fixtures.MockPatchObject(self.compute_api.compute_task_api,
                                      'resize_instance')).mock
+        mock_get_numa.return_value = fake_numa_topology
 
         if host_name:
             mock_get_all_by_host.return_value = [objects.ComputeNode(
@@ -1795,8 +1867,9 @@ class _ComputeAPIUnitTestMixIn(object):
 
         current_flavor = fake_inst.get_flavor()
         if flavor_id_passed:
-            new_flavor = self._create_flavor(id=200, flavorid='new-flavor-id',
-                                name='new_flavor', disabled=False)
+            new_flavor = self._create_flavor(
+                id=200, flavorid='new-flavor-id', name='new_flavor',
+                disabled=False, extra_specs={'hw:numa_nodes': '1'})
             if same_flavor:
                 new_flavor.id = current_flavor.id
             mock_get_flavor.return_value = new_flavor
@@ -1841,6 +1914,11 @@ class _ComputeAPIUnitTestMixIn(object):
 
             scheduler_hint = {'filter_properties': filter_properties}
 
+        mock_allow_cross_cell_resize = self.useFixture(
+            fixtures.MockPatchObject(
+                self.compute_api, '_allow_cross_cell_resize')).mock
+        mock_allow_cross_cell_resize.return_value = allow_cross_cell_resize
+
         if flavor_id_passed:
             self.compute_api.resize(self.context, fake_inst,
                                     flavor_id='new-flavor-id',
@@ -1865,7 +1943,7 @@ class _ComputeAPIUnitTestMixIn(object):
                 self.assertEqual([fake_inst['host']], fake_spec.ignore_hosts)
 
             if host_name is None:
-                self.assertIsNone(fake_spec.requested_destination)
+                self.assertIsNotNone(fake_spec.requested_destination)
             else:
                 self.assertIn('host', fake_spec.requested_destination)
                 self.assertEqual(host_name,
@@ -1873,6 +1951,15 @@ class _ComputeAPIUnitTestMixIn(object):
                 self.assertIn('node', fake_spec.requested_destination)
                 self.assertEqual('hypervisor_host',
                                  fake_spec.requested_destination.node)
+            self.assertEqual(
+                allow_cross_cell_resize,
+                fake_spec.requested_destination.allow_cross_cell_move)
+            mock_allow_resize_to_same_host.assert_called_once()
+
+            if flavor_id_passed and not same_flavor:
+                mock_get_numa.assert_called_once_with(new_flavor, mock.ANY)
+            else:
+                mock_get_numa.assert_not_called()
 
         if host_name:
             mock_get_all_by_host.assert_called_once_with(
@@ -1932,7 +2019,7 @@ class _ComputeAPIUnitTestMixIn(object):
                     scheduler_hint=scheduler_hint,
                     flavor=test.MatchType(objects.Flavor),
                     clean_shutdown=clean_shutdown,
-                    request_spec=fake_spec)
+                    request_spec=fake_spec, do_cast=True)
             else:
                 mock_resize.assert_not_called()
 
@@ -1954,6 +2041,11 @@ class _ComputeAPIUnitTestMixIn(object):
     def test_resize_forced_shutdown(self):
         self._test_resize(clean_shutdown=False)
 
+    def test_resize_allow_cross_cell_resize_true(self):
+        self._test_resize(allow_cross_cell_resize=True)
+
+    @mock.patch('nova.compute.api.API.get_instance_host_status',
+                new=mock.Mock(return_value=fields_obj.HostStatus.UP))
     @mock.patch('nova.compute.flavors.get_flavor_by_flavor_id')
     @mock.patch('nova.objects.Quotas.count_as_dict')
     @mock.patch('nova.objects.Quotas.limit_check_project_and_user')
@@ -1966,7 +2058,7 @@ class _ComputeAPIUnitTestMixIn(object):
                                    'user': user_count}
 
         cur_flavor = objects.Flavor(id=1, name='foo', vcpus=1, memory_mb=512,
-                                    root_gb=10, disabled=False)
+                                    root_gb=10, disabled=False, extra_specs={})
         fake_inst = self._create_instance_obj()
         fake_inst.flavor = cur_flavor
         new_flavor = objects.Flavor(id=2, name='bar', vcpus=1, memory_mb=2048,
@@ -2007,6 +2099,12 @@ class _ComputeAPIUnitTestMixIn(object):
     def test_migrate_with_host_name(self):
         self._test_migrate(host_name='target_host')
 
+    def test_migrate_with_host_name_allow_cross_cell_resize_true(self):
+        self._test_migrate(host_name='target_host',
+                           allow_cross_cell_resize=True)
+
+    @mock.patch('nova.compute.api.API.get_instance_host_status',
+                new=mock.Mock(return_value=fields_obj.HostStatus.UP))
     @mock.patch.object(objects.ComputeNodeList, 'get_all_by_host',
                        side_effect=exception.ComputeHostNotFound(
                            host='nonexistent_host'))
@@ -2016,12 +2114,8 @@ class _ComputeAPIUnitTestMixIn(object):
                           self.compute_api.resize, self.context,
                           fake_inst, host_name='nonexistent_host')
 
-    def test_migrate_to_same_host(self):
-        fake_inst = self._create_instance_obj()
-        self.assertRaises(exception.CannotMigrateToSameHost,
-                          self.compute_api.resize, self.context,
-                          fake_inst, host_name='fake_host')
-
+    @mock.patch('nova.compute.api.API.get_instance_host_status',
+                new=mock.Mock(return_value=fields_obj.HostStatus.UP))
     @mock.patch.object(objects.Instance, 'save')
     @mock.patch.object(compute_api.API, '_record_action_start')
     @mock.patch.object(quotas_obj.Quotas, 'limit_check_project_and_user')
@@ -2047,6 +2141,8 @@ class _ComputeAPIUnitTestMixIn(object):
         mock_resize.assert_not_called()
         mock_save.assert_not_called()
 
+    @mock.patch('nova.compute.api.API.get_instance_host_status',
+                new=mock.Mock(return_value=fields_obj.HostStatus.UP))
     @mock.patch.object(objects.Instance, 'save')
     @mock.patch.object(compute_api.API, '_record_action_start')
     @mock.patch.object(quotas_obj.Quotas, 'limit_check_project_and_user')
@@ -2073,6 +2169,8 @@ class _ComputeAPIUnitTestMixIn(object):
         mock_resize.assert_not_called()
         mock_save.assert_not_called()
 
+    @mock.patch('nova.compute.api.API.get_instance_host_status',
+                new=mock.Mock(return_value=fields_obj.HostStatus.UP))
     @mock.patch.object(flavors, 'get_flavor_by_flavor_id')
     def test_resize_to_zero_disk_flavor_fails(self, get_flavor_by_flavor_id):
         fake_inst = self._create_instance_obj()
@@ -2087,6 +2185,8 @@ class _ComputeAPIUnitTestMixIn(object):
                               self.compute_api.resize, self.context,
                               fake_inst, flavor_id='flavor-id')
 
+    @mock.patch('nova.compute.api.API.get_instance_host_status',
+                new=mock.Mock(return_value=fields_obj.HostStatus.UP))
     @mock.patch('nova.compute.api.API._validate_flavor_image_nostatus')
     @mock.patch.object(objects.RequestSpec, 'get_by_instance_uuid')
     @mock.patch('nova.compute.api.API._record_action_start')
@@ -2116,6 +2216,8 @@ class _ComputeAPIUnitTestMixIn(object):
 
         do_test()
 
+    @mock.patch('nova.compute.api.API.get_instance_host_status',
+                new=mock.Mock(return_value=fields_obj.HostStatus.UP))
     @mock.patch.object(objects.Instance, 'save')
     @mock.patch.object(compute_api.API, '_record_action_start')
     @mock.patch.object(quotas_obj.Quotas,
@@ -2172,6 +2274,8 @@ class _ComputeAPIUnitTestMixIn(object):
         mock_record.assert_not_called()
         mock_resize.assert_not_called()
 
+    @mock.patch('nova.compute.api.API.get_instance_host_status',
+                new=mock.Mock(return_value=fields_obj.HostStatus.UP))
     @mock.patch.object(flavors, 'get_flavor_by_flavor_id')
     @mock.patch.object(compute_utils, 'upsize_quota_delta')
     @mock.patch.object(quotas_obj.Quotas, 'count_as_dict')
@@ -2197,6 +2301,8 @@ class _ComputeAPIUnitTestMixIn(object):
                               fake_inst, flavor_id='flavor-id')
             self.assertFalse(mock_save.called)
 
+    @mock.patch('nova.compute.api.API.get_instance_host_status',
+                new=mock.Mock(return_value=fields_obj.HostStatus.UP))
     @mock.patch.object(flavors, 'get_flavor_by_flavor_id')
     @mock.patch.object(objects.Quotas, 'count_as_dict')
     @mock.patch.object(objects.Quotas, 'limit_check_project_and_user')
@@ -3016,7 +3122,7 @@ class _ComputeAPIUnitTestMixIn(object):
         self.stub_out('nova.objects.BlockDeviceMappingList'
                       '.get_by_instance_uuid',
                       fake_bdm_list_get_by_instance_uuid)
-        self.stub_out('nova.image.api.API.create', fake_image_create)
+        self.stub_out('nova.image.glance.API.create', fake_image_create)
         self.stub_out('nova.volume.cinder.API.get',
                       lambda self, context, volume_id:
                           {'id': volume_id, 'display_description': ''})
@@ -3044,7 +3150,8 @@ class _ComputeAPIUnitTestMixIn(object):
         mock_event.assert_called_once_with(self.context,
                                            'api_snapshot_instance',
                                            CONF.host,
-                                           instance.uuid)
+                                           instance.uuid,
+                                           graceful_exit=False)
 
         bdm = fake_block_device.FakeDbBlockDeviceDict(
                 {'no_device': False, 'volume_id': '1', 'boot_index': 0,
@@ -3092,7 +3199,8 @@ class _ComputeAPIUnitTestMixIn(object):
         mock_event.assert_called_once_with(self.context,
                                            'api_snapshot_instance',
                                            CONF.host,
-                                           instance.uuid)
+                                           instance.uuid,
+                                           graceful_exit=False)
 
         instance.system_metadata['image_mappings'] = jsonutils.dumps(
             [{'virtual': 'ami', 'device': 'vda'},
@@ -3151,7 +3259,8 @@ class _ComputeAPIUnitTestMixIn(object):
         mock_event.assert_called_once_with(self.context,
                                            'api_snapshot_instance',
                                            CONF.host,
-                                           instance.uuid)
+                                           instance.uuid,
+                                           graceful_exit=False)
 
     def test_snapshot_volume_backed(self):
         self._test_snapshot_volume_backed(quiesce_required=False,
@@ -3407,11 +3516,14 @@ class _ComputeAPIUnitTestMixIn(object):
                                side_effect=get_vol_data):
             if not is_bootable:
                 self.assertRaises(exception.InvalidBDMVolumeNotBootable,
-                                  self.compute_api._get_bdm_image_metadata,
-                                  self.context, block_device_mapping)
+                                  utils.get_bdm_image_metadata,
+                                  self.context, self.compute_api.image_api,
+                                  self.compute_api.volume_api,
+                                  block_device_mapping)
             else:
-                meta = self.compute_api._get_bdm_image_metadata(self.context,
-                                    block_device_mapping)
+                meta = utils.get_bdm_image_metadata(
+                    self.context, self.compute_api.image_api,
+                    self.compute_api.volume_api, block_device_mapping)
                 self.assertEqual(expected_meta, meta)
 
     def test_boot_volume_non_bootable(self):
@@ -3434,8 +3546,9 @@ class _ComputeAPIUnitTestMixIn(object):
                        {"min_ram": 256, "min_disk": 128, "foo": "bar"}}
         with mock.patch.object(self.compute_api.volume_api, 'get',
                                return_value=fake_volume):
-            meta = self.compute_api._get_bdm_image_metadata(
-                self.context, block_device_mapping)
+            meta = utils.get_bdm_image_metadata(
+                self.context, self.compute_api.image_api,
+                self.compute_api.volume_api, block_device_mapping)
             self.assertEqual(256, meta['min_ram'])
             self.assertEqual(128, meta['min_disk'])
             self.assertEqual('active', meta['status'])
@@ -3460,8 +3573,9 @@ class _ComputeAPIUnitTestMixIn(object):
                 mock.patch.object(self.compute_api.volume_api, 'get_snapshot',
                     return_value=fake_snapshot)) as (
                             volume_get, volume_get_snapshot):
-            meta = self.compute_api._get_bdm_image_metadata(
-                self.context, block_device_mapping)
+            meta = utils.get_bdm_image_metadata(
+                self.context, self.compute_api.image_api,
+                self.compute_api.volume_api, block_device_mapping)
             self.assertEqual(256, meta['min_ram'])
             self.assertEqual(128, meta['min_disk'])
             self.assertEqual('active', meta['status'])
@@ -3492,6 +3606,21 @@ class _ComputeAPIUnitTestMixIn(object):
                       lambda obj, context, image_id, **kwargs: self.fake_image)
         return self.fake_image['id']
 
+    def _setup_fake_image_with_invalid_arch(self):
+        self.fake_image = {
+            'id': 2,
+            'name': 'fake_name',
+            'status': 'active',
+            'properties': {"hw_architecture": "arm64"},
+        }
+
+        fake_image.stub_out_image_service(self)
+        self.stub_out('nova.tests.unit.image.fake._FakeImageService.show',
+                      lambda obj, context, image_id, **kwargs: self.fake_image)
+        return self.fake_image['id']
+
+    @mock.patch('nova.compute.api.API.get_instance_host_status',
+                new=mock.Mock(return_value=fields_obj.HostStatus.UP))
     def test_resize_with_disabled_auto_disk_config_fails(self):
         fake_inst = self._create_instance_with_disabled_disk_config(
             object=True)
@@ -3519,6 +3648,21 @@ class _ComputeAPIUnitTestMixIn(object):
                           image_id,
                           "new password",
                           auto_disk_config=True)
+
+    def test_rebuild_with_invalid_image_arch(self):
+        instance = fake_instance.fake_instance_obj(
+            self.context, vm_state=vm_states.ACTIVE, cell_name='fake-cell',
+            launched_at=timeutils.utcnow(),
+            system_metadata={}, image_ref='foo',
+            expected_attrs=['system_metadata'])
+        image_id = self._setup_fake_image_with_invalid_arch()
+        self.assertRaises(exception.InvalidArchitectureName,
+                          self.compute_api.rebuild,
+                          self.context,
+                          instance,
+                          image_id,
+                          "new password")
+        self.assertIsNone(instance.task_state)
 
     @mock.patch.object(objects.RequestSpec, 'get_by_instance_uuid')
     @mock.patch.object(objects.Instance, 'save')
@@ -3569,7 +3713,8 @@ class _ComputeAPIUnitTestMixIn(object):
                     preserve_ephemeral=False, host=instance.host,
                     request_spec=fake_spec)
 
-        _check_auto_disk_config.assert_called_once_with(image=image)
+        _check_auto_disk_config.assert_called_once_with(
+            image=image, auto_disk_config=None)
         _checks_for_create_and_rebuild.assert_called_once_with(self.context,
                 None, image, flavor, {}, [], None)
         self.assertNotEqual(orig_system_metadata, instance.system_metadata)
@@ -3645,7 +3790,8 @@ class _ComputeAPIUnitTestMixIn(object):
             self.assertEqual('rebuild',
                              fake_spec.scheduler_hints['_nova_check_type'][0])
 
-        _check_auto_disk_config.assert_called_once_with(image=new_image)
+        _check_auto_disk_config.assert_called_once_with(
+            image=new_image, auto_disk_config=None)
         _checks_for_create_and_rebuild.assert_called_once_with(self.context,
                 None, new_image, flavor, {}, [], None)
         self.assertEqual(fields_obj.VMMode.XEN, instance.vm_mode)
@@ -3706,7 +3852,8 @@ class _ComputeAPIUnitTestMixIn(object):
                     preserve_ephemeral=False, host=instance.host,
                     request_spec=fake_spec)
 
-        _check_auto_disk_config.assert_called_once_with(image=image)
+        _check_auto_disk_config.assert_called_once_with(
+            image=image, auto_disk_config=None)
         _checks_for_create_and_rebuild.assert_called_once_with(self.context,
                 None, image, flavor, {}, [], None)
         self.assertNotEqual(orig_key_name, instance.key_name)
@@ -3764,7 +3911,8 @@ class _ComputeAPIUnitTestMixIn(object):
                 preserve_ephemeral=False, host=instance.host,
                 request_spec=fake_spec)
 
-        _check_auto_disk_config.assert_called_once_with(image=image)
+        _check_auto_disk_config.assert_called_once_with(
+            image=image, auto_disk_config=None)
         _checks_for_create_and_rebuild.assert_called_once_with(
             self.context, None, image, flavor, {}, [], None)
         self.assertEqual(new_trusted_certs, instance.trusted_certs.ids)
@@ -3827,7 +3975,8 @@ class _ComputeAPIUnitTestMixIn(object):
                 preserve_ephemeral=False, host=instance.host,
                 request_spec=fake_spec)
 
-        _check_auto_disk_config.assert_called_once_with(image=image)
+        _check_auto_disk_config.assert_called_once_with(
+            image=image, auto_disk_config=None)
         _checks_for_create_and_rebuild.assert_called_once_with(
             self.context, None, image, flavor, {}, [], None)
         self.assertIsNone(instance.trusted_certs)
@@ -3867,7 +4016,24 @@ class _ComputeAPIUnitTestMixIn(object):
                           image_href, admin_pass, files_to_inject,
                           trusted_certs=new_trusted_certs)
 
-        _check_auto_disk_config.assert_called_once_with(image=image)
+        _check_auto_disk_config.assert_called_once_with(
+            image=image, auto_disk_config=None)
+
+    @mock.patch('nova.objects.Quotas.limit_check')
+    def test_check_metadata_properties_quota_with_empty_dict(self,
+                                                             limit_check):
+        metadata = {}
+        self.compute_api._check_metadata_properties_quota(self.context,
+                                                          metadata)
+        self.assertEqual(0, limit_check.call_count)
+
+    @mock.patch('nova.objects.Quotas.limit_check')
+    def test_check_injected_file_quota_with_empty_list(self,
+                                                       limit_check):
+        injected_files = []
+        self.compute_api._check_injected_file_quota(self.context,
+                                                    injected_files)
+        self.assertEqual(0, limit_check.call_count)
 
     def _test_check_injected_file_quota_onset_file_limit_exceeded(self,
                                                                   side_effect):
@@ -4169,6 +4335,87 @@ class _ComputeAPIUnitTestMixIn(object):
                                    host='host2')
             self.assertEqual(2, method.call_count)
 
+    @mock.patch('nova.objects.Migration.get_by_id')
+    @mock.patch('nova.objects.HostMapping.get_by_host')
+    @mock.patch('nova.context.set_target_cell')
+    @mock.patch('nova.context.get_admin_context')
+    def test_external_instance_event_cross_cell_move(
+            self, get_admin_context, set_target_cell, get_hm_by_host,
+            get_mig_by_id):
+        """Tests a scenario where an external server event comes for an
+        instance undergoing a cross-cell migration so the event is routed
+        to both the source host in the source cell and dest host in dest cell
+        using the properly targeted request contexts.
+        """
+        migration = objects.Migration(
+            id=1, source_compute='host1', dest_compute='host2',
+            cross_cell_move=True)
+        migration_context = objects.MigrationContext(
+            instance_uuid=uuids.instance, migration_id=migration.id,
+            migration_type='resize', cross_cell_move=True)
+        instance = objects.Instance(
+            self.context, uuid=uuids.instance, host=migration.source_compute,
+            migration_context=migration_context)
+        get_mig_by_id.return_value = migration
+        source_cell_mapping = objects.CellMapping(name='source-cell')
+        dest_cell_mapping = objects.CellMapping(name='dest-cell')
+
+        # Wrap _get_relevant_hosts and sort the result for predictable asserts.
+        original_get_relevant_hosts = self.compute_api._get_relevant_hosts
+
+        def wrap_get_relevant_hosts(_self, *a, **kw):
+            hosts, cross_cell_move = original_get_relevant_hosts(*a, **kw)
+            return sorted(hosts), cross_cell_move
+        self.stub_out('nova.compute.api.API._get_relevant_hosts',
+                      wrap_get_relevant_hosts)
+
+        def fake_hm_get_by_host(ctxt, host):
+            if host == migration.source_compute:
+                return objects.HostMapping(
+                    host=host, cell_mapping=source_cell_mapping)
+            if host == migration.dest_compute:
+                return objects.HostMapping(
+                    host=host, cell_mapping=dest_cell_mapping)
+            raise Exception('Unexpected host: %s' % host)
+
+        get_hm_by_host.side_effect = fake_hm_get_by_host
+        # get_admin_context should be called twice in order (source and dest)
+        get_admin_context.side_effect = [
+            mock.sentinel.source_context, mock.sentinel.dest_context]
+
+        event = objects.InstanceExternalEvent(
+            instance_uuid=instance.uuid, name='network-vif-plugged')
+        events = [event]
+
+        with mock.patch.object(self.compute_api.compute_rpcapi,
+                               'external_instance_event') as rpc_mock:
+            self.compute_api.external_instance_event(
+                self.context, [instance], events)
+
+        # We should have gotten the migration because of the migration_context.
+        get_mig_by_id.assert_called_once_with(self.context, migration.id)
+        # We should have gotten two host mappings (for source and dest).
+        self.assertEqual(2, get_hm_by_host.call_count)
+        get_hm_by_host.assert_has_calls([
+            mock.call(self.context, migration.source_compute),
+            mock.call(self.context, migration.dest_compute)])
+        self.assertEqual(2, get_admin_context.call_count)
+        # We should have targeted a context to both cells.
+        self.assertEqual(2, set_target_cell.call_count)
+        set_target_cell.assert_has_calls([
+            mock.call(mock.sentinel.source_context, source_cell_mapping),
+            mock.call(mock.sentinel.dest_context, dest_cell_mapping)])
+        # We should have RPC cast to both hosts in different cells.
+        self.assertEqual(2, rpc_mock.call_count)
+        rpc_mock.assert_has_calls([
+            mock.call(mock.sentinel.source_context, [instance], events,
+                      host=migration.source_compute),
+            mock.call(mock.sentinel.dest_context, [instance], events,
+                      host=migration.dest_compute)],
+            # The rpc calls are based on iterating over a dict which is not
+            # ordered so we have to just assert the calls in any order.
+            any_order=True)
+
     def test_volume_ops_invalid_task_state(self):
         instance = self._create_instance_obj()
         self.assertEqual(instance.vm_state, vm_states.ACTIVE)
@@ -4201,27 +4448,68 @@ class _ComputeAPIUnitTestMixIn(object):
                  'device_name': 'vda',
                  }))]
         self.assertRaises(exception.CinderConnectionFailed,
-                          self.compute_api._get_bdm_image_metadata,
+                          utils.get_bdm_image_metadata,
                           self.context,
+                          self.compute_api.image_api,
+                          self.compute_api.volume_api,
                           bdms, legacy_bdm=True)
+
+    def test_get_volumes_for_bdms_errors(self):
+        """Simple test to make sure _get_volumes_for_bdms raises up errors."""
+        # Use a mix of pre-existing and source_type=image volumes to test the
+        # filtering logic in the method.
+        bdms = objects.BlockDeviceMappingList(objects=[
+            objects.BlockDeviceMapping(source_type='image', volume_id=None),
+            objects.BlockDeviceMapping(source_type='volume',
+                                       volume_id=uuids.volume_id)])
+        for exc in (
+            exception.VolumeNotFound(volume_id=uuids.volume_id),
+            exception.CinderConnectionFailed(reason='gremlins'),
+            exception.Forbidden()
+        ):
+            with mock.patch.object(self.compute_api.volume_api, 'get',
+                                   side_effect=exc) as mock_vol_get:
+                self.assertRaises(type(exc),
+                                  self.compute_api._get_volumes_for_bdms,
+                                  self.context, bdms)
+            mock_vol_get.assert_called_once_with(self.context, uuids.volume_id)
+
+    @ddt.data(True, False)
+    def test_validate_vol_az_for_create_multiple_vols_diff_az(self, cross_az):
+        """Tests cross_az_attach=True|False scenarios where the volumes are
+        in different zones.
+        """
+        self.flags(cross_az_attach=cross_az, group='cinder')
+        volumes = [{'availability_zone': str(x)} for x in range(2)]
+        if cross_az:
+            # Since cross_az_attach=True (the default) we do not care that the
+            # volumes are in different zones.
+            self.assertIsNone(self.compute_api._validate_vol_az_for_create(
+                None, volumes))
+        else:
+            # In this case the volumes cannot be in different zones.
+            ex = self.assertRaises(
+                exception.MismatchVolumeAZException,
+                self.compute_api._validate_vol_az_for_create, None, volumes)
+            self.assertIn('Volumes are in different availability zones: 0,1',
+                          six.text_type(ex))
+
+    def test_validate_vol_az_for_create_vol_az_matches_default_cpu_az(self):
+        """Tests the scenario that the instance is not being created in a
+        specific zone and the volume's zone matches
+        CONF.default_availabilty_zone so None is returned indicating the
+        RequestSpec.availability_zone does not need to be updated.
+        """
+        self.flags(cross_az_attach=False, group='cinder')
+        volumes = [{'availability_zone': CONF.default_availability_zone}]
+        self.assertIsNone(self.compute_api._validate_vol_az_for_create(
+            None, volumes))
 
     @mock.patch.object(cinder.API, 'get_snapshot',
              side_effect=exception.CinderConnectionFailed(reason='error'))
-    @mock.patch.object(cinder.API, 'get',
-             side_effect=exception.CinderConnectionFailed(reason='error'))
-    def test_validate_bdm_with_cinder_down(self, mock_get, mock_get_snapshot):
+    def test_validate_bdm_with_cinder_down(self, mock_get_snapshot):
         instance = self._create_instance_obj()
         instance_type = self._create_flavor()
-        bdm = [objects.BlockDeviceMapping(
-                **fake_block_device.FakeDbBlockDeviceDict(
-                {
-                 'id': 1,
-                 'volume_id': 1,
-                 'source_type': 'volume',
-                 'destination_type': 'volume',
-                 'device_name': 'vda',
-                 'boot_index': 0,
-                 }))]
         bdms = [objects.BlockDeviceMapping(
                 **fake_block_device.FakeDbBlockDeviceDict(
                 {
@@ -4232,20 +4520,15 @@ class _ComputeAPIUnitTestMixIn(object):
                  'device_name': 'vda',
                  'boot_index': 0,
                  }))]
+        image_cache = volumes = {}
         self.assertRaises(exception.CinderConnectionFailed,
                           self.compute_api._validate_bdm,
                           self.context,
-                          instance, instance_type, bdm)
-        self.assertRaises(exception.CinderConnectionFailed,
-                          self.compute_api._validate_bdm,
-                          self.context,
-                          instance, instance_type, bdms)
+                          instance, instance_type, bdms, image_cache, volumes)
 
-    @mock.patch.object(cinder.API, 'get')
     @mock.patch.object(cinder.API, 'attachment_create',
                        side_effect=exception.InvalidInput(reason='error'))
-    def test_validate_bdm_with_error_volume_new_flow(self, mock_attach_create,
-                                                     mock_get):
+    def test_validate_bdm_with_error_volume_new_flow(self, mock_attach_create):
         # Tests that an InvalidInput exception raised from
         # volume_api.attachment_create due to the volume status not being
         # 'available' results in _validate_bdm re-raising InvalidVolume.
@@ -4256,7 +4539,6 @@ class _ComputeAPIUnitTestMixIn(object):
         volume_info = {'status': 'error',
                        'attach_status': 'detached',
                        'id': volume_id, 'multiattach': False}
-        mock_get.return_value = volume_info
         bdms = [objects.BlockDeviceMapping(
                 **fake_block_device.FakeDbBlockDeviceDict(
                 {
@@ -4270,9 +4552,9 @@ class _ComputeAPIUnitTestMixIn(object):
         self.assertRaises(exception.InvalidVolume,
                           self.compute_api._validate_bdm,
                           self.context,
-                          instance, instance_type, bdms)
+                          instance, instance_type, bdms, {},
+                          {volume_id: volume_info})
 
-        mock_get.assert_called_once_with(self.context, volume_id)
         mock_attach_create.assert_called_once_with(
             self.context, volume_id, instance.uuid)
 
@@ -4283,17 +4565,14 @@ class _ComputeAPIUnitTestMixIn(object):
             objects.BlockDeviceMapping(
                 boot_index=None, image_id=uuids.image_id,
                 source_type='image', destination_type='volume')])
+        image_cache = volumes = {}
         self.assertRaises(exception.InvalidBDMBootSequence,
                           self.compute_api._validate_bdm,
                           self.context, objects.Instance(), objects.Flavor(),
-                          bdms)
+                          bdms, image_cache, volumes)
 
-    @mock.patch.object(objects.service, 'get_minimum_version_all_cells',
-                       return_value=compute_api.MIN_COMPUTE_VOLUME_TYPE)
-    def test_validate_bdm_with_volume_type_name_is_specified(
-            self, mock_get_min_version):
-        """Test _check_requested_volume_type and
-        _check_compute_supports_volume_type methods are used.
+    def test_validate_bdm_with_volume_type_name_is_specified(self):
+        """Test _check_requested_volume_type method is used.
         """
         instance = self._create_instance_obj()
         instance_type = self._create_flavor()
@@ -4330,15 +4609,14 @@ class _ComputeAPIUnitTestMixIn(object):
                 mock.patch.object(cinder.API, 'get_all_volume_types',
                                   return_value=volume_types),
                 mock.patch.object(compute_api.API,
-                                  '_check_compute_supports_volume_type'),
-                mock.patch.object(compute_api.API,
                                   '_check_requested_volume_type')) as (
-                get_all_vol_types, vol_type_supported, vol_type_requested):
+                get_all_vol_types, vol_type_requested):
 
+            image_cache = volumes = {}
             self.compute_api._validate_bdm(self.context, instance,
-                                           instance_type, bdms)
+                                           instance_type, bdms, image_cache,
+                                           volumes)
 
-            vol_type_supported.assert_called_once_with(self.context)
             get_all_vol_types.assert_called_once_with(self.context)
 
             vol_type_requested.assert_any_call(bdms[0], volume_type,
@@ -4358,10 +4636,11 @@ class _ComputeAPIUnitTestMixIn(object):
                 source_type='image', destination_type='volume',
                 volume_type=None, snapshot_id=None, volume_id=None,
                 volume_size=None)])
+        image_cache = volumes = {}
         self.assertRaises(exception.InvalidBDM,
                           self.compute_api._validate_bdm,
                           self.context, instance, objects.Flavor(),
-                          bdms)
+                          bdms, image_cache, volumes)
         self.assertEqual(0, mock_get_image.call_count)
         # then we test the case of instance.image_ref != bdm.image_id
         image_id = uuids.image_id
@@ -4374,13 +4653,10 @@ class _ComputeAPIUnitTestMixIn(object):
         self.assertRaises(exception.InvalidBDM,
                           self.compute_api._validate_bdm,
                           self.context, instance, objects.Flavor(),
-                          bdms)
+                          bdms, image_cache, volumes)
         mock_get_image.assert_called_once_with(self.context, image_id)
 
-    @mock.patch.object(objects.service, 'get_minimum_version_all_cells',
-                       return_value=compute_api.MIN_COMPUTE_VOLUME_TYPE)
-    def test_the_specified_volume_type_id_assignment_to_name(
-            self, mock_get_min_version):
+    def test_the_specified_volume_type_id_assignment_to_name(self):
         """Test _check_requested_volume_type method is called, if the user
         is using the volume type ID, assign volume_type to volume type name.
         """
@@ -4409,12 +4685,10 @@ class _ComputeAPIUnitTestMixIn(object):
                                                     expected_exception):
         @mock.patch('nova.compute.utils.check_num_instances_quota')
         @mock.patch.object(objects.Instance, 'create')
-        @mock.patch.object(self.compute_api.security_group_api,
-                'ensure_default')
         @mock.patch.object(objects.RequestSpec, 'from_components')
         def do_test(
-                mock_req_spec_from_components, _mock_ensure_default,
-                _mock_create, mock_check_num_inst_quota):
+                mock_req_spec_from_components, _mock_create,
+                mock_check_num_inst_quota):
             req_spec_mock = mock.MagicMock()
 
             mock_check_num_inst_quota.return_value = 1
@@ -4496,20 +4770,22 @@ class _ComputeAPIUnitTestMixIn(object):
     def test_provision_instances_with_keypair(self, mock_im, mock_instance,
                                               mock_br, mock_rs):
         fake_keypair = objects.KeyPair(name='test')
+        inst_type = self._create_flavor()
 
+        @mock.patch.object(self.compute_api, '_get_volumes_for_bdms')
         @mock.patch.object(self.compute_api,
                            '_create_reqspec_buildreq_instmapping',
                            new=mock.MagicMock())
         @mock.patch('nova.compute.utils.check_num_instances_quota')
-        @mock.patch.object(self.compute_api, 'security_group_api')
+        @mock.patch('nova.network.security_group_api')
         @mock.patch.object(self.compute_api,
                            'create_db_entry_for_new_instance')
         @mock.patch.object(self.compute_api,
                            '_bdm_validate_set_size_and_instance')
-        def do_test(mock_bdm_v, mock_cdb, mock_sg, mock_cniq):
+        def do_test(mock_bdm_v, mock_cdb, mock_sg, mock_cniq, mock_get_vols):
             mock_cniq.return_value = 1
             self.compute_api._provision_instances(self.context,
-                                                  mock.sentinel.flavor,
+                                                  inst_type,
                                                   1, 1, mock.MagicMock(),
                                                   {}, None,
                                                   None, None, None, {}, None,
@@ -4520,7 +4796,7 @@ class _ComputeAPIUnitTestMixIn(object):
                 'test',
                 mock_instance.return_value.keypairs.objects[0].name)
             self.compute_api._provision_instances(self.context,
-                                                  mock.sentinel.flavor,
+                                                  inst_type,
                                                   1, 1, mock.MagicMock(),
                                                   {}, None,
                                                   None, None, None, {}, None,
@@ -4532,17 +4808,81 @@ class _ComputeAPIUnitTestMixIn(object):
 
         do_test()
 
+    @mock.patch('nova.accelerator.cyborg.get_device_profile_request_groups')
+    @mock.patch('nova.objects.RequestSpec.from_components')
+    @mock.patch('nova.objects.BuildRequest')
+    @mock.patch('nova.objects.Instance')
+    @mock.patch('nova.objects.InstanceMapping.create')
+    def _test_provision_instances_with_accels(self,
+        instance_type, dp_request_groups, prev_request_groups,
+        mock_im, mock_instance, mock_br, mock_rs, mock_get_dp):
+
+        @mock.patch.object(self.compute_api, '_get_volumes_for_bdms')
+        @mock.patch.object(self.compute_api,
+                           '_create_reqspec_buildreq_instmapping',
+                           new=mock.MagicMock())
+        @mock.patch('nova.compute.utils.check_num_instances_quota')
+        @mock.patch('nova.network.security_group_api')
+        @mock.patch.object(self.compute_api,
+                           'create_db_entry_for_new_instance')
+        @mock.patch.object(self.compute_api,
+                           '_bdm_validate_set_size_and_instance')
+        def do_test(mock_bdm_v, mock_cdb, mock_sg, mock_cniq, mock_get_vols):
+            mock_cniq.return_value = 1
+            self.compute_api._provision_instances(self.context,
+                                                  instance_type,
+                                                  1, 1, mock.MagicMock(),
+                                                  {}, None,
+                                                  None, None, None, {}, None,
+                                                  None,
+                                                  objects.TagList(), None,
+                                                  False)
+
+        mock_get_dp.return_value = dp_request_groups
+        fake_rs = fake_request_spec.fake_spec_obj()
+        fake_rs.requested_resources = prev_request_groups
+        mock_rs.return_value = fake_rs
+        do_test()
+        return mock_get_dp, fake_rs
+
+    def test_provision_instances_with_accels_ok(self):
+        # If extra_specs has accel spec, device profile's request_groups
+        # should be obtained, and added to reqspec's requested_resources.
+        dp_name = 'mydp'
+        extra_specs = {'extra_specs': {'accel:device_profile': dp_name}}
+        instance_type = self._create_flavor(**extra_specs)
+
+        prev_groups = [objects.RequestGroup(requester_id='prev0'),
+                       objects.RequestGroup(requester_id='prev1')]
+        dp_groups = [objects.RequestGroup(requester_id='deviceprofile2'),
+                     objects.RequestGroup(requester_id='deviceprofile3')]
+
+        mock_get_dp, fake_rs = self._test_provision_instances_with_accels(
+            instance_type, dp_groups, prev_groups)
+        mock_get_dp.assert_called_once_with(self.context, dp_name)
+        self.assertEqual(prev_groups + dp_groups, fake_rs.requested_resources)
+
+    def test_provision_instances_with_accels_no_dp(self):
+        # If extra specs has no accel spec, no attempt should be made to
+        # get device profile's request_groups, and reqspec.requested_resources
+        # should be left unchanged.
+        instance_type = self._create_flavor()
+        prev_groups = [objects.RequestGroup(requester_id='prev0'),
+                       objects.RequestGroup(requester_id='prev1')]
+        mock_get_dp, fake_rs = self._test_provision_instances_with_accels(
+            instance_type, [], prev_groups)
+        mock_get_dp.assert_not_called()
+        self.assertEqual(prev_groups, fake_rs.requested_resources)
+
     def test_provision_instances_creates_build_request(self):
+        @mock.patch.object(self.compute_api, '_get_volumes_for_bdms')
         @mock.patch.object(self.compute_api,
                            '_create_reqspec_buildreq_instmapping')
         @mock.patch.object(objects.Instance, 'create')
         @mock.patch('nova.compute.utils.check_num_instances_quota')
-        @mock.patch.object(self.compute_api.security_group_api,
-                'ensure_default')
         @mock.patch.object(objects.RequestSpec, 'from_components')
-        def do_test(mock_req_spec_from_components, _mock_ensure_default,
-                    mock_check_num_inst_quota, mock_inst_create,
-                    mock_create_rs_br_im):
+        def do_test(mock_req_spec_from_components, mock_check_num_inst_quota,
+                    mock_inst_create, mock_create_rs_br_im, mock_get_volumes):
 
             min_count = 1
             max_count = 2
@@ -4605,7 +4945,8 @@ class _ComputeAPIUnitTestMixIn(object):
                         instance_tags, trusted_certs, False)
             validate_bdm.assert_has_calls([mock.call(
                 ctxt, test.MatchType(objects.Instance), flavor,
-                block_device_mappings, False)] * max_count)
+                block_device_mappings, {}, mock_get_volumes.return_value,
+                False)] * max_count)
 
             for rs, br, im in instances_to_build:
                 self.assertIsInstance(br.instance, objects.Instance)
@@ -4619,19 +4960,18 @@ class _ComputeAPIUnitTestMixIn(object):
         do_test()
 
     def test_provision_instances_creates_instance_mapping(self):
+        @mock.patch.object(self.compute_api, '_get_volumes_for_bdms')
         @mock.patch.object(self.compute_api,
                            '_create_reqspec_buildreq_instmapping',
                            new=mock.MagicMock())
         @mock.patch('nova.compute.utils.check_num_instances_quota')
         @mock.patch.object(objects.Instance, 'create', new=mock.MagicMock())
-        @mock.patch.object(self.compute_api.security_group_api,
-                'ensure_default', new=mock.MagicMock())
         @mock.patch.object(self.compute_api, '_validate_bdm',
                 new=mock.MagicMock())
-        @mock.patch.object(objects.RequestSpec, 'from_components',
-                mock.MagicMock())
+        @mock.patch.object(objects.RequestSpec, 'from_components')
         @mock.patch('nova.objects.InstanceMapping')
-        def do_test(mock_inst_mapping, mock_check_num_inst_quota):
+        def do_test(mock_inst_mapping, mock_rs, mock_check_num_inst_quota,
+                    mock_get_vols):
             inst_mapping_mock = mock.MagicMock()
 
             mock_check_num_inst_quota.return_value = 1
@@ -4714,14 +5054,12 @@ class _ComputeAPIUnitTestMixIn(object):
                            '_create_reqspec_buildreq_instmapping')
         @mock.patch('nova.compute.utils.check_num_instances_quota')
         @mock.patch.object(objects, 'Instance')
-        @mock.patch.object(self.compute_api.security_group_api,
-                'ensure_default')
         @mock.patch.object(objects.RequestSpec, 'from_components')
         @mock.patch.object(objects, 'BuildRequest')
         @mock.patch.object(objects, 'InstanceMapping')
         def do_test(mock_inst_mapping, mock_build_req,
-                mock_req_spec_from_components, _mock_ensure_default,
-                mock_inst, mock_check_num_inst_quota, mock_create_rs_br_im):
+                mock_req_spec_from_components, mock_inst,
+                mock_check_num_inst_quota, mock_create_rs_br_im):
 
             min_count = 1
             max_count = 2
@@ -4738,7 +5076,7 @@ class _ComputeAPIUnitTestMixIn(object):
             mock_inst_mapping.side_effect = inst_map_mocks
 
             ctxt = context.RequestContext('fake-user', 'fake-project')
-            flavor = self._create_flavor()
+            flavor = self._create_flavor(extra_specs={})
             boot_meta = {
                 'id': 'fake-image-id',
                 'properties': {'mappings': []},
@@ -4806,7 +5144,8 @@ class _ComputeAPIUnitTestMixIn(object):
                            '_create_reqspec_buildreq_instmapping',
                            new=mock.MagicMock())
         @mock.patch('nova.compute.utils.check_num_instances_quota')
-        @mock.patch.object(self.compute_api, 'security_group_api')
+        @mock.patch('nova.network.security_group_api'
+                    '.populate_security_groups')
         @mock.patch.object(compute_api, 'objects')
         @mock.patch.object(self.compute_api,
                            'create_db_entry_for_new_instance',
@@ -4817,12 +5156,13 @@ class _ComputeAPIUnitTestMixIn(object):
         def test(mock_objects, mock_secgroup, mock_cniq):
             ctxt = context.RequestContext('fake-user', 'fake-project')
             mock_cniq.return_value = 1
-            self.compute_api._provision_instances(ctxt, None, None, None,
+            inst_type = self._create_flavor()
+            self.compute_api._provision_instances(ctxt, inst_type, None, None,
                                                   mock.MagicMock(), None, None,
                                                   [], None, None, None, None,
                                                   None, objects.TagList(),
                                                   None, False)
-            secgroups = mock_secgroup.populate_security_groups.return_value
+            secgroups = mock_secgroup.return_value
             mock_objects.RequestSpec.from_components.assert_called_once_with(
                 mock.ANY, mock.ANY, mock.ANY, mock.ANY, mock.ANY, mock.ANY,
                 mock.ANY, mock.ANY, mock.ANY,
@@ -4905,6 +5245,162 @@ class _ComputeAPIUnitTestMixIn(object):
             rpcapi_unrescue_instance.assert_called_once_with(
                 self.context, instance=instance)
 
+    @mock.patch('nova.objects.compute_node.ComputeNode'
+                '.get_by_host_and_nodename')
+    @mock.patch('nova.compute.utils.is_volume_backed_instance',
+                return_value=True)
+    @mock.patch('nova.objects.block_device.BlockDeviceMappingList'
+                '.get_by_instance_uuid')
+    def test_rescue_bfv_with_required_trait(self, mock_get_bdms,
+                                            mock_is_volume_backed,
+                                            mock_get_cn):
+        instance = self._create_instance_obj()
+        bdms = objects.BlockDeviceMappingList(objects=[
+                objects.BlockDeviceMapping(
+                    boot_index=0, image_id=uuids.image_id, source_type='image',
+                    destination_type='volume', volume_type=None,
+                    snapshot_id=None, volume_id=uuids.volume_id,
+                    volume_size=None)])
+        with test.nested(
+            mock.patch.object(self.compute_api.placementclient,
+                              'get_provider_traits'),
+            mock.patch.object(self.compute_api.volume_api, 'get'),
+            mock.patch.object(self.compute_api.volume_api, 'check_attached'),
+            mock.patch.object(instance, 'save'),
+            mock.patch.object(self.compute_api, '_record_action_start'),
+            mock.patch.object(self.compute_api.compute_rpcapi,
+                              'rescue_instance')
+        ) as (
+            mock_get_traits, mock_get_volume, mock_check_attached,
+            mock_instance_save, mock_record_start, mock_rpcapi_rescue
+        ):
+            # Mock out the returned compute node, bdms and volume
+            mock_get_cn.return_value = mock.Mock(uuid=uuids.cn)
+            mock_get_bdms.return_value = bdms
+            mock_get_volume.return_value = mock.sentinel.volume
+
+            # Ensure the required trait is returned, allowing BFV rescue
+            mock_trait_info = mock.Mock(traits=[ot.COMPUTE_RESCUE_BFV])
+            mock_get_traits.return_value = mock_trait_info
+
+            # Try to rescue the instance
+            self.compute_api.rescue(self.context, instance,
+                                    rescue_image_ref=uuids.rescue_image_id,
+                                    allow_bfv_rescue=True)
+
+            # Assert all of the calls made in the compute API
+            mock_get_bdms.assert_called_once_with(self.context, instance.uuid)
+            mock_get_volume.assert_called_once_with(
+                self.context, uuids.volume_id)
+            mock_check_attached.assert_called_once_with(
+                self.context, mock.sentinel.volume)
+            mock_is_volume_backed.assert_called_once_with(
+                self.context, instance, bdms)
+            mock_get_cn.assert_called_once_with(
+                self.context, instance.host, instance.node)
+            mock_get_traits.assert_called_once_with(self.context, uuids.cn)
+            mock_instance_save.assert_called_once_with(
+                expected_task_state=[None])
+            mock_record_start.assert_called_once_with(
+                self.context, instance, instance_actions.RESCUE)
+            mock_rpcapi_rescue.assert_called_once_with(
+                self.context, instance=instance, rescue_password=None,
+                rescue_image_ref=uuids.rescue_image_id, clean_shutdown=True)
+
+            # Assert that the instance task state as set in the compute API
+            self.assertEqual(task_states.RESCUING, instance.task_state)
+
+    @mock.patch('nova.objects.compute_node.ComputeNode'
+                '.get_by_host_and_nodename')
+    @mock.patch('nova.compute.utils.is_volume_backed_instance',
+                return_value=True)
+    @mock.patch('nova.objects.block_device.BlockDeviceMappingList'
+                '.get_by_instance_uuid')
+    def test_rescue_bfv_without_required_trait(self, mock_get_bdms,
+                                               mock_is_volume_backed,
+                                               mock_get_cn):
+        instance = self._create_instance_obj()
+        bdms = objects.BlockDeviceMappingList(objects=[
+                objects.BlockDeviceMapping(
+                    boot_index=0, image_id=uuids.image_id, source_type='image',
+                    destination_type='volume', volume_type=None,
+                    snapshot_id=None, volume_id=uuids.volume_id,
+                    volume_size=None)])
+        with test.nested(
+            mock.patch.object(self.compute_api.placementclient,
+                              'get_provider_traits'),
+            mock.patch.object(self.compute_api.volume_api, 'get'),
+            mock.patch.object(self.compute_api.volume_api, 'check_attached'),
+        ) as (
+            mock_get_traits, mock_get_volume, mock_check_attached
+        ):
+            # Mock out the returned compute node, bdms and volume
+            mock_get_bdms.return_value = bdms
+            mock_get_volume.return_value = mock.sentinel.volume
+            mock_get_cn.return_value = mock.Mock(uuid=uuids.cn)
+
+            # Ensure the required trait is not returned, denying BFV rescue
+            mock_trait_info = mock.Mock(traits=[])
+            mock_get_traits.return_value = mock_trait_info
+
+            # Assert that any attempt to rescue a bfv instance on a compute
+            # node that does not report the COMPUTE_RESCUE_BFV trait fails and
+            # raises InstanceNotRescuable
+            self.assertRaises(exception.InstanceNotRescuable,
+                              self.compute_api.rescue, self.context, instance,
+                              rescue_image_ref=None, allow_bfv_rescue=True)
+
+            # Assert the calls made in the compute API prior to the failure
+            mock_get_bdms.assert_called_once_with(self.context, instance.uuid)
+            mock_get_volume.assert_called_once_with(
+                self.context, uuids.volume_id)
+            mock_check_attached.assert_called_once_with(
+                self.context, mock.sentinel.volume)
+            mock_is_volume_backed.assert_called_once_with(
+                self.context, instance, bdms)
+            mock_get_cn.assert_called_once_with(
+                self.context, instance.host, instance.node)
+            mock_get_traits.assert_called_once_with(
+                self.context, uuids.cn)
+
+    @mock.patch('nova.compute.utils.is_volume_backed_instance',
+                return_value=True)
+    @mock.patch('nova.objects.block_device.BlockDeviceMappingList'
+                '.get_by_instance_uuid')
+    def test_rescue_bfv_without_allow_flag(self, mock_get_bdms,
+                                           mock_is_volume_backed):
+        instance = self._create_instance_obj()
+        bdms = objects.BlockDeviceMappingList(objects=[
+                objects.BlockDeviceMapping(
+                    boot_index=0, image_id=uuids.image_id, source_type='image',
+                    destination_type='volume', volume_type=None,
+                    snapshot_id=None, volume_id=uuids.volume_id,
+                    volume_size=None)])
+        with test.nested(
+            mock.patch.object(self.compute_api.volume_api, 'get'),
+            mock.patch.object(self.compute_api.volume_api, 'check_attached'),
+        ) as (
+            mock_get_volume, mock_check_attached
+        ):
+            # Mock out the returned bdms and volume
+            mock_get_bdms.return_value = bdms
+            mock_get_volume.return_value = mock.sentinel.volume
+
+            # Assert that any attempt to rescue a bfv instance with
+            # allow_bfv_rescue=False fails and raises InstanceNotRescuable
+            self.assertRaises(exception.InstanceNotRescuable,
+                              self.compute_api.rescue, self.context, instance,
+                              rescue_image_ref=None, allow_bfv_rescue=False)
+
+            # Assert the calls made in the compute API prior to the failure
+            mock_get_bdms.assert_called_once_with(self.context, instance.uuid)
+            mock_get_volume.assert_called_once_with(
+                self.context, uuids.volume_id)
+            mock_check_attached.assert_called_once_with(
+                self.context, mock.sentinel.volume)
+            mock_is_volume_backed.assert_called_once_with(
+                self.context, instance, bdms)
+
     def test_set_admin_password_invalid_state(self):
         # Tests that InstanceInvalidState is raised when not ACTIVE.
         instance = self._create_instance_obj({'vm_state': vm_states.STOPPED})
@@ -4922,14 +5418,14 @@ class _ComputeAPIUnitTestMixIn(object):
                            'set_admin_password')
         def do_test(compute_rpcapi_mock, record_mock, instance_save_mock):
             # call the API
-            self.compute_api.set_admin_password(self.context, instance)
+            self.compute_api.set_admin_password(self.context, instance, 'pass')
             # make our assertions
             instance_save_mock.assert_called_once_with(
                 expected_task_state=[None])
             record_mock.assert_called_once_with(
                 self.context, instance, instance_actions.CHANGE_PASSWORD)
             compute_rpcapi_mock.assert_called_once_with(
-                self.context, instance=instance, new_pass=None)
+                self.context, instance=instance, new_pass='pass')
 
         do_test()
 
@@ -5030,8 +5526,10 @@ class _ComputeAPIUnitTestMixIn(object):
                         block_device_mapping)))
 
         with mock.patch.object(self.compute_api, '_validate_bdm'):
+            image_cache = volumes = {}
             bdms = self.compute_api._bdm_validate_set_size_and_instance(
-                self.context, instance, instance_type, block_device_mapping)
+                self.context, instance, instance_type, block_device_mapping,
+                image_cache, volumes)
 
         expected = [{'device_name': '/dev/sda1',
                      'source_type': 'snapshot', 'destination_type': 'volume',
@@ -5224,16 +5722,10 @@ class _ComputeAPIUnitTestMixIn(object):
     @mock.patch('nova.compute.api.API._record_action_start')
     @mock.patch.object(compute_rpcapi.ComputeAPI, 'live_migration_abort')
     @mock.patch.object(objects.Migration, 'get_by_id_and_instance')
-    @mock.patch.object(objects.Service, 'get_by_compute_host')
     def test_live_migrate_abort_in_queue_succeeded(self,
-                                                   mock_get_service,
                                                    mock_get_migration,
                                                    mock_lm_abort,
                                                    mock_rec_action):
-        service_obj = objects.Service()
-        service_obj.version = (
-                compute_api.MIN_COMPUTE_ABORT_QUEUED_LIVE_MIGRATION)
-        mock_get_service.return_value = service_obj
         instance = self._create_instance_obj()
         instance.task_state = task_states.MIGRATING
         for migration_status in ('queued', 'preparing'):
@@ -5263,23 +5755,6 @@ class _ComputeAPIUnitTestMixIn(object):
                           self.compute_api.live_migrate_abort, self.context,
                           instance, migration.id,
                           support_abort_in_queue=False)
-
-    @mock.patch.object(objects.Migration, 'get_by_id_and_instance')
-    @mock.patch.object(objects.Service, 'get_by_compute_host')
-    def test_live_migration_abort_in_queue_old_compute_conflict(
-            self, mock_get_service, mock_get_migration):
-        service_obj = objects.Service()
-        service_obj.version = (
-                compute_api.MIN_COMPUTE_ABORT_QUEUED_LIVE_MIGRATION - 1)
-        mock_get_service.return_value = service_obj
-        instance = self._create_instance_obj()
-        instance.task_state = task_states.MIGRATING
-        migration = self._get_migration(21, 'queued', 'live-migration')
-        mock_get_migration.return_value = migration
-        self.assertRaises(exception.AbortQueuedLiveMigrationNotYetSupported,
-                          self.compute_api.live_migrate_abort, self.context,
-                          instance, migration.id,
-                          support_abort_in_queue=True)
 
     @mock.patch.object(objects.Migration, 'get_by_id_and_instance')
     def test_live_migration_abort_wrong_migration_status(self,
@@ -6023,7 +6498,6 @@ class _ComputeAPIUnitTestMixIn(object):
         """Tests that a list of security groups passed in do not actually get
         stored on with the instance when using neutron.
         """
-        self.flags(use_neutron=True)
         flavor = self._create_flavor()
         params = {'display_name': 'fake-instance'}
         instance = self._create_instance_obj(params, flavor)
@@ -6418,16 +6892,16 @@ class ComputeAPIUnitTestCase(_ComputeAPIUnitTestMixIn, test.NoDBTestCase):
             access_ip_v4 = access_ip_v6 = config_drive = \
                 auto_disk_config = reservation_id = None
         # This tests that 'default' is unchanged, but 'fake-security-group'
-        # will be translated to a uuid for Neutron.
+        # will be translated to a UUID for Neutron.
         requested_secgroups = ['default', 'fake-security-group']
         # This will short-circuit _check_requested_networks
         requested_networks = objects.NetworkRequestList(objects=[
             objects.NetworkRequest(network_id='none')])
         max_count = 1
         supports_port_resource_request = False
-        with mock.patch.object(
-                self.compute_api.security_group_api, 'get',
-                return_value={'id': uuids.secgroup_uuid}) as scget:
+        with mock.patch(
+                'nova.network.security_group_api.validate_name',
+                return_value=uuids.secgroup_uuid) as scget:
             base_options, max_network_count, key_pair, security_groups, \
                     network_metadata = (
                 self.compute_api._validate_and_build_base_options(
@@ -6515,22 +6989,7 @@ class ComputeAPIUnitTestCase(_ComputeAPIUnitTestMixIn, test.NoDBTestCase):
                               self.compute_api.attach_volume,
                               self.context, instance, uuids.volumeid)
 
-    @mock.patch('nova.objects.service.get_minimum_version_all_cells',
-                return_value=compute_api.MIN_COMPUTE_VOLUME_TYPE - 1)
-    def test_check_compute_supports_volume_type_new_inst_old_compute(
-            self, get_min_version):
-        """Tests that _check_compute_supports_volume_type fails if trying to
-        specify a volume type to create a new instance but the nova-compute
-        service version are not all upgraded yet.
-        """
-        self.assertRaises(exception.VolumeTypeSupportNotYetAvailable,
-                          self.compute_api._check_compute_supports_volume_type,
-                          self.context)
-
-    @mock.patch('nova.objects.service.get_minimum_version_all_cells',
-                return_value=compute_api.MIN_COMPUTE_VOLUME_TYPE)
-    def test_validate_bdm_check_volume_type_raise_not_found(
-            self, get_min_version):
+    def test_validate_bdm_check_volume_type_raise_not_found(self):
         """Tests that _validate_bdm will fail if the requested volume type
         name or id does not match the volume types in Cinder.
         """
@@ -6554,8 +7013,8 @@ class ComputeAPIUnitTestCase(_ComputeAPIUnitTestMixIn, test.NoDBTestCase):
     @mock.patch.object(neutron_api.API, 'list_ports')
     @mock.patch.object(objects.BuildRequestList, 'get_by_filters',
                        new_callable=mock.NonCallableMock)
-    def test_get_all_ip_filter_use_neutron(self, mock_buildreq_get,
-                                           mock_list_port, mock_check_ext):
+    def test_get_all_ip_filter(self, mock_buildreq_get, mock_list_port,
+                               mock_check_ext):
         mock_check_ext.return_value = True
         cell_instances = self._list_of_instances(2)
         mock_list_port.return_value = {
@@ -6582,8 +7041,8 @@ class ComputeAPIUnitTestCase(_ComputeAPIUnitTestMixIn, test.NoDBTestCase):
     @mock.patch.object(neutron_api.API, 'list_ports')
     @mock.patch.object(objects.BuildRequestList, 'get_by_filters',
                        new_callable=mock.NonCallableMock)
-    def test_get_all_ip6_filter_use_neutron(self, mock_buildreq_get,
-                                            mock_list_port, mock_check_ext):
+    def test_get_all_ip6_filter(self, mock_buildreq_get, mock_list_port,
+                                mock_check_ext):
         mock_check_ext.return_value = True
         cell_instances = self._list_of_instances(2)
         mock_list_port.return_value = {
@@ -6610,9 +7069,8 @@ class ComputeAPIUnitTestCase(_ComputeAPIUnitTestMixIn, test.NoDBTestCase):
     @mock.patch.object(neutron_api.API, 'list_ports')
     @mock.patch.object(objects.BuildRequestList, 'get_by_filters',
                        new_callable=mock.NonCallableMock)
-    def test_get_all_ip_and_ip6_filter_use_neutron(self, mock_buildreq_get,
-                                                   mock_list_port,
-                                                   mock_check_ext):
+    def test_get_all_ip_and_ip6_filter(self, mock_buildreq_get, mock_list_port,
+                                       mock_check_ext):
         mock_check_ext.return_value = True
         cell_instances = self._list_of_instances(2)
         mock_list_port.return_value = {
@@ -6643,8 +7101,7 @@ class ComputeAPIUnitTestCase(_ComputeAPIUnitTestMixIn, test.NoDBTestCase):
 
     @mock.patch.object(neutron_api.API, 'has_substr_port_filtering_extension')
     @mock.patch.object(neutron_api.API, 'list_ports')
-    def test_get_all_ip6_filter_use_neutron_exc(self, mock_list_port,
-                                                mock_check_ext):
+    def test_get_all_ip6_filter_exc(self, mock_list_port, mock_check_ext):
         mock_check_ext.return_value = True
         mock_list_port.side_effect = exception.InternalError('fake')
 
@@ -6726,6 +7183,236 @@ class ComputeAPIUnitTestCase(_ComputeAPIUnitTestMixIn, test.NoDBTestCase):
             self.compute_api.placementclient
         mock_report_client.assert_called_once_with()
 
+    def test_validate_host_for_cold_migrate_same_host_fails(self):
+        """Asserts CannotMigrateToSameHost is raised when trying to cold
+        migrate to the same host.
+        """
+        instance = fake_instance.fake_instance_obj(self.context)
+        self.assertRaises(exception.CannotMigrateToSameHost,
+                          self.compute_api._validate_host_for_cold_migrate,
+                          self.context, instance, instance.host,
+                          allow_cross_cell_resize=False)
+
+    @mock.patch('nova.objects.ComputeNode.'
+                'get_first_node_by_host_for_old_compat')
+    def test_validate_host_for_cold_migrate_diff_host_no_cross_cell(
+            self, mock_cn_get):
+        """Tests the scenario where allow_cross_cell_resize=False and the
+        host is found in the same cell as the instance.
+        """
+        instance = fake_instance.fake_instance_obj(self.context)
+        node = self.compute_api._validate_host_for_cold_migrate(
+            self.context, instance, uuids.host, allow_cross_cell_resize=False)
+        self.assertIs(node, mock_cn_get.return_value)
+        mock_cn_get.assert_called_once_with(
+            self.context, uuids.host, use_slave=True)
+
+    @mock.patch('nova.objects.HostMapping.get_by_host',
+                side_effect=exception.HostMappingNotFound(name=uuids.host))
+    def test_validate_host_for_cold_migrate_cross_cell_host_mapping_not_found(
+            self, mock_hm_get):
+        """Tests the scenario where allow_cross_cell_resize=True but the
+        HostMapping for the given host could not be found.
+        """
+        instance = fake_instance.fake_instance_obj(self.context)
+        self.assertRaises(exception.ComputeHostNotFound,
+                          self.compute_api._validate_host_for_cold_migrate,
+                          self.context, instance, uuids.host,
+                          allow_cross_cell_resize=True)
+        mock_hm_get.assert_called_once_with(self.context, uuids.host)
+
+    @mock.patch('nova.objects.HostMapping.get_by_host',
+                return_value=objects.HostMapping(
+                    cell_mapping=objects.CellMapping(uuid=uuids.cell2)))
+    @mock.patch('nova.context.target_cell')
+    @mock.patch('nova.objects.ComputeNode.'
+                'get_first_node_by_host_for_old_compat')
+    def test_validate_host_for_cold_migrate_cross_cell(
+            self, mock_cn_get, mock_target_cell, mock_hm_get):
+        """Tests the scenario where allow_cross_cell_resize=True and the
+        ComputeNode is pulled from the target cell defined by the HostMapping.
+        """
+        instance = fake_instance.fake_instance_obj(self.context)
+        node = self.compute_api._validate_host_for_cold_migrate(
+            self.context, instance, uuids.host,
+            allow_cross_cell_resize=True)
+        self.assertIs(node, mock_cn_get.return_value)
+        mock_hm_get.assert_called_once_with(self.context, uuids.host)
+        # get_first_node_by_host_for_old_compat is called with a temporarily
+        # cell-targeted context
+        mock_cn_get.assert_called_once_with(
+            mock_target_cell.return_value.__enter__.return_value,
+            uuids.host, use_slave=True)
+
+    def _test_get_migrations_sorted_filter_duplicates(self, migrations,
+                                                      expected):
+        """Tests the cross-cell scenario where there are multiple migrations
+        with the same UUID from different cells and only one should be
+        returned.
+        """
+        sort_keys = ['created_at', 'id']
+        sort_dirs = ['desc', 'desc']
+        filters = {'migration_type': 'resize'}
+        limit = 1000
+        marker = None
+        with mock.patch(
+                'nova.compute.migration_list.get_migration_objects_sorted',
+                return_value=objects.MigrationList(
+                    objects=migrations)) as getter:
+            sorted_migrations = self.compute_api.get_migrations_sorted(
+                self.context, filters, sort_dirs=sort_dirs,
+                sort_keys=sort_keys, limit=limit, marker=marker)
+        self.assertEqual(1, len(sorted_migrations))
+        getter.assert_called_once_with(
+            self.context, filters, limit, marker, sort_keys, sort_dirs)
+        self.assertIs(expected, sorted_migrations[0])
+
+    def test_get_migrations_sorted_filter_duplicates(self):
+        """Tests filtering duplicated Migration records where both have
+        created_at and updated_at set.
+        """
+        t1 = timeutils.utcnow()
+        source_cell_migration = objects.Migration(
+            uuid=uuids.migration, created_at=t1, updated_at=t1)
+        t2 = t1 + datetime.timedelta(seconds=1)
+        target_cell_migration = objects.Migration(
+            uuid=uuids.migration, created_at=t2, updated_at=t2)
+        self._test_get_migrations_sorted_filter_duplicates(
+            [source_cell_migration, target_cell_migration],
+            target_cell_migration)
+        # Run it again in reverse.
+        self._test_get_migrations_sorted_filter_duplicates(
+            [target_cell_migration, source_cell_migration],
+            target_cell_migration)
+
+    def test_get_migrations_sorted_filter_duplicates_using_created_at(self):
+        """Tests the cross-cell scenario where there are multiple migrations
+        with the same UUID from different cells and only one should be
+        returned. In this test the first Migration object to be processed has
+        not been updated yet but is created after the second record to process.
+        """
+        t1 = timeutils.utcnow()
+        older = objects.Migration(
+            uuid=uuids.migration, created_at=t1, updated_at=t1)
+        t2 = t1 + datetime.timedelta(seconds=1)
+        newer = objects.Migration(
+            uuid=uuids.migration, created_at=t2, updated_at=None)
+        self._test_get_migrations_sorted_filter_duplicates(
+            [newer, older], newer)
+        # Test with just created_at.
+        older.updated_at = None
+        self._test_get_migrations_sorted_filter_duplicates(
+            [newer, older], newer)
+        # Run it again in reverse.
+        self._test_get_migrations_sorted_filter_duplicates(
+            [older, newer], newer)
+
+    @mock.patch('nova.objects.Migration.get_by_instance_and_status')
+    def test_confirm_resize_cross_cell_move_true(self, mock_migration_get):
+        """Tests confirm_resize where Migration.cross_cell_move is True"""
+        instance = fake_instance.fake_instance_obj(
+            self.context, vm_state=vm_states.RESIZED, task_state=None,
+            launched_at=timeutils.utcnow())
+        migration = objects.Migration(cross_cell_move=True)
+        mock_migration_get.return_value = migration
+        with test.nested(
+            mock.patch.object(self.context, 'elevated',
+                              return_value=self.context),
+            mock.patch.object(migration, 'save'),
+            mock.patch.object(self.compute_api, '_record_action_start'),
+            mock.patch.object(self.compute_api.compute_task_api,
+                              'confirm_snapshot_based_resize'),
+        ) as (
+            mock_elevated, mock_migration_save, mock_record_action,
+            mock_conductor_confirm
+        ):
+            self.compute_api.confirm_resize(self.context, instance)
+        mock_elevated.assert_called_once_with()
+        mock_migration_save.assert_called_once_with()
+        self.assertEqual('confirming', migration.status)
+        mock_record_action.assert_called_once_with(
+            self.context, instance, instance_actions.CONFIRM_RESIZE)
+        mock_conductor_confirm.assert_called_once_with(
+            self.context, instance, migration)
+
+    @mock.patch('nova.objects.service.get_minimum_version_all_cells')
+    def test_allow_cross_cell_resize_default_false(self, mock_get_min_ver):
+        """Based on the default policy this asserts nobody is allowed to
+        perform cross-cell resize.
+        """
+        instance = objects.Instance(
+            project_id='fake-project', user_id='fake-user')
+        self.assertFalse(self.compute_api._allow_cross_cell_resize(
+            self.context, instance))
+        # We did not need to check the minimum nova-compute version since the
+        # policy check failed.
+        mock_get_min_ver.assert_not_called()
+
+    @mock.patch('nova.objects.service.get_minimum_version_all_cells',
+                return_value=compute_api.MIN_COMPUTE_CROSS_CELL_RESIZE - 1)
+    def test_allow_cross_cell_resize_false_old_version(self, mock_get_min_ver):
+        """Policy allows cross-cell resize but minimum nova-compute service
+        version is not new enough.
+        """
+        instance = objects.Instance(
+            project_id='fake-project', user_id='fake-user')
+        with mock.patch.object(self.context, 'can', return_value=True) as can:
+            self.assertFalse(self.compute_api._allow_cross_cell_resize(
+                self.context, instance))
+        can.assert_called_once()
+        mock_get_min_ver.assert_called_once_with(
+            self.context, ['nova-compute'])
+
+    @mock.patch('nova.objects.service.get_minimum_version_all_cells',
+                return_value=compute_api.MIN_COMPUTE_CROSS_CELL_RESIZE)
+    def test_allow_cross_cell_resize_true(self, mock_get_min_ver):
+        """Policy allows cross-cell resize and minimum nova-compute service
+        version is new enough.
+        """
+        instance = objects.Instance(
+            project_id='fake-project', user_id='fake-user')
+        with mock.patch.object(self.context, 'can', return_value=True) as can:
+            self.assertTrue(self.compute_api._allow_cross_cell_resize(
+                self.context, instance))
+        can.assert_called_once()
+        mock_get_min_ver.assert_called_once_with(
+            self.context, ['nova-compute'])
+
+    def _test_block_accelerators(self, instance, args_info):
+        @compute_api.block_accelerators
+        def myfunc(self, context, instance, *args, **kwargs):
+            args_info['args'] = (context, instance, *args)
+            args_info['kwargs'] = dict(**kwargs)
+
+        args = ('arg1', 'arg2')
+        kwargs = {'arg3': 'dummy3', 'arg4': 'dummy4'}
+
+        myfunc(mock.ANY, self.context, instance, *args, **kwargs)
+
+        expected_args = (self.context, instance, *args)
+        return expected_args, kwargs
+
+    def test_block_accelerators_no_device_profile(self):
+        instance = self._create_instance_obj()
+        args_info = {}
+
+        expected_args, kwargs = self._test_block_accelerators(
+                                    instance, args_info)
+        self.assertEqual(expected_args, args_info['args'])
+        self.assertEqual(kwargs, args_info['kwargs'])
+
+    def test_block_accelerators_with_device_profile(self):
+        extra_specs = {'accel:device_profile': 'mydp'}
+        flavor = self._create_flavor(extra_specs=extra_specs)
+        instance = self._create_instance_obj(flavor=flavor)
+        args_info = {}
+
+        self.assertRaisesRegex(exception.ForbiddenWithAccelerators,
+            'Forbidden with instances that have accelerators.',
+            self._test_block_accelerators, instance, args_info)
+        # myfunc was not called
+        self.assertEqual({}, args_info)
+
 
 class DiffDictTestCase(test.NoDBTestCase):
     """Unit tests for _diff_dict()."""
@@ -6757,29 +7444,3 @@ class DiffDictTestCase(test.NoDBTestCase):
         diff = compute_api._diff_dict(old, new)
 
         self.assertEqual(diff, dict(b=['-']))
-
-
-class SecurityGroupAPITest(test.NoDBTestCase):
-    def setUp(self):
-        super(SecurityGroupAPITest, self).setUp()
-        self.secgroup_api = compute_api.SecurityGroupAPI()
-        self.user_id = 'fake'
-        self.project_id = 'fake'
-        self.context = context.RequestContext(self.user_id,
-                                              self.project_id)
-
-    def test_get_instance_security_groups(self):
-        groups = objects.SecurityGroupList()
-        groups.objects = [objects.SecurityGroup(name='foo'),
-                          objects.SecurityGroup(name='bar')]
-        instance = objects.Instance(security_groups=groups)
-        names = self.secgroup_api.get_instance_security_groups(self.context,
-                                                               instance)
-        self.assertEqual(sorted([{'name': 'bar'}, {'name': 'foo'}], key=str),
-                         sorted(names, key=str))
-
-    @mock.patch('nova.objects.security_group.make_secgroup_list')
-    def test_populate_security_groups(self, mock_msl):
-        r = self.secgroup_api.populate_security_groups([mock.sentinel.group])
-        mock_msl.assert_called_once_with([mock.sentinel.group])
-        self.assertEqual(r, mock_msl.return_value)

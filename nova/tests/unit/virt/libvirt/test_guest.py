@@ -89,27 +89,6 @@ class GuestTestCase(test.NoDBTestCase):
         self.assertRaises(test.TestingException, self.guest.launch)
         self.assertEqual(1, mock_safe_decode.called)
 
-    @mock.patch('nova.privsep.libvirt.enable_hairpin')
-    @mock.patch.object(libvirt_guest.Guest, 'get_interfaces')
-    def test_enable_hairpin(self, mock_get_interfaces, mock_writefile):
-        mock_get_interfaces.return_value = ["vnet0", "vnet1"]
-        self.guest.enable_hairpin()
-        mock_writefile.assert_has_calls([
-            mock.call('vnet0'),
-            mock.call('vnet1')]
-        )
-
-    @mock.patch.object(encodeutils, 'safe_decode')
-    @mock.patch('nova.privsep.libvirt.enable_hairpin')
-    @mock.patch.object(libvirt_guest.Guest, 'get_interfaces')
-    def test_enable_hairpin_exception(self, mock_get_interfaces,
-                            mock_writefile, mock_safe_decode):
-        mock_get_interfaces.return_value = ["foo"]
-        mock_writefile.side_effect = test.TestingException
-
-        self.assertRaises(test.TestingException, self.guest.enable_hairpin)
-        self.assertEqual(1, mock_safe_decode.called)
-
     def test_get_interfaces(self):
         self.domain.XMLDesc.return_value = """<domain>
   <devices>
@@ -770,7 +749,7 @@ class GuestBlockTestCase(test.NoDBTestCase):
 
     def test_resize(self):
         self.gblock.resize(10)
-        self.domain.blockResize.assert_called_once_with('vda', 10)
+        self.domain.blockResize.assert_called_once_with('vda', 10, flags=1)
 
     def test_rebase(self):
         self.gblock.rebase("foo")

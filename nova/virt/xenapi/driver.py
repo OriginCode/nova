@@ -70,6 +70,7 @@ class XenAPIDriver(driver.ComputeDriver):
         "supports_multiattach": False,
         "supports_trusted_certs": False,
         "supports_pcpus": False,
+        "supports_accelerators": False,
 
         # Image type support flags
         "supports_image_type_aki": False,
@@ -82,6 +83,7 @@ class XenAPIDriver(driver.ComputeDriver):
         "supports_image_type_vhd": True,
         "supports_image_type_vhdx": False,
         "supports_image_type_vmdk": False,
+        "supports_image_type_ploop": False,
     }
 
     def __init__(self, virtapi, read_only=False):
@@ -214,7 +216,7 @@ class XenAPIDriver(driver.ComputeDriver):
 
     def spawn(self, context, instance, image_meta, injected_files,
               admin_password, allocations, network_info=None,
-              block_device_info=None, power_on=True):
+              block_device_info=None, power_on=True, accel_info=None):
         """Create VM instance."""
         vgpu_info = self._get_vgpu_info(allocations)
         self._vmops.spawn(context, instance, image_meta, injected_files,
@@ -236,7 +238,7 @@ class XenAPIDriver(driver.ComputeDriver):
 
     def finish_migration(self, context, migration, instance, disk_info,
                          network_info, image_meta, resize_instance,
-                         block_device_info=None, power_on=True):
+                         allocations, block_device_info=None, power_on=True):
         """Completes a resize, turning on the migrated instance."""
         self._vmops.finish_migration(context, migration, instance, disk_info,
                                      network_info, image_meta, resize_instance,
@@ -251,7 +253,8 @@ class XenAPIDriver(driver.ComputeDriver):
         self._vmops.post_interrupted_snapshot_cleanup(context, instance)
 
     def reboot(self, context, instance, network_info, reboot_type,
-               block_device_info=None, bad_volumes_callback=None):
+               block_device_info=None, bad_volumes_callback=None,
+               accel_info=None):
         """Reboot VM instance."""
         self._vmops.reboot(instance, reboot_type,
                            bad_volumes_callback=bad_volumes_callback)
@@ -310,7 +313,7 @@ class XenAPIDriver(driver.ComputeDriver):
         self._vmops.resume(instance)
 
     def rescue(self, context, instance, network_info, image_meta,
-               rescue_password):
+               rescue_password, block_device_info):
         """Rescue the specified instance."""
         self._vmops.rescue(context, instance, network_info, image_meta,
                            rescue_password)
@@ -329,7 +332,7 @@ class XenAPIDriver(driver.ComputeDriver):
         self._vmops.power_off(instance)
 
     def power_on(self, context, instance, network_info,
-                 block_device_info=None):
+                 block_device_info=None, accel_info=None):
         """Power on the specified instance."""
         self._vmops.power_on(instance)
 
@@ -617,12 +620,6 @@ class XenAPIDriver(driver.ComputeDriver):
 
         return dic
 
-    def ensure_filtering_rules_for_instance(self, instance, network_info):
-        # NOTE(salvatore-orlando): it enforces security groups on
-        # host initialization and live migration.
-        # In XenAPI we do not assume instances running upon host initialization
-        return
-
     def check_can_live_migrate_destination(self, context, instance,
                 src_compute_info, dst_compute_info,
                 block_migration=False, disk_over_commit=False):
@@ -769,26 +766,6 @@ class XenAPIDriver(driver.ComputeDriver):
         """
         self._vmops.post_live_migration_at_destination(context, instance,
                 network_info, block_device_info, block_device_info)
-
-    def unfilter_instance(self, instance, network_info):
-        """Removes security groups configured for an instance."""
-        return self._vmops.unfilter_instance(instance, network_info)
-
-    def refresh_security_group_rules(self, security_group_id):
-        """Updates security group rules for all instances associated with a
-        given security group.
-
-        Invoked when security group rules are updated.
-        """
-        return self._vmops.refresh_security_group_rules(security_group_id)
-
-    def refresh_instance_security_rules(self, instance):
-        """Updates security group rules for specified instance.
-
-        Invoked when instances are added/removed to a security group
-        or when a rule is added/removed to a security group.
-        """
-        return self._vmops.refresh_instance_security_rules(instance)
 
     def get_available_nodes(self, refresh=False):
         stats = self.host_state.get_host_stats(refresh=refresh)

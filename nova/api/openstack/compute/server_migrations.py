@@ -26,7 +26,7 @@ from nova.i18n import _
 from nova.policies import servers_migrations as sm_policies
 
 
-def output(migration, include_uuid=False):
+def output(migration, include_uuid=False, include_user_project=False):
     """Returns the desired output of the API from an object.
 
     From a Migrations's object this method returns the primitive
@@ -52,6 +52,9 @@ def output(migration, include_uuid=False):
     }
     if include_uuid:
         result['uuid'] = migration.uuid
+    if include_user_project:
+        result['user_id'] = migration.user_id
+        result['project_id'] = migration.project_id
     return result
 
 
@@ -69,9 +72,10 @@ class ServerMigrationsController(wsgi.Controller):
     @validation.schema(server_migrations.force_complete)
     def _force_complete(self, req, id, server_id, body):
         context = req.environ['nova.context']
-        context.can(sm_policies.POLICY_ROOT % 'force_complete')
-
         instance = common.get_instance(self.compute_api, context, server_id)
+        context.can(sm_policies.POLICY_ROOT % 'force_complete',
+                    target={'project_id': instance.project_id})
+
         try:
             self.compute_api.live_migrate_force_complete(context, instance, id)
         except exception.InstanceNotFound as e:
@@ -91,29 +95,34 @@ class ServerMigrationsController(wsgi.Controller):
     def index(self, req, server_id):
         """Return all migrations of an instance in progress."""
         context = req.environ['nova.context']
-        context.can(sm_policies.POLICY_ROOT % 'index')
-
         # NOTE(Shaohe Feng) just check the instance is available. To keep
         # consistency with other API, check it before get migrations.
-        common.get_instance(self.compute_api, context, server_id)
+        instance = common.get_instance(self.compute_api, context, server_id)
+
+        context.can(sm_policies.POLICY_ROOT % 'index',
+                    target={'project_id': instance.project_id})
 
         migrations = self.compute_api.get_migrations_in_progress_by_instance(
                 context, server_id, 'live-migration')
 
         include_uuid = api_version_request.is_supported(req, '2.59')
-        return {'migrations': [output(
-            migration, include_uuid) for migration in migrations]}
+
+        include_user_project = api_version_request.is_supported(req, '2.80')
+        return {'migrations': [
+            output(migration, include_uuid, include_user_project)
+            for migration in migrations]}
 
     @wsgi.Controller.api_version("2.23")
     @wsgi.expected_errors(404)
     def show(self, req, server_id, id):
         """Return the migration of an instance in progress by id."""
         context = req.environ['nova.context']
-        context.can(sm_policies.POLICY_ROOT % 'show')
-
         # NOTE(Shaohe Feng) just check the instance is available. To keep
         # consistency with other API, check it before get migrations.
-        common.get_instance(self.compute_api, context, server_id)
+        instance = common.get_instance(self.compute_api, context, server_id)
+
+        context.can(sm_policies.POLICY_ROOT % 'show',
+                    target={'project_id': instance.project_id})
 
         try:
             migration = self.compute_api.get_migration_by_id_and_instance(
@@ -136,7 +145,10 @@ class ServerMigrationsController(wsgi.Controller):
             raise exc.HTTPNotFound(explanation=msg)
 
         include_uuid = api_version_request.is_supported(req, '2.59')
-        return {'migration': output(migration, include_uuid)}
+
+        include_user_project = api_version_request.is_supported(req, '2.80')
+        return {'migration': output(migration, include_uuid,
+                                    include_user_project)}
 
     @wsgi.Controller.api_version("2.24")
     @wsgi.response(202)
@@ -144,11 +156,12 @@ class ServerMigrationsController(wsgi.Controller):
     def delete(self, req, server_id, id):
         """Abort an in progress migration of an instance."""
         context = req.environ['nova.context']
-        context.can(sm_policies.POLICY_ROOT % 'delete')
+        instance = common.get_instance(self.compute_api, context, server_id)
+        context.can(sm_policies.POLICY_ROOT % 'delete',
+                    target={'project_id': instance.project_id})
 
         support_abort_in_queue = api_version_request.is_supported(req, '2.65')
 
-        instance = common.get_instance(self.compute_api, context, server_id)
         try:
             self.compute_api.live_migrate_abort(
                 context, instance, id,
@@ -160,5 +173,3 @@ class ServerMigrationsController(wsgi.Controller):
             raise exc.HTTPNotFound(explanation=e.format_message())
         except exception.InvalidMigrationState as e:
             raise exc.HTTPBadRequest(explanation=e.format_message())
-        except exception.AbortQueuedLiveMigrationNotYetSupported as e:
-            raise exc.HTTPConflict(explanation=e.format_message())

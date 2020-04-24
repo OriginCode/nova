@@ -87,9 +87,17 @@ from nova.virt import osinfo
 
 CONF = cfg.CONF
 
-
-SUPPORTED_DEVICE_TYPES = ('disk', 'cdrom', 'floppy', 'lun')
 BOOT_DEV_FOR_TYPE = {'disk': 'hd', 'cdrom': 'cdrom', 'floppy': 'fd'}
+# NOTE(aspiers): If you change this, don't forget to update the docs and
+# metadata for hw_*_bus in glance.
+SUPPORTED_DEVICE_BUSES = {
+    'qemu': ['virtio', 'scsi', 'ide', 'usb', 'fdc', 'sata'],
+    'kvm': ['virtio', 'scsi', 'ide', 'usb', 'fdc', 'sata'],
+    'xen': ['xen', 'ide'],
+    'uml': ['uml'],
+    'lxc': ['lxc'],
+    'parallels': ['ide', 'scsi']}
+SUPPORTED_DEVICE_TYPES = ('disk', 'cdrom', 'floppy', 'lun')
 
 
 def has_disk_dev(mapping, disk_dev):
@@ -201,21 +209,9 @@ def find_disk_dev_for_disk_bus(mapping, bus,
 
 
 def is_disk_bus_valid_for_virt(virt_type, disk_bus):
-    # NOTE(aspiers): If you change this, don't forget to update the
-    # docs and metadata for hw_*_bus in glance.
-    valid_bus = {
-        'qemu': ['virtio', 'scsi', 'ide', 'usb', 'fdc', 'sata'],
-        'kvm': ['virtio', 'scsi', 'ide', 'usb', 'fdc', 'sata'],
-        'xen': ['xen', 'ide'],
-        'uml': ['uml'],
-        'lxc': ['lxc'],
-        'parallels': ['ide', 'scsi']
-        }
-
-    if virt_type not in valid_bus:
+    if virt_type not in SUPPORTED_DEVICE_BUSES:
         raise exception.UnsupportedVirtType(virt=virt_type)
-
-    return disk_bus in valid_bus[virt_type]
+    return disk_bus in SUPPORTED_DEVICE_BUSES[virt_type]
 
 
 def get_disk_bus_for_device_type(instance,
@@ -509,11 +505,9 @@ def update_bdm(bdm, info):
                          info['bus'], info['type']))))
 
 
-def get_disk_mapping(virt_type, instance,
-                     disk_bus, cdrom_bus,
-                     image_meta,
-                     block_device_info=None,
-                     rescue=False):
+def get_disk_mapping(virt_type, instance, disk_bus, cdrom_bus, image_meta,
+                     block_device_info=None, rescue=False,
+                     rescue_image_meta=None):
     """Determine how to map default disks to the virtual machine.
 
        This is about figuring out whether the default 'disk',
@@ -522,32 +516,76 @@ def get_disk_mapping(virt_type, instance,
 
        Returns the guest disk mapping for the devices.
     """
+    # NOTE(lyarwood): This is a legacy rescue attempt so provide a mapping with
+    # the rescue disk, original root disk and optional config drive.
+    if rescue and rescue_image_meta is None:
+        return _get_rescue_disk_mapping(
+            virt_type, instance, disk_bus, image_meta)
 
+    # NOTE(lyarwood): This is a new stable rescue attempt so provide a mapping
+    # with the original mapping *and* rescue disk appended to the end.
+    if rescue and rescue_image_meta:
+        return _get_stable_device_rescue_mapping(
+            virt_type, instance, disk_bus, cdrom_bus, image_meta,
+            block_device_info, rescue_image_meta)
+
+    # NOTE(lyarwood): This is a normal spawn so fetch the full disk mapping.
+    return _get_disk_mapping(
+        virt_type, instance, disk_bus, cdrom_bus, image_meta,
+        block_device_info)
+
+
+def _get_rescue_disk_mapping(virt_type, instance, disk_bus, image_meta):
+    """Build disk mapping for a legacy instance rescue
+
+    This legacy method of rescue requires that the rescue device is attached
+    first, ahead of the original root disk and optional config drive.
+
+    :param virt_type: Virt type used by libvirt.
+    :param instance: nova.objects.instance.Instance object
+    :param disk_bus: Disk bus to use within the mapping
+    :param image_meta: objects.image_meta.ImageMeta for the instance
+
+    :returns: Disk mapping for the given instance
+    """
     mapping = {}
+    rescue_info = get_next_disk_info(mapping,
+                                     disk_bus, boot_index=1)
+    mapping['disk.rescue'] = rescue_info
+    mapping['root'] = rescue_info
 
-    if rescue:
-        rescue_info = get_next_disk_info(mapping,
-                                         disk_bus, boot_index=1)
-        mapping['disk.rescue'] = rescue_info
-        mapping['root'] = rescue_info
+    os_info = get_next_disk_info(mapping,
+                                 disk_bus)
+    mapping['disk'] = os_info
 
-        os_info = get_next_disk_info(mapping,
-                                     disk_bus)
-        mapping['disk'] = os_info
+    if configdrive.required_by(instance):
+        device_type = get_config_drive_type()
+        disk_bus = get_disk_bus_for_device_type(instance,
+                                                virt_type,
+                                                image_meta,
+                                                device_type)
+        config_info = get_next_disk_info(mapping,
+                                         disk_bus,
+                                         device_type)
+        mapping['disk.config.rescue'] = config_info
 
-        if configdrive.required_by(instance):
-            device_type = get_config_drive_type()
-            disk_bus = get_disk_bus_for_device_type(instance,
-                                                    virt_type,
-                                                    image_meta,
-                                                    device_type)
-            config_info = get_next_disk_info(mapping,
-                                             disk_bus,
-                                             device_type)
-            mapping['disk.config.rescue'] = config_info
+    return mapping
 
-        return mapping
 
+def _get_disk_mapping(virt_type, instance, disk_bus, cdrom_bus, image_meta,
+                      block_device_info):
+    """Build disk mapping for a given instance
+
+    :param virt_type: Virt type used by libvirt.
+    :param instance: nova.objects.instance.Instance object
+    :param disk_bus: Disk bus to use within the mapping
+    :param cdrom_bus: CD-ROM bus to use within the mapping
+    :param image_meta: objects.image_meta.ImageMeta for the instance
+    :param block_device_info: dict detailing disks and volumes attached
+
+    :returns: Disk mapping for the given instance.
+    """
+    mapping = {}
     pre_assigned_device_names = \
     [block_device.strip_dev(get_device_name(bdm)) for bdm in itertools.chain(
         driver.block_device_info_get_ephemerals(block_device_info),
@@ -630,12 +668,40 @@ def get_disk_mapping(virt_type, instance,
                                          disk_bus,
                                          device_type)
         mapping['disk.config'] = config_info
-
     return mapping
 
 
-def get_disk_info(virt_type, instance, image_meta,
-                  block_device_info=None, rescue=False):
+def _get_stable_device_rescue_mapping(virt_type, instance, disk_bus, cdrom_bus,
+            image_meta, block_device_info, rescue_image_meta):
+    """Build a disk mapping for a given instance and add a rescue device
+
+    This method builds the original disk mapping of the instance before
+    attaching the rescue device last.
+
+    :param virt_type: Virt type used by libvirt.
+    :param instance: nova.objects.instance.Instance object
+    :param disk_bus: Disk bus to use within the mapping
+    :param cdrom_bus: CD-ROM bus to use within the mapping
+    :param image_meta: objects.image_meta.ImageMeta for the instance
+    :param block_device_info: dict detailing disks and volumes attached
+    :param rescue_image_meta: objects.image_meta.ImageMeta of the rescue image
+
+    :returns: Disk mapping dict with rescue device added.
+    """
+    mapping = _get_disk_mapping(
+        virt_type, instance, disk_bus, cdrom_bus, image_meta,
+        block_device_info)
+    rescue_device = get_rescue_device(rescue_image_meta)
+    rescue_bus = get_rescue_bus(instance, virt_type, rescue_image_meta,
+                                rescue_device)
+    rescue_info = get_next_disk_info(mapping, rescue_bus,
+                                     device_type=rescue_device)
+    mapping['disk.rescue'] = rescue_info
+    return mapping
+
+
+def get_disk_info(virt_type, instance, image_meta, block_device_info=None,
+                  rescue=False, rescue_image_meta=None):
     """Determine guest disk mapping info.
 
        This is a wrapper around get_disk_mapping, which
@@ -656,8 +722,9 @@ def get_disk_info(virt_type, instance, image_meta,
     mapping = get_disk_mapping(virt_type, instance,
                                disk_bus, cdrom_bus,
                                image_meta,
-                               block_device_info,
-                               rescue)
+                               block_device_info=block_device_info,
+                               rescue=rescue,
+                               rescue_image_meta=rescue_image_meta)
 
     return {'disk_bus': disk_bus,
             'cdrom_bus': cdrom_bus,
@@ -676,3 +743,42 @@ def get_boot_order(disk_info):
         return [el for el in lst if el not in s and not s.add(el)]
 
     return uniq(boot_devs_dup)
+
+
+def get_rescue_device(rescue_image_meta):
+    """Find and validate the rescue device
+
+    :param rescue_image_meta: ImageMeta object provided when rescuing
+
+    :raises: UnsupportedRescueDevice if the requested device type is not
+             supported
+    :returns: A valid device type to be used during the rescue
+    """
+    rescue_device = rescue_image_meta.properties.get("hw_rescue_device",
+                                                     "disk")
+    if rescue_device not in SUPPORTED_DEVICE_TYPES:
+        raise exception.UnsupportedRescueDevice(device=rescue_device)
+    return rescue_device
+
+
+def get_rescue_bus(instance, virt_type, rescue_image_meta, rescue_device):
+    """Find and validate the rescue bus
+
+    :param instance: The instance to be rescued
+    :param virt_type: The hypervisor the instance will run on
+    :param rescue_image_meta: ImageMeta object provided when rescuing
+    :param rescue_device: The rescue device being used
+
+    :raises: UnsupportedRescueBus if the requested bus is not
+             supported by the hypervisor
+    :returns: A valid device bus given virt_type and rescue device
+    """
+    rescue_bus = rescue_image_meta.properties.get("hw_rescue_bus")
+    if rescue_bus is not None:
+        if is_disk_bus_valid_for_virt(virt_type, rescue_bus):
+            return rescue_bus
+        else:
+            raise exception.UnsupportedRescueBus(bus=rescue_bus,
+                                                 virt=virt_type)
+    return get_disk_bus_for_device_type(instance, virt_type, rescue_image_meta,
+                                        device_type=rescue_device)

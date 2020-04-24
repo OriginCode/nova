@@ -53,10 +53,12 @@ Response
   - status: migrate_status
   - updated_at: updated
   - uuid: migration_uuid
+  - user_id: user_id_migration_2_80
+  - project_id: project_id_migration_2_80
 
-**Example List Migrations (2.59)**
+**Example List Migrations (2.80)**
 
-.. literalinclude:: ../../doc/api_samples/server-migrations/v2.59/migrations-index.json
+.. literalinclude:: ../../doc/api_samples/server-migrations/v2.80/migrations-index.json
    :language: javascript
 
 Show Migration Details
@@ -107,10 +109,12 @@ Response
   - status: migrate_status
   - updated_at: updated
   - uuid: migration_uuid
+  - user_id: user_id_migration_2_80
+  - project_id: project_id_migration_2_80
 
-**Example Show Migration Details (2.59)**
+**Example Show Migration Details (2.80)**
 
-.. literalinclude:: ../../doc/api_samples/server-migrations/v2.59/migrations-get.json
+.. literalinclude:: ../../doc/api_samples/server-migrations/v2.80/migrations-get.json
    :language: javascript
 
 Force Migration Complete Action (force_complete Action)
@@ -191,8 +195,10 @@ Abort an in-progress live migration.
 .. note:: With microversion 2.65 or greater, you can abort live migrations
     also in ``queued`` and ``preparing`` status.
 
-.. note:: Not all compute back ends support aborting an in-progress live
+.. note:: Not all `compute back ends`__ support aborting an in-progress live
     migration.
+
+.. __: https://docs.openstack.org/nova/latest/user/support-matrix.html#operation_abort_in_progress_live_migration
 
 Policy defaults enable only users with the administrative role to perform
 this operation. Cloud providers can change these permissions through the

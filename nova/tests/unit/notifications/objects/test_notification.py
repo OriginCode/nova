@@ -366,6 +366,8 @@ class TestNotificationBase(test.NoDBTestCase):
 
 
 notification_object_data = {
+    'AggregateCacheNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
+    'AggregateCachePayload': '1.0-3f4dc002bed67d06eecb577242a43572',
     'AggregateNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
     'AggregatePayload': '1.1-1eb9adcc4440d8627de6ec37c6398746',
     'AuditPeriodPayload': '1.0-2b429dd307b8374636703b843fa3f9cb',
@@ -375,13 +377,17 @@ notification_object_data = {
     'ComputeTaskNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
     'ComputeTaskPayload': '1.0-e3d34762c14d131c98337b72e8c600e1',
     'DestinationPayload': '1.0-4ccf26318dd18c4377dada2b1e74ec2e',
-    'EventType': '1.19-000a76e83b06a9de11d365465a755a5e',
+    'EventType': '1.21-6a5f57fafe478f354f66b81b4cb537ea',
     'ExceptionNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
     'ExceptionPayload': '1.1-6c43008bd81885a63bc7f7c629f0793b',
     'FlavorNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
     'FlavorPayload': '1.4-2e7011b8b4e59167fe8b7a0a81f0d452',
     'ImageMetaPayload': '1.0-0e65beeacb3393beed564a57bc2bc989',
-    'ImageMetaPropsPayload': '1.1-789c420945f2cae6ac64ca8dffbcb1b8',
+    # NOTE(efried): ImageMetaPropsPayload is built dynamically from
+    # ImageMetaProps, so when you see a fail here for that reason, you must
+    # *also* bump the version of ImageMetaPropsPayload. See its docstring for
+    # more information.
+    'ImageMetaPropsPayload': '1.3-9c200c895932163a4e14e6bb385fa1e0',
     'InstanceActionNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
     'InstanceActionPayload': '1.8-4fa3da9cbf0761f1f700ae578f36dc2f',
     'InstanceActionRebuildNotification':

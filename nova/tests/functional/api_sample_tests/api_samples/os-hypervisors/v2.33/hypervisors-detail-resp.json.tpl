@@ -33,7 +33,7 @@
             "running_vms": 0,
             "service": {
                 "host": "%(host_name)s",
-                "id": 6,
+                "id": "%(int:service_id)s",
                 "disabled_reason": null
             },
             "vcpus": 2,
@@ -42,7 +42,7 @@
     ],
     "hypervisors_links": [
         {
-            "href": "http://openstack.example.com/v2.1/6f70656e737461636b20342065766572/hypervisors/detail?limit=1&marker=2",
+            "href": "http://openstack.example.com/v2.1/6f70656e737461636b20342065766572/os-hypervisors/detail?limit=1&marker=2",
             "rel": "next"
         }
     ]

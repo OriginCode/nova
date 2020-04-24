@@ -7,12 +7,28 @@ enhance documentation, and increase testing. Contributions of any type are
 valuable, and part of what keeps the project going. Here are a list of
 resources to get your started.
 
+Basic Information
+=================
+
+.. toctree::
+   :maxdepth: 2
+
+   contributing
+
 Getting Started
 ===============
 
 * :doc:`/contributor/how-to-get-involved`: Overview of engaging in the project
 * :doc:`/contributor/development-environment`: Get your computer setup to
   contribute
+
+.. # NOTE(amotoki): toctree needs to be placed at the end of the secion to
+   # keep the document structure in the PDF doc.
+.. toctree::
+   :hidden:
+
+   how-to-get-involved
+   development-environment
 
 Nova Process
 ============
@@ -44,6 +60,17 @@ while keeping users happy and keeping developers productive.
 
 * :doc:`/contributor/ptl-guide`: A chronological PTL reference guide
 
+.. # NOTE(amotoki): toctree needs to be placed at the end of the secion to
+   # keep the document structure in the PDF doc.
+.. toctree::
+   :hidden:
+
+   project-scope
+   policies
+   process
+   blueprints
+   ptl-guide
+
 Reviewing
 =========
 
@@ -59,6 +86,15 @@ Reviewing
 * :doc:`/contributor/documentation`: Guidelines for handling documentation
   contributions
 
+.. # NOTE(amotoki): toctree needs to be placed at the end of the secion to
+   # keep the document structure in the PDF doc.
+.. toctree::
+   :hidden:
+
+   releasenotes
+   code-review
+   /reference/i18n
+   documentation
 
 Testing
 =======
@@ -84,6 +120,18 @@ be Python code. All new code needs to be validated somehow.
 
   * :doc:`/contributor/testing/eventlet-profiling`
 
+.. # NOTE(amotoki): toctree needs to be placed at the end of the secion to
+   # keep the document structure in the PDF doc.
+.. toctree::
+   :hidden:
+
+   testing
+   testing/libvirt-numa
+   testing/serial-console
+   testing/zero-downtime-upgrade
+   testing/down-cell
+   testing/eventlet-profiling
+
 The Nova API
 ============
 
@@ -101,6 +149,16 @@ changes done to the API, as the impact can be very wide.
 * :doc:`/contributor/api-ref-guideline`: The guideline to write the API
   reference.
 
+.. # NOTE(amotoki): toctree needs to be placed at the end of the secion to
+   # keep the document structure in the PDF doc.
+.. toctree::
+   :hidden:
+
+   api
+   api-2
+   microversions
+   api-ref-guideline
+
 Nova Major Subsystems
 =====================
 
@@ -108,8 +166,17 @@ Major subsystems in nova have different needs. If you are contributing to one
 of these please read the :ref:`reference guide <reference-internals>` before
 diving in.
 
-Move operations
-~~~~~~~~~~~~~~~
+* Move operations
 
-* :doc:`/contributor/evacuate-vs-rebuild`: Describes the differences between
-  the often-confused evacuate and rebuild operations.
+  * :doc:`/contributor/evacuate-vs-rebuild`: Describes the differences between
+    the often-confused evacuate and rebuild operations.
+  * :doc:`/contributor/resize-and-cold-migrate`: Describes the differences and
+    similarities between resize and cold migrate operations.
+
+.. # NOTE(amotoki): toctree needs to be placed at the end of the secion to
+   # keep the document structure in the PDF doc.
+.. toctree::
+   :hidden:
+
+   evacuate-vs-rebuild
+   resize-and-cold-migrate

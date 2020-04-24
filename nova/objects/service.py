@@ -31,7 +31,7 @@ LOG = logging.getLogger(__name__)
 
 
 # NOTE(danms): This is the global service version counter
-SERVICE_VERSION = 40
+SERVICE_VERSION = 51
 
 
 # NOTE(danms): This is our SERVICE_VERSION history. The idea is that any
@@ -161,6 +161,30 @@ SERVICE_VERSION_HISTORY = (
     # drop_move_claim_at_destination() method, and numa_live_migration
     # parameter to check_can_live_migrate_source()
     {'compute_rpc': '5.3'},
+    # Version 41: Add cache_images() to compute rpcapi (version 5.4)
+    {'compute_rpc': '5.4'},
+    # Version 42: Compute RPC version 5.5; +prep_snapshot_based_resize_at_dest
+    {'compute_rpc': '5.5'},
+    # Version 43: Compute RPC version 5.6: prep_snapshot_based_resize_at_source
+    {'compute_rpc': '5.6'},
+    # Version 44: Compute RPC version 5.7: finish_snapshot_based_resize_at_dest
+    {'compute_rpc': '5.7'},
+    # Version 45: Compute RPC v5.8: confirm_snapshot_based_resize_at_source
+    {'compute_rpc': '5.8'},
+    # Version 46: Compute RPC v5.9: revert_snapshot_based_resize_at_dest
+    {'compute_rpc': '5.9'},
+    # Version 47: Compute RPC v5.10:
+    # finish_revert_snapshot_based_resize_at_source
+    {'compute_rpc': '5.10'},
+    # Version 48: Drivers report COMPUTE_SAME_HOST_COLD_MIGRATE trait.
+    {'compute_rpc': '5.10'},
+    # Version 49: Compute now support server move operations with qos ports
+    {'compute_rpc': '5.10'},
+    # Version 50: Compute RPC v5.11:
+    # Add accel_uuids (accelerator requests) param to build_and_run_instance
+    {'compute_rpc': '5.11'},
+    # Version 51: Add support for live migration with vpmem
+    {'compute_rpc': '5.11'},
 )
 
 
@@ -285,13 +309,6 @@ class Service(base.NovaPersistentObject, base.NovaObject,
 
         service._context = context
         service.obj_reset_changes()
-
-        # TODO(dpeschman): Drop this once all services have uuids in database
-        if 'uuid' not in service and not service.deleted:
-            service.uuid = uuidutils.generate_uuid()
-            LOG.debug('Generated UUID %(uuid)s for service %(id)i',
-                      dict(uuid=service.uuid, id=service.id))
-            service.save()
 
         return service
 

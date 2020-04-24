@@ -34,7 +34,7 @@ EXTENDED_QUOTAS = ['server_groups', 'server_group_members']
 
 # NOTE(gmann): Network related quotas are filter out in
 # microversion 2.50. Bug#1701211.
-FILTERED_QUOTAS_2_50 = ["fixed_ips", "floating_ips", "networks",
+FILTERED_QUOTAS_2_50 = ["fixed_ips", "floating_ips",
                         "security_group_rules", "security_groups"]
 
 # Microversion 2.57 removes personality (injected) files from the API.
@@ -93,7 +93,7 @@ class QuotaClassSetsController(wsgi.Controller):
     def _show(self, req, id, filtered_quotas=None,
               exclude_server_groups=False):
         context = req.environ['nova.context']
-        context.can(qcs_policies.POLICY_ROOT % 'show', {'quota_class': id})
+        context.can(qcs_policies.POLICY_ROOT % 'show', target={})
         values = QUOTAS.get_class_quotas(context, id)
         return self._format_quota_set(id, values, filtered_quotas,
                                       exclude_server_groups)
@@ -119,7 +119,7 @@ class QuotaClassSetsController(wsgi.Controller):
     def _update(self, req, id, body, filtered_quotas=None,
                 exclude_server_groups=False):
         context = req.environ['nova.context']
-        context.can(qcs_policies.POLICY_ROOT % 'update', {'quota_class': id})
+        context.can(qcs_policies.POLICY_ROOT % 'update', target={})
         try:
             utils.check_string_length(id, 'quota_class_name',
                                       min_length=1, max_length=255)

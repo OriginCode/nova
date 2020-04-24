@@ -26,12 +26,12 @@ class QuotaClassSetsTestV21(test.TestCase):
     validation_error = exception.ValidationError
     api_version = '2.1'
     quota_resources = {'metadata_items': 128,
-                       'ram': 51200, 'floating_ips': 10,
+                       'ram': 51200, 'floating_ips': -1,
                        'fixed_ips': -1, 'instances': 10,
                        'injected_files': 5, 'cores': 20,
                        'injected_file_content_bytes': 10240,
-                       'security_groups': 10,
-                       'security_group_rules': 20, 'key_pairs': 100,
+                       'security_groups': -1,
+                       'security_group_rules': -1, 'key_pairs': 100,
                        'injected_file_path_bytes': 255}
     filtered_quotas = None
 
@@ -51,10 +51,10 @@ class QuotaClassSetsTestV21(test.TestCase):
     def _check_filtered_extended_quota(self, quota_set):
         self.assertNotIn('server_groups', quota_set)
         self.assertNotIn('server_group_members', quota_set)
-        self.assertEqual(10, quota_set['floating_ips'])
+        self.assertEqual(-1, quota_set['floating_ips'])
         self.assertEqual(-1, quota_set['fixed_ips'])
-        self.assertEqual(10, quota_set['security_groups'])
-        self.assertEqual(20, quota_set['security_group_rules'])
+        self.assertEqual(-1, quota_set['security_groups'])
+        self.assertEqual(-1, quota_set['security_group_rules'])
 
     def test_format_quota_set(self):
         quota_set = self.controller._format_quota_set('test_class',
@@ -156,32 +156,3 @@ class QuotaClassSetsTestV257(QuotaClassSetsTestV250):
         for resource in quota_classes_v21.FILTERED_QUOTAS_2_57:
             self.quota_resources.pop(resource, None)
         self.filtered_quotas.extend(quota_classes_v21.FILTERED_QUOTAS_2_57)
-
-
-class QuotaClassesPolicyEnforcementV21(test.NoDBTestCase):
-
-    def setUp(self):
-        super(QuotaClassesPolicyEnforcementV21, self).setUp()
-        self.controller = quota_classes_v21.QuotaClassSetsController()
-        self.req = fakes.HTTPRequest.blank('')
-
-    def test_show_policy_failed(self):
-        rule_name = "os_compute_api:os-quota-class-sets:show"
-        self.policy.set_rules({rule_name: "quota_class:non_fake"})
-        exc = self.assertRaises(
-            exception.PolicyNotAuthorized,
-            self.controller.show, self.req, fakes.FAKE_UUID)
-        self.assertEqual(
-            "Policy doesn't allow %s to be performed." % rule_name,
-            exc.format_message())
-
-    def test_update_policy_failed(self):
-        rule_name = "os_compute_api:os-quota-class-sets:update"
-        self.policy.set_rules({rule_name: "quota_class:non_fake"})
-        exc = self.assertRaises(
-            exception.PolicyNotAuthorized,
-            self.controller.update, self.req, fakes.FAKE_UUID,
-            body={'quota_class_set': {}})
-        self.assertEqual(
-            "Policy doesn't allow %s to be performed." % rule_name,
-            exc.format_message())

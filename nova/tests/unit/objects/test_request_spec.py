@@ -307,7 +307,8 @@ class _TestRequestSpecObject(object):
         spec = objects.RequestSpec.from_primitives(ctxt, spec_dict, filt_props)
         mock_limits.assert_called_once_with({})
         # Make sure that all fields are set using that helper method
-        skip = ['id', 'security_groups', 'network_metadata', 'is_bfv']
+        skip = ['id', 'security_groups', 'network_metadata', 'is_bfv',
+                'request_level_params']
         for field in [f for f in spec.obj_fields if f not in skip]:
             self.assertTrue(spec.obj_attr_is_set(field),
                              'Field: %s is not set' % field)
@@ -338,7 +339,7 @@ class _TestRequestSpecObject(object):
                 filter_properties, instance_group, instance.availability_zone,
                 objects.SecurityGroupList())
         # Make sure that all fields are set using that helper method
-        skip = ['id', 'network_metadata', 'is_bfv']
+        skip = ['id', 'network_metadata', 'is_bfv', 'request_level_params']
         for field in [f for f in spec.obj_fields if f not in skip]:
             self.assertTrue(spec.obj_attr_is_set(field),
                             'Field: %s is not set' % field)
@@ -888,29 +889,6 @@ class _TestRequestSpecObject(object):
                               objects.NetworkMetadata)
         self.assertIn('network_metadata', req_obj)
 
-    def test_destination_aggregates_default(self):
-        destination = objects.Destination()
-        self.assertIsNone(destination.aggregates)
-
-    def test_destination_require_aggregates(self):
-        destination = objects.Destination()
-        destination.require_aggregates(['foo', 'bar'])
-        destination.require_aggregates(['baz'])
-        self.assertEqual(['foo,bar', 'baz'], destination.aggregates)
-
-    def test_destination_obj_make_compatible(self):
-        destination = objects.Destination(
-            aggregates=['foo'], host='fake-host', allow_cross_cell_move=False)
-        primitive = destination.obj_to_primitive(
-            target_version='1.2')['nova_object.data']
-        self.assertIn('aggregates', primitive)
-        self.assertNotIn('allow_cross_cell_move', primitive)
-
-        primitive = destination.obj_to_primitive(
-            target_version='1.0')['nova_object.data']
-        self.assertNotIn('aggregates', primitive)
-        self.assertEqual('fake-host', primitive['host'])
-
     def test_create_raises_on_unchanged_object(self):
         ctxt = context.RequestContext(uuids.user_id, uuids.project_id)
         req_obj = request_spec.RequestSpec(context=ctxt)
@@ -921,24 +899,24 @@ class _TestRequestSpecObject(object):
         req_obj.create()
         req_obj.save()
 
-    def test_destination_forbidden_aggregates_default(self):
-        destination = objects.Destination()
-        self.assertIsNone(destination.forbidden_aggregates)
+    def test_get_request_group_mapping_no_request(self):
+        req_obj = request_spec.RequestSpec()
+        self.assertIsNone(req_obj.get_request_group_mapping())
 
-    def test_destination_append_forbidden_aggregates(self):
-        destination = objects.Destination()
-        destination.append_forbidden_aggregates(set(['foo', 'bar']))
+    def test_get_request_group_mapping(self):
+        req_obj = request_spec.RequestSpec(
+            requested_resources=[
+                request_spec.RequestGroup(
+                    requester_id='requester1',
+                    provider_uuids=[uuids.pr1, uuids.pr2]),
+                request_spec.RequestGroup(
+                    requester_id='requester2',
+                    provider_uuids=[]),
+            ])
         self.assertEqual(
-            set(['foo', 'bar']), destination.forbidden_aggregates)
-        destination.append_forbidden_aggregates(set(['bar', 'baz']))
-        self.assertEqual(
-            set(['foo', 'bar', 'baz']), destination.forbidden_aggregates)
-
-    def test_destination_delete_forbidden_aggregates(self):
-        destination = objects.Destination()
-        destination.append_forbidden_aggregates(set(['foo']))
-        primitive = destination.obj_to_primitive(target_version='1.0')
-        self.assertNotIn('forbidden_aggregates', primitive['nova_object.data'])
+            {'requester1': [uuids.pr1, uuids.pr2],
+             'requester2': []},
+            req_obj.get_request_group_mapping())
 
 
 class TestRequestSpecObject(test_objects._LocalTest,
@@ -1062,31 +1040,68 @@ class TestDestinationObject(test.NoDBTestCase):
         self.project_id = uuids.project_id
         self.context = context.RequestContext(uuids.user_id, uuids.project_id)
 
-    def test_obj_make_compatible_destination(self):
-        values = {
-            'host': 'fake_host',
-            'node': 'fake_node',
-            'aggregates': ['agg1', 'agg2'],
-            'forbidden_aggregates': set(['agg3', 'agg4'])}
-        obj = objects.Destination(self.context, **values)
-        data = lambda x: x['nova_object.data']
-        obj_primitive = data(obj.obj_to_primitive(target_version='1.3'))
-        self.assertNotIn('forbidden_aggregates', obj_primitive)
-        self.assertIn('aggregates', obj_primitive)
+    def test_destination_aggregates_default(self):
+        destination = objects.Destination()
+        self.assertIsNone(destination.aggregates)
 
-    def test_obj_make_compatible_destination_with_forbidden_aggregates(self):
+    def test_destination_require_aggregates(self):
+        destination = objects.Destination()
+        destination.require_aggregates(['foo', 'bar'])
+        destination.require_aggregates(['baz'])
+        self.assertEqual(['foo,bar', 'baz'], destination.aggregates)
+
+    def test_destination_forbidden_aggregates_default(self):
+        destination = objects.Destination()
+        self.assertIsNone(destination.forbidden_aggregates)
+
+    def test_destination_append_forbidden_aggregates(self):
+        destination = objects.Destination()
+        destination.append_forbidden_aggregates(set(['foo', 'bar']))
+        self.assertEqual(
+            set(['foo', 'bar']), destination.forbidden_aggregates)
+        destination.append_forbidden_aggregates(set(['bar', 'baz']))
+        self.assertEqual(
+            set(['foo', 'bar', 'baz']), destination.forbidden_aggregates)
+
+    def test_obj_make_compatible(self):
         values = {
             'host': 'fake_host',
             'node': 'fake_node',
+            'cell': objects.CellMapping(uuid=uuids.cell1),
             'aggregates': ['agg1', 'agg2'],
+            'allow_cross_cell_move': False,
             'forbidden_aggregates': set(['agg3', 'agg4'])}
         obj = objects.Destination(self.context, **values)
         data = lambda x: x['nova_object.data']
-        obj_primitive = data(obj.obj_to_primitive(target_version='1.4'))
+        manifest = ovo_base.obj_tree_get_versions(obj.obj_name())
+
+        obj_primitive = data(obj.obj_to_primitive(target_version='1.4',
+                                                  version_manifest=manifest))
         self.assertIn('forbidden_aggregates', obj_primitive)
         self.assertItemsEqual(obj_primitive['forbidden_aggregates'],
                               set(['agg3', 'agg4']))
         self.assertIn('aggregates', obj_primitive)
+
+        obj_primitive = data(obj.obj_to_primitive(target_version='1.3',
+                                                  version_manifest=manifest))
+        self.assertNotIn('forbidden_aggregates', obj_primitive)
+        self.assertIn('allow_cross_cell_move', obj_primitive)
+
+        obj_primitive = data(obj.obj_to_primitive(target_version='1.2',
+                                                  version_manifest=manifest))
+        self.assertIn('aggregates', obj_primitive)
+        self.assertNotIn('allow_cross_cell_move', obj_primitive)
+
+        obj_primitive = data(obj.obj_to_primitive(target_version='1.1',
+                                                  version_manifest=manifest))
+        self.assertIn('cell', obj_primitive)
+        self.assertNotIn('aggregates', obj_primitive)
+
+        obj_primitive = data(obj.obj_to_primitive(target_version='1.0',
+                                                  version_manifest=manifest))
+        self.assertNotIn('forbidden_aggregates', obj_primitive)
+        self.assertNotIn('cell', obj_primitive)
+        self.assertEqual('fake_host', obj_primitive['host'])
 
 
 class TestMappingRequestGroupsToProviders(test.NoDBTestCase):

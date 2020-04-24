@@ -309,6 +309,12 @@ class TestPutAllocations(SchedulerReportClientTestCase):
         log_msg = mock_warn.call_args[0][0]
         self.assertIn("Failed to save allocation for", log_msg)
 
+    def test_put_allocations_fail_connection_error(self):
+        self.ks_adap_mock.put.side_effect = ks_exc.EndpointNotFound()
+        self.assertRaises(
+            exception.PlacementAPIConnectFailure, self.client.put_allocations,
+            self.context, mock.sentinel.consumer, mock.sentinel.payload)
+
     @mock.patch('nova.scheduler.client.report.SchedulerReportClient.put')
     def test_put_allocations_fail_due_to_consumer_generation_conflict(
             self, mock_put):
@@ -2068,16 +2074,16 @@ class TestProviderOperations(SchedulerReportClientTestCase):
                 'trait:CUSTOM_TRAIT2': 'preferred',
                 'trait:CUSTOM_TRAIT3': 'forbidden',
                 'trait:CUSTOM_TRAIT4': 'forbidden',
-                'resources1:DISK_GB': '30',
-                'trait1:STORAGE_DISK_SSD': 'required',
+                'resources_DISK:DISK_GB': '30',
+                'trait_DISK:STORAGE_DISK_SSD': 'required',
                 'resources2:VGPU': '2',
                 'trait2:HW_GPU_RESOLUTION_W2560H1600': 'required',
                 'trait2:HW_GPU_API_VULKAN': 'required',
-                'resources3:SRIOV_NET_VF': '1',
-                'resources3:CUSTOM_NET_EGRESS_BYTES_SEC': '125000',
+                'resources_NET:SRIOV_NET_VF': '1',
+                'resources_NET:CUSTOM_NET_EGRESS_BYTES_SEC': '125000',
                 'group_policy': 'isolate',
                 # These are ignored because misspelled, bad value, etc.
-                'resources02:CUSTOM_WIDGET': '123',
+                'resources*2:CUSTOM_WIDGET': '123',
                 'trait:HW_NIC_OFFLOAD_LRO': 'preferred',
                 'group_policy3': 'none',
             })
@@ -2096,12 +2102,13 @@ class TestProviderOperations(SchedulerReportClientTestCase):
             ('member_of', 'in:agg1,agg2,agg3'),
             ('required', 'CUSTOM_TRAIT1,HW_CPU_X86_AVX,!CUSTOM_TRAIT3,'
                          '!CUSTOM_TRAIT4'),
-            ('required1', 'STORAGE_DISK_SSD'),
             ('required2', 'HW_GPU_API_VULKAN,HW_GPU_RESOLUTION_W2560H1600'),
+            ('required_DISK', 'STORAGE_DISK_SSD'),
             ('resources', 'MEMORY_MB:1024,VCPU:1'),
-            ('resources1', 'DISK_GB:30'),
             ('resources2', 'VGPU:2'),
-            ('resources3', 'CUSTOM_NET_EGRESS_BYTES_SEC:125000,SRIOV_NET_VF:1')
+            ('resources_DISK', 'DISK_GB:30'),
+            ('resources_NET',
+             'CUSTOM_NET_EGRESS_BYTES_SEC:125000,SRIOV_NET_VF:1')
         ]
 
         resp_mock.json.return_value = json_data
@@ -2118,7 +2125,7 @@ class TestProviderOperations(SchedulerReportClientTestCase):
         expected_url = '/allocation_candidates?%s' % parse.urlencode(
             expected_query)
         self.ks_adap_mock.get.assert_called_once_with(
-            expected_url, microversion='1.32',
+            expected_url, microversion='1.35',
             global_request_id=self.context.global_id)
         self.assertEqual(mock.sentinel.alloc_reqs, alloc_reqs)
         self.assertEqual(mock.sentinel.p_sums, p_sums)
@@ -2162,7 +2169,7 @@ class TestProviderOperations(SchedulerReportClientTestCase):
             expected_query)
         self.assertEqual(mock.sentinel.alloc_reqs, alloc_reqs)
         self.ks_adap_mock.get.assert_called_once_with(
-            expected_url, microversion='1.32',
+            expected_url, microversion='1.35',
             global_request_id=self.context.global_id)
         self.assertEqual(mock.sentinel.p_sums, p_sums)
 
@@ -2188,7 +2195,7 @@ class TestProviderOperations(SchedulerReportClientTestCase):
         res = self.client.get_allocation_candidates(self.context, resources)
 
         self.ks_adap_mock.get.assert_called_once_with(
-            mock.ANY, microversion='1.32',
+            mock.ANY, microversion='1.35',
             global_request_id=self.context.global_id)
         url = self.ks_adap_mock.get.call_args[0][0]
         split_url = parse.urlsplit(url)
@@ -3212,6 +3219,19 @@ class TestAllocations(SchedulerReportClientTestCase):
         # With a 409, only the error should be called
         self.assertEqual(0, mock_log.info.call_count)
         self.assertEqual(1, mock_log.error.call_count)
+
+    @mock.patch('nova.scheduler.client.report.SchedulerReportClient.delete',
+                new=mock.Mock(side_effect=ks_exc.EndpointNotFound()))
+    def test_delete_resource_provider_placement_exception(self):
+        """Ensure that a ksa exception in delete_resource_provider raises
+        through.
+        """
+        self.client._provider_tree.new_root(uuids.cn, uuids.cn, generation=1)
+        cn = objects.ComputeNode(uuid=uuids.cn, host="fake_host",
+                hypervisor_hostname="fake_hostname", )
+        self.assertRaises(
+            ks_exc.ClientException,
+            self.client.delete_resource_provider, self.context, cn)
 
     @mock.patch("nova.scheduler.client.report.SchedulerReportClient.get")
     def test_get_allocations_for_resource_provider(self, mock_get):

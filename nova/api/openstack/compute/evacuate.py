@@ -13,6 +13,7 @@
 #   under the License.
 
 
+from oslo_log import log as logging
 from oslo_utils import strutils
 from webob import exc
 
@@ -25,11 +26,13 @@ from nova.compute import api as compute
 import nova.conf
 from nova import exception
 from nova.i18n import _
-from nova import network
+from nova.network import neutron
 from nova.policies import evacuate as evac_policies
 from nova import utils
 
 CONF = nova.conf.CONF
+
+LOG = logging.getLogger(__name__)
 
 
 class EvacuateController(wsgi.Controller):
@@ -37,7 +40,7 @@ class EvacuateController(wsgi.Controller):
         super(EvacuateController, self).__init__()
         self.compute_api = compute.API()
         self.host_api = compute.HostAPI()
-        self.network_api = network.API()
+        self.network_api = neutron.API()
 
     def _get_on_shared_storage(self, req, evacuate_body):
         if api_version_request.is_supported(req, min_version='2.14'):
@@ -71,7 +74,7 @@ class EvacuateController(wsgi.Controller):
     # TODO(eliqiao): Should be responding here with 202 Accept
     # because evacuate is an async call, but keep to 200 for
     # backwards compatibility reasons.
-    @wsgi.expected_errors((400, 404, 409))
+    @wsgi.expected_errors((400, 403, 404, 409))
     @wsgi.action('evacuate')
     @validation.schema(evacuate.evacuate, "2.0", "2.13")
     @validation.schema(evacuate.evacuate_v214, "2.14", "2.28")
@@ -121,12 +124,16 @@ class EvacuateController(wsgi.Controller):
         # extra API call to neutron when we support move operations with ports
         # having resource requests.
         if (common.instance_has_port_with_resource_request(
-                    instance.uuid, self.network_api) and not
-                common.supports_port_resource_request_during_move(req)):
+                instance.uuid, self.network_api) and not
+                common.supports_port_resource_request_during_move()):
+            LOG.warning("The evacuate action on a server with ports "
+                        "having resource requests, like a port with a QoS "
+                        "minimum bandwidth policy, is not supported until "
+                        "every nova-compute is upgraded to Ussuri")
             msg = _("The evacuate action on a server with ports having "
                     "resource requests, like a port with a QoS minimum "
-                    "bandwidth policy, is not supported with this "
-                    "microversion")
+                    "bandwidth policy, is not supported by this cluster right "
+                    "now")
             raise exc.HTTPBadRequest(explanation=msg)
 
         try:
@@ -137,6 +144,8 @@ class EvacuateController(wsgi.Controller):
                     'evacuate', id)
         except exception.ComputeServiceInUse as e:
             raise exc.HTTPBadRequest(explanation=e.format_message())
+        except exception.ForbiddenWithAccelerators as e:
+            raise exc.HTTPForbidden(explanation=e.format_message())
 
         if (not api_version_request.is_supported(req, min_version='2.14') and
                 CONF.api.enable_instance_password):

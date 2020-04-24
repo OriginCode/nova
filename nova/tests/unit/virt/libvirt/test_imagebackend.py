@@ -306,7 +306,7 @@ class FlatTestCase(_ImageTestCase, test.NoDBTestCase):
         # a non-existent backend.
 
         base_dir = os.path.join(CONF.instances_path,
-                                CONF.image_cache_subdirectory_name)
+                                CONF.image_cache.subdirectory_name)
 
         # Lets assume the base image cache directory already exists
         existing = set([base_dir])
@@ -1561,9 +1561,14 @@ class RbdTestCase(_ImageTestCase, test.NoDBTestCase):
         self.flags(rbd_secret_uuid="3306a5c4-8378-4b3c-aa1f-7b48d3a26172",
                    group='libvirt')
 
-        def get_mon_addrs():
-            hosts = ["server1", "server2"]
-            ports = ["1899", "1920"]
+        # image.get_model() should  always pass strip_brackets=False
+        # for building proper IPv6 address+ports for libguestfs
+        def get_mon_addrs(strip_brackets=True):
+            if strip_brackets:
+                hosts = ["server1", "server2", "::1"]
+            else:
+                hosts = ["server1", "server2", "[::1]"]
+            ports = ["1899", "1920", "1930"]
             return hosts, ports
         mock_mon_addrs.side_effect = get_mon_addrs
 
@@ -1574,14 +1579,31 @@ class RbdTestCase(_ImageTestCase, test.NoDBTestCase):
             "FakePool",
             "FakeUser",
             b"MTIzNDU2Cg==",
-            ["server1:1899", "server2:1920"]),
+            ["server1:1899", "server2:1920", "[::1]:1930"]),
                          model)
 
+    @mock.patch.object(rbd_utils.RBDDriver, 'parent_info')
     @mock.patch.object(rbd_utils.RBDDriver, 'flatten')
-    def test_flatten(self, mock_flatten):
+    def test_flatten(self, mock_flatten, mock_parent_info):
         image = self.image_class(self.INSTANCE, self.NAME)
         image.flatten()
         mock_flatten.assert_called_once_with(image.rbd_name, pool=self.POOL)
+        mock_parent_info.assert_called_once_with(
+            image.rbd_name, pool=self.POOL)
+
+    @mock.patch.object(imagebackend, 'LOG')
+    @mock.patch.object(rbd_utils.RBDDriver, 'parent_info')
+    @mock.patch.object(rbd_utils.RBDDriver, 'flatten')
+    def test_flatten_already_flat(
+            self, mock_flatten, mock_parent_info, mock_log):
+        mock_parent_info.side_effect = exception.ImageUnacceptable(
+            image_id=1, reason='foo')
+        image = self.image_class(self.INSTANCE, self.NAME)
+        image.flatten()
+        mock_log.debug.assert_called_once()
+        mock_flatten.assert_not_called()
+        mock_parent_info.assert_called_once_with(
+            image.rbd_name, pool=self.POOL)
 
     def test_import_file(self):
         image = self.image_class(self.INSTANCE, self.NAME)

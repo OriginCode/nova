@@ -417,8 +417,9 @@ availability_zone_query_server:
   description: |
     Filter the server list result by server availability zone.
 
-    This parameter is only valid when specified by administrators.
-    If non-admin users specify this parameter, it is ignored.
+    This parameter is restricted to administrators until microversion 2.83.
+    If non-admin users specify this parameter on a microversion less than 2.83,
+    it will be ignored.
   in: query
   required: false
   type: string
@@ -579,8 +580,9 @@ config_drive_query_server:
   description: |
     Filter the server list result by the config drive setting of the server.
 
-    This parameter is only valid when specified by administrators.
-    If non-admin users specify this parameter, it is ignored.
+    This parameter is restricted to administrators until microversion 2.83.
+    If non-admin users specify this parameter on a microversion less than 2.83,
+    it will be ignored.
   in: query
   required: false
   type: string
@@ -597,8 +599,9 @@ created_at_query_server:
     For example, ``2015-08-27T09:49:58-05:00``.
     If you omit the time zone, the UTC time zone is assumed.
 
-    This parameter is only valid when specified by administrators.
-    If non-admin users specify this parameter, it is ignored.
+    This parameter is restricted to administrators until microversion 2.83.
+    If non-admin users specify this parameter on a microversion less than 2.83,
+    it will be ignored.
   in: query
   required: false
   type: string
@@ -888,8 +891,9 @@ key_name_query_server:
   description: |
     Filter the server list result by keypair name.
 
-    This parameter is only valid when specified by administrators.
-    If non-admin users specify this parameter, it is ignored.
+    This parameter is restricted to administrators until microversion 2.83.
+    If non-admin users specify this parameter on a microversion less than 2.83,
+    it will be ignored.
   in: query
   required: false
   type: string
@@ -942,8 +946,9 @@ launched_at_query_server:
     For example, ``2015-08-27T09:49:58-05:00``.
     If you omit the time zone, the UTC time zone is assumed.
 
-    This parameter is only valid when specified by administrators.
-    If non-admin users specify this parameter, it is ignored.
+    This parameter is restricted to administrators until microversion 2.83.
+    If non-admin users specify this parameter on a microversion less than 2.83,
+    it will be ignored.
   in: query
   required: false
   type: string
@@ -1121,18 +1126,27 @@ power_state_query_server:
       6: CRASHED
       7: SUSPENDED
 
-    This parameter is only valid when specified by administrators.
-    If non-admin users specify this parameter, it is ignored.
+    This parameter is restricted to administrators until microversion 2.83.
+    If non-admin users specify this parameter on a microversion less than 2.83,
+    it will be ignored.
 progress_query_server:
   description: |
     Filter the server list result by the progress of the server.
     The value could be from 0 to 100 as integer.
 
-    This parameter is only valid when specified by administrators.
-    If non-admin users specify this parameter, it is ignored.
+    This parameter is restricted to administrators until microversion 2.83.
+    If non-admin users specify this parameter on a microversion less than 2.83,
+    it will be ignored.
   in: query
   required: false
   type: integer
+project_id_query_migrations:
+  description: |
+    Filter the migrations by the given project ID.
+  in: query
+  required: false
+  type: string
+  min_version: 2.80
 project_id_query_server:
   description: |
     Filter the list of servers by the given project ID.
@@ -1364,8 +1378,9 @@ task_state_query_server:
   description: |
     Filter the server list result by task state.
 
-    This parameter is only valid when specified by administrators.
-    If non-admin users specify this parameter, it is ignored.
+    This parameter is restricted to administrators until microversion 2.83.
+    If non-admin users specify this parameter on a microversion less than 2.83,
+    it will be ignored.
 tenant_id_query:
   description: |
     Specify the project ID (tenant ID) to show the rate and absolute limits.
@@ -1385,8 +1400,9 @@ terminated_at_query_server:
     For example, ``2015-08-27T09:49:58-05:00``.
     If you omit the time zone, the UTC time zone is assumed.
 
-    This parameter is only valid when specified by administrators.
-    If non-admin users specify this parameter, it is ignored.
+    This parameter is restricted to administrators until microversion 2.83.
+    If non-admin users specify this parameter on a microversion less than 2.83,
+    it will be ignored.
   in: query
   required: false
   type: string
@@ -1409,6 +1425,13 @@ usage_marker:
   required: false
   type: string
   min_version: 2.40
+user_id_query_migrations:
+  description: |
+    Filter the migrations by the given user ID.
+  in: query
+  required: false
+  type: string
+  min_version: 2.80
 user_id_query_quota:
   description: |
     ID of user to list the quotas for.
@@ -1425,8 +1448,9 @@ user_id_query_server:
   description: |
     Filter the list of servers by the given user ID.
 
-    This parameter is only valid when specified by administrators.
-    If non-admin users specify this parameter, it is ignored.
+    This parameter is restricted to administrators until microversion 2.83.
+    If non-admin users specify this parameter on a microversion less than 2.83,
+    it will be ignored.
   in: query
   required: false
   type: string
@@ -1455,8 +1479,9 @@ vm_state_query_server:
     - ``STOPPED``
     - ``SUSPENDED``
 
-    This parameter is only valid when specified by administrators.
-    If non-admin users specify this parameter, it is ignored.
+    This parameter is restricted to administrators until microversion 2.83.
+    If non-admin users specify this parameter on a microversion less than 2.83,
+    it will be ignored.
   in: query
   required: false
   type: string
@@ -1751,12 +1776,26 @@ associate_host:
   in: body
   required: true
   type: string
+attachment_device_put_req:
+  description: |
+    Name of the device in the attachment object, such as, ``/dev/vdb``.
+  in: body
+  required: false
+  type: string
+  min_version: 2.85
 attachment_device_resp:
   description: |
     Name of the device in the attachment object, such as, ``/dev/vdb``.
   in: body
   required: false
   type: string
+attachment_id_put_req:
+  description: |
+    The UUID of the attachment.
+  in: body
+  required: false
+  type: string
+  min_version: 2.85
 attachment_id_required:
   description: |
     The UUID of the attachment.
@@ -1769,6 +1808,13 @@ attachment_id_resp:
   in: body
   required: false
   type: string
+attachment_server_id_put_req:
+  description: |
+    The UUID of the server.
+  in: body
+  required: false
+  type: string
+  min_version: 2.85
 attachment_server_id_resp:
   description: |
     The UUID of the server.
@@ -1983,6 +2029,11 @@ boot_index:
   in: body
   required: true
   type: integer
+cache:
+  description: A list of image objects to cache.
+  in: body
+  required: true
+  type: array
 certificate:
   description: |
     The certificate object.
@@ -2264,6 +2315,14 @@ delete_on_termination_attachments_resp:
   required: true
   type: boolean
   min_version: 2.79
+delete_on_termination_put_req:
+  description: |
+    A flag indicating if the attached volume will be deleted when the server is
+    deleted.
+  in: body
+  required: false
+  type: boolean
+  min_version: 2.85
 deleted:
   description: |
     A boolean indicates whether this aggregate is deleted or not, if it has
@@ -2354,6 +2413,13 @@ device_tag_bdm_attachment:
   required: false
   type: string
   min_version: 2.49
+device_tag_bdm_attachment_put_req:
+  description: |
+    The device tag applied to the volume block device or ``null``.
+  in: body
+  required: true
+  type: string
+  min_version: 2.85
 device_tag_bdm_attachment_resp:
   description: |
     The device tag applied to the volume block device or ``null``.
@@ -2581,6 +2647,13 @@ event:
   in: body
   required: true
   type: string
+event_details:
+  min_version: 2.84
+  description: |
+    Details of the event. May be ``null``.
+  in: body
+  required: true
+  type: string
 event_finish_time:
   description: |
     The date and time when the event was finished. The date and time
@@ -2629,6 +2702,7 @@ event_name:
     - ``network-vif-deleted``
     - ``volume-extended`` (since microversion ``2.51``)
     - ``power-update`` (since microversion ``2.76``)
+    - ``accelerator-request-bound`` (since microversion ``2.82``)
 
   in: body
   required: true
@@ -2666,6 +2740,8 @@ event_tag:
     A string value that identifies the event. Certain types of events require
     specific tags:
 
+    - For the ``accelerator-request-bound`` event, the tag must be
+      the accelerator request UUID.
     - For the ``power-update`` event the tag must be either be ``POWER_ON``
       or ``POWER_OFF``.
     - For the ``volume-extended`` event the tag must be the volume id.
@@ -3194,15 +3270,21 @@ floating_ip_obj:
   type: object
 floating_ip_pool_name:
   description: |
-    The name of the floating ip pool.
+    The name of the floating IP pool.
   in: body
   required: true
   type: string
 floating_ip_pool_name_optional:
   description: |
-    The name of the floating ip pool
+    The name of the floating IP pool
   in: body
   required: false
+  type: string
+floating_ip_pool_name_or_id:
+  description: |
+    The name or ID of the floating IP pool.
+  in: body
+  required: true
   type: string
 floating_ip_pools:
   description: |
@@ -3813,7 +3895,7 @@ hypervisors:
 image:
   description: |
     The UUID and links for the image for your server instance. The ``image`` object
-    might be an empty string when you boot the server from a volume.
+    will be an empty string when you boot the server from a volume.
   in: body
   required: true
   type: object
@@ -4014,8 +4096,8 @@ instance_actions_next_links:
   description: |
     Links pertaining to the instance action.
     This parameter is returned when paging and more data is available.
-    See `API Guide / Links and References
-    <https://docs.openstack.org/api-guide/compute/links_and_references.html>`_
+    See `Paginated collections
+    <https://docs.openstack.org/api-guide/compute/paginated_collections.html>`__
     for more info.
   in: body
   required: false
@@ -4712,8 +4794,8 @@ migration_links_2_23:
     Links to the migration.
     This parameter is returned if the migration type is ``live-migration`` and
     the migration status is one of ``queued``, ``preparing``, ``running``
-    and ``post-migrating``. See `API Guide / Links and References
-    <https://docs.openstack.org/api-guide/compute/links_and_references.html>`_
+    and ``post-migrating``. See `Paginated collections
+    <https://docs.openstack.org/api-guide/compute/paginated_collections.html>`__
     for more info.
   in: body
   required: false
@@ -4735,8 +4817,8 @@ migration_next_links_2_59:
   description: |
     Links pertaining to the migration.
     This parameter is returned when paging and more data is available.
-    See `API Guide / Links and References
-    <https://docs.openstack.org/api-guide/compute/links_and_references.html>`_
+    See `Paginated collections
+    <https://docs.openstack.org/api-guide/compute/paginated_collections.html>`__
     for more info.
   in: body
   required: false
@@ -5265,7 +5347,7 @@ os-getVNCConsole:
   type: object
 os-getVNCConsole-type:
   description: |
-    The type of VNC console. The valid values are ``novnc`` and ``xvpvnc``.
+    The type of VNC console. The only valid value is ``novnc``.
   in: body
   required: true
   type: string
@@ -5697,6 +5779,14 @@ project_id:
   in: body
   required: false
   type: string
+project_id_migration_2_80:
+  description: |
+    The ID of the project which initiated the server migration. The value
+    may be ``null`` for older migration records.
+  in: body
+  required: true
+  type: string
+  min_version: 2.80
 project_id_server:
   description: |
     The ID of the project that this server belongs to.
@@ -5806,7 +5896,7 @@ remote_console_protocol:
   type: string
 remote_console_type:
   description: |
-    The type of remote console. The valid values are ``novnc``, ``xvpvnc``,
+    The type of remote console. The valid values are ``novnc``,
     ``rdp-html5``, ``spice-html5``, ``serial``, and ``webmks``. The type
     ``webmks`` is added since Microversion ``2.8``.
   in: body
@@ -6046,11 +6136,17 @@ security_groups_obj:
   in: body
   required: true
   type: array
+security_groups_obj_optional:
+  description: |
+    One or more security groups objects.
+  in: body
+  required: false
+  type: array
 security_groups_obj_update_rebuild:
   description: |
     One or more security groups objects.
   in: body
-  required: true
+  required: false
   type: array
   min_version: 2.75
 security_groups_quota:
@@ -6518,8 +6614,8 @@ servers_links:
   description: |
     Links to the next server. It is available when the number of servers exceeds
     ``limit`` parameter or ``[api]/max_limit`` in the configuration file.
-    See `API Guide / Links and References
-    <https://docs.openstack.org/api-guide/compute/links_and_references.html>`_
+    See `Paginated collections
+    <https://docs.openstack.org/api-guide/compute/paginated_collections.html>`__
     for more info.
   in: body
   type: array
@@ -7107,6 +7203,14 @@ user_id:
   in: body
   required: true
   type: string
+user_id_migration_2_80:
+  description: |
+    The ID of the user which initiated the server migration. The value
+    may be ``null`` for older migration records.
+  in: body
+  required: true
+  type: string
+  min_version: 2.80
 user_id_server_action:
   description: |
     The ID of the user which initiated the server action.
@@ -7302,7 +7406,8 @@ volumeAttachment_post:
 volumeAttachment_put:
   description: |
     A dictionary representation of a volume attachment containing the field
-    ``volumeId`` which is the UUID of the replacement volume.
+    ``volumeId`` which is the UUID of the replacement volume, and other fields
+    to update in the attachment.
   in: body
   required: true
   type: object

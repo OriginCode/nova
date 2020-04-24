@@ -42,6 +42,7 @@ from oslo_db.sqlalchemy import enginefacade
 from oslo_db.sqlalchemy import test_fixtures
 from oslo_db.sqlalchemy import test_migrations
 from oslo_db.sqlalchemy import utils as oslodbutils
+from oslotest import timeout
 import sqlalchemy
 from sqlalchemy.engine import reflection
 import sqlalchemy.exc
@@ -96,13 +97,9 @@ class NovaMigrationsCheckers(test_migrations.ModelsMigrationsSync,
         self.useFixture(nova_fixtures.StandardLogging())
 
         super(NovaMigrationsCheckers, self).setUp()
-        # NOTE(rpodolyaka): we need to repeat the functionality of the base
-        # test case a bit here as this gets overridden by oslotest base test
-        # case and nova base test case cleanup must be the last one (as it
-        # deletes attributes of test case instances)
-        self.useFixture(nova_fixtures.Timeout(
-            os.environ.get('OS_TEST_TIMEOUT', 0),
-            self.TIMEOUT_SCALING_FACTOR))
+        # The Timeout fixture picks up env.OS_TEST_TIMEOUT, defaulting to 0.
+        self.useFixture(timeout.Timeout(
+            scaling_factor=self.TIMEOUT_SCALING_FACTOR))
         self.engine = enginefacade.writer.get_engine()
 
     def assertColumnExists(self, engine, table_name, column):
@@ -185,6 +182,7 @@ class NovaMigrationsCheckers(test_migrations.ModelsMigrationsSync,
         # placeholders per cycle since the rate of DB changes has dropped
         # significantly
         stein_placeholders = list(range(392, 397))
+        train_placeholders = list(range(403, 408))
 
         return (special +
                 havana_placeholders +
@@ -197,7 +195,8 @@ class NovaMigrationsCheckers(test_migrations.ModelsMigrationsSync,
                 ocata_placeholders +
                 pike_placeholders +
                 queens_placeholders +
-                stein_placeholders)
+                stein_placeholders +
+                train_placeholders)
 
     def migrate_up(self, version, with_data=False):
         if with_data:

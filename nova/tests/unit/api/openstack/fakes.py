@@ -37,12 +37,10 @@ import nova.conf
 from nova import context
 from nova.db.sqlalchemy import models
 from nova import exception as exc
-from nova.network.security_group import security_group_base
 from nova import objects
 from nova.objects import base
 from nova import quota
 from nova.tests.unit import fake_block_device
-from nova.tests.unit import fake_network
 from nova.tests.unit.objects import test_keypair
 from nova import utils
 
@@ -64,22 +62,32 @@ def fake_wsgi(self, req):
 
 def wsgi_app_v21(fake_auth_context=None, v2_compatible=False,
                  custom_routes=None):
+    # NOTE(efried): Keep this (roughly) in sync with api-paste.ini
+
+    def wrap(app, use_context=False):
+        if v2_compatible:
+            app = openstack_api.LegacyV2CompatibleWrapper(app)
+
+        if use_context:
+            if fake_auth_context is not None:
+                ctxt = fake_auth_context
+            else:
+                ctxt = context.RequestContext(
+                    'fake', FAKE_PROJECT_ID, auth_token=True)
+            app = api_auth.InjectContext(ctxt, app)
+
+        app = openstack_api.FaultWrapper(app)
+
+        return app
 
     inner_app_v21 = compute.APIRouterV21(custom_routes=custom_routes)
 
-    if v2_compatible:
-        inner_app_v21 = openstack_api.LegacyV2CompatibleWrapper(inner_app_v21)
-
-    if fake_auth_context is not None:
-        ctxt = fake_auth_context
-    else:
-        ctxt = context.RequestContext('fake', 'fake', auth_token=True)
-    api_v21 = openstack_api.FaultWrapper(
-          api_auth.InjectContext(ctxt, inner_app_v21))
     mapper = urlmap.URLMap()
-    mapper['/v2'] = api_v21
-    mapper['/v2.1'] = api_v21
-    mapper['/'] = openstack_api.FaultWrapper(versions.Versions())
+    mapper['/'] = wrap(versions.Versions())
+    mapper['/v2'] = wrap(versions.VersionsV2())
+    mapper['/v2.1'] = wrap(versions.VersionsV2())
+    mapper['/v2/+'] = wrap(inner_app_v21, use_context=True)
+    mapper['/v2.1/+'] = wrap(inner_app_v21, use_context=True)
     return mapper
 
 
@@ -178,10 +186,6 @@ class stub_out_compute_api_backup(object):
         return dict(id='123', status='ACTIVE', name=name, properties=props)
 
 
-def stub_out_nw_api_get_instance_nw_info(test, num_networks=1, func=None):
-    fake_network.stub_out_nw_api_get_instance_nw_info(test)
-
-
 def stub_out_nw_api(test, cls=None, private=None, publics=None):
     if not private:
         private = '192.168.0.3'
@@ -201,47 +205,40 @@ def stub_out_nw_api(test, cls=None, private=None, publics=None):
         def validate_networks(self, context, networks, max_count):
             return max_count
 
-        def create_resource_requests(self, context, requested_networks,
-                                     pci_requests):
+        def create_resource_requests(
+                self, context, requested_networks,
+                pci_requests=None, affinity_policy=None):
             return None, []
 
     if cls is None:
         cls = Fake
-    if CONF.use_neutron:
-        test.stub_out('nova.network.neutronv2.api.API', cls)
-    else:
-        test.stub_out('nova.network.api.API', cls)
-        fake_network.stub_out_nw_api_get_instance_nw_info(test)
+
+    test.stub_out('nova.network.neutron.API', cls)
 
 
 def stub_out_secgroup_api(test, security_groups=None):
 
-    class FakeSecurityGroupAPI(security_group_base.SecurityGroupBase):
-        """This handles both nova-network and neutron style security group APIs
-        """
-        def get_instances_security_groups_bindings(
-                self, context, servers, detailed=False):
-            # This method shouldn't be called unless using neutron.
-            if not CONF.use_neutron:
-                raise Exception('Invalid security group API call for nova-net')
-            instances_security_group_bindings = {}
-            if servers:
-                instances_security_group_bindings = {
-                    server['id']: [] for server in servers
-                }
-            return instances_security_group_bindings
+    def get_instances_security_groups_bindings(
+            context, servers, detailed=False):
+        instances_security_group_bindings = {}
+        if servers:
+            # we don't get security group information for down cells
+            instances_security_group_bindings = {
+                server['id']: security_groups or [] for server in servers
+                if server['status'] != 'UNKNOWN'
+            }
+        return instances_security_group_bindings
 
-        def get_instance_security_groups(
-                self, context, instance, detailed=False):
-            return security_groups if security_groups is not None else []
+    def get_instance_security_groups(context, instance, detailed=False):
+        return security_groups if security_groups is not None else []
 
-    if CONF.use_neutron:
-        test.stub_out(
-            'nova.network.security_group.neutron_driver.SecurityGroupAPI',
-            FakeSecurityGroupAPI)
-    else:
-        test.stub_out(
-            'nova.compute.api.SecurityGroupAPI', FakeSecurityGroupAPI)
+    test.stub_out(
+        'nova.network.security_group_api'
+        '.get_instances_security_groups_bindings',
+        get_instances_security_groups_bindings)
+    test.stub_out(
+        'nova.network.security_group_api.get_instance_security_groups',
+        get_instance_security_groups)
 
 
 class FakeToken(object):
@@ -269,7 +266,7 @@ class HTTPRequest(os_wsgi.Request):
     def blank(cls, *args, **kwargs):
         defaults = {'base_url': 'http://localhost/v2'}
         use_admin_context = kwargs.pop('use_admin_context', False)
-        project_id = kwargs.pop('project_id', 'fake')
+        project_id = kwargs.pop('project_id', FAKE_PROJECT_ID)
         version = kwargs.pop('version', os_wsgi.DEFAULT_API_VERSION)
         defaults.update(kwargs)
         out = super(HTTPRequest, cls).blank(*args, **defaults)

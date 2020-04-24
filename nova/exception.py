@@ -114,14 +114,6 @@ class EncryptionFailure(NovaException):
     msg_fmt = _("Failed to encrypt text: %(reason)s")
 
 
-class DecryptionFailure(NovaException):
-    msg_fmt = _("Failed to decrypt text: %(reason)s")
-
-
-class RevokeCertFailure(NovaException):
-    msg_fmt = _("Failed to revoke certificate for %(project_id)s")
-
-
 class VirtualInterfaceCreateException(NovaException):
     msg_fmt = _("Virtual Interface creation failed")
 
@@ -161,6 +153,11 @@ class CinderAPIVersionNotAvailable(NovaException):
 
 class Forbidden(NovaException):
     msg_fmt = _("Forbidden")
+    code = 403
+
+
+class ForbiddenWithAccelerators(NovaException):
+    msg_fmt = _("Forbidden with instances that have accelerators.")
     code = 403
 
 
@@ -285,14 +282,6 @@ class MultiattachNotSupportedByVirtDriver(NovaException):
 class MultiattachNotSupportedOldMicroversion(Invalid):
     msg_fmt = _('Multiattach volumes are only supported starting with '
                 'compute API version 2.60.')
-
-
-class VolumeTypeSupportNotYetAvailable(NovaException):
-    # This exception indicates the deployment is not yet new enough to support
-    # volume type, so a 409 HTTPConflict response is generally used
-    # for handling this in the API.
-    msg_fmt = _("Volume type support is not yet available.")
-    code = 409
 
 
 class MultiattachToShelvedNotSupported(Invalid):
@@ -581,19 +570,6 @@ class InvalidIpAddressError(Invalid):
     msg_fmt = _("%(address)s is not a valid IP v4/6 address.")
 
 
-class InvalidVLANTag(Invalid):
-    msg_fmt = _("VLAN tag is not appropriate for the port group "
-                "%(bridge)s. Expected VLAN tag is %(tag)s, "
-                "but the one associated with the port group is %(pgroup)s.")
-
-
-class InvalidVLANPortGroup(Invalid):
-    msg_fmt = _("vSwitch which contains the port group %(bridge)s is "
-                "not associated with the desired physical adapter. "
-                "Expected vSwitch is %(expected)s, but the one associated "
-                "is %(actual)s.")
-
-
 class InvalidDiskFormat(Invalid):
     msg_fmt = _("Disk format %(disk_format)s is not acceptable")
 
@@ -613,6 +589,11 @@ class ImageUnacceptable(Invalid):
 class ImageBadRequest(Invalid):
     msg_fmt = _("Request of image %(image_id)s got BadRequest response: "
                 "%(response)s")
+
+
+class ImageQuotaExceeded(NovaException):
+    msg_fmt = _("Quota exceeded or out of space for image %(image_id)s "
+                "in the image service.")
 
 
 class InstanceUnacceptable(Invalid):
@@ -726,10 +707,6 @@ class PreserveEphemeralNotSupported(Invalid):
                 "preserving ephemeral partitions.")
 
 
-class ProjectNotFound(NotFound):
-    msg_fmt = _("Project %(project_id)s could not be found.")
-
-
 class StorageRepositoryNotFound(NotFound):
     msg_fmt = _("Cannot find SR to read/write VDI.")
 
@@ -738,56 +715,8 @@ class InstanceMappingNotFound(NotFound):
     msg_fmt = _("Instance %(uuid)s has no mapping to a cell.")
 
 
-class NetworkDhcpReleaseFailed(NovaException):
-    msg_fmt = _("Failed to release IP %(address)s with MAC %(mac_address)s")
-
-
-class NetworkInUse(NovaException):
-    msg_fmt = _("Network %(network_id)s is still in use.")
-
-
-class NetworkSetHostFailed(NovaException):
-    msg_fmt = _("Network set host failed for network %(network_id)s.")
-
-
-class NetworkNotCreated(Invalid):
-    msg_fmt = _("%(req)s is required to create a network.")
-
-
-class LabelTooLong(Invalid):
-    msg_fmt = _("Maximum allowed length for 'label' is 255.")
-
-
-class InvalidIntValue(Invalid):
-    msg_fmt = _("%(key)s must be an integer.")
-
-
 class InvalidCidr(Invalid):
     msg_fmt = _("%(cidr)s is not a valid IP network.")
-
-
-class InvalidAddress(Invalid):
-    msg_fmt = _("%(address)s is not a valid IP address.")
-
-
-class AddressOutOfRange(Invalid):
-    msg_fmt = _("%(address)s is not within %(cidr)s.")
-
-
-class DuplicateVlan(NovaException):
-    msg_fmt = _("Detected existing vlan with id %(vlan)d")
-    code = 409
-
-
-class CidrConflict(NovaException):
-    msg_fmt = _('Requested cidr (%(cidr)s) conflicts '
-                'with existing cidr (%(other)s)')
-    code = 409
-
-
-class NetworkHasProject(NetworkInUse):
-    msg_fmt = _('Network must be disassociated from project '
-                '%(project_id)s before it can be deleted.')
 
 
 class NetworkNotFound(NotFound):
@@ -802,29 +731,8 @@ class NetworkNotFoundForBridge(NetworkNotFound):
     msg_fmt = _("Network could not be found for bridge %(bridge)s")
 
 
-class NetworkNotFoundForUUID(NetworkNotFound):
-    msg_fmt = _("Network could not be found for uuid %(uuid)s")
-
-
-class NetworkNotFoundForCidr(NetworkNotFound):
-    msg_fmt = _("Network could not be found with cidr %(cidr)s.")
-
-
 class NetworkNotFoundForInstance(NetworkNotFound):
     msg_fmt = _("Network could not be found for instance %(instance_id)s.")
-
-
-class NoNetworksFound(NotFound):
-    msg_fmt = _("No networks defined.")
-
-
-class NoMoreNetworks(NovaException):
-    msg_fmt = _("No more available networks.")
-
-
-class NetworkNotFoundForProject(NetworkNotFound):
-    msg_fmt = _("Either network uuid %(network_uuid)s is not present or "
-                "is not assigned to the project %(project_id)s.")
 
 
 class NetworkAmbiguous(Invalid):
@@ -863,10 +771,6 @@ class VifDetailsMissingMacvtapParameters(Invalid):
                 " correct.")
 
 
-class OVSConfigurationFailure(NovaException):
-    msg_fmt = _("OVS configuration failed with: %(inner_exception)s.")
-
-
 class DatastoreNotFound(NotFound):
     msg_fmt = _("Could not find the datastore reference(s) which the VM uses.")
 
@@ -887,10 +791,6 @@ class PortNotUsableDNS(Invalid):
     msg_fmt = _("Port %(port_id)s not usable for instance %(instance)s. "
                 "Value %(value)s assigned to dns_name attribute does not "
                 "match instance's hostname %(hostname)s")
-
-
-class PortNotFree(Invalid):
-    msg_fmt = _("No free port available for instance %(instance)s.")
 
 
 class PortBindingFailed(Invalid):
@@ -918,38 +818,12 @@ class AttachSRIOVPortNotSupported(Invalid):
                 'specified during server creation.')
 
 
-class FixedIpExists(NovaException):
-    msg_fmt = _("Fixed IP %(address)s already exists.")
-
-
-class FixedIpNotFound(NotFound):
-    msg_fmt = _("No fixed IP associated with id %(id)s.")
-
-
-class FixedIpNotFoundForAddress(FixedIpNotFound):
+class FixedIpNotFoundForAddress(NotFound):
     msg_fmt = _("Fixed IP not found for address %(address)s.")
 
 
-class FixedIpNotFoundForInstance(FixedIpNotFound):
-    msg_fmt = _("Instance %(instance_uuid)s has zero fixed IPs.")
-
-
-class FixedIpNotFoundForNetworkHost(FixedIpNotFound):
-    msg_fmt = _("Network host %(host)s has zero fixed IPs "
-                "in network %(network_id)s.")
-
-
-class FixedIpNotFoundForSpecificInstance(FixedIpNotFound):
-    msg_fmt = _("Instance %(instance_uuid)s doesn't have fixed IP '%(ip)s'.")
-
-
-class FixedIpNotFoundForNetwork(FixedIpNotFound):
-    msg_fmt = _("Fixed IP address (%(address)s) does not exist in "
-                "network (%(network_uuid)s).")
-
-
-class FixedIpAssociateFailed(NovaException):
-    msg_fmt = _("Fixed IP associate failed for network: %(net)s.")
+class FixedIpNotFoundForInstance(NotFound):
+    msg_fmt = _("Instance %(instance_uuid)s does not have fixed IP '%(ip)s'.")
 
 
 class FixedIpAlreadyInUse(NovaException):
@@ -962,10 +836,6 @@ class FixedIpAssociatedWithMultipleInstances(NovaException):
                 "'%(address)s'.")
 
 
-class FixedIpInvalid(Invalid):
-    msg_fmt = _("Fixed IP address %(address)s is invalid.")
-
-
 class FixedIpInvalidOnHost(Invalid):
     msg_fmt = _("The fixed IP associated with port %(port_id)s is not "
                 "compatible with the host.")
@@ -975,28 +845,12 @@ class NoMoreFixedIps(NovaException):
     msg_fmt = _("No fixed IP addresses available for network: %(net)s")
 
 
-class NoFixedIpsDefined(NotFound):
-    msg_fmt = _("Zero fixed IPs could be found.")
-
-
-class FloatingIpExists(NovaException):
-    msg_fmt = _("Floating IP %(address)s already exists.")
-
-
 class FloatingIpNotFound(NotFound):
     msg_fmt = _("Floating IP not found for ID %(id)s.")
 
 
-class FloatingIpDNSExists(Invalid):
-    msg_fmt = _("The DNS entry %(name)s already exists in domain %(domain)s.")
-
-
 class FloatingIpNotFoundForAddress(FloatingIpNotFound):
     msg_fmt = _("Floating IP not found for address %(address)s.")
-
-
-class FloatingIpNotFoundForHost(FloatingIpNotFound):
-    msg_fmt = _("Floating IP not found for host %(host)s.")
 
 
 class FloatingIpMultipleFoundForAddress(NovaException):
@@ -1017,20 +871,8 @@ class FloatingIpAssociated(NovaException):
     msg_fmt = _("Floating IP %(address)s is associated.")
 
 
-class FloatingIpNotAssociated(NovaException):
-    msg_fmt = _("Floating IP %(address)s is not associated.")
-
-
-class NoFloatingIpsDefined(NotFound):
-    msg_fmt = _("Zero floating IPs exist.")
-
-
 class NoFloatingIpInterface(NotFound):
     msg_fmt = _("Interface %(interface)s not found.")
-
-
-class FloatingIpAllocateFailed(NovaException):
-    msg_fmt = _("Floating IP allocate failed.")
 
 
 class FloatingIpAssociateFailed(NovaException):
@@ -1039,10 +881,6 @@ class FloatingIpAssociateFailed(NovaException):
 
 class FloatingIpBadRequest(Invalid):
     msg_fmt = _("The floating IP request failed with a BadRequest")
-
-
-class CannotDisassociateAutoAssignedFloatingIP(NovaException):
-    msg_fmt = _("Cannot disassociate auto assigned floating IP")
 
 
 class KeypairNotFound(NotFound):
@@ -1076,10 +914,6 @@ class ComputeHostNotFound(HostNotFound):
 
 class HostBinaryNotFound(NotFound):
     msg_fmt = _("Could not find binary %(binary)s on host %(host)s.")
-
-
-class InvalidReservationExpiration(Invalid):
-    msg_fmt = _("Invalid reservation expiration %(expire)s.")
 
 
 class InvalidQuotaValue(Invalid):
@@ -1121,20 +955,6 @@ class QuotaClassExists(NovaException):
     msg_fmt = _("Quota class %(class_name)s exists for resource %(resource)s")
 
 
-class QuotaUsageNotFound(QuotaNotFound):
-    msg_fmt = _("Quota usage for project %(project_id)s could not be found.")
-
-
-class QuotaUsageRefreshNotAllowed(Invalid):
-    msg_fmt = _("Quota usage refresh of resource %(resource)s for project "
-                "%(project_id)s, user %(user_id)s, is not allowed. "
-                "The allowed resources are %(syncable)s.")
-
-
-class ReservationNotFound(QuotaNotFound):
-    msg_fmt = _("Quota reservation %(uuid)s could not be found.")
-
-
 class OverQuota(NovaException):
     msg_fmt = _("Quota exceeded for resources: %(overs)s")
 
@@ -1148,27 +968,9 @@ class SecurityGroupNotFoundForProject(SecurityGroupNotFound):
                 "for project %(project_id)s.")
 
 
-class SecurityGroupNotFoundForRule(SecurityGroupNotFound):
-    msg_fmt = _("Security group with rule %(rule_id)s not found.")
-
-
 class SecurityGroupExists(Invalid):
     msg_fmt = _("Security group %(security_group_name)s already exists "
                 "for project %(project_id)s.")
-
-
-class SecurityGroupExistsForInstance(Invalid):
-    msg_fmt = _("Security group %(security_group_id)s is already associated"
-                " with the instance %(instance_id)s")
-
-
-class SecurityGroupNotExistsForInstance(Invalid):
-    msg_fmt = _("Security group %(security_group_id)s is not associated with"
-                " the instance %(instance_id)s")
-
-
-class SecurityGroupDefaultRuleNotFound(Invalid):
-    msg_fmt = _("Security group default rule (%rule_id)s not found.")
 
 
 class SecurityGroupCannotBeApplied(Invalid):
@@ -1205,44 +1007,13 @@ class InvalidMigrationState(Invalid):
                 "migration is in this state.")
 
 
-class AbortQueuedLiveMigrationNotYetSupported(NovaException):
-    msg_fmt = _("Aborting live migration %(migration_id)s with status "
-                "%(status)s is not yet supported for this instance.")
-    code = 409
-
-
 class ConsoleLogOutputException(NovaException):
     msg_fmt = _("Console log output could not be retrieved for instance "
                 "%(instance_id)s. Reason: %(reason)s")
 
 
-class ConsolePoolExists(NovaException):
-    msg_fmt = _("Console pool with host %(host)s, console_type "
-                "%(console_type)s and compute_host %(compute_host)s "
-                "already exists.")
-
-
-class ConsolePoolNotFoundForHostType(NotFound):
-    msg_fmt = _("Console pool of type %(console_type)s "
-                "for compute host %(compute_host)s "
-                "on proxy host %(host)s not found.")
-
-
-class ConsoleNotFound(NotFound):
-    msg_fmt = _("Console %(console_id)s could not be found.")
-
-
-class ConsoleNotFoundForInstance(ConsoleNotFound):
-    msg_fmt = _("Console for instance %(instance_uuid)s could not be found.")
-
-
 class ConsoleNotAvailable(NotFound):
     msg_fmt = _("Guest does not have a console available.")
-
-
-class ConsoleNotFoundInPoolForInstance(ConsoleNotFound):
-    msg_fmt = _("Console for instance %(instance_uuid)s "
-                "in pool %(pool_id)s could not be found.")
 
 
 class ConsoleTypeInvalid(Invalid):
@@ -1298,15 +1069,6 @@ class FileNotFound(NotFound):
     msg_fmt = _("File %(file_path)s could not be found.")
 
 
-class SwitchNotFoundForNetworkAdapter(NotFound):
-    msg_fmt = _("Virtual switch associated with the "
-                "network adapter %(adapter)s not found.")
-
-
-class NetworkAdapterNotFound(NotFound):
-    msg_fmt = _("Network adapter %(adapter)s could not be found.")
-
-
 class ClassNotFound(NotFound):
     msg_fmt = _("Class %(class_name)s could not be found: %(exception)s")
 
@@ -1358,10 +1120,6 @@ class MigrationPreCheckError(MigrationError):
 
 class MigrationSchedulerRPCError(MigrationError):
     msg_fmt = _("Migration select destinations error: %(reason)s")
-
-
-class RPCPinnedToOldVersion(NovaException):
-    msg_fmt = _("RPC is pinned to old version")
 
 
 class MalformedRequestBody(NovaException):
@@ -1452,10 +1210,6 @@ class TooManyInstances(QuotaError):
 
 class FloatingIpLimitExceeded(QuotaError):
     msg_fmt = _("Maximum number of floating IPs exceeded")
-
-
-class FixedIpLimitExceeded(QuotaError):
-    msg_fmt = _("Maximum number of fixed IPs exceeded")
 
 
 class MetadataLimitExceeded(QuotaError):
@@ -1620,14 +1374,6 @@ class InstanceActionEventNotFound(NovaException):
     msg_fmt = _("Event %(event)s not found for action id %(action_id)s")
 
 
-class CryptoCAFileNotFound(FileNotFound):
-    msg_fmt = _("The CA file for %(project)s could not be found")
-
-
-class CryptoCRLFileNotFound(FileNotFound):
-    msg_fmt = _("The CRL file for %(project)s could not be found")
-
-
 class InstanceEvacuateNotSupported(Invalid):
     msg_fmt = _('Instance evacuate is not supported.')
 
@@ -1645,6 +1391,15 @@ class UnsupportedVirtType(Invalid):
 class UnsupportedHardware(Invalid):
     msg_fmt = _("Requested hardware '%(model)s' is not supported by "
                 "the '%(virt)s' virt driver")
+
+
+class UnsupportedRescueBus(Invalid):
+    msg_fmt = _("Requested rescue bus '%(bus)s' is not supported by "
+                "the '%(virt)s' virt driver")
+
+
+class UnsupportedRescueDevice(Invalid):
+    msg_fmt = _("Requested rescue device '%(device)s' is not supported")
 
 
 class Base64Exception(NovaException):
@@ -1698,11 +1453,6 @@ class InstanceGroupNotFound(NotFound):
 
 class InstanceGroupIdExists(NovaException):
     msg_fmt = _("Instance group %(group_uuid)s already exists.")
-
-
-class InstanceGroupMemberNotFound(NotFound):
-    msg_fmt = _("Instance group %(group_uuid)s has no member with "
-                "id %(instance_id)s.")
 
 
 class InstanceGroupSaveException(NovaException):
@@ -1921,6 +1671,12 @@ class ImageNUMATopologyRebuildConflict(Invalid):
         "The image provided is invalid for this instance.")
 
 
+class ImagePCINUMAPolicyForbidden(Forbidden):
+    msg_fmt = _("Image property 'hw_pci_numa_affinity_policy' is not "
+                "permitted to override the 'hw:pci_numa_affinity_policy' "
+                "flavor extra spec.")
+
+
 class ImageNUMATopologyAsymmetric(Invalid):
     msg_fmt = _("Instance CPUs and/or memory cannot be evenly distributed "
                 "across instance NUMA nodes. Explicit assignment of CPUs "
@@ -2038,11 +1794,6 @@ class MemoryPageSizeForbidden(Invalid):
 
 class MemoryPageSizeNotSupported(Invalid):
     msg_fmt = _("Page size %(pagesize)s is not supported by the host.")
-
-
-class CPUPinningNotSupported(Invalid):
-    msg_fmt = _("CPU pinning is not supported by the host: "
-                "%(reason)s")
 
 
 class CPUPinningInvalid(Invalid):
@@ -2250,10 +2001,6 @@ class InvalidResourceClass(Invalid):
     msg_fmt = _("Resource class '%(resource_class)s' invalid.")
 
 
-class InvalidResourceAmount(Invalid):
-    msg_fmt = _("Resource amounts must be integers. Received '%(amount)s'.")
-
-
 class InvalidInventory(Invalid):
     msg_fmt = _("Inventory for '%(resource_class)s' on "
                 "resource provider '%(resource_provider)s' invalid.")
@@ -2314,6 +2061,10 @@ class InvalidNetworkNUMAAffinity(Invalid):
     msg_fmt = _("Invalid NUMA network affinity configured: %(reason)s")
 
 
+class InvalidPCINUMAAffinity(Invalid):
+    msg_fmt = _("Invalid PCI NUMA affinity configured: %(policy)s")
+
+
 class PowerVMAPIFailed(NovaException):
     msg_fmt = _("PowerVM API failed to complete for instance=%(inst_name)s.  "
                 "%(reason)s")
@@ -2325,11 +2076,6 @@ class TraitRetrievalFailed(NovaException):
 
 class TraitCreationFailed(NovaException):
     msg_fmt = _("Failed to create trait %(name)s: %(error)s")
-
-
-class CannotMigrateWithTargetHost(NovaException):
-    msg_fmt = _("Cannot migrate with target host. Retry without a host "
-                "specified.")
 
 
 class CannotMigrateToSameHost(NovaException):
@@ -2536,10 +2282,36 @@ class PMEMNamespaceConfigInvalid(NovaException):
                 "please check your conf file. ")
 
 
-class GetPMEMNamespaceFailed(NovaException):
-    msg_fmt = _("Get PMEM namespaces on host failed: %(reason)s.")
-
-
 class VPMEMCleanupFailed(NovaException):
     msg_fmt = _("Failed to clean up the vpmem backend device %(dev)s: "
                 "%(error)s")
+
+
+class RequestGroupSuffixConflict(NovaException):
+    msg_fmt = _("Duplicate request group suffix %(suffix)s.")
+
+
+class AmbiguousResourceProviderForPCIRequest(NovaException):
+    msg_fmt = _("Allocating resources from multiple resource providers "
+                "%(providers)s for a single pci request %(requester)s is not "
+                "supported.")
+
+
+class UnexpectedResourceProviderNameForPCIRequest(NovaException):
+    msg_fmt = _("Resource provider %(provider)s used to allocate resources "
+                "for the pci request %(requester)s does not have a properly "
+                "formatted name. Expected name format is "
+                "<hostname>:<agentname>:<interfacename>, but got "
+                "%(provider_name)s")
+
+
+class DeviceProfileError(NovaException):
+    msg_fmt = _("Device profile name %(name)s: %(msg)s")
+
+
+class AcceleratorRequestOpFailed(NovaException):
+    msg_fmt = _("Failed to %(op)s accelerator requests: %(msg)s")
+
+
+class InvalidLibvirtGPUConfig(NovaException):
+    msg_fmt = _('Invalid configuration for GPU devices: %(reason)s')

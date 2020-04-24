@@ -24,6 +24,7 @@ import requests_mock
 
 from nova import context
 from nova import exception
+from nova.policies import servers as servers_policy
 from nova import policy
 from nova import test
 from nova.tests.unit import fake_policy
@@ -185,6 +186,22 @@ class PolicyTestCase(test.NoDBTestCase):
                 "project_id:%(project_id)s")])
         mock_warning.assert_not_called()
 
+    @requests_mock.mock()
+    def test_authorize_raise_invalid_scope(self, req_mock):
+        req_mock.post('http://www.example.com/',
+                      text='False')
+        action = "example:get_http"
+        target = {}
+        with mock.patch('oslo_policy.policy.Enforcer.authorize') as auth_mock:
+            auth_mock.side_effect = oslo_policy.InvalidScope(
+                action, self.context.system_scope, 'invalid_scope')
+            exc = self.assertRaises(exception.PolicyNotAuthorized,
+                                    policy.authorize, self.context,
+                                    action, target)
+            self.assertEqual(
+                "Policy doesn't allow %s to be performed." % action,
+                exc.format_message())
+
     @mock.patch.object(policy.LOG, 'warning')
     def test_verify_deprecated_policy_using_old_action(self, mock_warning):
 
@@ -256,7 +273,7 @@ class IsAdminCheckTestCase(test.NoDBTestCase):
         mock_auth.assert_called_once_with(
             'context_is_admin',
             {'user_id': 'fake-user', 'project_id': 'fake-project'},
-            ctxt.to_policy_values())
+            ctxt)
 
 
 class AdminRolePolicyTestCase(test.NoDBTestCase):
@@ -288,6 +305,7 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
         self.fake_policy = jsonutils.loads(fake_policy.policy_data)
 
         self.admin_only_rules = (
+"compute:aggregates:images",
 "compute:server:topology:host:index",
 "network:attach_external_network",
 "os_compute_api:servers:create:forced_host",
@@ -296,6 +314,7 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:servers:index:get_all_tenants",
 "os_compute_api:servers:allow_all_filters",
 "os_compute_api:servers:show:host_status",
+"os_compute_api:servers:show:host_status:unknown-only",
 "os_compute_api:servers:migrations:force_complete",
 "os_compute_api:servers:migrations:delete",
 "os_compute_api:os-admin-actions:reset_network",
@@ -309,7 +328,9 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-aggregates:add_host",
 "os_compute_api:os-aggregates:remove_host",
 "os_compute_api:os-aggregates:set_metadata",
-"os_compute_api:os-agents",
+"os_compute_api:os-agents:create",
+"os_compute_api:os-agents:update",
+"os_compute_api:os-agents:delete",
 "os_compute_api:os-baremetal-nodes",
 "os_compute_api:os-evacuate",
 "os_compute_api:os-extended-server-attributes",
@@ -322,33 +343,25 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-flavor-manage:update",
 "os_compute_api:os-flavor-manage:delete",
 "os_compute_api:os-hosts",
-"os_compute_api:os-hypervisors",
 "os_compute_api:os-instance-actions:events",
-"os_compute_api:os-instance-usage-audit-log",
 "os_compute_api:os-lock-server:unlock:unlock_override",
 "os_compute_api:os-migrate-server:migrate",
 "os_compute_api:os-migrate-server:migrate_live",
-"os_compute_api:os-networks",
-"os_compute_api:os-networks-associate",
 "os_compute_api:os-quota-sets:update",
 "os_compute_api:os-quota-sets:delete",
-"os_compute_api:os-security-group-default-rules",
 "os_compute_api:os-server-diagnostics",
-"os_compute_api:os-services",
+"os_compute_api:os-server-groups:index:all_projects",
+"os_compute_api:os-services:update",
+"os_compute_api:os-services:delete",
 "os_compute_api:os-shelve:shelve_offload",
-"os_compute_api:os-simple-tenant-usage:list",
 "os_compute_api:os-availability-zone:detail",
-"os_compute_api:os-used-limits",
-"os_compute_api:os-migrations:index",
 "os_compute_api:os-assisted-volume-snapshots:create",
 "os_compute_api:os-assisted-volume-snapshots:delete",
 "os_compute_api:os-console-auth-tokens",
 "os_compute_api:os-quota-class-sets:update",
 "os_compute_api:os-server-external-events:create",
-"os_compute_api:os-volumes-attachments:update",
+"os_compute_api:os-volumes-attachments:swap",
 "os_compute_api:servers:create:zero_disk_flavor",
-"os_compute_api:servers:migrations:index",
-"os_compute_api:servers:migrations:show",
 )
 
         self.admin_or_owner_rules = (
@@ -375,7 +388,6 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:server-metadata:create",
 "os_compute_api:server-metadata:update",
 "os_compute_api:server-metadata:update_all",
-"os_compute_api:os-simple-tenant-usage:show",
 "os_compute_api:os-suspend-server:suspend",
 "os_compute_api:os-suspend-server:resume",
 "os_compute_api:os-tenant-networks",
@@ -398,32 +410,27 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:servers:update",
 "os_compute_api:servers:create_image:allow_volume_backed",
 "os_compute_api:os-admin-password",
-"os_compute_api:os-attach-interfaces",
 "os_compute_api:os-attach-interfaces:create",
 "os_compute_api:os-attach-interfaces:delete",
-"os_compute_api:os-consoles:create",
-"os_compute_api:os-consoles:delete",
-"os_compute_api:os-consoles:index",
-"os_compute_api:os-consoles:show",
 "os_compute_api:os-console-output",
 "os_compute_api:os-remote-consoles",
-"os_compute_api:os-deferred-delete",
+"os_compute_api:os-deferred-delete:restore",
+"os_compute_api:os-deferred-delete:force",
 "os_compute_api:os-flavor-access",
 "os_compute_api:os-flavor-extra-specs:index",
 "os_compute_api:os-flavor-extra-specs:show",
 "os_compute_api:os-floating-ip-pools",
 "os_compute_api:os-floating-ips",
-"os_compute_api:os-instance-actions",
-"os_compute_api:limits",
 "os_compute_api:os-multinic",
 "os_compute_api:os-networks:view",
 "os_compute_api:os-rescue",
+"os_compute_api:os-unrescue",
 "os_compute_api:os-security-groups",
-"os_compute_api:os-server-password",
+"os_compute_api:os-security-groups:add",
+"os_compute_api:os-security-groups:remove",
+"os_compute_api:os-server-password:clear",
 "os_compute_api:os-server-tags:delete",
 "os_compute_api:os-server-tags:delete_all",
-"os_compute_api:os-server-tags:index",
-"os_compute_api:os-server-tags:show",
 "os_compute_api:os-server-tags:update",
 "os_compute_api:os-server-tags:update_all",
 "os_compute_api:os-server-groups:index",
@@ -433,16 +440,54 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-shelve:shelve",
 "os_compute_api:os-shelve:unshelve",
 "os_compute_api:os-volumes",
-"os_compute_api:os-volumes-attachments:index",
-"os_compute_api:os-volumes-attachments:show",
 "os_compute_api:os-volumes-attachments:create",
 "os_compute_api:os-volumes-attachments:delete",
-"os_compute_api:os-availability-zone:list",
+"os_compute_api:os-volumes-attachments:update",
 )
 
         self.allow_all_rules = (
 "os_compute_api:os-quota-sets:defaults",
+"os_compute_api:os-availability-zone:list",
+"os_compute_api:limits",
 )
+
+        self.system_reader_rules = (
+"os_compute_api:servers:migrations:index",
+"os_compute_api:servers:migrations:show",
+"os_compute_api:os-simple-tenant-usage:list",
+"os_compute_api:os-migrations:index",
+"os_compute_api:os-services:list",
+"os_compute_api:os-instance-actions:events:details",
+"os_compute_api:os-instance-usage-audit-log:list",
+"os_compute_api:os-instance-usage-audit-log:show",
+"os_compute_api:os-agents:list",
+"os_compute_api:os-hypervisors:list",
+"os_compute_api:os-hypervisors:list-detail",
+"os_compute_api:os-hypervisors:show",
+"os_compute_api:os-hypervisors:statistics",
+"os_compute_api:os-hypervisors:uptime",
+"os_compute_api:os-hypervisors:search",
+"os_compute_api:os-hypervisors:servers",
+"os_compute_api:limits:other_project",
+)
+
+        self.system_reader_or_owner_rules = (
+"os_compute_api:os-simple-tenant-usage:show",
+"os_compute_api:os-security-groups:list",
+"os_compute_api:os-volumes-attachments:index",
+"os_compute_api:os-volumes-attachments:show",
+"os_compute_api:os-attach-interfaces:list",
+"os_compute_api:os-attach-interfaces:show",
+"os_compute_api:os-instance-actions:list",
+"os_compute_api:os-instance-actions:show",
+"os_compute_api:os-server-password:show",
+"os_compute_api:os-server-tags:index",
+"os_compute_api:os-server-tags:show",
+)
+
+        self.allow_nobody_rules = (
+            servers_policy.CROSS_CELL_RESIZE,
+        )
 
     def test_all_rules_in_sample_file(self):
         special_rules = ["context_is_admin", "admin_or_owner", "default"]
@@ -469,14 +514,26 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
         for rule in self.allow_all_rules:
             policy.authorize(self.non_admin_context, rule, self.target)
 
+    def test_allow_nobody_rules(self):
+        """No one can perform these operations, not even admin."""
+        for rule in self.allow_nobody_rules:
+            self.assertRaises(exception.PolicyNotAuthorized, policy.authorize,
+                              self.admin_context, rule, self.target)
+
     def test_rule_missing(self):
         rules = policy.get_rules()
         # eliqiao os_compute_api:os-quota-class-sets:show requires
         # admin=True or quota_class match, this rule won't belong to
         # admin_only, non_admin, admin_or_user, empty_rule
         special_rules = ('admin_api', 'admin_or_owner', 'context_is_admin',
-                         'os_compute_api:os-quota-class-sets:show')
+                         'os_compute_api:os-quota-class-sets:show',
+                         'system_admin_api', 'system_reader_api',
+                         'project_admin_api', 'project_member_api',
+                         'project_reader_api', 'system_admin_or_owner',
+                         'system_or_project_reader')
         result = set(rules.keys()) - set(self.admin_only_rules +
             self.admin_or_owner_rules +
-            self.allow_all_rules + special_rules)
+            self.allow_all_rules + self.system_reader_rules +
+            self.system_reader_or_owner_rules +
+            self.allow_nobody_rules + special_rules)
         self.assertEqual(set([]), result)

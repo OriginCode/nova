@@ -61,8 +61,8 @@ def get_injected_network_template(network_info, template=None,
                                   libvirt_virt_type=None):
     """Returns a rendered network template for the given network_info.
 
-    :param network_info:
-        :py:meth:`~nova.network.manager.NetworkManager.get_instance_nw_info`
+    :param network_info: `nova.network.models.NetworkInfo` object describing
+        the network metadata.
     :param template: Path to the interfaces template file.
     :param libvirt_virt_type: The Libvirt `virt_type`, will be `None` for
         other hypervisors..
@@ -222,6 +222,22 @@ def get_network_metadata(network_info):
         "networks": nets,
         "services": services
     }
+
+
+def get_ec2_ip_info(network_info):
+    if not isinstance(network_info, model.NetworkInfo):
+        network_info = model.NetworkInfo.hydrate(network_info)
+
+    ip_info = {}
+    fixed_ips = network_info.fixed_ips()
+    ip_info['fixed_ips'] = [
+        ip['address'] for ip in fixed_ips if ip['version'] == 4]
+    ip_info['fixed_ip6s'] = [
+        ip['address'] for ip in fixed_ips if ip['version'] == 6]
+    ip_info['floating_ips'] = [
+        ip['address'] for ip in network_info.floating_ips()]
+
+    return ip_info
 
 
 def _get_eth_link(vif, ifc_num):

@@ -114,8 +114,9 @@ def create_cow_image(backing_file, path, size=None):
     base_cmd = ['qemu-img', 'create', '-f', 'qcow2']
     cow_opts = []
     if backing_file:
-        cow_opts += ['backing_file=%s' % backing_file]
         base_details = images.qemu_img_info(backing_file)
+        cow_opts += ['backing_file=%s' % backing_file]
+        cow_opts += ['backing_fmt=%s' % base_details.file_format]
     else:
         base_details = None
     # Explicitly inherit the value of 'cluster_size' property of a qcow2
@@ -536,6 +537,10 @@ def get_cpu_model_from_arch(arch):
         mode = 'qemu32'
     elif arch == obj_fields.Architecture.PPC64LE:
         mode = 'POWER8'
+    # NOTE(kevinz): In aarch64, cpu model 'max' will offer the capabilities
+    # that all the stuff it can currently emulate, both for "TCG" and "KVM"
+    elif arch == obj_fields.Architecture.AARCH64:
+        mode = 'max'
     return mode
 
 

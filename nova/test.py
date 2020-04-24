@@ -24,6 +24,7 @@ inline callbacks.
 import nova.monkey_patch  # noqa
 
 import abc
+import collections
 import copy
 import datetime
 import inspect
@@ -45,18 +46,15 @@ from oslo_serialization import jsonutils
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 from oslo_versionedobjects import fixture as ovo_fixture
+from oslotest import base
 from oslotest import mock_fixture
-from oslotest import moxstubout
 import six
 from six.moves import builtins
 import testtools
 
 from nova.compute import rpcapi as compute_rpcapi
 from nova import context
-from nova.db import api as db
 from nova import exception
-from nova.network import manager as network_manager
-from nova.network.security_group import openstack_driver
 from nova import objects
 from nova.objects import base as objects_base
 from nova import quota
@@ -78,6 +76,7 @@ logging.register_options(CONF)
 CONF.set_override('use_stderr', False)
 logging.setup(CONF, 'nova')
 cache.configure(CONF)
+LOG = logging.getLogger(__name__)
 
 _TRUE_VALUES = ('True', 'true', '1', 'yes')
 CELL1_NAME = 'cell1'
@@ -87,70 +86,8 @@ CELL1_NAME = 'cell1'
 nested = utils.nested_contexts
 
 
-class SampleNetworks(fixtures.Fixture):
-
-    """Create sample networks in the database."""
-
-    def __init__(self, host=None):
-        self.host = host
-
-    def setUp(self):
-        super(SampleNetworks, self).setUp()
-        ctxt = context.get_admin_context()
-        network = network_manager.VlanManager(host=self.host)
-        bridge_interface = CONF.flat_interface or CONF.vlan_interface
-        network.create_networks(ctxt,
-                                label='test',
-                                cidr='10.0.0.0/8',
-                                multi_host=CONF.multi_host,
-                                num_networks=CONF.num_networks,
-                                network_size=CONF.network_size,
-                                cidr_v6=CONF.fixed_range_v6,
-                                gateway=CONF.gateway,
-                                gateway_v6=CONF.gateway_v6,
-                                bridge=CONF.flat_network_bridge,
-                                bridge_interface=bridge_interface,
-                                vpn_start=CONF.vpn_start,
-                                vlan_start=CONF.vlan_start,
-                                dns1=CONF.flat_network_dns)
-        for net in db.network_get_all(ctxt):
-            network.set_network_host(ctxt, net)
-
-
 class TestingException(Exception):
     pass
-
-
-class skipIf(object):
-    def __init__(self, condition, reason):
-        self.condition = condition
-        self.reason = reason
-
-    def __call__(self, func_or_cls):
-        condition = self.condition
-        reason = self.reason
-        if inspect.isfunction(func_or_cls):
-            @six.wraps(func_or_cls)
-            def wrapped(*args, **kwargs):
-                if condition:
-                    raise testtools.TestCase.skipException(reason)
-                return func_or_cls(*args, **kwargs)
-
-            return wrapped
-        elif inspect.isclass(func_or_cls):
-            orig_func = getattr(func_or_cls, 'setUp')
-
-            @six.wraps(orig_func)
-            def new_func(self, *args, **kwargs):
-                if condition:
-                    raise testtools.TestCase.skipException(reason)
-                orig_func(self, *args, **kwargs)
-
-            func_or_cls.setUp = new_func
-            return func_or_cls
-        else:
-            raise TypeError('skipUnless can be used only with functions or '
-                            'classes')
 
 
 # NOTE(claudiub): this needs to be called before any mock.patch calls are
@@ -158,6 +95,39 @@ class skipIf(object):
 # the mock.patch autospec issue:
 # https://github.com/testing-cabal/mock/issues/396
 mock_fixture.patch_mock_module()
+
+
+def _poison_unfair_compute_resource_semaphore_locking():
+    """Ensure that every locking on COMPUTE_RESOURCE_SEMAPHORE is called with
+    fair=True.
+    """
+    orig_synchronized = utils.synchronized
+
+    def poisoned_synchronized(*args, **kwargs):
+        # Only check fairness if the decorator is used with
+        # COMPUTE_RESOURCE_SEMAPHORE. But the name of the semaphore can be
+        # passed as args or as kwargs.
+        # Note that we cannot import COMPUTE_RESOURCE_SEMAPHORE as that would
+        # apply the decorators we want to poison here.
+        if len(args) >= 1:
+            name = args[0]
+        else:
+            name = kwargs.get("name")
+        if name == "compute_resources" and not kwargs.get("fair", False):
+            raise AssertionError(
+                'Locking on COMPUTE_RESOURCE_SEMAPHORE should always be fair. '
+                'See bug 1864122.')
+        # go and act like the original decorator
+        return orig_synchronized(*args, **kwargs)
+
+    # replace the synchronized decorator factory with our own that checks the
+    # params passed in
+    utils.synchronized = poisoned_synchronized
+
+
+# NOTE(gibi): This poisoning needs to be done in import time as decorators are
+# applied in import time on the ResourceTracker
+_poison_unfair_compute_resource_semaphore_locking()
 
 
 class NovaExceptionReraiseFormatError(object):
@@ -180,7 +150,7 @@ class NovaExceptionReraiseFormatError(object):
 NovaExceptionReraiseFormatError.patch()
 
 
-class TestCase(testtools.TestCase):
+class TestCase(base.BaseTestCase):
     """Test case base class for all unit tests.
 
     Due to the slowness of DB access, please consider deriving from
@@ -204,26 +174,21 @@ class TestCase(testtools.TestCase):
     # base class when USES_DB is True.
     NUMBER_OF_CELLS = 1
 
-    TIMEOUT_SCALING_FACTOR = 1
-
     def setUp(self):
         """Run before each test method to initialize test environment."""
-        super(TestCase, self).setUp()
-        self.useFixture(nova_fixtures.Timeout(
-            os.environ.get('OS_TEST_TIMEOUT', 0),
-            self.TIMEOUT_SCALING_FACTOR))
+        # Ensure BaseTestCase's ConfigureLogging fixture is disabled since
+        # we're using our own (StandardLogging).
+        with fixtures.EnvironmentVariable('OS_LOG_CAPTURE', '0'):
+            super(TestCase, self).setUp()
+
+        # How many of which service we've started. {$service-name: $count}
+        self._service_fixture_count = collections.defaultdict(int)
 
         self.useFixture(nova_fixtures.OpenStackSDKFixture())
 
-        self.useFixture(fixtures.NestedTempfile())
-        self.useFixture(fixtures.TempHomeDir())
         self.useFixture(log_fixture.get_logging_handle_error_fixture())
 
-        self.output = nova_fixtures.OutputStreamCapture()
-        self.useFixture(self.output)
-
-        self.stdlog = nova_fixtures.StandardLogging()
-        self.useFixture(self.stdlog)
+        self.stdlog = self.useFixture(nova_fixtures.StandardLogging())
 
         # NOTE(sdague): because of the way we were using the lock
         # wrapper we ended up with a lot of tests that started
@@ -269,6 +234,7 @@ class TestCase(testtools.TestCase):
         context.CELL_CACHE = {}
         context.CELLS = []
 
+        self.computes = {}
         self.cell_mappings = {}
         self.host_mappings = {}
         # NOTE(danms): If the test claims to want to set up the database
@@ -292,27 +258,17 @@ class TestCase(testtools.TestCase):
 
         self.useFixture(ovo_fixture.StableObjectJsonFixture())
 
-        # NOTE(mnaser): All calls to utils.is_neutron() are cached in
-        # nova.utils._IS_NEUTRON.  We set it to None to avoid any
-        # caching of that value.
-        utils._IS_NEUTRON = None
-
         # Reset the global QEMU version flag.
         images.QEMU_VERSION = None
 
         # Reset the compute RPC API globals (mostly the _ROUTER).
         compute_rpcapi.reset_globals()
 
-        mox_fixture = self.useFixture(moxstubout.MoxStubout())
-        self.mox = mox_fixture.mox
-        self.stubs = mox_fixture.stubs
         self.addCleanup(self._clear_attrs)
         self.useFixture(fixtures.EnvironmentVariable('http_proxy'))
         self.policy = self.useFixture(policy_fixture.PolicyFixture())
 
         self.useFixture(nova_fixtures.PoisonFunctions())
-
-        openstack_driver.DRIVER_CACHE = None
 
         self.useFixture(nova_fixtures.ForbidNewLegacyNotificationFixture())
 
@@ -390,9 +346,6 @@ class TestCase(testtools.TestCase):
         Use the monkey patch fixture to replace a function for the
         duration of a test. Useful when you want to provide fake
         methods instead of mocks during testing.
-
-        This should be used instead of self.stubs.Set (which is based
-        on mox) going forward.
         """
         self.useFixture(fixtures.MonkeyPatch(old, new))
 
@@ -425,7 +378,11 @@ class TestCase(testtools.TestCase):
         for k, v in kw.items():
             CONF.set_override(k, v, group)
 
-    def start_service(self, name, host=None, **kwargs):
+    def start_service(self, name, host=None, cell_name=None, **kwargs):
+        # Disallow starting multiple scheduler services
+        if name == 'scheduler' and self._service_fixture_count[name]:
+            raise TestingException("Duplicate start_service(%s)!" % name)
+
         cell = None
         # if the host is None then the CONF.host remains defaulted to
         # 'fake-mini' (originally done in ConfFixture)
@@ -438,7 +395,7 @@ class TestCase(testtools.TestCase):
             # otherwise we'll fail to update the scheduler while running
             # the compute node startup routines below.
             ctxt = context.get_context()
-            cell_name = kwargs.pop('cell', CELL1_NAME) or CELL1_NAME
+            cell_name = cell_name or CELL1_NAME
             cell = self.cell_mappings[cell_name]
             if (host or name) not in self.host_mappings:
                 # NOTE(gibi): If the HostMapping does not exists then this is
@@ -451,7 +408,50 @@ class TestCase(testtools.TestCase):
         svc = self.useFixture(
             nova_fixtures.ServiceFixture(name, host, cell=cell, **kwargs))
 
+        # Keep track of how many instances of this service are running.
+        self._service_fixture_count[name] += 1
+        real_stop = svc.service.stop
+
+        # Make sure stopping the service decrements the active count, so that
+        # start,stop,start doesn't trigger the "Duplicate start_service"
+        # exception.
+        def patch_stop(*a, **k):
+            self._service_fixture_count[name] -= 1
+            return real_stop(*a, **k)
+        self.useFixture(fixtures.MockPatchObject(
+            svc.service, 'stop', patch_stop))
+
         return svc.service
+
+    def _start_compute(self, host, cell_name=None):
+        """Start a nova compute service on the given host
+
+        :param host: the name of the host that will be associated to the
+                     compute service.
+        :param cell_name: optional name of the cell in which to start the
+                          compute service
+        :return: the nova compute service object
+        """
+        compute = self.start_service('compute', host=host, cell_name=cell_name)
+        self.computes[host] = compute
+        return compute
+
+    def _run_periodics(self):
+        """Run the update_available_resource task on every compute manager
+
+        This runs periodics on the computes in an undefined order; some child
+        class redefine this function to force a specific order.
+        """
+
+        ctx = context.get_admin_context()
+        for host, compute in self.computes.items():
+            LOG.info('Running periodic for compute (%s)', host)
+            # Make sure the context is targeted to the proper cell database
+            # for multi-cell tests.
+            with context.target_cell(
+                    ctx, self.host_mappings[host].cell_mapping) as cctxt:
+                compute.manager.update_available_resource(cctxt)
+        LOG.info('Finished with periodics')
 
     def restart_compute_service(self, compute, keep_hypervisor_state=True):
         """Stops the service and starts a new one to have realistic restart
@@ -496,10 +496,10 @@ class TestCase(testtools.TestCase):
                     'nova.virt.driver.load_compute_driver') as load_driver:
                 load_driver.return_value = old_driver
                 new_compute = self.start_service(
-                    'compute', host=compute.host, cell=cell_name)
+                    'compute', host=compute.host, cell_name=cell_name)
         else:
             new_compute = self.start_service(
-                'compute', host=compute.host, cell=cell_name)
+                'compute', host=compute.host, cell_name=cell_name)
 
         return new_compute
 
@@ -757,12 +757,9 @@ class BaseHookTestCase(NoDBTestCase):
 class MatchType(object):
     """Matches any instance of a specified type
 
-    The MatchType class is a helper for use with the
-    mock.assert_called_with() method that lets you
-    assert that a particular parameter has a specific
-    data type. It enables strict check than the built
-    in mock.ANY helper, and is the equivalent of the
-    mox.IsA() function from the legacy mox library
+    The MatchType class is a helper for use with the mock.assert_called_with()
+    method that lets you assert that a particular parameter has a specific data
+    type. It enables stricter checking than the built in mock.ANY helper.
 
     Example usage could be:
 
@@ -804,11 +801,9 @@ class MatchObjPrims(object):
 class ContainKeyValue(object):
     """Checks whether a key/value pair is in a dict parameter.
 
-    The ContainKeyValue class is a helper for use with the
-    mock.assert_*() method that lets you assert that a particular
-    dict contain a key/value pair. It enables strict check than
-    the built in mock.ANY helper, and is the equivalent of the
-    mox.ContainsKeyValue() function from the legacy mox library
+    The ContainKeyValue class is a helper for use with the mock.assert_*()
+    method that lets you assert that a particular dict contain a key/value
+    pair. It enables stricter checking than the built in mock.ANY helper.
 
     Example usage could be:
 

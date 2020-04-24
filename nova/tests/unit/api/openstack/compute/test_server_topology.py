@@ -32,10 +32,11 @@ class ServerTopologyTestV278(test.NoDBTestCase):
         super(ServerTopologyTestV278, self).setUp()
         self.uuid = uuids.instance
         self.req = fakes.HTTPRequest.blank(
-            '/v2/fake/servers/%s/topology' % self.uuid,
+            '/v2/%s/servers/%s/topology' % (fakes.FAKE_PROJECT_ID, self.uuid),
             version=self.api_version,
             use_admin_context=True)
         self.controller = server_topology.ServerTopologyController()
+        self.context = self.req.environ['nova.context']
 
     def _fake_numa(self, cpu_pinning=None):
         ce0 = numa.InstanceNUMACell(node=0, memory=1024, pagesize=4, id=0,
@@ -57,7 +58,8 @@ class ServerTopologyTestV278(test.NoDBTestCase):
     @mock.patch.object(common, 'get_instance')
     def test_get_topology_with_no_topology(self, fake_get):
         expect = {'nodes': [], 'pagesize_kb': None}
-        inst = objects.instance.Instance(uuid=self.uuid, host='123')
+        inst = objects.instance.Instance(uuid=self.uuid, host='123',
+            project_id=self.context.project_id)
         inst.numa_topology = None
         fake_get.return_value = inst
 
@@ -74,7 +76,8 @@ class ServerTopologyTestV278(test.NoDBTestCase):
                      'cpu_pinning':{}}],
                      'pagesize_kb': 4}
 
-        inst = objects.instance.Instance(uuid=self.uuid, host='123')
+        inst = objects.instance.Instance(uuid=self.uuid, host='123',
+            project_id=self.context.project_id)
         inst.numa_topology = self._fake_numa(cpu_pinning=None)
         fake_get.return_value = inst
 
@@ -88,29 +91,10 @@ class ServerTopologyTestV278(test.NoDBTestCase):
 
     def test_hit_topology_before278(self):
         req = fakes.HTTPRequest.blank(
-                            '/v2/fake/servers/%s/topology' % self.uuid,
-                            version='2.77')
+            '/v2/%s/servers/%s/topology' % (fakes.FAKE_PROJECT_ID, self.uuid),
+            version='2.77')
         excep = self.assertRaises(exception.VersionNotFoundForAPIMethod,
                          self.controller.index,
                          req,
                          self.uuid)
         self.assertEqual(400, excep.code)
-
-
-class ServerTopologyEnforcementV278(test.NoDBTestCase):
-    api_version = '2.78'
-
-    def setUp(self):
-        super(ServerTopologyEnforcementV278, self).setUp()
-        self.controller = server_topology.ServerTopologyController()
-        self.req = fakes.HTTPRequest.blank('', version=self.api_version)
-
-    def test_get_topology_policy_failed(self):
-        rule_name = "compute:server:topology:index"
-        self.policy.set_rules({rule_name: "project:non_fake"})
-        exc = self.assertRaises(
-                    exception.PolicyNotAuthorized,
-                    self.controller.index, self.req, fakes.FAKE_UUID)
-        self.assertEqual(
-            "Policy doesn't allow %s to be performed." % rule_name,
-            exc.format_message())

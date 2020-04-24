@@ -37,9 +37,6 @@ from nova import policy
 from nova import utils
 
 LOG = logging.getLogger(__name__)
-# TODO(melwitt): This cache should be cleared whenever WSGIService receives a
-# SIGHUP and periodically based on an expiration time. Currently, none of the
-# cell caches are purged, so neither is this one, for now.
 CELL_CACHE = {}
 # NOTE(melwitt): Used for the scatter-gather utility to indicate we timed out
 # waiting for a result from a cell.
@@ -118,7 +115,8 @@ class RequestContext(context.RequestContext):
             # Only include required parts of service_catalog
             self.service_catalog = [s for s in service_catalog
                 if s.get('type') in ('image', 'block-storage', 'volumev3',
-                                     'key-manager', 'placement', 'network')]
+                                     'key-manager', 'placement', 'network',
+                                     'accelerator')]
         else:
             # if list is empty or none
             self.service_catalog = []

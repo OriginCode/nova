@@ -55,9 +55,7 @@ the same host to the destination options. Also set to true
 if you allow the ServerGroupAffinityFilter and need to resize.
 """),
     cfg.ListOpt('non_inheritable_image_properties',
-        default=['cache_in_nova', 'bittorrent',
-                 'img_signature_hash_method', 'img_signature',
-                 'img_signature_key_type', 'img_signature_certificate_uuid'],
+        default=['cache_in_nova', 'bittorrent'],
         help="""
 Image properties that should not be inherited from the instance
 when taking a snapshot.
@@ -65,15 +63,25 @@ when taking a snapshot.
 This option gives an opportunity to select which image-properties
 should not be inherited by newly created snapshots.
 
+.. note::
+
+   The following image properties are *never* inherited regardless of
+   whether they are listed in this configuration option or not:
+
+   * cinder_encryption_key_id
+   * cinder_encryption_key_deletion_policy
+   * img_signature
+   * img_signature_hash_method
+   * img_signature_key_type
+   * img_signature_certificate_uuid
+
 Possible values:
 
 * A comma-separated list whose item is an image property. Usually only
   the image properties that are only needed by base images can be included
   here, since the snapshots that are created from the base images don't
   need them.
-* Default list: cache_in_nova, bittorrent, img_signature_hash_method,
-                img_signature, img_signature_key_type,
-                img_signature_certificate_uuid
+* Default list: cache_in_nova, bittorrent
 
 """),
     cfg.IntOpt('max_local_block_devices',
@@ -168,6 +176,17 @@ Related options:
 * vif_plugging_is_fatal - If ``vif_plugging_timeout`` is set to zero and
   ``vif_plugging_is_fatal`` is False, events should not be expected to
   arrive at all.
+"""),
+    cfg.IntOpt('arq_binding_timeout',
+        default=300,
+        min=1,
+        help="""
+Timeout for Accelerator Request (ARQ) bind event message arrival.
+
+Number of seconds to wait for ARQ bind resolution event to arrive.
+The event indicates that every ARQ for an instance has either bound
+successfully or failed to bind. If it does not arrive, instance bringup
+is aborted with an exception.
 """),
     cfg.StrOpt('injected_network_template',
         default=paths.basedir_def('nova/virt/interfaces.template'),
@@ -264,22 +283,6 @@ driver (for qcow and raw), or loop (for raw).
         default=10,
         min=0,
         help='Amount of time, in seconds, to wait for NBD device start up.'),
-    cfg.StrOpt('image_cache_subdirectory_name',
-        default='_base',
-        help="""
-Location of cached images.
-
-This is NOT the full path - just a folder name relative to '$instances_path'.
-For per-compute-host cached images, set to '_base_$my_ip'
-"""),
-    cfg.BoolOpt('remove_unused_base_images',
-        default=True,
-        help='Should unused base images be removed?'),
-    cfg.IntOpt('remove_unused_original_minimum_age_seconds',
-        default=(24 * 3600),
-        help="""
-Unused unresized base images younger than this will not be removed.
-"""),
     cfg.StrOpt('pointer_model',
         default='usbtablet',
         choices=[
@@ -954,17 +957,6 @@ Possible values:
 ]
 
 interval_opts = [
-    cfg.IntOpt('image_cache_manager_interval',
-        default=2400,
-        min=-1,
-        help="""
-Number of seconds to wait between runs of the image cache manager.
-
-Possible values:
-* 0: run at the default rate.
-* -1: disable
-* Any other value
-"""),
     cfg.IntOpt('bandwidth_poll_interval',
         default=600,
         help="""
@@ -1042,11 +1034,23 @@ must be set globally otherwise servers could be put into a soft deleted
 state in the API and never actually reclaimed (deleted) on the compute
 node.
 
+.. note:: When using this option, you should also configure the ``[cinder]``
+          auth options, e.g. ``auth_type``, ``auth_url``, ``username``, etc.
+          Since the reclaim happens in a periodic task, there is no user token
+          to cleanup volumes attached to any SOFT_DELETED servers so nova must
+          be configured with administrator role access to cleanup those
+          resources in cinder.
+
 Possible values:
 
 * Any positive integer(in seconds) greater than 0 will enable
   this option.
 * Any value <=0 will disable the option.
+
+Related options:
+
+* [cinder] auth options for cleaning up volumes attached to servers during
+  the reclaim process
 """),
     cfg.IntOpt('volume_usage_poll_interval',
         default=0,
@@ -1177,7 +1181,7 @@ Related options:
         help="""
 Interval for updating compute resources.
 
-This option specifies how often the update_available_resources
+This option specifies how often the update_available_resource
 periodic task should run. A number less than 0 means to disable the
 task completely. Leaving this at the default of 0 will cause this to
 run at the default periodic interval. Setting it to any positive

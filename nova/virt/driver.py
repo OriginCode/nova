@@ -110,6 +110,7 @@ CAPABILITY_TRAITS_MAP = {
     "supports_multiattach": os_traits.COMPUTE_VOLUME_MULTI_ATTACH,
     # Added in os-traits 0.8.0.
     "supports_trusted_certs": os_traits.COMPUTE_TRUSTED_CERTS,
+    "supports_accelerators": os_traits.COMPUTE_ACCELERATORS,
 
     # Image type support flags, added in os-traits 0.12.0
     "supports_image_type_aki": os_traits.COMPUTE_IMAGE_TYPE_AKI,
@@ -122,6 +123,12 @@ CAPABILITY_TRAITS_MAP = {
     "supports_image_type_vhd": os_traits.COMPUTE_IMAGE_TYPE_VHD,
     "supports_image_type_vhdx": os_traits.COMPUTE_IMAGE_TYPE_VHDX,
     "supports_image_type_vmdk": os_traits.COMPUTE_IMAGE_TYPE_VMDK,
+    # Added in os-traits 2.0.0
+    "supports_image_type_ploop": os_traits.COMPUTE_IMAGE_TYPE_PLOOP,
+    # Added in os-traits 2.1.0.
+    "supports_migrate_to_same_host": os_traits.COMPUTE_SAME_HOST_COLD_MIGRATE,
+    # Added in os-traits 2.2.0.
+    "supports_bfv_rescue": os_traits.COMPUTE_RESCUE_BFV,
 }
 
 
@@ -171,6 +178,8 @@ class ComputeDriver(object):
         "supports_multiattach": False,
         "supports_trusted_certs": False,
         "supports_pcpus": False,
+        "supports_accelerators": False,
+        "supports_bfv_rescue": False,
 
         # Image type support flags
         "supports_image_type_aki": False,
@@ -183,6 +192,7 @@ class ComputeDriver(object):
         "supports_image_type_vhd": False,
         "supports_image_type_vhdx": False,
         "supports_image_type_vmdk": False,
+        "supports_image_type_ploop": False,
     }
 
     # Indicates if this driver will rebalance nodes among compute service
@@ -343,7 +353,7 @@ class ComputeDriver(object):
 
     def spawn(self, context, instance, image_meta, injected_files,
               admin_password, allocations, network_info=None,
-              block_device_info=None, power_on=True):
+              block_device_info=None, power_on=True, accel_info=None):
         """Create a new instance/VM/domain on the virtualization platform.
 
         Once this successfully completes, the instance should be
@@ -370,6 +380,22 @@ class ComputeDriver(object):
                                   attached to the instance.
         :param power_on: True if the instance should be powered on, False
                          otherwise
+        :param arqs: List of bound accelerator requests for this instance.
+            [
+             {'uuid': $arq_uuid,
+              'device_profile_name': $dp_name,
+              'device_profile_group_id': $dp_request_group_index,
+              'state': 'Bound',
+              'device_rp_uuid': $resource_provider_uuid,
+              'hostname': $host_nodename,
+              'instance_uuid': $instance_uuid,
+              'attach_handle_info': {  # PCI bdf
+                'bus': '0c', 'device': '0', 'domain': '0000', 'function': '0'},
+              'attach_handle_type': 'PCI'
+                   # or 'TEST_PCI' for Cyborg fake driver
+             }
+            ]
+            Also doc'd in nova/accelerator/cyborg.py::get_arqs_for_instance()
         """
         raise NotImplementedError()
 
@@ -408,7 +434,8 @@ class ComputeDriver(object):
         raise NotImplementedError()
 
     def reboot(self, context, instance, network_info, reboot_type,
-               block_device_info=None, bad_volumes_callback=None):
+               block_device_info=None, bad_volumes_callback=None,
+               accel_info=None):
         """Reboot the specified instance.
 
         After this is called successfully, the instance's state
@@ -423,6 +450,8 @@ class ComputeDriver(object):
         :param block_device_info: Info pertaining to attached volumes
         :param bad_volumes_callback: Function to handle any bad volumes
             encountered
+        :param accel_info: List of accelerator request dicts. The exact
+            data struct is doc'd in nova/virt/driver.py::spawn().
         """
         raise NotImplementedError()
 
@@ -571,9 +600,11 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
-    def extend_volume(self, connection_info, instance, requested_size):
+    def extend_volume(self, context, connection_info, instance,
+                      requested_size):
         """Extend the disk attached to the instance.
 
+        :param context: The request context.
         :param dict connection_info:
             The connection for the extended volume.
         :param nova.objects.instance.Instance instance:
@@ -701,7 +732,7 @@ class ComputeDriver(object):
 
     def finish_migration(self, context, migration, instance, disk_info,
                          network_info, image_meta, resize_instance,
-                         block_device_info=None, power_on=True):
+                         allocations, block_device_info=None, power_on=True):
         """Completes a resize/migration.
 
         :param context: the context for the migration/resize
@@ -713,6 +744,9 @@ class ComputeDriver(object):
             The metadata of the image of the instance.
         :param resize_instance: True if the instance is being resized,
                                 False otherwise
+        :param allocations: Information about resources allocated to the
+                            instance via placement, of the form returned by
+                            SchedulerReportClient.get_allocs_for_consumer.
         :param block_device_info: instance volume block device info
         :param power_on: True if the instance should be powered on, False
                          otherwise
@@ -821,7 +855,7 @@ class ComputeDriver(object):
         raise NotImplementedError()
 
     def rescue(self, context, instance, network_info, image_meta,
-               rescue_password):
+               rescue_password, block_device_info):
         """Rescue the specified instance.
 
         :param nova.context.RequestContext context:
@@ -833,6 +867,8 @@ class ComputeDriver(object):
         :param nova.objects.ImageMeta image_meta:
             The metadata of the image of the instance.
         :param rescue_password: new root password to set for rescue.
+        :param dict block_device_info:
+            The block device mapping of the instance.
         """
         raise NotImplementedError()
 
@@ -862,10 +898,14 @@ class ComputeDriver(object):
         raise NotImplementedError()
 
     def power_on(self, context, instance, network_info,
-                 block_device_info=None):
+                 block_device_info=None, accel_info=None):
         """Power on the specified instance.
 
         :param instance: nova.objects.instance.Instance
+        :param network_info: instance network information
+        :param block_device_info: instance volume block device info
+        :param accel_info: List of accelerator request dicts. The exact
+            data struct is doc'd in nova/virt/driver.py::spawn().
         """
         raise NotImplementedError()
 
@@ -972,9 +1012,6 @@ class ComputeDriver(object):
         node, as well as the inventory, aggregates, and traits associated with
         those resource providers.
 
-        This method supersedes get_inventory(): if this method is implemented,
-        get_inventory() is not used.
-
         Implementors of this interface are expected to set ``allocation_ratio``
         and ``reserved`` values for inventory records, which may be based on
         configuration options, e.g. ``[DEFAULT]/cpu_allocation_ratio``,
@@ -1045,12 +1082,6 @@ class ComputeDriver(object):
             resource class.
         :raises: ReshapeFailed if the requested tree reshape fails for
             whatever reason.
-        """
-        raise NotImplementedError()
-
-    def get_inventory(self, nodename):
-        """Return a dict, keyed by resource class, of inventory information for
-        the supplied node.
         """
         raise NotImplementedError()
 
@@ -1307,67 +1338,10 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
-    def refresh_security_group_rules(self, security_group_id):
-        """This method is called after a change to security groups.
-
-        All security groups and their associated rules live in the datastore,
-        and calling this method should apply the updated rules to instances
-        running the specified security group.
-
-        An error should be raised if the operation cannot complete.
-
-        """
-        # TODO(Vek): Need to pass context in for access to auth_token
-        raise NotImplementedError()
-
-    def refresh_instance_security_rules(self, instance):
-        """Refresh security group rules
-
-        Gets called when an instance gets added to or removed from
-        the security group the instance is a member of or if the
-        group gains or loses a rule.
-        """
-        raise NotImplementedError()
-
     def reset_network(self, instance):
         """reset networking for specified instance."""
         # TODO(Vek): Need to pass context in for access to auth_token
         pass
-
-    def ensure_filtering_rules_for_instance(self, instance, network_info):
-        """Setting up filtering rules and waiting for its completion.
-
-        To migrate an instance, filtering rules to hypervisors
-        and firewalls are inevitable on destination host.
-        ( Waiting only for filtering rules to hypervisor,
-        since filtering rules to firewall rules can be set faster).
-
-        Concretely, the below method must be called.
-        - setup_basic_filtering (for nova-basic, etc.)
-        - prepare_instance_filter(for nova-instance-instance-xxx, etc.)
-
-        Don't use thread for this method since migration should
-        not be started when setting-up filtering rules operations
-        are not completed.
-
-        :param instance: nova.objects.instance.Instance object
-
-        """
-        # TODO(Vek): Need to pass context in for access to auth_token
-        raise NotImplementedError()
-
-    def filter_defer_apply_on(self):
-        """Defer application of IPTables rules."""
-        pass
-
-    def filter_defer_apply_off(self):
-        """Turn off deferral of IPTables rules and apply the rules now."""
-        pass
-
-    def unfilter_instance(self, instance, network_info):
-        """Stop filtering instance."""
-        # TODO(Vek): Need to pass context in for access to auth_token
-        raise NotImplementedError()
 
     def set_admin_password(self, instance, new_pass):
         """Set the root password on the specified instance.
@@ -1502,9 +1476,6 @@ class ComputeDriver(object):
         raise NotImplementedError()
 
     def unplug_vifs(self, instance, network_info):
-        # NOTE(markus_z): 2015-08-18
-        # The compute manager doesn't use this interface, which seems odd
-        # since the manager should be the controlling thing here.
         """Unplug virtual interfaces (VIFs) from networks.
 
         The counter action is :func:`plug_vifs`.
@@ -1566,10 +1537,6 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
-    def deallocate_networks_on_reschedule(self, instance):
-        """Does the driver want networks deallocated on reschedule?"""
-        return False
-
     def manage_image_cache(self, context, all_instances):
         """Manage the driver's local image cache.
 
@@ -1581,6 +1548,22 @@ class ComputeDriver(object):
         :param all_instances: nova.objects.instance.InstanceList
         """
         pass
+
+    def cache_image(self, context, image_id):
+        """Download an image into the cache.
+
+        Used by the compute manager in response to a request to pre-cache
+        an image on the compute node. If the driver implements an image cache,
+        it should implement this method as well and perform the same action
+        as it does during an on-demand base image fetch in response to a
+        spawn.
+
+        :returns: A boolean indicating whether or not the image was fetched.
+                  True if it was fetched, or False if it already exists in
+                  the cache.
+        :raises: An Exception on error
+        """
+        raise NotImplementedError()
 
     def add_to_aggregate(self, context, aggregate, host, **kwargs):
         """Add a compute host to an aggregate.

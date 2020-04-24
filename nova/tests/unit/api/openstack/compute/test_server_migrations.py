@@ -18,7 +18,6 @@ import datetime
 
 import mock
 from oslo_utils.fixture import uuidsentinel as uuids
-import six
 import webob
 
 from nova.api.openstack.compute import server_migrations
@@ -348,79 +347,6 @@ class ServerMigrationsTestsV265(ServerMigrationsTestsV224):
                                                support_abort_in_queue=True)
         _do_test()
 
-    def test_cancel_live_migration_in_queue_not_yet_available(self):
-        exc = exception.AbortQueuedLiveMigrationNotYetSupported(
-            migration_id=1, status='queued')
 
-        @mock.patch.object(self.compute_api, 'live_migrate_abort',
-                           side_effect=exc)
-        @mock.patch.object(self.compute_api, 'get')
-        def _do_test(mock_get, mock_abort):
-            error = self.assertRaises(webob.exc.HTTPConflict,
-                                      self.controller.delete,
-                                      self.req, 'server-id', 1)
-            self.assertIn("Aborting live migration 1 with status queued is "
-                          "not yet supported for this instance.",
-                          six.text_type(error))
-            mock_abort.assert_called_once_with(self.context,
-                                               mock_get.return_value, 1,
-                                               support_abort_in_queue=True)
-        _do_test()
-
-
-class ServerMigrationsPolicyEnforcementV21(test.NoDBTestCase):
-    wsgi_api_version = '2.22'
-
-    def setUp(self):
-        super(ServerMigrationsPolicyEnforcementV21, self).setUp()
-        self.controller = server_migrations.ServerMigrationsController()
-        self.req = fakes.HTTPRequest.blank('', version=self.wsgi_api_version)
-
-    def test_force_complete_policy_failed(self):
-        rule_name = "os_compute_api:servers:migrations:force_complete"
-        self.policy.set_rules({rule_name: "project:non_fake"})
-        body_args = {'force_complete': None}
-        exc = self.assertRaises(exception.PolicyNotAuthorized,
-                                self.controller._force_complete, self.req,
-                                fakes.FAKE_UUID, fakes.FAKE_UUID,
-                                body=body_args)
-        self.assertEqual(
-                      "Policy doesn't allow %s to be performed." % rule_name,
-                      exc.format_message())
-
-
-class ServerMigrationsPolicyEnforcementV223(
-                ServerMigrationsPolicyEnforcementV21):
-
-    wsgi_api_version = '2.23'
-
-    def test_migration_index_failed(self):
-        rule_name = "os_compute_api:servers:migrations:index"
-        self.policy.set_rules({rule_name: "project:non_fake"})
-        exc = self.assertRaises(exception.PolicyNotAuthorized,
-                                self.controller.index, self.req,
-                                fakes.FAKE_UUID)
-        self.assertEqual("Policy doesn't allow %s to be performed." %
-                         rule_name, exc.format_message())
-
-    def test_migration_show_failed(self):
-        rule_name = "os_compute_api:servers:migrations:show"
-        self.policy.set_rules({rule_name: "project:non_fake"})
-        exc = self.assertRaises(exception.PolicyNotAuthorized,
-                                self.controller.show, self.req,
-                                fakes.FAKE_UUID, 1)
-        self.assertEqual("Policy doesn't allow %s to be performed." %
-                         rule_name, exc.format_message())
-
-
-class ServerMigrationsPolicyEnforcementV224(
-                ServerMigrationsPolicyEnforcementV223):
-
-    wsgi_api_version = '2.24'
-
-    def test_migrate_delete_failed(self):
-        rule_name = "os_compute_api:servers:migrations:delete"
-        self.policy.set_rules({rule_name: "project:non_fake"})
-        self.assertRaises(exception.PolicyNotAuthorized,
-                          self.controller.delete, self.req,
-                          fakes.FAKE_UUID, '10')
+class ServerMigrationsTestsV280(ServerMigrationsTestsV265):
+    wsgi_api_version = '2.80'

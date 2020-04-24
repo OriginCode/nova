@@ -14,8 +14,7 @@ from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional import integrated_helpers
 
 
-class MultiCellEvacuateTestCase(integrated_helpers._IntegratedTestBase,
-                                integrated_helpers.InstanceHelperMixin):
+class MultiCellEvacuateTestCase(integrated_helpers._IntegratedTestBase):
     """Recreate test for bug 1823370 which was introduced in Pike.
 
     When evacuating a server, the request to the scheduler should be restricted
@@ -31,7 +30,6 @@ class MultiCellEvacuateTestCase(integrated_helpers._IntegratedTestBase,
     NUMBER_OF_CELLS = 2
     REQUIRES_LOCKING = False
     ADMIN_API = True
-    USE_NEUTRON = True
     _image_ref_parameter = 'imageRef'
     _flavor_ref_parameter = 'flavorRef'
     api_major_version = 'v2.1'
@@ -51,20 +49,18 @@ class MultiCellEvacuateTestCase(integrated_helpers._IntegratedTestBase,
         """
         host_to_cell = {'host1': 'cell1', 'host2': 'cell2', 'host3': 'cell1'}
         for host, cell in host_to_cell.items():
-            svc = self.start_service('compute', host=host, cell=cell)
-            # Set an attribute so we can access this service later.
-            setattr(self, host, svc)
+            self._start_compute(host, cell_name=cell)
 
     def test_evacuate_multi_cell(self):
         # Create a server which should land on host1 since it has the highest
         # weight.
-        server = self._build_server(self.api.get_flavors()[0]['id'])
+        server = self._build_server()
         server = self.api.post_server({'server': server})
-        server = self._wait_for_state_change(self.api, server, 'ACTIVE')
+        server = self._wait_for_state_change(server, 'ACTIVE')
         self.assertEqual('host1', server['OS-EXT-SRV-ATTR:host'])
 
         # Disable the host on which the server is now running.
-        self.host1.stop()
+        self.computes['host1'].stop()
         self.api.force_down_service('host1', 'nova-compute', forced_down=True)
 
         # Now evacuate the server which should send it to host3 since it is
@@ -73,9 +69,5 @@ class MultiCellEvacuateTestCase(integrated_helpers._IntegratedTestBase,
         req = {'evacuate': {'onSharedStorage': False}}
         self.api.post_server_action(server['id'], req)
         self._wait_for_migration_status(server, ['done'])
-        server = self._wait_for_state_change(self.api, server, 'ACTIVE')
-        # FIXME(mriedem): This is bug 1823370 where conductor does not restrict
-        # the RequestSpec to the origin cell before calling the scheduler to
-        # pick a new host so the host (host2) in the other cell (cell2) is
-        # incorrectly picked.
-        self.assertEqual('host2', server['OS-EXT-SRV-ATTR:host'])
+        server = self._wait_for_state_change(server, 'ACTIVE')
+        self.assertEqual('host3', server['OS-EXT-SRV-ATTR:host'])

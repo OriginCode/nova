@@ -12,7 +12,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova VERSION\n"
 "Report-Msgid-Bugs-To: https://bugs.launchpad.net/openstack-i18n/\n"
-"POT-Creation-Date: 2019-10-01 18:30+0000\n"
+"POT-Creation-Date: 2019-12-08 15:51+0000\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
@@ -109,10 +109,6 @@ msgid "'rxtx_factor' argument must be a float between 0 and %g"
 msgstr "'rxtx_factor' 引數必須是介於 0 和 %g 之間的浮點數"
 
 #, python-format
-msgid "/%s should be specified as single address(es) not in cidr format"
-msgstr "/%s 應該指定為單一位址，而不是指定為 CIDR 格式"
-
-#, python-format
 msgid "A NetworkModel is required in field %s"
 msgstr "欄位 %s 需要 NetworkModel"
 
@@ -146,9 +142,6 @@ msgstr "動作：'%(action)s'，呼叫方法：%(meth)s，主體：%(body)s"
 #, python-format
 msgid "Add metadata failed for aggregate %(id)s after %(retries)s retries"
 msgstr "重試 %(retries)s 次之後，對聚集 %(id)s 新增 meta 資料仍失敗"
-
-msgid "Address could not be converted."
-msgstr "無法轉換位址。"
 
 msgid "Affinity instance group policy was violated."
 msgstr "違反了親緣性實例群組原則。"
@@ -535,40 +528,10 @@ msgid "Connection to the hypervisor is broken on host: %(host)s"
 msgstr "Hypervisor 連線在主機 %(host)s 上已中斷"
 
 #, python-format
-msgid "Console %(console_id)s could not be found."
-msgstr "找不到主控台 %(console_id)s。"
-
-#, python-format
-msgid "Console for instance %(instance_uuid)s could not be found."
-msgstr "找不到實例 %(instance_uuid)s 的主控台。"
-
-#, python-format
-msgid ""
-"Console for instance %(instance_uuid)s in pool %(pool_id)s could not be "
-"found."
-msgstr "在儲存區 %(pool_id)s 中找不到實例 %(instance_uuid)s 的主控台。"
-
-#, python-format
 msgid ""
 "Console log output could not be retrieved for instance %(instance_id)s. "
 "Reason: %(reason)s"
 msgstr "無法擷取實例 %(instance_id)s 的主控台日誌輸出。原因：%(reason)s"
-
-#, python-format
-msgid ""
-"Console pool of type %(console_type)s for compute host %(compute_host)s on "
-"proxy host %(host)s not found."
-msgstr ""
-"在 Proxy 主機 %(host)s 上找不到計算主機 %(compute_host)s 的主控台儲存區（類型"
-"為 %(console_type)s）。"
-
-#, python-format
-msgid ""
-"Console pool with host %(host)s, console_type %(console_type)s and "
-"compute_host %(compute_host)s already exists."
-msgstr ""
-"主機為 %(host)s、console_type 為 %(console_type)s 且compute_host 為 "
-"%(compute_host)s 的主控台儲存區已存在。"
 
 msgid "Constraint not met."
 msgstr "不符合限制。"
@@ -621,17 +584,8 @@ msgstr "無法上傳映像檔 %(image_id)s"
 msgid "Couldn't get Link Local IP of %(interface)s :%(ex)s"
 msgstr "無法取得 %(interface)s 的鏈結本端 IP：%(ex)s"
 
-msgid "Create networks failed"
-msgstr "建立網路失敗"
-
 msgid "Creation of virtual interface with unique mac address failed"
 msgstr "使用唯一 MAC 位址來建立虛擬介面失敗"
-
-msgid "DNS1"
-msgstr "DNS1"
-
-msgid "DNS2"
-msgstr "DNS2"
 
 #, python-format
 msgid "Datastore regex %s did not match any datastores"
@@ -703,17 +657,6 @@ msgstr "驅動程式錯誤：%s"
 #, python-format
 msgid "Duplicate networks (%s) are not allowed"
 msgstr "不接受重複的網路 (%s)"
-
-msgid ""
-"ERROR: Network commands are not supported when using the Neutron API.  Use "
-"python-neutronclient instead."
-msgstr ""
-"錯誤：使用 Neutron API 時，不支援網路指令。請改用 python-neutronclient。"
-
-msgid ""
-"ESX SOAP server returned an empty port group for the host system in its "
-"response"
-msgstr "ESX SOAP 伺服器在其回應中傳回了主機系統的空白埠群組"
 
 #, python-format
 msgid ""
@@ -1191,12 +1134,6 @@ msgstr "IP 配置超過儲存區 %s 中的配額。"
 
 msgid "IP allocation over quota."
 msgstr "IP 配置超過配額。"
-
-msgid "IPv4"
-msgstr "IPv4"
-
-msgid "IPv6"
-msgstr "IPv6"
 
 #, python-format
 msgid "IPv6 netmask \"%s\" must be a netmask or integral prefix"
@@ -1906,10 +1843,6 @@ msgid ""
 msgstr "網路 %(network_uuid)s 需要子網路才能啟動實例。"
 
 #, python-format
-msgid "Network adapter %(adapter)s could not be found."
-msgstr "找不到網路配接卡 %(adapter)s。"
-
-#, python-format
 msgid "Network could not be found for bridge %(bridge)s"
 msgstr "找不到橋接器 %(bridge)s 的網路"
 
@@ -1924,9 +1857,6 @@ msgstr "找不到 UUID %(uuid)s 的網路"
 #, python-format
 msgid "Network could not be found with cidr %(cidr)s."
 msgstr "找不到 CIDR 為 %(cidr)s 的網路。"
-
-msgid "Network driver does not support this function."
-msgstr "網路驅動程式不支援此函數。"
 
 #, python-format
 msgid "Network host %(host)s has zero fixed IPs in network %(network_id)s."
@@ -1997,9 +1927,6 @@ msgstr "ID %(id)s 沒有相關聯的固定 IP。"
 msgid "No fixed IPs associated to instance"
 msgstr "沒有固定 IP 與實例相關聯"
 
-msgid "No floating IP addresses have been defined."
-msgstr "尚未定義浮動 IP 位址。"
-
 msgid "No free nbd devices"
 msgstr "沒有可用的 NBD 裝置"
 
@@ -2047,9 +1974,6 @@ msgstr "在 %(image)s 的 %(root)s 中找不到裝載點"
 
 msgid "No networks defined."
 msgstr "未定義網路。"
-
-msgid "No networks found"
-msgstr "找不到網路"
 
 #, python-format
 msgid "No operating system found in %s"
@@ -2245,9 +2169,6 @@ msgstr ""
 msgid "Physical network is missing for network %(network_uuid)s"
 msgstr "遺漏了用於網路 %(network_uuid)s 的實體網路"
 
-msgid "Please specify either fixed_range or uuid"
-msgstr "請指定 fixed_range 或 UUID"
-
 #, python-format
 msgid "Policy doesn't allow %(action)s to be performed."
 msgstr "原則不容許執行 %(action)s。"
@@ -2321,9 +2242,6 @@ msgstr "資源已超出配額：%(overs)s"
 
 msgid "Quota exceeded, too many key pairs."
 msgstr "已超出配額，金鑰組太多。"
-
-msgid "Quota exceeded, too many networks."
-msgstr "已超出配額，網路太多。"
 
 msgid "Quota exceeded, too many security group rules."
 msgstr "已超出配額，安全群組規則太多。"
@@ -2426,9 +2344,6 @@ msgid ""
 "fit the given host NUMA topology"
 msgstr "所要求的實例 NUMA 拓蹼及所要求的 PCI 裝置無法適合給定的主機 NUMA 拓蹼"
 
-msgid "Requested network does not contain enough (2+) usable hosts"
-msgstr "所要求網路包含的可用主機數目不足（必須是 2 個以上）"
-
 #, python-format
 msgid ""
 "Requested vCPU limits %(sockets)d:%(cores)d:%(threads)d are impossible to "
@@ -2514,10 +2429,6 @@ msgstr "安全群組 %s 已存在"
 #, python-format
 msgid "Security group %s is not a string or unicode"
 msgstr "安全群組 %s 不是字串或 Unicode"
-
-#, python-format
-msgid "Security group default rule (%rule_id)s not found."
-msgstr "找不到安全群組預設規則 (%rule_id)s。"
 
 msgid "Security group id should be integer"
 msgstr "安全群組 ID 應該是整數"
@@ -2840,9 +2751,6 @@ msgid ""
 "%(version)s."
 msgstr "這部電腦節點的 Hypervisor 版本低於所支援的版本下限：%(version)s。"
 
-msgid "This default rule already exists."
-msgstr "此預設規則已存在。"
-
 msgid "This domU must be running on the host specified by connection_url"
 msgstr "此 domU 必須正在 connection_url 所指定的主機上執行"
 
@@ -2886,12 +2794,6 @@ msgstr "目標埠和來源埠必須是整數"
 
 msgid "Token not found"
 msgstr "找不到記號"
-
-#, python-format
-msgid ""
-"Too many IP addresses will be generated.  Please increase /%s to reduce the "
-"number generated."
-msgstr "將產生太多的 IP 位址。請增大 /%s 以減少所產生的數目。"
 
 msgid "Triggering crash dump is not supported"
 msgstr "不支援觸發損毀傾出"
@@ -3202,14 +3104,6 @@ msgstr "VHD 聯合嘗試次數已超出 (%d) 次，正在放棄..."
 
 #, python-format
 msgid ""
-"VLAN tag is not appropriate for the port group %(bridge)s. Expected VLAN tag "
-"is %(tag)s, but the one associated with the port group is %(pgroup)s."
-msgstr ""
-"VLAN 標籤不適合於埠群組 %(bridge)s。需要的 VLAN 標籤為 %(tag)s，但與埠群組相"
-"關聯的為 %(pgroup)s。"
-
-#, python-format
-msgid ""
 "Value (%(value)s) for parameter Group%(property)s is invalid. Content "
 "limited to '%(allowed)s'."
 msgstr ""
@@ -3236,16 +3130,8 @@ msgid "Virtual machine mode '%s' is not valid"
 msgstr "虛擬機器模式 '%s' 無效"
 
 #, python-format
-msgid ""
-"Virtual switch associated with the network adapter %(adapter)s not found."
-msgstr "找不到與網路配接卡 %(adapter)s 相關聯的虛擬交換器。"
-
-#, python-format
 msgid "Virtualization type '%(virt)s' is not supported by this compute driver"
 msgstr "此計算驅動程式不支援虛擬化類型 '%(virt)s'"
-
-msgid "VlanID"
-msgstr "VlanID"
 
 #, python-format
 msgid "Volume %(volume_id)s could not be attached. Reason: %(reason)s"
@@ -3419,9 +3305,6 @@ msgstr "fmt = %(fmt)s 受 %(backing_file)s 支援"
 msgid "href %s does not contain version"
 msgstr "href %s 不包含版本"
 
-msgid "id"
-msgstr "ID"
-
 msgid "image already mounted"
 msgstr "已裝載映像檔"
 
@@ -3531,9 +3414,6 @@ msgstr "含有至少一個非空格字元的可列印字元"
 msgid "printable characters. Can not start or end with whitespace."
 msgstr "可列印字元。不能以空格開頭或結尾。"
 
-msgid "project"
-msgstr "專案"
-
 #, python-format
 msgid "qemu-img failed to execute on %(path)s : %(exp)s"
 msgstr "qemu-img 無法在 %(path)s 上執行：%(exp)s"
@@ -3571,9 +3451,6 @@ msgstr "%s 的 Snapshot"
 msgid "snapshot_id required in create_info"
 msgstr "create_info 中需要 snapshot_id"
 
-msgid "start address"
-msgstr "起始位址"
-
 msgid "token not provided"
 msgstr "未提供記號"
 
@@ -3582,18 +3459,6 @@ msgstr "主體金鑰太多"
 
 msgid "unpause not supported for vmwareapi"
 msgstr "vmwareapi 不支援取消暫停"
-
-msgid "uuid"
-msgstr "UUID"
-
-#, python-format
-msgid ""
-"vSwitch which contains the port group %(bridge)s is not associated with the "
-"desired physical adapter. Expected vSwitch is %(expected)s, but the one "
-"associated is %(actual)s."
-msgstr ""
-"包含埠群組 %(bridge)s 的 vSwitch 未與需要的實體配接卡產生關聯。需要的 "
-"vSwitch 為 %(expected)s，但相關聯的 vSwitch 為 %(actual)s。"
 
 msgid "version should be an integer"
 msgstr "版本應該是整數"

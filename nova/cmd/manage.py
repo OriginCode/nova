@@ -30,16 +30,15 @@ import sys
 import traceback
 
 from dateutil import parser as dateutil_parser
-import decorator
 from keystoneauth1 import exceptions as ks_exc
-import netaddr
 from neutronclient.common import exceptions as neutron_client_exc
+import os_resource_classes as orc
 from oslo_config import cfg
 from oslo_db import exception as db_exc
 from oslo_log import log as logging
 import oslo_messaging as messaging
+from oslo_serialization import jsonutils
 from oslo_utils import encodeutils
-from oslo_utils import importutils
 from oslo_utils import uuidutils
 import prettytable
 import six
@@ -56,8 +55,8 @@ from nova.db import migration
 from nova.db.sqlalchemy import api as sa_db
 from nova import exception
 from nova.i18n import _
-from nova.network.neutronv2 import api as neutron_api
-from nova.network.neutronv2 import constants
+from nova.network import constants
+from nova.network import neutron as neutron_api
 from nova import objects
 from nova.objects import block_device as block_device_obj
 from nova.objects import compute_node as compute_node_obj
@@ -66,19 +65,14 @@ from nova.objects import instance as instance_obj
 from nova.objects import instance_mapping as instance_mapping_obj
 from nova.objects import quotas as quotas_obj
 from nova.objects import virtual_interface as virtual_interface_obj
-from nova import quota
 from nova import rpc
 from nova.scheduler.client import report
 from nova.scheduler import utils as scheduler_utils
-from nova import utils
 from nova import version
 from nova.virt import ironic
 
 CONF = nova.conf.CONF
-
 LOG = logging.getLogger(__name__)
-
-QUOTAS = quota.QUOTAS
 
 # Keep this list sorted and one entry per line for readability.
 _EXTRA_DEFAULT_LOG_LEVELS = ['oslo_concurrency=INFO',
@@ -105,268 +99,6 @@ def mask_passwd_in_url(url):
     return urlparse.urlunparse(new_parsed)
 
 
-class FloatingIpCommands(object):
-    """Class for managing floating IP."""
-
-    # TODO(stephenfin): Remove these when we remove cells v1
-    description = ('DEPRECATED: Floating IP commands are deprecated since '
-                   'nova-network is deprecated in favor of Neutron. The '
-                   'floating IP commands will be removed in an upcoming '
-                   'release.')
-
-    @staticmethod
-    def address_to_hosts(addresses):
-        """Iterate over hosts within an address range.
-
-        If an explicit range specifier is missing, the parameter is
-        interpreted as a specific individual address.
-        """
-        try:
-            return [netaddr.IPAddress(addresses)]
-        except ValueError:
-            net = netaddr.IPNetwork(addresses)
-            if net.size < 4:
-                reason = _("/%s should be specified as single address(es) "
-                           "not in cidr format") % net.prefixlen
-                raise exception.InvalidInput(reason=reason)
-            elif net.size >= 1000000:
-                # NOTE(dripton): If we generate a million IPs and put them in
-                # the database, the system will slow to a crawl and/or run
-                # out of memory and crash.  This is clearly a misconfiguration.
-                reason = _("Too many IP addresses will be generated.  Please "
-                           "increase /%s to reduce the number generated."
-                          ) % net.prefixlen
-                raise exception.InvalidInput(reason=reason)
-            else:
-                return net.iter_hosts()
-
-    @args('--ip_range', metavar='<range>', help='IP range')
-    @args('--pool', metavar='<pool>', help='Optional pool')
-    @args('--interface', metavar='<interface>', help='Optional interface')
-    def create(self, ip_range, pool=None, interface=None):
-        """Creates floating IPs for zone by range."""
-        admin_context = context.get_admin_context()
-        if not pool:
-            pool = CONF.default_floating_pool
-        if not interface:
-            interface = CONF.public_interface
-
-        ips = [{'address': str(address), 'pool': pool, 'interface': interface}
-               for address in self.address_to_hosts(ip_range)]
-        try:
-            db.floating_ip_bulk_create(admin_context, ips, want_result=False)
-        except exception.FloatingIpExists as exc:
-            # NOTE(simplylizz): Maybe logging would be better here
-            # instead of printing, but logging isn't used here and I
-            # don't know why.
-            print('error: %s' % exc)
-            return 1
-
-    @args('--ip_range', metavar='<range>', help='IP range')
-    def delete(self, ip_range):
-        """Deletes floating IPs by range."""
-        admin_context = context.get_admin_context()
-
-        ips = ({'address': str(address)}
-               for address in self.address_to_hosts(ip_range))
-        db.floating_ip_bulk_destroy(admin_context, ips)
-
-    @args('--host', metavar='<host>', help='Host')
-    def list(self, host=None):
-        """Lists all floating IPs (optionally by host).
-
-        Note: if host is given, only active floating IPs are returned
-        """
-        ctxt = context.get_admin_context()
-        try:
-            if host is None:
-                floating_ips = db.floating_ip_get_all(ctxt)
-            else:
-                floating_ips = db.floating_ip_get_all_by_host(ctxt, host)
-        except exception.NoFloatingIpsDefined:
-            print(_("No floating IP addresses have been defined."))
-            return
-        for floating_ip in floating_ips:
-            instance_uuid = None
-            if floating_ip['fixed_ip_id']:
-                fixed_ip = db.fixed_ip_get(ctxt, floating_ip['fixed_ip_id'])
-                instance_uuid = fixed_ip['instance_uuid']
-
-            print("%s\t%s\t%s\t%s\t%s" % (floating_ip['project_id'],
-                                          floating_ip['address'],
-                                          instance_uuid,
-                                          floating_ip['pool'],
-                                          floating_ip['interface']))
-
-
-@decorator.decorator
-def validate_network_plugin(f, *args, **kwargs):
-    """Decorator to validate the network plugin."""
-    if utils.is_neutron():
-        print(_("ERROR: Network commands are not supported when using the "
-                "Neutron API.  Use python-neutronclient instead."))
-        return 2
-    return f(*args, **kwargs)
-
-
-class NetworkCommands(object):
-    """Class for managing networks."""
-
-    # TODO(stephenfin): Remove these when we remove cells v1
-    description = ('DEPRECATED: Network commands are deprecated since '
-                   'nova-network is deprecated in favor of Neutron. The '
-                   'network commands will be removed in an upcoming release.')
-
-    @validate_network_plugin
-    @args('--label', metavar='<label>', help='Label for network (ex: public)')
-    @args('--fixed_range_v4', dest='cidr', metavar='<x.x.x.x/yy>',
-            help='IPv4 subnet (ex: 10.0.0.0/8)')
-    @args('--num_networks', metavar='<number>',
-            help='Number of networks to create')
-    @args('--network_size', metavar='<number>',
-            help='Number of IPs per network')
-    @args('--vlan', metavar='<vlan id>', help='vlan id')
-    @args('--vlan_start', dest='vlan_start', metavar='<vlan start id>',
-          help='vlan start id')
-    @args('--vpn', dest='vpn_start', help='vpn start')
-    @args('--fixed_range_v6', dest='cidr_v6',
-          help='IPv6 subnet (ex: fe80::/64')
-    @args('--gateway', help='gateway')
-    @args('--gateway_v6', help='ipv6 gateway')
-    @args('--bridge', metavar='<bridge>',
-            help='VIFs on this network are connected to this bridge')
-    @args('--bridge_interface', metavar='<bridge interface>',
-            help='the bridge is connected to this interface')
-    @args('--multi_host', metavar="<'T'|'F'>",
-            help='Multi host')
-    @args('--dns1', metavar="<DNS Address>", help='First DNS')
-    @args('--dns2', metavar="<DNS Address>", help='Second DNS')
-    @args('--uuid', metavar="<network uuid>", help='Network UUID')
-    @args('--fixed_cidr', metavar='<x.x.x.x/yy>',
-            help='IPv4 subnet for fixed IPs (ex: 10.20.0.0/16)')
-    @args('--project_id', metavar="<project id>",
-          help='Project id')
-    @args('--priority', metavar="<number>", help='Network interface priority')
-    def create(self, label=None, cidr=None, num_networks=None,
-               network_size=None, multi_host=None, vlan=None,
-               vlan_start=None, vpn_start=None, cidr_v6=None, gateway=None,
-               gateway_v6=None, bridge=None, bridge_interface=None,
-               dns1=None, dns2=None, project_id=None, priority=None,
-               uuid=None, fixed_cidr=None):
-        """Creates fixed IPs for host by range."""
-
-        # NOTE(gmann): These checks are moved here as API layer does all these
-        # validation through JSON schema.
-        if not label:
-            raise exception.NetworkNotCreated(req="label")
-        if len(label) > 255:
-            raise exception.LabelTooLong()
-        if not (cidr or cidr_v6):
-            raise exception.NetworkNotCreated(req="cidr or cidr_v6")
-
-        kwargs = {k: v for k, v in locals().items()
-                  if v and k != "self"}
-        if multi_host is not None:
-            kwargs['multi_host'] = multi_host == 'T'
-        net_manager = importutils.import_object(CONF.network_manager)
-        net_manager.create_networks(context.get_admin_context(), **kwargs)
-
-    @validate_network_plugin
-    def list(self):
-        """List all created networks."""
-        _fmt = "%-5s\t%-18s\t%-15s\t%-15s\t%-15s\t%-15s\t%-15s\t%-15s\t%-15s"
-        print(_fmt % (_('id'),
-                          _('IPv4'),
-                          _('IPv6'),
-                          _('start address'),
-                          _('DNS1'),
-                          _('DNS2'),
-                          _('VlanID'),
-                          _('project'),
-                          _("uuid")))
-        try:
-            # Since network_get_all can throw exception.NoNetworksFound
-            # for this command to show a nice result, this exception
-            # should be caught and handled as such.
-            networks = db.network_get_all(context.get_admin_context())
-        except exception.NoNetworksFound:
-            print(_('No networks found'))
-        else:
-            for network in networks:
-                print(_fmt % (network.id,
-                              network.cidr,
-                              network.cidr_v6,
-                              network.dhcp_start,
-                              network.dns1,
-                              network.dns2,
-                              network.vlan,
-                              network.project_id,
-                              network.uuid))
-
-    @validate_network_plugin
-    @args('--fixed_range', metavar='<x.x.x.x/yy>', help='Network to delete')
-    @args('--uuid', metavar='<uuid>', help='UUID of network to delete')
-    def delete(self, fixed_range=None, uuid=None):
-        """Deletes a network."""
-        if fixed_range is None and uuid is None:
-            raise Exception(_("Please specify either fixed_range or uuid"))
-
-        net_manager = importutils.import_object(CONF.network_manager)
-
-        # delete the network
-        net_manager.delete_network(context.get_admin_context(),
-            fixed_range, uuid)
-
-    @validate_network_plugin
-    @args('--fixed_range', metavar='<x.x.x.x/yy>', help='Network to modify')
-    @args('--project', metavar='<project name>',
-            help='Project name to associate')
-    @args('--host', metavar='<host>', help='Host to associate')
-    @args('--disassociate-project', action="store_true", dest='dis_project',
-          default=False, help='Disassociate Network from Project')
-    @args('--disassociate-host', action="store_true", dest='dis_host',
-          default=False, help='Disassociate Host from Project')
-    def modify(self, fixed_range, project=None, host=None,
-               dis_project=None, dis_host=None):
-        """Associate/Disassociate Network with Project and/or Host
-        arguments: network project host
-        leave any field blank to ignore it
-        """
-        admin_context = context.get_admin_context()
-        network = db.network_get_by_cidr(admin_context, fixed_range)
-        net = {}
-        # User can choose the following actions each for project and host.
-        # 1) Associate (set not None value given by project/host parameter)
-        # 2) Disassociate (set None by disassociate parameter)
-        # 3) Keep unchanged (project/host key is not added to 'net')
-        if dis_project:
-            net['project_id'] = None
-        if dis_host:
-            net['host'] = None
-
-        # The --disassociate-X are boolean options, but if they user
-        # mistakenly provides a value, it will be used as a positional argument
-        # and be erroneously interpreted as some other parameter (e.g.
-        # a project instead of host value). The safest thing to do is error-out
-        # with a message indicating that there is probably a problem with
-        # how the disassociate modifications are being used.
-        if dis_project or dis_host:
-            if project or host:
-                error_msg = "ERROR: Unexpected arguments provided. Please " \
-                    "use separate commands."
-                print(error_msg)
-                return 1
-            db.network_update(admin_context, network['id'], net)
-            return
-
-        if project:
-            net['project_id'] = project
-        if host:
-            net['host'] = host
-
-        db.network_update(admin_context, network['id'], net)
-
-
 class DbCommands(object):
     """Class for managing the main database."""
 
@@ -385,9 +117,6 @@ class DbCommands(object):
     # complete have finished.
     # NOTE(stephenfin): These names must be unique
     online_migrations = (
-        # Added in Pike
-        # TODO(mriedem): Remove this in the U release.
-        db.service_uuids_online_data_migration,
         # Added in Pike
         quotas_obj.migrate_quota_limits_to_api_db,
         # Added in Pike
@@ -975,12 +704,19 @@ class ApiDbCommands(object):
 class CellV2Commands(object):
     """Commands for managing cells v2."""
 
-    def _validate_transport_url(self, transport_url):
-        transport_url = transport_url or CONF.transport_url
+    def _validate_transport_url(self, transport_url, warn_about_none=True):
         if not transport_url:
-            print('Must specify --transport-url if [DEFAULT]/transport_url '
-                  'is not set in the configuration file.')
-            return None
+            if not CONF.transport_url:
+                if warn_about_none:
+                    print(_(
+                        'Must specify --transport-url if '
+                        '[DEFAULT]/transport_url is not set in the '
+                        'configuration file.'))
+                return None
+            print(_('--transport-url not provided in the command line, '
+                    'using the value [DEFAULT]/transport_url from the '
+                    'configuration file'))
+            transport_url = CONF.transport_url
 
         try:
             messaging.TransportURL.parse(conf=CONF,
@@ -991,6 +727,22 @@ class CellV2Commands(object):
             return None
 
         return transport_url
+
+    def _validate_database_connection(
+            self, database_connection, warn_about_none=True):
+        if not database_connection:
+            if not CONF.database.connection:
+                if warn_about_none:
+                    print(_(
+                        'Must specify --database_connection if '
+                        '[database]/connection is not set in the '
+                        'configuration file.'))
+                return None
+            print(_('--database_connection not provided in the command line, '
+                    'using the value [database]/connection from the '
+                    'configuration file'))
+            return CONF.database.connection
+        return database_connection
 
     def _non_unique_transport_url_database_connection_checker(self, ctxt,
                             cell_mapping, transport_url, database_connection):
@@ -1423,11 +1175,9 @@ class CellV2Commands(object):
         if not transport_url:
             return 1
 
-        database_connection = database_connection or CONF.database.connection
+        database_connection = self._validate_database_connection(
+            database_connection)
         if not database_connection:
-            print(_('Must specify --database_connection '
-                    'if [database]/connection is not set '
-                    'in the configuration file.'))
             return 1
         if (self._non_unique_transport_url_database_connection_checker(ctxt,
             None, transport_url, database_connection)):
@@ -1610,8 +1360,12 @@ class CellV2Commands(object):
         if name:
             cell_mapping.name = name
 
-        transport_url = transport_url or CONF.transport_url
-        db_connection = db_connection or CONF.database.connection
+        # Having empty transport_url and db_connection means leaving the
+        # existing values
+        transport_url = self._validate_transport_url(
+            transport_url, warn_about_none=False)
+        db_connection = self._validate_database_connection(
+            db_connection, warn_about_none=False)
 
         if (self._non_unique_transport_url_database_connection_checker(ctxt,
                 cell_mapping, transport_url, db_connection)):
@@ -1765,7 +1519,7 @@ class PlacementCommands(object):
 
         :param ctxt: nova.context.RequestContext
         :param instance: the instance to return the ports for
-        :param neutron: nova.network.neutronv2.api.ClientWrapper to
+        :param neutron: nova.network.neutron.ClientWrapper to
             communicate with Neutron
         :return: a list of neutron port dict objects
         :raise UnableToQueryPorts: If the neutron list ports query fails.
@@ -1920,7 +1674,7 @@ class PlacementCommands(object):
             values; this cache is updated if a new node is processed.
         :param placement: nova.scheduler.client.report.SchedulerReportClient
             to communicate with the Placement service API.
-        :param neutron: nova.network.neutronv2.api.ClientWrapper to
+        :param neutron: nova.network.neutron.ClientWrapper to
             communicate with Neutron
         :param output: function that takes a single message for verbose output
         :raise UnableToQueryPorts: If the neutron list ports query fails.
@@ -2087,7 +1841,7 @@ class PlacementCommands(object):
             any changes.
         :param heal_port_allocations: True if healing port allocation is
             requested, False otherwise.
-        :param neutron: nova.network.neutronv2.api.ClientWrapper to
+        :param neutron: nova.network.neutron.ClientWrapper to
             communicate with Neutron
         :return: True if allocations were created or updated for the instance,
             None if nothing needed to be done
@@ -2168,16 +1922,19 @@ class PlacementCommands(object):
 
         if need_healing:
             if dry_run:
+                # json dump the allocation dict as it contains nested default
+                # dicts that is pretty hard to read in the verbose output
+                alloc = jsonutils.dumps(allocations)
                 if need_healing == _CREATE:
                     output(_('[dry-run] Create allocations for instance '
                              '%(instance)s: %(allocations)s') %
                            {'instance': instance.uuid,
-                            'allocations': allocations})
+                            'allocations': alloc})
                 elif need_healing == _UPDATE:
                     output(_('[dry-run] Update allocations for instance '
                              '%(instance)s: %(allocations)s') %
                            {'instance': instance.uuid,
-                            'allocations': allocations})
+                            'allocations': alloc})
             else:
                 # First update ports in neutron. If any of those operations
                 # fail, then roll back the successful part of it and fail the
@@ -2234,7 +1991,7 @@ class PlacementCommands(object):
         :param instance_uuid: UUID of a specific instance to process.
         :param heal_port_allocations: True if healing port allocation is
             requested, False otherwise.
-        :param neutron: nova.network.neutronv2.api.ClientWrapper to
+        :param neutron: nova.network.neutron.ClientWrapper to
             communicate with Neutron
         :return: Number of instances that had allocations created.
         :raises: nova.exception.ComputeHostNotFound if a compute node for a
@@ -2333,7 +2090,8 @@ class PlacementCommands(object):
                'changes. The return code should be 4.')
     @args('--instance', metavar='<instance_uuid>', dest='instance_uuid',
           help='UUID of a specific instance to process. If specified '
-               '--max-count has no effect.')
+               '--max-count has no effect. '
+               'The --cell and --instance options are mutually exclusive.')
     @args('--skip-port-allocations', action='store_true',
           dest='skip_port_allocations', default=False,
           help='Skip the healing of the resource allocations of bound ports. '
@@ -2342,8 +2100,12 @@ class PlacementCommands(object):
                'not use such a feature then the performance impact of '
                'querying neutron ports for each instance can be avoided with '
                'this flag.')
+    @args('--cell', metavar='<cell_uuid>', dest='cell_uuid',
+          help='Heal allocations within a specific cell. '
+               'The --cell and --instance options are mutually exclusive.')
     def heal_allocations(self, max_count=None, verbose=False, dry_run=False,
-                         instance_uuid=None, skip_port_allocations=False):
+                         instance_uuid=None, skip_port_allocations=False,
+                         cell_uuid=None):
         """Heals instance allocations in the Placement service
 
         Return codes:
@@ -2360,7 +2122,6 @@ class PlacementCommands(object):
         * 127: Invalid input.
         """
         # NOTE(mriedem): Thoughts on ways to expand this:
-        # - allow passing a specific cell to heal
         # - allow filtering on enabled/disabled cells
         # - add a force option to force allocations for instances which have
         #   task_state is not None (would get complicated during a migration);
@@ -2377,6 +2138,13 @@ class PlacementCommands(object):
         output = lambda msg: None
         if verbose:
             output = lambda msg: print(msg)
+
+        # If user has provided both cell and instance
+        # Throw an error
+        if instance_uuid and cell_uuid:
+            print(_('The --cell and --instance options '
+                    'are mutually exclusive.'))
+            return 127
 
         # TODO(mriedem): Rather than --max-count being both a total and batch
         # count, should we have separate options to be specific, i.e. --total
@@ -2412,6 +2180,15 @@ class PlacementCommands(object):
                       'running "nova-manage cell_v2 verify_instance" or '
                       '"nova-manage cell_v2 map_instances".' %
                       instance_uuid)
+                return 127
+        elif cell_uuid:
+            try:
+                # validate cell_uuid
+                cell = objects.CellMapping.get_by_uuid(ctxt, cell_uuid)
+                # create CellMappingList
+                cells = objects.CellMappingList(objects=[cell])
+            except exception.CellMappingNotFound:
+                print(_('Cell with uuid %s was not found.') % cell_uuid)
                 return 127
         else:
             cells = objects.CellMappingList.get_all(ctxt)
@@ -2660,13 +2437,305 @@ class PlacementCommands(object):
 
         return return_code
 
+    def _get_instances_and_current_migrations(self, ctxt, cn_uuid):
+        if self.cn_uuid_mapping.get(cn_uuid):
+            cell_uuid, cn_host, cn_node = self.cn_uuid_mapping[cn_uuid]
+        else:
+            # We need to find the compute node record from all cells.
+            results = context.scatter_gather_skip_cell0(
+                ctxt, objects.ComputeNode.get_by_uuid, cn_uuid)
+            for result_cell_uuid, result in results.items():
+                if not context.is_cell_failure_sentinel(result):
+                    cn = result
+                    cell_uuid = result_cell_uuid
+                    break
+            else:
+                return False
+            cn_host, cn_node = (cn.host, cn.hypervisor_hostname)
+            self.cn_uuid_mapping[cn_uuid] = (cell_uuid, cn_host, cn_node)
+        cell_mapping = objects.CellMapping.get_by_uuid(ctxt, cell_uuid)
+
+        # Get all the active instances from this compute node
+        if self.instances_mapping.get(cn_uuid):
+            inst_uuids = self.instances_mapping[cn_uuid]
+        else:
+            # Get the instance list record from the cell.
+            with context.target_cell(ctxt, cell_mapping) as cctxt:
+                instances = objects.InstanceList.get_by_host_and_node(
+                    cctxt, cn_host, cn_node, expected_attrs=[])
+            inst_uuids = [instance.uuid for instance in instances]
+            self.instances_mapping[cn_uuid] = inst_uuids
+
+        # Get all *active* migrations for this compute node
+        # NOTE(sbauza): Since migrations are transient, it's better to not
+        # cache the results as they could be stale
+        with context.target_cell(ctxt, cell_mapping) as cctxt:
+            migs = objects.MigrationList.get_in_progress_by_host_and_node(
+                cctxt, cn_host, cn_node)
+        mig_uuids = [migration.uuid for migration in migs]
+
+        return (inst_uuids, mig_uuids)
+
+    def _delete_allocations_from_consumer(self, ctxt, placement, provider,
+                                          consumer_uuid, consumer_type):
+        """Deletes allocations from a resource provider with consumer UUID.
+
+        :param ctxt: nova.context.RequestContext
+        :param placement: nova.scheduler.client.report.SchedulerReportClient
+            to communicate with the Placement service API.
+        :param provider: Resource Provider to look at.
+        :param consumer_uuid: the consumer UUID having allocations.
+        :param consumer_type: the type of consumer,
+            either 'instance' or 'migration'
+        :returns: bool whether the allocations were deleted.
+        """
+        # We need to be careful and only remove the allocations
+        # against this specific RP or we would delete the
+        # whole instance usage and then it would require some
+        # healing.
+        # TODO(sbauza): Remove this extra check once placement
+        # supports querying allocation delete on both
+        # consumer and resource provider parameters.
+        allocations = placement.get_allocs_for_consumer(
+            ctxt, consumer_uuid)
+        if len(allocations['allocations']) > 1:
+            # This consumer has resources spread among multiple RPs (think
+            # nested or shared for example)
+            # We then need to just update the usage to remove
+            # the orphaned resources on the specific RP
+            del allocations['allocations'][provider['uuid']]
+            try:
+                placement.put_allocations(
+                    ctxt, consumer_uuid, allocations)
+            except exception.AllocationUpdateFailed:
+                return False
+
+        else:
+            try:
+                placement.delete_allocation_for_instance(
+                    ctxt, consumer_uuid, consumer_type)
+            except exception.AllocationDeleteFailed:
+                return False
+        return True
+
+    def _check_orphaned_allocations_for_provider(self, ctxt, placement,
+                                                 output, provider,
+                                                 delete):
+        """Finds orphaned allocations for a specific resource provider.
+
+        :param ctxt: nova.context.RequestContext
+        :param placement: nova.scheduler.client.report.SchedulerReportClient
+            to communicate with the Placement service API.
+        :param output: function that takes a single message for verbose output
+        :param provider: Resource Provider to look at.
+        :param delete: deletes the found orphaned allocations.
+        :return: a tuple (<number of orphaned allocs>, <number of faults>)
+        """
+        num_processed = 0
+        faults = 0
+
+        # TODO(sbauza): Are we sure we have all Nova RCs ?
+        # FIXME(sbauza): Possibly use consumer types once Placement API
+        # supports them.
+        # NOTE(sbauza): We check allocations having *any* below RC, not having
+        # *all* of them.
+        NOVA_RCS = [orc.VCPU, orc.MEMORY_MB, orc.DISK_GB, orc.VGPU,
+                    orc.NET_BW_EGR_KILOBIT_PER_SEC,
+                    orc.NET_BW_IGR_KILOBIT_PER_SEC,
+                    orc.PCPU, orc.MEM_ENCRYPTION_CONTEXT]
+
+        # Since the RP can be a child RP, we need to get the root RP as it's
+        # the compute node UUID
+        # NOTE(sbauza): In case Placement doesn't support 1.14 microversion,
+        # that means we don't have nested RPs.
+        # Since we ask for microversion 1.14, all RPs have a root RP UUID.
+        cn_uuid = provider.get("root_provider_uuid")
+        # Now get all the existing instances and active migrations for this
+        # compute node
+        result = self._get_instances_and_current_migrations(ctxt, cn_uuid)
+        if result is False:
+            # We don't want to hard stop here because the compute service could
+            # have disappear while we could still have orphaned allocations.
+            output(_('The compute node for UUID %s can not be '
+                     'found') % cn_uuid)
+        inst_uuids, mig_uuids = result or ([], [])
+        try:
+            pallocs = placement.get_allocations_for_resource_provider(
+                ctxt, provider['uuid'])
+        except exception.ResourceProviderAllocationRetrievalFailed:
+            print(_('Not able to find allocations for resource '
+                    'provider %s.') % provider['uuid'])
+            raise
+
+        # Verify every allocations for each consumer UUID
+        for consumer_uuid, consumer_resources in six.iteritems(
+                pallocs.allocations):
+            consumer_allocs = consumer_resources['resources']
+            if any(rc in NOVA_RCS
+                   for rc in consumer_allocs):
+                # We reset the consumer type for each allocation
+                consumer_type = None
+                # This is an allocation for Nova resources
+                # We need to guess whether the instance was deleted
+                # or if the instance is currently migrating
+                if not (consumer_uuid in inst_uuids or
+                        consumer_uuid in mig_uuids):
+                    # By default we suspect the orphaned allocation was for a
+                    # migration...
+                    consumer_type = 'migration'
+                    if not(consumer_uuid in inst_uuids):
+                        # ... but if we can't find it either for an instance,
+                        # that means it was for this.
+                        consumer_type = 'instance'
+                if consumer_type is not None:
+                    output(_('Allocations were set against consumer UUID '
+                             '%(consumer_uuid)s but no existing instances or '
+                             'active migrations are related. ')
+                           % {'consumer_uuid': consumer_uuid})
+                    if delete:
+                        deleted = self._delete_allocations_from_consumer(
+                            ctxt, placement, provider, consumer_uuid,
+                            consumer_type)
+                        if not deleted:
+                            print(_('Not able to delete allocations '
+                                    'for consumer UUID %s')
+                                  % consumer_uuid)
+                            faults += 1
+                            continue
+                        output(_('Deleted allocations for consumer UUID '
+                                 '%(consumer_uuid)s on Resource Provider '
+                                 '%(rp)s: %(allocations)s')
+                               % {'consumer_uuid': consumer_uuid,
+                                  'rp': provider['uuid'],
+                                  'allocations': consumer_allocs})
+                    else:
+                        output(_('Allocations for consumer UUID '
+                                 '%(consumer_uuid)s on Resource Provider '
+                                 '%(rp)s can be deleted: '
+                                 '%(allocations)s')
+                               % {'consumer_uuid': consumer_uuid,
+                                  'rp': provider['uuid'],
+                                  'allocations': consumer_allocs})
+                    num_processed += 1
+        return (num_processed, faults)
+
+    # TODO(sbauza): Move this to the scheduler report client ?
+    def _get_resource_provider(self, context, placement, uuid):
+        """Returns a single Resource Provider by its UUID.
+
+        :param context: The nova.context.RequestContext auth context
+        :param placement: nova.scheduler.client.report.SchedulerReportClient
+            to communicate with the Placement service API.
+        :param uuid: A specific Resource Provider UUID
+        :return: the existing resource provider.
+        :raises: keystoneauth1.exceptions.base.ClientException on failure to
+                 communicate with the placement API
+        """
+
+        resource_providers = self._get_resource_providers(context, placement,
+                                                          uuid=uuid)
+        if not resource_providers:
+            # The endpoint never returns a 404, it rather returns an empty list
+            raise exception.ResourceProviderNotFound(name_or_uuid=uuid)
+        return resource_providers[0]
+
+    def _get_resource_providers(self, context, placement, **kwargs):
+        """Returns all resource providers regardless of their relationships.
+
+        :param context: The nova.context.RequestContext auth context
+        :param placement: nova.scheduler.client.report.SchedulerReportClient
+            to communicate with the Placement service API.
+        :param kwargs: extra attributes for the query string
+        :return: list of resource providers.
+        :raises: keystoneauth1.exceptions.base.ClientException on failure to
+                 communicate with the placement API
+        """
+        url = '/resource_providers'
+        if 'uuid' in kwargs:
+            url += '&uuid=%s' % kwargs['uuid']
+
+        resp = placement.get(url, global_request_id=context.global_id,
+                             version='1.14')
+        if resp is None:
+            raise exception.PlacementAPIConnectFailure()
+
+        data = resp.json()
+        resource_providers = data.get('resource_providers')
+
+        return resource_providers
+
+    @action_description(
+        _("Audits orphaned allocations that are no longer corresponding to "
+          "existing instance resources. This command requires that "
+          "the [api_database]/connection and [placement] configuration "
+          "options are set."))
+    @args('--verbose', action='store_true', dest='verbose', default=False,
+          help='Provide verbose output during execution.')
+    @args('--resource_provider', metavar='<provider_uuid>',
+          dest='provider_uuid',
+          help='UUID of a specific resource provider to verify.')
+    @args('--delete', action='store_true', dest='delete', default=False,
+          help='Deletes orphaned allocations that were found.')
+    def audit(self, verbose=False, provider_uuid=None, delete=False):
+        """Provides information about orphaned allocations that can be removed
+
+        Return codes:
+
+        * 0: Command completed successfully and no orphaned allocations exist.
+        * 1: An unexpected error happened during run.
+        * 3: Orphaned allocations were detected.
+        * 4: Orphaned allocations were detected and deleted.
+        * 127: Invalid input.
+        """
+
+        ctxt = context.get_admin_context()
+        output = lambda msg: None
+        if verbose:
+            output = lambda msg: print(msg)
+
+        placement = report.SchedulerReportClient()
+        # Resets two in-memory dicts for knowing instances per compute node
+        self.cn_uuid_mapping = collections.defaultdict(tuple)
+        self.instances_mapping = collections.defaultdict(list)
+
+        num_processed = 0
+        faults = 0
+
+        if provider_uuid:
+            try:
+                resource_provider = self._get_resource_provider(
+                    ctxt, placement, provider_uuid)
+            except exception.ResourceProviderNotFound:
+                print(_('Resource provider with UUID %s does not exist.') %
+                      provider_uuid)
+                return 127
+            resource_providers = [resource_provider]
+        else:
+            resource_providers = self._get_resource_providers(ctxt, placement)
+
+        for provider in resource_providers:
+            nb_p, faults = self._check_orphaned_allocations_for_provider(
+                ctxt, placement, output, provider, delete)
+            num_processed += nb_p
+            if faults > 0:
+                print(_('The Resource Provider %s had problems when '
+                        'deleting allocations. Stopping now. Please fix the '
+                        'problem by hand and run again.') %
+                      provider['uuid'])
+                return 1
+        if num_processed > 0:
+            suffix = 's.' if num_processed > 1 else '.'
+            output(_('Processed %(num)s allocation%(suffix)s')
+                   % {'num': num_processed,
+                      'suffix': suffix})
+            return 4 if delete else 3
+        return 0
+
 
 CATEGORIES = {
     'api_db': ApiDbCommands,
     'cell_v2': CellV2Commands,
     'db': DbCommands,
-    'floating': FloatingIpCommands,
-    'network': NetworkCommands,
     'placement': PlacementCommands
 }
 
