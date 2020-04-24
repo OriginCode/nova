@@ -1,6 +1,6 @@
 Template: nova-consoleproxy/daemon_type
 Type: select
-Choices: spicehtml5, xenvnc, novnc
+Choices: spicehtml5, novnc
 Default: spicehtml5
 _Description: Type of console daemon to start at boot time:
  Nova Console supports 3 types of consoles. One is specific to Xen, called

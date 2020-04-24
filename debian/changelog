@@ -4,6 +4,8 @@ nova (2:21.0.0~rc1-1) experimental; urgency=medium
   * Fixed (build-)depends for this release.
   * Rebased remove-svg-converter-from-doc-conf.py.patch.
   * Removed --with systemd from debian/rules.
+  * Kill the xenvnc console proxy from nova-consoleproxy, and the nova-console
+    package, as these are gone from upstream.
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 24 Apr 2020 10:52:19 +0200
 
