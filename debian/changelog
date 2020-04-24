@@ -1,3 +1,9 @@
+nova (2:21.0.0~rc1-2) experimental; urgency=medium
+
+  * Build-Depends on python3-oslotest >= 4.2.0, as building with 4.1.0 fails.
+
+ -- Thomas Goirand <zigo@debian.org>  Fri, 24 Apr 2020 12:56:14 +0200
+
 nova (2:21.0.0~rc1-1) experimental; urgency=medium
 
   * New upstream release.

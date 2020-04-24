@@ -83,7 +83,7 @@ Build-Depends-Indep:
  python3-oslo.utils (>= 4.1.0),
  python3-oslo.versionedobjects (>= 1.35.0),
  python3-oslo.vmware,
- python3-oslotest (>= 3.8.0),
+ python3-oslotest (>= 1:4.2.0),
  python3-osprofiler,
  python3-paramiko,
  python3-paste,
