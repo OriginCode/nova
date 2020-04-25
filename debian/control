@@ -191,6 +191,7 @@ Architecture: all
 Depends:
  adduser,
  conntrack,
+ cgroup-tools,
  curl,
  ebtables,
  fdisk | util-linux (<< 2.29.2-3~),
