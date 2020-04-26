@@ -1,6 +1,7 @@
-nova (2:21.0.0~rc1-3) UNRELEASED; urgency=medium
+nova (2:21.0.0~rc1-3) experimental; urgency=medium
 
   * Add cgroup-tools as depends for nova-compute to allow Cinder QoS.
+  * Correctly install systemd .service units.
 
  -- Thomas Goirand <zigo@debian.org>  Sat, 25 Apr 2020 20:23:35 +0200
 
