@@ -1,3 +1,11 @@
+nova (2:21.0.0~rc1-4) experimental; urgency=medium
+
+  * Fixed policy.json issue where the default generated one breaks everything.
+    Now shipping an empty policy.json and let operators decide what to do.
+    An example policy.json is shipped in /usr/share/nova-common.
+
+ -- Thomas Goirand <zigo@debian.org>  Mon, 27 Apr 2020 16:57:13 +0200
+
 nova (2:21.0.0~rc1-3) experimental; urgency=medium
 
   * Add cgroup-tools as depends for nova-compute to allow Cinder QoS.

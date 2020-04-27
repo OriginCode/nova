@@ -60,9 +60,16 @@ endif
 
 	rm -rf $(CURDIR)/debian/tmp/usr/etc
 
+	# Loading the generated policy.json just *breaks* nova (ie: we can't do anything,
+	# as there's troubles with rules). As a consequence, we just leave it in nova-common
+	# for the moment, and ship an empty policy.json. Note that the empty /etc/nova/policy.json
+	# *must* be present, otherwise nova-api will error 500...
+	# Let's hope that this gets all fixed upstream soon.
 	mkdir -p $(CURDIR)/debian/nova-common/etc/nova
+	touch $(CURDIR)/debian/nova-common/etc/nova/policy.json
+	mkdir -p $(CURDIR)/debian/nova-common/usr/share/nova-common
 	PYTHONPATH=$(CURDIR)/debian/tmp/usr/lib/python3/dist-packages oslopolicy-sample-generator \
-		--output-file=$(CURDIR)/debian/nova-common/etc/nova/policy.json \
+		--output-file=$(CURDIR)/debian/nova-common/usr/share/nova-common/policy.json.example \
 		--format json \
 		--namespace nova
 
