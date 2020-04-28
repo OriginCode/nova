@@ -73,6 +73,11 @@ endif
 		--format json \
 		--namespace nova
 
+	PYTHONPATH=$(CURDIR)/debian/tmp/usr/lib/python3/dist-packages oslopolicy-sample-generator \
+		--output-file=$(CURDIR)/debian/nova-common/usr/share/nova-common/policy.yaml.example \
+		--format yaml \
+		--namespace nova
+
 	mkdir -p $(CURDIR)/debian/nova-common/usr/share/nova-common
 	PYTHONPATH=$(CURDIR)/debian/tmp/usr/lib/python3/dist-packages oslo-config-generator \
 		--output-file=$(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf \
