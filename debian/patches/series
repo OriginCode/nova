@@ -3,3 +3,4 @@ clean-up-build_requests-table-on-upgrades.patch
 remove-crashing-blockdiag-doc-line.patch
 fix-requirements.txt.patch
 remove-svg-converter-from-doc-conf.py.patch
+Add-a-healtcheck-url.patch
