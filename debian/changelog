@@ -1,9 +1,11 @@
-nova (2:21.0.0~rc1-5) UNRELEASED; urgency=medium
+nova (2:21.0.0~rc2-1) unstable; urgency=medium
 
   * Also generate a policy.yaml example.
   * Add Add-a-healtcheck-url.patch.
+  * New upstream release.
+  * Uploading to unstable.
 
- -- Thomas Goirand <zigo@debian.org>  Tue, 28 Apr 2020 18:31:37 +0200
+ -- Thomas Goirand <zigo@debian.org>  Sat, 09 May 2020 01:55:57 +0200
 
 nova (2:21.0.0~rc1-4) experimental; urgency=medium
 
