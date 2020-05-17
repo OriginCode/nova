@@ -86,6 +86,7 @@ endif
 		--namespace oslo.log \
 		--namespace oslo.messaging \
 		--namespace oslo.policy \
+		--namespace oslo.privsep \
 		--namespace oslo.service.periodic_task \
 		--namespace oslo.service.service \
 		--namespace oslo.db \

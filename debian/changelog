@@ -1,3 +1,9 @@
+nova (2:21.0.0-2) unstable; urgency=medium
+
+  * Add missing --namespace oslo.privsep when generating nova.conf.
+
+ -- Thomas Goirand <zigo@debian.org>  Mon, 18 May 2020 01:56:54 +0200
+
 nova (2:21.0.0-1) unstable; urgency=medium
 
   * New upstream release.
