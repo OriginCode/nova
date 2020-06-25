@@ -1,3 +1,9 @@
+nova (2:21.0.0-3) UNRELEASED; urgency=medium
+
+  * Rebuild.
+
+ -- Thomas Goirand <zigo@debian.org>  Thu, 25 Jun 2020 10:59:40 +0200
+
 nova (2:21.0.0-2) unstable; urgency=medium
 
   * Add missing --namespace oslo.privsep when generating nova.conf.
