@@ -1,6 +1,8 @@
-nova (2:21.0.0-3) UNRELEASED; urgency=medium
+nova (2:21.0.0-3) unstable; urgency=medium
 
-  * Rebuild.
+  * Blacklist NovaProxyRequestHandlerTestCase.test_tcp_rst_no_compute_rpcapi().
+    Note the other unit test were repaired by the oslo.utils 4.1.1-4.
+    (Closes: #963339).
 
  -- Thomas Goirand <zigo@debian.org>  Thu, 25 Jun 2020 10:59:40 +0200
 
