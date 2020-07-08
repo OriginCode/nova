@@ -1,3 +1,9 @@
+nova (2:21.0.0-4) UNRELEASED; urgency=medium
+
+  * Replaced Suggests: python3-pygresql by python3-psycopg2 (Closes: #964473).
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 08 Jul 2020 13:47:24 +0200
+
 nova (2:21.0.0-3) unstable; urgency=medium
 
   * Blacklist NovaProxyRequestHandlerTestCase.test_tcp_rst_no_compute_rpcapi().

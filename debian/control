@@ -171,7 +171,7 @@ Depends:
  ${misc:Depends},
  ${python3:Depends},
 Suggests:
- python3-pysqlite2 | python3-mysqldb | python3-pygresql,
+ python3-pysqlite2 | python3-mysqldb | python3-psycopg2,
 Description: OpenStack Compute - common files
  OpenStack is a reliable cloud infrastructure. Its mission is to produce
  the ubiquitous cloud computing platform that will meet the needs of public
