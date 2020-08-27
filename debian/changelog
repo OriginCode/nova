@@ -1,3 +1,9 @@
+nova (2:21.1.0-2) unstable; urgency=medium
+
+  * Add dosfstools as depends to nova-compute, needed for ephemeral storage.
+
+ -- Thomas Goirand <zigo@debian.org>  Thu, 27 Aug 2020 12:52:38 +0200
+
 nova (2:21.1.0-1) unstable; urgency=medium
 
   * Replaced Suggests: python3-pygresql by python3-psycopg2 (Closes: #964473).

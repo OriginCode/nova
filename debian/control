@@ -193,6 +193,7 @@ Depends:
  conntrack,
  cgroup-tools,
  curl,
+ dosfstools,
  ebtables,
  fdisk | util-linux (<< 2.29.2-3~),
  gawk,
