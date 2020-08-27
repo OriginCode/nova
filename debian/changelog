@@ -1,9 +1,10 @@
-nova (2:21.0.0-4) UNRELEASED; urgency=medium
+nova (2:21.1.0-1) unstable; urgency=medium
 
   * Replaced Suggests: python3-pygresql by python3-psycopg2 (Closes: #964473).
   * Runtime depends on qemu-system instead of just qemu (Closes: #966264).
+  * New upstream release.
 
- -- Thomas Goirand <zigo@debian.org>  Wed, 08 Jul 2020 13:47:24 +0200
+ -- Thomas Goirand <zigo@debian.org>  Thu, 27 Aug 2020 12:02:13 +0200
 
 nova (2:21.0.0-3) unstable; urgency=medium
 
