@@ -286,6 +286,8 @@ MIN_QEMU_PMEM_SUPPORT = (3, 1, 0)
 MIN_LIBVIRT_BLOCKDEV = (6, 0, 0)
 MIN_QEMU_BLOCKDEV = (4, 2, 0)
 
+MIN_LIBVIRT_VIR_ERR_DEVICE_MISSING = (4, 1, 0)
+
 
 class LibvirtDriver(driver.ComputeDriver):
     def __init__(self, virtapi, read_only=False):
@@ -828,22 +830,43 @@ class LibvirtDriver(driver.ComputeDriver):
                       '2.10 or libvirt must be greater than or equal to 3.10.')
 
     def _check_file_backed_memory_support(self):
-        if CONF.libvirt.file_backed_memory:
-            # file_backed_memory is only compatible with qemu/kvm virts
-            if CONF.libvirt.virt_type not in ("qemu", "kvm"):
-                raise exception.InternalError(
-                    _('Running Nova with file_backed_memory and virt_type '
-                      '%(type)s is not supported. file_backed_memory is only '
-                      'supported with qemu and kvm types.') %
-                    {'type': CONF.libvirt.virt_type})
+        if not CONF.libvirt.file_backed_memory:
+            return
 
-            # file-backed memory doesn't work with memory overcommit.
-            # Block service startup if file-backed memory is enabled and
-            # ram_allocation_ratio is not 1.0
-            if CONF.ram_allocation_ratio != 1.0:
-                raise exception.InternalError(
-                    'Running Nova with file_backed_memory requires '
-                    'ram_allocation_ratio configured to 1.0')
+        # file_backed_memory is only compatible with qemu/kvm virts
+        if CONF.libvirt.virt_type not in ("qemu", "kvm"):
+            raise exception.InternalError(
+                _('Running Nova with file_backed_memory and virt_type '
+                  '%(type)s is not supported. file_backed_memory is only '
+                  'supported with qemu and kvm types.') %
+                {'type': CONF.libvirt.virt_type})
+
+        # file-backed memory doesn't work with memory overcommit.
+        # Block service startup if file-backed memory is enabled and
+        # ram_allocation_ratio is not 1.0
+        if CONF.ram_allocation_ratio != 1.0:
+            raise exception.InternalError(
+                'Running Nova with file_backed_memory requires '
+                'ram_allocation_ratio configured to 1.0')
+
+        if CONF.reserved_host_memory_mb:
+            # this is a hard failure as placement won't allow total < reserved
+            if CONF.reserved_host_memory_mb >= CONF.libvirt.file_backed_memory:
+                msg = _(
+                    "'[libvirt] file_backed_memory', which represents total "
+                    "memory reported to placement, must be greater than "
+                    "reserved memory configured via '[DEFAULT] "
+                    "reserved_host_memory_mb'"
+                )
+                raise exception.InternalError(msg)
+
+            # TODO(stephenfin): Change this to an exception in W or later
+            LOG.warning(
+                "Reserving memory via '[DEFAULT] reserved_host_memory_mb' "
+                "is not compatible with file-backed memory. Consider "
+                "setting '[DEFAULT] reserved_host_memory_mb' to 0. This will "
+                "be an error in a future release."
+            )
 
     def _check_my_ip(self):
         ips = compute_utils.get_machine_ips()
@@ -1312,6 +1335,71 @@ class LibvirtDriver(driver.ComputeDriver):
 
     def cleanup(self, context, instance, network_info, block_device_info=None,
                 destroy_disks=True, migrate_data=None, destroy_vifs=True):
+        """Cleanup the instance from the host.
+
+        Identify if the instance disks and instance path should be removed
+        from the host before calling down into the _cleanup method for the
+        actual removal of resources from the host.
+
+        :param context: security context
+        :param instance: instance object for the instance being cleaned up
+        :param network_info: instance network information
+        :param block_device_info: optional instance block device information
+        :param destroy_disks: if local ephemeral disks should be destroyed
+        :param migrate_data: optional migrate_data object
+        :param destroy_vifs: if plugged vifs should be unplugged
+        """
+        cleanup_instance_dir = False
+        cleanup_instance_disks = False
+        # We assume destroy_disks means destroy instance directory and disks
+        if destroy_disks:
+            cleanup_instance_dir = True
+            cleanup_instance_disks = True
+        else:
+            # NOTE(mdbooth): I think the theory here was that if this is a
+            # migration with shared block storage then we need to delete the
+            # instance directory because that's not shared. I'm pretty sure
+            # this is wrong.
+            if migrate_data and 'is_shared_block_storage' in migrate_data:
+                cleanup_instance_dir = migrate_data.is_shared_block_storage
+
+            # NOTE(lyarwood): The following workaround allows operators to
+            # ensure that non-shared instance directories are removed after an
+            # evacuation or revert resize when using the shared RBD
+            # imagebackend. This workaround is not required when cleaning up
+            # migrations that provide migrate_data to this method as the
+            # existing is_shared_block_storage conditional will cause the
+            # instance directory to be removed.
+            if not cleanup_instance_dir:
+                if CONF.workarounds.ensure_libvirt_rbd_instance_dir_cleanup:
+                    cleanup_instance_dir = CONF.libvirt.images_type == 'rbd'
+
+        return self._cleanup(
+                context, instance, network_info,
+                block_device_info=block_device_info,
+                destroy_vifs=destroy_vifs,
+                cleanup_instance_dir=cleanup_instance_dir,
+                cleanup_instance_disks=cleanup_instance_disks)
+
+    def _cleanup(self, context, instance, network_info, block_device_info=None,
+                 destroy_vifs=True, cleanup_instance_dir=False,
+                 cleanup_instance_disks=False):
+        """Cleanup the domain and any attached resources from the host.
+
+        This method cleans up any pmem devices, unplugs VIFs, disconnects
+        attached volumes and undefines the instance domain within libvirt.
+        It also optionally removes the ephemeral disks and the instance
+        directory from the host depending on the cleanup_instance_dir|disks
+        kwargs provided.
+
+        :param context: security context
+        :param instance: instance object for the instance being cleaned up
+        :param network_info: instance network information
+        :param block_device_info: optional instance block device information
+        :param destroy_vifs: if plugged vifs should be unplugged
+        :param cleanup_instance_dir: If the instance dir should be removed
+        :param cleanup_instance_disks: If the instance disks should be removed
+        """
         # zero the data on backend pmem device
         vpmems = self._get_vpmems(instance)
         if vpmems:
@@ -1342,7 +1430,7 @@ class LibvirtDriver(driver.ComputeDriver):
                 self._disconnect_volume(context, connection_info, instance)
             except Exception as exc:
                 with excutils.save_and_reraise_exception() as ctxt:
-                    if destroy_disks:
+                    if cleanup_instance_disks:
                         # Don't block on Volume errors if we're trying to
                         # delete the instance as we may be partially created
                         # or deleted
@@ -1354,26 +1442,14 @@ class LibvirtDriver(driver.ComputeDriver):
                              'exc': encodeutils.exception_to_unicode(exc)},
                             instance=instance)
 
-        if destroy_disks:
+        if cleanup_instance_disks:
             # NOTE(haomai): destroy volumes if needed
             if CONF.libvirt.images_type == 'lvm':
                 self._cleanup_lvm(instance, block_device_info)
             if CONF.libvirt.images_type == 'rbd':
                 self._cleanup_rbd(instance)
 
-        is_shared_block_storage = False
-        if migrate_data and 'is_shared_block_storage' in migrate_data:
-            is_shared_block_storage = migrate_data.is_shared_block_storage
-        # NOTE(lyarwood): The following workaround allows operators to ensure
-        # that non-shared instance directories are removed after an evacuation
-        # or revert resize when using the shared RBD imagebackend. This
-        # workaround is not required when cleaning up migrations that provide
-        # migrate_data to this method as the existing is_shared_block_storage
-        # conditional will cause the instance directory to be removed.
-        if ((destroy_disks or is_shared_block_storage) or
-            (CONF.workarounds.ensure_libvirt_rbd_instance_dir_cleanup and
-             CONF.libvirt.images_type == 'rbd')):
-
+        if cleanup_instance_dir:
             attempts = int(instance.system_metadata.get('clean_attempts',
                                                         '0'))
             success = self.delete_instance_files(instance)
@@ -1956,9 +2032,11 @@ class LibvirtDriver(driver.ComputeDriver):
             # detaching any attached encryptors or disconnecting the underlying
             # volume in _disconnect_volume. Otherwise, the encryptor or volume
             # driver may report that the volume is still in use.
-            wait_for_detach = guest.detach_device_with_retry(guest.get_disk,
-                                                             disk_dev,
-                                                             live=live)
+            supports_device_missing = self._host.has_min_version(
+               MIN_LIBVIRT_VIR_ERR_DEVICE_MISSING)
+            wait_for_detach = guest.detach_device_with_retry(
+                guest.get_disk, disk_dev, live=live,
+                supports_device_missing_error_code=supports_device_missing)
             wait_for_detach()
 
         except exception.InstanceNotFound:
@@ -2161,9 +2239,12 @@ class LibvirtDriver(driver.ComputeDriver):
             live = state in (power_state.RUNNING, power_state.PAUSED)
             # Now we are going to loop until the interface is detached or we
             # timeout.
+            supports_device_missing = self._host.has_min_version(
+               MIN_LIBVIRT_VIR_ERR_DEVICE_MISSING)
             wait_for_detach = guest.detach_device_with_retry(
                 guest.get_interface_by_cfg, cfg, live=live,
-                alternative_device_name=self.vif_driver.get_vif_devname(vif))
+                alternative_device_name=self.vif_driver.get_vif_devname(vif),
+                supports_device_missing_error_code=supports_device_missing)
             wait_for_detach()
         except exception.DeviceDetachFailed:
             # We failed to detach the device even with the retry loop, so let's
@@ -3558,9 +3639,10 @@ class LibvirtDriver(driver.ComputeDriver):
         gen_confdrive = functools.partial(self._create_configdrive,
                                           context, instance,
                                           injection_info)
-        self._create_image(context, instance, disk_info['mapping'],
-                           injection_info=injection_info,
-                           block_device_info=block_device_info)
+        created_instance_dir, created_disks = self._create_image(
+                context, instance, disk_info['mapping'],
+                injection_info=injection_info,
+                block_device_info=block_device_info)
 
         # Required by Quobyte CI
         self._ensure_console_log_for_instance(instance)
@@ -3576,8 +3658,9 @@ class LibvirtDriver(driver.ComputeDriver):
             context, xml, instance, network_info,
             block_device_info=block_device_info,
             post_xml_callback=gen_confdrive,
-            destroy_disks_on_failure=True,
-            power_on=power_on)
+            power_on=power_on,
+            cleanup_instance_dir=created_instance_dir,
+            cleanup_instance_disks=created_disks)
         LOG.debug("Guest created on hypervisor", instance=instance)
 
         def _wait_for_boot():
@@ -3868,8 +3951,17 @@ class LibvirtDriver(driver.ComputeDriver):
         def raw(fname):
             return image(fname, image_type='raw')
 
+        created_instance_dir = True
+
         # ensure directories exist and are writable
-        fileutils.ensure_tree(libvirt_utils.get_instance_path(instance))
+        instance_dir = libvirt_utils.get_instance_path(instance)
+        if os.path.exists(instance_dir):
+            LOG.debug("Instance directory exists: not creating",
+                      instance=instance)
+            created_instance_dir = False
+        else:
+            LOG.debug("Creating instance directory", instance=instance)
+            fileutils.ensure_tree(libvirt_utils.get_instance_path(instance))
 
         LOG.info('Creating image', instance=instance)
 
@@ -3911,6 +4003,10 @@ class LibvirtDriver(driver.ComputeDriver):
                            'kernel_id': instance.kernel_id,
                            'ramdisk_id': instance.ramdisk_id}
 
+        # NOTE(mdbooth): kernel and ramdisk, if they are defined, are hardcoded
+        # to use raw, which means they will always be cleaned up with the
+        # instance directory. We must not consider them for created_disks,
+        # which may not be using the instance directory.
         if disk_images['kernel_id']:
             fname = imagecache.get_cache_fname(disk_images['kernel_id'])
             raw('kernel').cache(fetch_func=libvirt_utils.fetch_raw_image,
@@ -3930,10 +4026,9 @@ class LibvirtDriver(driver.ComputeDriver):
             uid = pwd.getpwnam('root').pw_uid
             nova.privsep.path.chown(image('disk').path, uid=uid)
 
-        self._create_and_inject_local_root(context, instance,
-                                           booted_from_volume, suffix,
-                                           disk_images, injection_info,
-                                           fallback_from_host)
+        created_disks = self._create_and_inject_local_root(
+                context, instance, booted_from_volume, suffix, disk_images,
+                injection_info, fallback_from_host)
 
         # Lookup the filesystem type if required
         os_type_with_default = nova.privsep.fs.get_fs_type_for_os_type(
@@ -3947,6 +4042,9 @@ class LibvirtDriver(driver.ComputeDriver):
         ephemeral_gb = instance.flavor.ephemeral_gb
         if 'disk.local' in disk_mapping:
             disk_image = image('disk.local')
+            # Short circuit the exists() tests if we already created a disk
+            created_disks = created_disks or not disk_image.exists()
+
             fn = functools.partial(self._create_ephemeral,
                                    fs_label='ephemeral0',
                                    os_type=instance.os_type,
@@ -3963,6 +4061,8 @@ class LibvirtDriver(driver.ComputeDriver):
         for idx, eph in enumerate(driver.block_device_info_get_ephemerals(
                 block_device_info)):
             disk_image = image(blockinfo.get_eph_disk(idx))
+            # Short circuit the exists() tests if we already created a disk
+            created_disks = created_disks or not disk_image.exists()
 
             specified_fs = eph.get('guest_format')
             if specified_fs and not self.is_supported_fs_format(specified_fs):
@@ -3985,15 +4085,25 @@ class LibvirtDriver(driver.ComputeDriver):
 
         if swap_mb > 0:
             size = swap_mb * units.Mi
-            image('disk.swap').cache(fetch_func=self._create_swap,
-                                     context=context,
-                                     filename="swap_%s" % swap_mb,
-                                     size=size,
-                                     swap_mb=swap_mb)
+            swap = image('disk.swap')
+            # Short circuit the exists() tests if we already created a disk
+            created_disks = created_disks or not swap.exists()
+            swap.cache(fetch_func=self._create_swap, context=context,
+                       filename="swap_%s" % swap_mb,
+                       size=size, swap_mb=swap_mb)
+
+        if created_disks:
+            LOG.debug('Created local disks', instance=instance)
+        else:
+            LOG.debug('Did not create local disks', instance=instance)
+
+        return (created_instance_dir, created_disks)
 
     def _create_and_inject_local_root(self, context, instance,
                                       booted_from_volume, suffix, disk_images,
                                       injection_info, fallback_from_host):
+        created_disks = False
+
         # File injection only if needed
         need_inject = (not configdrive.required_by(instance) and
                        injection_info is not None and
@@ -4011,6 +4121,8 @@ class LibvirtDriver(driver.ComputeDriver):
 
             backend = self.image_backend.by_name(instance, 'disk' + suffix,
                                                  CONF.libvirt.images_type)
+            created_disks = not backend.exists()
+
             if instance.task_state == task_states.RESIZE_FINISH:
                 backend.create_snap(libvirt_utils.RESIZE_SNAPSHOT_NAME)
             if backend.SUPPORTS_CLONE:
@@ -4047,6 +4159,8 @@ class LibvirtDriver(driver.ComputeDriver):
         elif need_inject:
             LOG.warning('File injection into a boot from volume '
                         'instance is not supported', instance=instance)
+
+        return created_disks
 
     def _create_configdrive(self, context, instance, injection_info,
                             rescue=False):
@@ -6370,21 +6484,26 @@ class LibvirtDriver(driver.ComputeDriver):
                 for vif in network_info if vif.get('active', True) is False]
 
     def _cleanup_failed_start(self, context, instance, network_info,
-                              block_device_info, guest, destroy_disks):
+                              block_device_info, guest,
+                              cleanup_instance_dir=False,
+                              cleanup_instance_disks=False):
         try:
             if guest and guest.is_active():
                 guest.poweroff()
         finally:
-            self.cleanup(context, instance, network_info=network_info,
-                         block_device_info=block_device_info,
-                         destroy_disks=destroy_disks)
+            self._cleanup(context, instance, network_info,
+                          block_device_info=block_device_info,
+                          destroy_vifs=True,
+                          cleanup_instance_dir=cleanup_instance_dir,
+                          cleanup_instance_disks=cleanup_instance_disks)
 
     def _create_domain_and_network(self, context, xml, instance, network_info,
                                    block_device_info=None, power_on=True,
                                    vifs_already_plugged=False,
                                    post_xml_callback=None,
-                                   destroy_disks_on_failure=False,
-                                   external_events=None):
+                                   external_events=None,
+                                   cleanup_instance_dir=False,
+                                   cleanup_instance_disks=False):
 
         """Do required network setup and create domain."""
         timeout = CONF.vif_plugging_timeout
@@ -6412,9 +6531,10 @@ class LibvirtDriver(driver.ComputeDriver):
             # Neutron reported failure and we didn't swallow it, so
             # bail here
             with excutils.save_and_reraise_exception():
-                self._cleanup_failed_start(context, instance, network_info,
-                                           block_device_info, guest,
-                                           destroy_disks_on_failure)
+                self._cleanup_failed_start(
+                    context, instance, network_info, block_device_info, guest,
+                    cleanup_instance_dir=cleanup_instance_dir,
+                    cleanup_instance_disks=cleanup_instance_disks)
         except eventlet.timeout.Timeout:
             # We never heard from Neutron
             LOG.warning('Timeout waiting for %(events)s for '
@@ -6425,18 +6545,19 @@ class LibvirtDriver(driver.ComputeDriver):
                          'task_state': instance.task_state},
                         instance=instance)
             if CONF.vif_plugging_is_fatal:
-                self._cleanup_failed_start(context, instance, network_info,
-                                           block_device_info, guest,
-                                           destroy_disks_on_failure)
+                self._cleanup_failed_start(
+                    context, instance, network_info, block_device_info, guest,
+                    cleanup_instance_dir=cleanup_instance_dir,
+                    cleanup_instance_disks=cleanup_instance_disks)
                 raise exception.VirtualInterfaceCreateException()
         except Exception:
             # Any other error, be sure to clean up
             LOG.error('Failed to start libvirt guest', instance=instance)
             with excutils.save_and_reraise_exception():
-                self._cleanup_failed_start(context, instance, network_info,
-                                           block_device_info, guest,
-                                           destroy_disks_on_failure)
-
+                self._cleanup_failed_start(
+                    context, instance, network_info, block_device_info, guest,
+                    cleanup_instance_dir=cleanup_instance_dir,
+                    cleanup_instance_disks=cleanup_instance_disks)
         # Resume only if domain has been paused
         if pause:
             guest.resume()
@@ -6801,9 +6922,13 @@ class LibvirtDriver(driver.ComputeDriver):
         """Returns a dict of NET device."""
         devname = pci_utils.get_net_name_by_vf_pci_address(vf_address)
         if not devname:
-            return
+            return None
 
-        virtdev = self._host.device_lookup_by_name(devname)
+        try:
+            virtdev = self._host.device_lookup_by_name(devname)
+        except libvirt.libvirtError as ex:
+            LOG.warning(ex)
+            return None
         xmlstr = virtdev.XMLDesc(0)
         cfgdev = vconfig.LibvirtConfigNodeDevice()
         cfgdev.parse_str(xmlstr)
@@ -7544,7 +7669,8 @@ class LibvirtDriver(driver.ComputeDriver):
             'max_unit': disk_gb,
             'step_size': 1,
             'allocation_ratio': ratios[orc.DISK_GB],
-            'reserved': self._get_reserved_host_disk_gb_from_config(),
+            'reserved': (self._get_reserved_host_disk_gb_from_config() +
+                         self._get_disk_size_reserved_for_image_cache()),
         }
 
         # TODO(sbauza): Use traits to providing vGPU types. For the moment,
@@ -9960,6 +10086,18 @@ class LibvirtDriver(driver.ComputeDriver):
             # rest of the code currently called only from spawn().
             images.fetch_to_raw(context, image_id, path)
             return True
+
+    def _get_disk_size_reserved_for_image_cache(self):
+        """Return the amount of DISK_GB resource need to be reserved for the
+        image cache.
+
+        :returns: The disk space in GB
+        """
+        if not CONF.workarounds.reserve_disk_resource_for_image_cache:
+            return 0
+
+        return compute_utils.convert_mb_to_ceil_gb(
+            self.image_cache_manager.get_disk_usage() / 1024.0 / 1024.0)
 
     def _is_path_shared_with(self, dest, path):
         # NOTE (rmk): There are two methods of determining whether we are

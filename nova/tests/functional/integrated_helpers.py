@@ -407,16 +407,39 @@ class InstanceHelperMixin(object):
         }
         self._migrate_or_resize(server, resize_req)
 
+    def _live_migrate(self, server, migration_final_status):
+        self.api.post_server_action(
+            server['id'],
+            {'os-migrateLive': {'host': None,
+                                'block_migration': 'auto'}})
+        self._wait_for_state_change(server, 'ACTIVE')
+        self._wait_for_migration_status(server, [migration_final_status])
+
 
 class _IntegratedTestBase(test.TestCase, InstanceHelperMixin):
+    #: Whether the test requires global external locking being configured for
+    #: them. New tests should set this to False.
     REQUIRES_LOCKING = True
+
+    #: Whether to use admin credentials for all nova API requests.
     ADMIN_API = False
-    # This indicates whether to include the project ID in the URL for API
-    # requests through OSAPIFixture. Overridden by subclasses.
-    _use_project_id = False
-    # Override this in subclasses to avoid stubbing keystonemiddleware and
-    # NovaKeystoneContext, thus making those middlewares behave as they would
-    # in real life (i.e. try to do real authentication).
+
+    # TODO(stephenfin): Rename to API_MAJOR_VERSION
+    #: The default API major version to use for all nova API requests.
+    api_major_version = 'v2.1'
+
+    # TODO(stephenfin): Rename to API_MICRO_VERSION
+    #: The default microversion to use for all nova API requests; requires API
+    #: major version 2.1
+    microversion = None
+
+    #: Whether to include the project ID in the URL for API requests through
+    #: OSAPIFixture.
+    USE_PROJECT_ID = False
+
+    #: Whether to stub keystonemiddleware and NovaKeystoneContext; override to
+    #: making those middlewares behave as they would in real life, i.e. try to
+    #: do real authentication.
     STUB_KEYSTONE = True
 
     def setUp(self):
@@ -457,7 +480,7 @@ class _IntegratedTestBase(test.TestCase, InstanceHelperMixin):
         self.api_fixture = self.useFixture(
             nova_fixtures.OSAPIFixture(
                 api_version=self.api_major_version,
-                use_project_id_in_urls=self._use_project_id,
+                use_project_id_in_urls=self.USE_PROJECT_ID,
                 stub_keystone=self.STUB_KEYSTONE))
 
         # if the class needs to run as admin, make the api endpoint
@@ -468,7 +491,7 @@ class _IntegratedTestBase(test.TestCase, InstanceHelperMixin):
             self.api = self.api_fixture.api
             self.admin_api = self.api_fixture.admin_api
 
-        if hasattr(self, 'microversion'):
+        if self.microversion:
             self.api.microversion = self.microversion
 
             if not self.ADMIN_API:

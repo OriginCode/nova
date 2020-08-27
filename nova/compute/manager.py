@@ -2602,7 +2602,7 @@ class ComputeManager(manager.Manager):
                 arqs = self._get_bound_arq_resources(
                         context, dp_name, instance, accel_uuids)
         except (Exception, eventlet.timeout.Timeout) as exc:
-            LOG.exception(exc.format_message())
+            LOG.exception(exc)
             self._build_resources_cleanup(instance, network_info)
             compute_utils.delete_arqs_if_needed(context, instance)
             msg = _('Failure getting accelerator requests.')
@@ -4309,6 +4309,10 @@ class ComputeManager(manager.Manager):
                     # allocations in placement, delete them here.
                     self._delete_allocation_after_move(
                         context, instance, migration)
+                    # Also as the instance is not any more on this host, update
+                    # the scheduler about the move
+                    self._delete_scheduler_instance_info(
+                        context, instance.uuid)
 
         do_confirm_resize(context, instance, migration.id)
 
@@ -8654,7 +8658,12 @@ class ComputeManager(manager.Manager):
         for bdm in bdms:
             try:
                 original_bdm = original_bdms_by_volid[bdm.volume_id]
-                if bdm.attachment_id and original_bdm.attachment_id:
+                # NOTE(lyarwood): Only delete the referenced attachment if it
+                # is different to the original in order to avoid accidentally
+                # removing the source host volume attachment after it has
+                # already been rolled back by a failure in pre_live_migration.
+                if (bdm.attachment_id and original_bdm.attachment_id and
+                    bdm.attachment_id != original_bdm.attachment_id):
                     # NOTE(lyarwood): 3.44 cinder api flow. Delete the
                     # attachment used by the bdm and reset it to that of
                     # the original bdm.
