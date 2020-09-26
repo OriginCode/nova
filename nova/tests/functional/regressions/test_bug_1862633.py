@@ -17,7 +17,6 @@ from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import integrated_helpers
 from nova.tests.unit import fake_notifier
-from nova.tests.unit.image import fake as fake_image
 
 
 class UnshelveNeutronErrorTest(
@@ -27,11 +26,10 @@ class UnshelveNeutronErrorTest(
         # Start standard fixtures.
         placement = func_fixtures.PlacementFixture()
         self.useFixture(placement)
-        self.placement_api = placement.api
+        self.placement = placement.api
         self.neutron = nova_fixtures.NeutronFixture(self)
         self.useFixture(self.neutron)
-        fake_image.stub_out_image_service(self)
-        self.addCleanup(fake_image.FakeImageService_reset)
+        self.useFixture(nova_fixtures.GlanceFixture(self))
         # Start nova services.
         self.api = self.useFixture(nova_fixtures.OSAPIFixture(
             api_version='v2.1')).admin_api
@@ -56,7 +54,7 @@ class UnshelveNeutronErrorTest(
         self._wait_for_server_parameter(
             server, {'status': 'SHELVED_OFFLOADED',
                      'OS-EXT-SRV-ATTR:host': None})
-        allocations = self.placement_api.get(
+        allocations = self.placement.get(
             '/allocations/%s' % server['id']).body['allocations']
         self.assertEqual(0, len(allocations))
 
@@ -84,6 +82,6 @@ class UnshelveNeutronErrorTest(
                  'OS-EXT-SRV-ATTR:host': None})
 
         # As the instance went back to offloaded state we expect no allocation
-        allocations = self.placement_api.get(
+        allocations = self.placement.get(
             '/allocations/%s' % server['id']).body['allocations']
         self.assertEqual(0, len(allocations))

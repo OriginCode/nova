@@ -1120,8 +1120,8 @@ class TestInstanceNotificationSample(
         call, but the rescheduled also was unsuccessful. In this
         case called the exception block.
         In the exception block send a notification about error.
-        At end called the six.reraise(*exc_info), which not
-        send another error.
+        At end called raising an exception based on *exc_info,
+        which not send another error.
         """
         def _build_resources(*args, **kwargs):
             raise exception.FlavorDiskTooSmall()
@@ -1249,7 +1249,8 @@ class TestInstanceNotificationSample(
                     'nova_object.data': {},
                     'nova_object.name': 'ImageMetaPropsPayload',
                     'nova_object.namespace': 'nova',
-                    'nova_object.version': u'1.3'},
+                    'nova_object.version': u'1.5',
+                },
                 'image.size': 58145823,
                 'image.tags': [],
                 'scheduler_hints': {'_nova_check_type': ['rebuild']},
@@ -1344,7 +1345,8 @@ class TestInstanceNotificationSample(
                     'nova_object.data': {},
                     'nova_object.name': 'ImageMetaPropsPayload',
                     'nova_object.namespace': 'nova',
-                    'nova_object.version': u'1.3'},
+                    'nova_object.version': u'1.5',
+                },
                 'image.size': 58145823,
                 'image.tags': [],
                 'scheduler_hints': {'_nova_check_type': ['rebuild']},

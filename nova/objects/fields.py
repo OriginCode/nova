@@ -272,8 +272,9 @@ class CPUAllocationPolicy(BaseNovaEnum):
 
     DEDICATED = "dedicated"
     SHARED = "shared"
+    MIXED = "mixed"
 
-    ALL = (DEDICATED, SHARED)
+    ALL = (DEDICATED, SHARED, MIXED)
 
 
 class CPUThreadAllocationPolicy(BaseNovaEnum):
@@ -340,6 +341,8 @@ class DiskBus(BaseNovaEnum):
 
     # NOTE(aspiers): If you change this, don't forget to update the
     # docs and metadata for hw_*_bus in glance.
+    # NOTE(lyarwood): Also update the possible values in the api-ref for the
+    # block_device_mapping_v2.disk_bus parameter.
     FDC = "fdc"
     IDE = "ide"
     SATA = "sata"
@@ -379,8 +382,7 @@ class HVType(BaseNovaEnum):
     Provide the standard names for all known guest virtualization
     types. This is not to be confused with the Nova hypervisor driver
     types, since one driver may support multiple virtualization types
-    and one virtualization type (eg 'xen') may be supported by multiple
-    drivers ('XenAPI' or  'Libvirt-Xen').
+    and one virtualization type may be supported by multiple drivers.
     """
 
     BAREMETAL = 'baremetal'
@@ -464,6 +466,16 @@ class ImageSignatureKeyType(BaseNovaEnum):
     )
 
 
+class MigrationType(BaseNovaEnum):
+
+    MIGRATION = 'migration'  # cold migration
+    RESIZE = 'resize'
+    LIVE_MIGRATION = 'live-migration'
+    EVACUATION = 'evacuation'
+
+    ALL = (MIGRATION, RESIZE, LIVE_MIGRATION, EVACUATION)
+
+
 class OSType(BaseNovaEnum):
 
     LINUX = "linux"
@@ -497,6 +509,21 @@ class RNGModel(BaseNovaEnum):
     VIRTIO = "virtio"
 
     ALL = (VIRTIO,)
+
+
+class TPMModel(BaseNovaEnum):
+
+    TIS = "tpm-tis"
+    CRB = "tpm-crb"
+
+    ALL = (TIS, CRB)
+
+
+class TPMVersion(BaseNovaEnum):
+    v1_2 = "1.2"
+    v2_0 = "2.0"
+
+    ALL = (v1_2, v2_0)
 
 
 class SCSIModel(BaseNovaEnum):
@@ -750,6 +777,8 @@ class DiskFormat(BaseNovaEnum):
     ALL = (RBD, LVM, QCOW2, RAW, PLOOP, VHD, VMDK, VDI, ISO)
 
 
+# TODO(stephenfin): Remove the xenapi value when we bump the 'Diagnostics'
+# object (the only user of this enum) to 2.0
 class HypervisorDriver(BaseNovaEnum):
     LIBVIRT = "libvirt"
     XENAPI = "xenapi"
@@ -1207,12 +1236,24 @@ class ImageSignatureKeyTypeField(BaseEnumField):
     AUTO_TYPE = ImageSignatureKeyType()
 
 
+class MigrationTypeField(BaseEnumField):
+    AUTO_TYPE = MigrationType()
+
+
 class OSTypeField(BaseEnumField):
     AUTO_TYPE = OSType()
 
 
 class RNGModelField(BaseEnumField):
     AUTO_TYPE = RNGModel()
+
+
+class TPMModelField(BaseEnumField):
+    AUTO_TYPE = TPMModel()
+
+
+class TPMVersionField(BaseEnumField):
+    AUTO_TYPE = TPMVersion()
 
 
 class SCSIModelField(BaseEnumField):

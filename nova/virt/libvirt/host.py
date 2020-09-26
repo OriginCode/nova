@@ -31,21 +31,20 @@ from collections import defaultdict
 import inspect
 import operator
 import os
+import queue
 import socket
 import threading
-import traceback
+import typing as ty
 
 from eventlet import greenio
 from eventlet import greenthread
 from eventlet import patcher
 from eventlet import tpool
 from oslo_log import log as logging
-from oslo_utils import encodeutils
 from oslo_utils import excutils
 from oslo_utils import importutils
 from oslo_utils import units
 from oslo_utils import versionutils
-import six
 
 from nova.compute import utils as compute_utils
 import nova.conf
@@ -60,13 +59,16 @@ from nova.virt.libvirt import guest as libvirt_guest
 from nova.virt.libvirt import migration as libvirt_migrate
 from nova.virt.libvirt import utils as libvirt_utils
 
-libvirt = None
+if ty.TYPE_CHECKING:
+    import libvirt
+else:
+    libvirt = None
 
 LOG = logging.getLogger(__name__)
 
 native_socket = patcher.original('socket')
 native_threading = patcher.original("threading")
-native_Queue = patcher.original("Queue" if six.PY2 else "queue")
+native_Queue = patcher.original("queue")
 
 CONF = nova.conf.CONF
 
@@ -93,7 +95,8 @@ class Host(object):
         self._read_only = read_only
         self._initial_connection = True
         self._conn_event_handler = conn_event_handler
-        self._conn_event_handler_queue = six.moves.queue.Queue()
+        self._conn_event_handler_queue: queue.Queue[ty.Callable] = (
+          queue.Queue())
         self._lifecycle_event_handler = lifecycle_event_handler
         self._caps = None
         self._domain_caps = None
@@ -101,7 +104,7 @@ class Host(object):
 
         self._wrapped_conn = None
         self._wrapped_conn_lock = threading.Lock()
-        self._event_queue = None
+        self._event_queue: ty.Optional[queue.Queue[ty.Callable]] = None
 
         self._events_delayed = {}
         # Note(toabctl): During a reboot of a domain, STOPPED and
@@ -189,7 +192,7 @@ class Host(object):
         try:
             handler()
         except Exception:
-            LOG.exception(_('Exception handling connection event'))
+            LOG.exception('Exception handling connection event')
         finally:
             self._conn_event_handler_queue.task_done()
 
@@ -321,9 +324,14 @@ class Host(object):
         # Process as many events as possible without
         # blocking
         last_close_event = None
+        # required for mypy
+        if self._event_queue is None:
+            return
         while not self._event_queue.empty():
             try:
-                event = self._event_queue.get(block=False)
+                event_type = ty.Union[
+                    virtevent.LifecycleEvent, ty.Mapping[str, ty.Any]]
+                event: event_type = self._event_queue.get(block=False)
                 if isinstance(event, virtevent.LifecycleEvent):
                     # call possibly with delay
                     self._event_emit_delayed(event)
@@ -502,17 +510,15 @@ class Host(object):
         try:
             conn = self._get_connection()
         except libvirt.libvirtError as ex:
-            LOG.exception(_("Connection to libvirt failed: %s"), ex)
-            payload = dict(ip=CONF.my_ip,
-                           method='_connect',
-                           reason=ex)
+            LOG.exception("Connection to libvirt failed: %s", ex)
+            payload = {'ip': CONF.my_ip, 'method': '_connect', 'reason': ex}
             ctxt = nova_context.get_admin_context()
             rpc.get_notifier('compute').error(ctxt,
                                               'compute.libvirt.error',
                                               payload)
             compute_utils.notify_about_libvirt_connect_error(
-                ctxt, ip=CONF.my_ip, exception=ex, tb=traceback.format_exc())
-            raise exception.HypervisorUnavailable(host=CONF.host)
+                ctxt, ip=CONF.my_ip, exception=ex)
+            raise exception.HypervisorUnavailable()
 
         return conn
 
@@ -712,7 +718,7 @@ class Host(object):
                     self._caps.host.cpu.model is not None):
                 try:
                     xml_str = self._caps.host.cpu.to_xml()
-                    if six.PY3 and isinstance(xml_str, six.binary_type):
+                    if isinstance(xml_str, bytes):
                         xml_str = xml_str.decode('utf-8')
                     features = self.get_connection().baselineCPU(
                         [xml_str],
@@ -812,7 +818,7 @@ class Host(object):
         if self._domain_caps:
             return self._domain_caps
 
-        domain_caps = defaultdict(dict)
+        domain_caps: ty.Dict = defaultdict(dict)
         caps = self.get_capabilities()
         virt_type = CONF.libvirt.virt_type
 
@@ -999,24 +1005,30 @@ class Host(object):
             if e.get_error_code() == libvirt.VIR_ERR_NO_SECRET:
                 return None
 
-    def create_secret(self, usage_type, usage_id, password=None):
+    def create_secret(self, usage_type, usage_id, password=None, uuid=None):
         """Create a secret.
 
-        :param usage_type: one of 'iscsi', 'ceph', 'rbd' or 'volume'
-                           'rbd' will be converted to 'ceph'.
+        :param usage_type: one of 'iscsi', 'ceph', 'rbd', 'volume', 'vtpm'.
+                           'rbd' will be converted to 'ceph'. 'vtpm' secrets
+                           are private and ephemeral; others are not.
         :param usage_id: name of resource in secret
         :param password: optional secret value to set
+        :param uuid: optional UUID of the secret; else one is generated by
+            libvirt
         """
         secret_conf = vconfig.LibvirtConfigSecret()
-        secret_conf.ephemeral = False
-        secret_conf.private = False
+        secret_conf.ephemeral = usage_type == 'vtpm'
+        secret_conf.private = usage_type == 'vtpm'
         secret_conf.usage_id = usage_id
+        secret_conf.uuid = uuid
         if usage_type in ('rbd', 'ceph'):
             secret_conf.usage_type = 'ceph'
         elif usage_type == 'iscsi':
             secret_conf.usage_type = 'iscsi'
         elif usage_type == 'volume':
             secret_conf.usage_type = 'volume'
+        elif usage_type == 'vtpm':
+            secret_conf.usage_type = 'vtpm'
         else:
             msg = _("Invalid usage_type: %s")
             raise exception.InternalError(msg % usage_type)
@@ -1036,8 +1048,8 @@ class Host(object):
     def delete_secret(self, usage_type, usage_id):
         """Delete a secret.
 
-        usage_type: one of 'iscsi', 'ceph', 'rbd' or 'volume'
-        usage_id: name of resource in secret
+        :param usage_type: one of 'iscsi', 'ceph', 'rbd', 'volume' or 'vtpm'
+        :param usage_id: name of resource in secret
         """
         secret = self.find_secret(usage_type, usage_id)
         if secret is not None:
@@ -1129,8 +1141,6 @@ class Host(object):
 
         :returns: an instance of Guest
         """
-        if six.PY2:
-            xml = encodeutils.safe_encode(xml)
         domain = self.get_connection().defineXML(xml)
         return libvirt_guest.Guest(domain)
 
@@ -1179,6 +1189,19 @@ class Host(object):
                 return []
             else:
                 raise
+
+    def list_all_devices(
+            self, flags: int = 0) -> ty.List['libvirt.virNodeDevice']:
+        """Lookup devices.
+
+        :param flags: a bitmask of flags to filter the returned devices.
+        :returns: a list of virNodeDevice xml strings.
+        """
+        try:
+            return self.get_connection().listAllDevices(flags) or []
+        except libvirt.libvirtError as ex:
+            LOG.warning(ex)
+            return []
 
     def compare_cpu(self, xmlDesc, flags=0):
         """Compares the given CPU description with the host CPU."""

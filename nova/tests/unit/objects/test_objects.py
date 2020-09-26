@@ -881,7 +881,7 @@ class TestObjectSerializer(_BaseTestCase):
             }
 
         @base.NovaObjectRegistry.register  # noqa
-        class Parent(base.NovaObject):
+        class Parent(base.NovaObject):  # noqa
             VERSION = '1.1'
 
             fields = {
@@ -1077,7 +1077,7 @@ object_data = {
     'HyperVLiveMigrateData': '1.4-e265780e6acfa631476c8170e8d6fce0',
     'IDEDeviceBus': '1.0-29d4c9f27ac44197f01b6ac1b7e16502',
     'ImageMeta': '1.8-642d1b2eb3e880a367f37d72dd76162d',
-    'ImageMetaProps': '1.25-66fc973af215eb5701ed4034bb6f0685',
+    'ImageMetaProps': '1.27-f3f17d5e35146a0dbb56420ffc4f3990',
     'Instance': '2.7-d187aec68cad2e4d8b8a03a68e4739ce',
     'InstanceAction': '1.2-9a5abc87fdd3af46f45731960651efb5',
     'InstanceActionEvent': '1.4-5b1f361bd81989f8bb2c20bb7e8a4cb4',
@@ -1093,7 +1093,7 @@ object_data = {
     'InstanceList': '2.6-238f125650c25d6d12722340d726f723',
     'InstanceMapping': '1.2-3bd375e65c8eb9c45498d2f87b882e03',
     'InstanceMappingList': '1.3-d34b6ebb076d542ae0f8b440534118da',
-    'InstanceNUMACell': '1.4-b68e13eacba363ae8f196abf0ffffb5b',
+    'InstanceNUMACell': '1.6-25d9120d83a18356f4146f2a6fe2cc8d',
     'InstanceNUMATopology': '1.3-ec0030cb0402a49c96da7051c037082a',
     'InstancePCIRequest': '1.3-f6d324f1c337fad4f34892ed5f484c9a',
     'InstancePCIRequests': '1.1-65e38083177726d806684cb1cc0136d2',
@@ -1103,9 +1103,9 @@ object_data = {
     'LibvirtLiveMigrateData': '1.10-348cf70ea44d3b985f45f64725d6f6a7',
     'LibvirtLiveMigrateNUMAInfo': '1.0-0e777677f3459d0ed1634eabbdb6c22f',
     'MemoryDiagnostics': '1.0-2c995ae0f2223bb0f8e523c5cc0b83da',
-    'Migration': '1.7-b77066a88d08bdb0b05d7bc18780c55a',
+    'Migration': '1.7-bd45b232fd7c95cd79ae9187e10ef582',
     'MigrationContext': '1.2-89f10a83999f852a489962ae37d8a026',
-    'MigrationList': '1.4-983a9c29d4f1e747ce719dc9063b729b',
+    'MigrationList': '1.5-36793f8d65bae421bd5564d09a4de7be',
     'MonitorMetric': '1.1-53b1db7c4ae2c531db79761e7acc52ba',
     'MonitorMetricList': '1.1-15ecf022a68ddbb8c2a6739cfc9f8f5e',
     'NUMACell': '1.4-7695303e820fa855d76954be2eb2680e',
@@ -1155,7 +1155,6 @@ object_data = {
     'VirtualInterfaceList': '1.0-9750e2074437b3077e46359102779fc6',
     'VolumeUsage': '1.0-6c8190c46ce1469bb3286a1f21c2e475',
     'XenDeviceBus': '1.0-272a4f899b24e31e42b2b9a7ed7e9194',
-    'XenapiLiveMigrateData': '1.4-7dc9417e921b2953faa6751f18785f3f',
     # TODO(efried): re-alphabetize this
     'LibvirtVPMEMDevice': '1.0-17ffaf47585199eeb9a2b83d6bde069f',
 }

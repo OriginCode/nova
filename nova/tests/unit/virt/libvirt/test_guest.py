@@ -20,7 +20,6 @@ import mock
 from oslo_service import fixture as service_fixture
 from oslo_utils import encodeutils
 import six
-import testtools
 
 from nova import context
 from nova import exception
@@ -61,12 +60,16 @@ class GuestTestCase(test.NoDBTestCase):
         libvirt_guest.Guest.create("xml", self.host)
         mock_define.assert_called_once_with("xml")
 
+    @mock.patch.object(libvirt_guest.LOG, 'error')
     @mock.patch.object(fakelibvirt.Connection, 'defineXML')
-    def test_create_exception(self, mock_define):
+    def test_create_exception(self, mock_define, mock_log):
+        fake_xml = '<test>this is a test</test>'
         mock_define.side_effect = test.TestingException
         self.assertRaises(test.TestingException,
                           libvirt_guest.Guest.create,
-                          "foo", self.host)
+                          fake_xml, self.host)
+        # ensure the XML is logged
+        self.assertIn(fake_xml, str(mock_log.call_args[0]))
 
     def test_launch(self):
         self.guest.launch()
@@ -77,17 +80,21 @@ class GuestTestCase(test.NoDBTestCase):
         self.domain.createWithFlags.assert_called_once_with(
             fakelibvirt.VIR_DOMAIN_START_PAUSED)
 
+    @mock.patch.object(libvirt_guest.LOG, 'error')
+    @mock.patch.object(encodeutils, 'safe_decode')
+    def test_launch_exception(self, mock_safe_decode, mock_log):
+        fake_xml = '<test>this is a test</test>'
+        self.domain.createWithFlags.side_effect = test.TestingException
+        mock_safe_decode.return_value = fake_xml
+        self.assertRaises(test.TestingException, self.guest.launch)
+        self.assertEqual(1, mock_safe_decode.called)
+        # ensure the XML is logged
+        self.assertIn(fake_xml, str(mock_log.call_args[0]))
+
     def test_shutdown(self):
         self.domain.shutdown = mock.MagicMock()
         self.guest.shutdown()
         self.domain.shutdown.assert_called_once_with()
-
-    @mock.patch.object(encodeutils, 'safe_decode')
-    def test_launch_exception(self, mock_safe_decode):
-        self.domain.createWithFlags.side_effect = test.TestingException
-        mock_safe_decode.return_value = "</xml>"
-        self.assertRaises(test.TestingException, self.guest.launch)
-        self.assertEqual(1, mock_safe_decode.called)
 
     def test_get_interfaces(self):
         self.domain.XMLDesc.return_value = """<domain>
@@ -600,6 +607,44 @@ class GuestTestCase(test.NoDBTestCase):
             self.guest.get_interface_by_cfg(cfg))
         self.assertIsNone(self.guest.get_interface_by_cfg(None))
 
+    def test_get_interface_by_cfg_hostdev_pci(self):
+        self.domain.XMLDesc.return_value = """<domain>
+            <devices>
+                <hostdev mode='subsystem' type='pci' managed='yes'>
+                <driver name='vfio'/>
+                <source>
+                <address domain='0x0000' bus='0x81' slot='0x00'
+                    function='0x1'/>
+                </source>
+                <alias name='hostdev0'/>
+                <address type='pci' domain='0x0000' bus='0x00' slot='0x04'
+                    function='0x0'/>
+                </hostdev>
+            </devices>
+        </domain>"""
+        cfg = vconfig.LibvirtConfigGuestHostdevPCI()
+        cfg.parse_str("""
+            <hostdev mode='subsystem' type='pci' managed='yes'>
+            <driver name='vfio'/>
+            <source>
+            <address domain='0x0000' bus='0x81' slot='0x00' function='0x1'/>
+            </source>
+            </hostdev>""")
+        self.assertIsNotNone(
+            self.guest.get_interface_by_cfg(cfg))
+
+        cfg.parse_str("""
+            <hostdev mode='subsystem' type='pci' managed='yes'>
+            <driver name='vfio'/>
+            <source>
+            <address domain='0000' bus='81' slot='00' function='1'/>
+            </source>
+            </hostdev>""")
+        self.assertIsNotNone(
+            self.guest.get_interface_by_cfg(cfg))
+
+        self.assertIsNone(self.guest.get_interface_by_cfg(None))
+
     def test_get_info(self):
         self.domain.info.return_value = (1, 2, 3, 4, 5)
         self.domain.ID.return_value = 6
@@ -696,24 +741,6 @@ class GuestTestCase(test.NoDBTestCase):
                                            'migrate_disks': 'disk1',
                                            'destination_xml': '</xml>',
                                            'persistent_xml': '</xml>',
-                                           'bandwidth': 2})
-
-    @testtools.skipIf(not six.PY2, 'libvirt python3 bindings accept unicode')
-    def test_migrate_v3_unicode(self):
-        dest_xml_template = "<domain type='qemu'><name>%s</name></domain>"
-        name = u'\u00CD\u00F1st\u00E1\u00F1c\u00E9'
-        dest_xml = dest_xml_template % name
-        expect_dest_xml = dest_xml_template % encodeutils.to_utf8(name)
-        self.guest.migrate('an-uri', flags=1, migrate_uri='dest-uri',
-                           migrate_disks=[u"disk1", u"disk2"],
-                           destination_xml=dest_xml,
-                           bandwidth=2)
-        self.domain.migrateToURI3.assert_called_once_with(
-                'an-uri', flags=1, params={'migrate_uri': 'dest-uri',
-                                           'migrate_disks': ['disk1',
-                                                             'disk2'],
-                                           'destination_xml': expect_dest_xml,
-                                           'persistent_xml': expect_dest_xml,
                                            'bandwidth': 2})
 
     def test_abort_job(self):

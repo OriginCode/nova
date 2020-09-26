@@ -31,7 +31,6 @@ from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import integrated_helpers
 from nova.tests.unit import fake_network
 from nova.tests.unit import fake_notifier
-import nova.tests.unit.image.fake as fake_image
 from nova.tests.unit.virt.libvirt import fakelibvirt
 from nova.virt.libvirt import config as libvirt_config
 
@@ -50,10 +49,8 @@ FLAVOR_FIXTURES = [
      'root_gb': 1, 'ephemeral_gb': 0, 'swap': 1},
 ]
 
-
 # Choice of image id is arbitrary, but fixed for consistency.
-IMAGE_ID = fake_image.AUTO_DISK_CONFIG_ENABLED_IMAGE_UUID
-
+IMAGE_ID = nova_fixtures.GlanceFixture.auto_disk_config_enabled_image['id']
 
 # NOTE(mdbooth): Change I76448196 tests for creation of any local disk, and
 # short-circuits as soon as it sees one created. Disks are created in order:
@@ -220,7 +217,7 @@ class _RbdTest(object):
 
         # We never want to actually touch rbd
         self.mock_rbd_driver = self.useFixture(fixtures.MockPatch(
-            'nova.virt.libvirt.storage.rbd_utils.RBDDriver')).mock.return_value
+            'nova.storage.rbd_utils.RBDDriver')).mock.return_value
         self.mock_rbd_driver.get_mon_addrs.return_value = ([], [])
         self.mock_rbd_driver.size.return_value = 10 * units.Gi
         self.mock_rbd_driver.rbd_user = 'rbd'
@@ -423,6 +420,7 @@ class _LibvirtEvacuateTest(integrated_helpers.InstanceHelperMixin):
 
         self.useFixture(nova_fixtures.CinderFixture(self))
         self.useFixture(nova_fixtures.NeutronFixture(self))
+        self.useFixture(nova_fixtures.GlanceFixture(self))
         self.useFixture(func_fixtures.PlacementFixture())
         fake_network.set_stub_network_methods(self)
 
@@ -432,9 +430,6 @@ class _LibvirtEvacuateTest(integrated_helpers.InstanceHelperMixin):
         self.api = api_fixture.admin_api
         # force_down and evacuate without onSharedStorage
         self.api.microversion = '2.14'
-
-        fake_image.stub_out_image_service(self)
-        self.addCleanup(fake_image.FakeImageService_reset)
 
         fake_notifier.stub_notifier(self)
         self.addCleanup(fake_notifier.reset)
@@ -547,9 +542,6 @@ class _LibvirtEvacuateTest(integrated_helpers.InstanceHelperMixin):
         If we fail during evacuate and the instance directory didn't
         previously exist on the destination, we should delete it
         """
-        # Use a unique instances_path per test to allow cleanup
-        self.flags(instances_path=self.useFixture(fixtures.TempDir()).path)
-
         # Create instances on compute0
         compute0 = self._start_compute('compute0')
         servers = self._create_servers()
@@ -612,8 +604,6 @@ class _LibvirtEvacuateTest(integrated_helpers.InstanceHelperMixin):
         By default our 2 compute hosts share the same instance directory on
         the test runner.
         """
-        # Use a unique instances_path per test to allow cleanup
-        self.flags(instances_path=self.useFixture(fixtures.TempDir()).path)
         # Create test instances on compute0
         compute0 = self._start_compute('compute0')
         servers = self._create_servers()

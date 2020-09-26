@@ -189,10 +189,10 @@ CPUs can use the CPUs of another pinned instance, thus preventing resource
 contention between instances.
 
 CPU pinning policies can be used to determine whether an instance should be
-pinned or not. There are two policies: ``dedicated`` and ``shared`` (the
-default). The ``dedicated`` CPU policy is used to specify that an instance
-should use pinned CPUs. To configure a flavor to use the ``dedicated`` CPU
-policy, run:
+pinned or not. There are three policies: ``dedicated``, ``mixed`` and
+``shared`` (the default). The ``dedicated`` CPU policy is used to specify
+that all CPUs of an instance should use pinned CPUs. To configure a flavor to
+use the ``dedicated`` CPU policy, run:
 
 .. code-block:: console
 
@@ -220,10 +220,36 @@ use pinned CPUs. To configure a flavor to use the ``shared`` CPU policy, run:
 
    $ openstack flavor set [FLAVOR_ID] --property hw:cpu_policy=shared
 
+The ``mixed`` CPU policy is used to specify that an instance use pinned CPUs
+along with unpinned CPUs. The instance pinned CPU could be specified in the
+``hw:cpu_dedicated_mask`` or, if real-time is enabled
+(``hw:cpu_realtime``\ = yes), in the ``hw:cpu_realtime_mask`` extra spec. For
+example, to configure a flavor to use the ``mixed`` CPU policy with 4 vCPUs in
+total and the first 2 vCPUs as pinned CPUs, with the ``hw:cpu_realtime_mask``
+extra spec, run:
+
+.. code-block:: console
+
+   $ openstack flavor set [FLAVOR_ID] \
+     --vcpus=4 \
+     --property hw:cpu_policy=mixed \
+     --property hw:cpu_dedicated_mask=0-1
+
+To create the mixed instance with the real-time extra specs, run:
+
+.. code-block:: console
+
+   $ openstack flavor set [FLAVOR_ID] \
+     --vcpus=4 \
+     --property hw:cpu_policy=mixed \
+     --property hw:cpu_realtime=yes \
+     --property hw:cpu_realtime_mask=0-1
+
 .. note::
 
-   For more information about the syntax for ``hw:cpu_policy``, refer to the
-   :doc:`/admin/flavors` guide.
+   For more information about the syntax for ``hw:cpu_policy``,
+   ``hw:cpu_dedicated_mask``, ``hw:realtime_cpu`` and ``hw:cpu_realtime_mask``,
+   refer to the :doc:`/user/flavors` guide.
 
 It is also possible to configure the CPU policy via image metadata. This can
 be useful when packaging applications that require real-time or near real-time
@@ -334,7 +360,7 @@ This does not utilize traits and, as such, there is no trait-based equivalent.
 .. note::
 
    For more information about the syntax for ``hw:cpu_thread_policy``, refer to
-   the :doc:`/admin/flavors` guide.
+   the :doc:`/user/flavors` guide.
 
 As with CPU policies, it also possible to configure the CPU thread policy via
 image metadata. This can be useful when packaging applications that require
@@ -421,7 +447,7 @@ instance should be run on the pool of host cores listed in
 .. note::
 
    For more information about the syntax for ``hw:emulator_threads_policy``,
-   refer to the :doc:`/admin/flavors` guide.
+   refer to the :doc:`/user/flavors` guide.
 
 Customizing instance CPU topologies
 -----------------------------------
@@ -475,7 +501,7 @@ Similarly, to configure a flavor to use one core and one thread, run:
    with ten cores fails.
 
 For more information about the syntax for ``hw:cpu_sockets``, ``hw:cpu_cores``
-and ``hw:cpu_threads``, refer to the :doc:`/admin/flavors` guide.
+and ``hw:cpu_threads``, refer to the :doc:`/user/flavors` guide.
 
 It is also possible to set upper limits on the number of sockets, cores, and
 threads used. Unlike the hard values above, it is not necessary for this exact
@@ -490,7 +516,7 @@ instance topology, run:
 
 For more information about the syntax for ``hw:cpu_max_sockets``,
 ``hw:cpu_max_cores``, and ``hw:cpu_max_threads``, refer to the
-:doc:`/admin/flavors` guide.
+:doc:`/user/flavors` guide.
 
 Applications are frequently packaged as images. For applications that prefer
 certain CPU topologies, configure image metadata to hint that created instances

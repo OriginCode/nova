@@ -53,7 +53,6 @@ from nova.objects import fields
 from nova import rpc
 from nova import safe_utils
 from nova import utils
-from nova.virt import driver
 
 CONF = nova.conf.CONF
 LOG = log.getLogger(__name__)
@@ -229,10 +228,6 @@ def get_next_device_name(instance, device_name_list,
     except (TypeError, AttributeError, ValueError):
         raise exception.InvalidDevicePath(path=root_device_name)
 
-    # NOTE(vish): remove this when xenapi is setting default_root_device
-    if driver.is_xenapi():
-        prefix = '/dev/xvd'
-
     if req_prefix != prefix:
         LOG.debug("Using %(prefix)s instead of %(req_prefix)s",
                   {'prefix': prefix, 'req_prefix': req_prefix})
@@ -241,16 +236,6 @@ def get_next_device_name(instance, device_name_list,
     for device_path in device_name_list:
         letter = block_device.get_device_letter(device_path)
         used_letters.add(letter)
-
-    # NOTE(vish): remove this when xenapi is properly setting
-    #             default_ephemeral_device and default_swap_device
-    if driver.is_xenapi():
-        flavor = instance.get_flavor()
-        if flavor.ephemeral_gb:
-            used_letters.add('b')
-
-        if flavor.swap:
-            used_letters.add('c')
 
     check_max_disk_devices_to_attach(len(used_letters) + 1)
 
@@ -452,14 +437,15 @@ def notify_about_instance_usage(notifier, context, instance, event_suffix,
     method(context, 'compute.instance.%s' % event_suffix, usage_info)
 
 
-def _get_fault_and_priority_from_exc_and_tb(exception, tb):
+def _get_fault_and_priority_from_exception(exception: Exception):
     fault = None
     priority = fields.NotificationPriority.INFO
 
-    if exception:
-        priority = fields.NotificationPriority.ERROR
-        fault = notification_exception.ExceptionPayload.from_exc_and_traceback(
-            exception, tb)
+    if not exception:
+        return fault, priority
+
+    fault = notification_exception.ExceptionPayload.from_exception(exception)
+    priority = fields.NotificationPriority.ERROR
 
     return fault, priority
 
@@ -467,7 +453,7 @@ def _get_fault_and_priority_from_exc_and_tb(exception, tb):
 @rpc.if_notifications_enabled
 def notify_about_instance_action(context, instance, host, action, phase=None,
                                  source=fields.NotificationSource.COMPUTE,
-                                 exception=None, bdms=None, tb=None):
+                                 exception=None, bdms=None):
     """Send versioned notification about the action made on the instance
     :param instance: the instance which the action performed on
     :param host: the host emitting the notification
@@ -476,10 +462,9 @@ def notify_about_instance_action(context, instance, host, action, phase=None,
     :param source: the source of the notification
     :param exception: the thrown exception (used in error notifications)
     :param bdms: BlockDeviceMappingList object for the instance. If it is not
-                provided then we will load it from the db if so configured
-    :param tb: the traceback (used in error notifications)
+        provided then we will load it from the db if so configured
     """
-    fault, priority = _get_fault_and_priority_from_exc_and_tb(exception, tb)
+    fault, priority = _get_fault_and_priority_from_exception(exception)
     payload = instance_notification.InstanceActionPayload(
             context=context,
             instance=instance,
@@ -500,7 +485,7 @@ def notify_about_instance_action(context, instance, host, action, phase=None,
 
 @rpc.if_notifications_enabled
 def notify_about_instance_create(context, instance, host, phase=None,
-                                 exception=None, bdms=None, tb=None):
+                                 exception=None, bdms=None):
     """Send versioned notification about instance creation
 
     :param context: the request context
@@ -510,9 +495,8 @@ def notify_about_instance_create(context, instance, host, phase=None,
     :param exception: the thrown exception (used in error notifications)
     :param bdms: BlockDeviceMappingList object for the instance. If it is not
                 provided then we will load it from the db if so configured
-    :param tb: the traceback (used in error notifications)
     """
-    fault, priority = _get_fault_and_priority_from_exc_and_tb(exception, tb)
+    fault, priority = _get_fault_and_priority_from_exception(exception)
     payload = instance_notification.InstanceCreatePayload(
         context=context,
         instance=instance,
@@ -558,7 +542,7 @@ def notify_about_scheduler_action(context, request_spec, action, phase=None,
 
 @rpc.if_notifications_enabled
 def notify_about_volume_attach_detach(context, instance, host, action, phase,
-                                      volume_id=None, exception=None, tb=None):
+                                      volume_id=None, exception=None):
     """Send versioned notification about the action made on the instance
     :param instance: the instance which the action performed on
     :param host: the host emitting the notification
@@ -566,9 +550,8 @@ def notify_about_volume_attach_detach(context, instance, host, action, phase,
     :param phase: the phase of the action
     :param volume_id: id of the volume will be attached
     :param exception: the thrown exception (used in error notifications)
-    :param tb: the traceback (used in error notifications)
     """
-    fault, priority = _get_fault_and_priority_from_exc_and_tb(exception, tb)
+    fault, priority = _get_fault_and_priority_from_exception(exception)
     payload = instance_notification.InstanceActionVolumePayload(
             context=context,
             instance=instance,
@@ -590,7 +573,7 @@ def notify_about_volume_attach_detach(context, instance, host, action, phase,
 @rpc.if_notifications_enabled
 def notify_about_instance_rescue_action(context, instance, host,
                                         rescue_image_ref, phase=None,
-                                        exception=None, tb=None):
+                                        exception=None):
     """Send versioned notification about the action made on the instance
 
     :param instance: the instance which the action performed on
@@ -598,9 +581,8 @@ def notify_about_instance_rescue_action(context, instance, host,
     :param rescue_image_ref: the rescue image ref
     :param phase: the phase of the action
     :param exception: the thrown exception (used in error notifications)
-    :param tb: the traceback (used in error notifications)
     """
-    fault, priority = _get_fault_and_priority_from_exc_and_tb(exception, tb)
+    fault, priority = _get_fault_and_priority_from_exception(exception)
     payload = instance_notification.InstanceActionRescuePayload(
             context=context,
             instance=instance,
@@ -644,8 +626,7 @@ def notify_about_keypair_action(context, keypair, action, phase):
 
 @rpc.if_notifications_enabled
 def notify_about_volume_swap(context, instance, host, phase,
-                             old_volume_id, new_volume_id, exception=None,
-                             tb=None):
+                             old_volume_id, new_volume_id, exception=None):
     """Send versioned notification about the volume swap action
        on the instance
 
@@ -656,9 +637,8 @@ def notify_about_volume_swap(context, instance, host, phase,
     :param old_volume_id: the ID of the volume that is copied from and detached
     :param new_volume_id: the ID of the volume that is copied to and attached
     :param exception: an exception
-    :param tb: the traceback (used in error notifications)
     """
-    fault, priority = _get_fault_and_priority_from_exc_and_tb(exception, tb)
+    fault, priority = _get_fault_and_priority_from_exception(exception)
     payload = instance_notification.InstanceActionVolumeSwapPayload(
         context=context,
         instance=instance,
@@ -877,7 +857,7 @@ def notify_about_instance_rebuild(context, instance, host,
                                   action=fields.NotificationAction.REBUILD,
                                   phase=None,
                                   source=fields.NotificationSource.COMPUTE,
-                                  exception=None, bdms=None, tb=None):
+                                  exception=None, bdms=None):
     """Send versioned notification about instance rebuild
 
     :param instance: the instance which the action performed on
@@ -888,9 +868,8 @@ def notify_about_instance_rebuild(context, instance, host,
     :param exception: the thrown exception (used in error notifications)
     :param bdms: BlockDeviceMappingList object for the instance. If it is not
                 provided then we will load it from the db if so configured
-    :param tb: the traceback (used in error notifications)
     """
-    fault, priority = _get_fault_and_priority_from_exc_and_tb(exception, tb)
+    fault, priority = _get_fault_and_priority_from_exception(exception)
     payload = instance_notification.InstanceActionRebuildPayload(
             context=context,
             instance=instance,
@@ -938,15 +917,14 @@ def notify_about_metrics_update(context, host, host_ip, nodename,
 
 
 @rpc.if_notifications_enabled
-def notify_about_libvirt_connect_error(context, ip, exception, tb):
+def notify_about_libvirt_connect_error(context, ip, exception):
     """Send a versioned notification about libvirt connect error.
 
     :param context: the request context
     :param ip: the IP address of the host
     :param exception: the thrown exception
-    :param tb: the traceback
     """
-    fault, _ = _get_fault_and_priority_from_exc_and_tb(exception, tb)
+    fault, _ = _get_fault_and_priority_from_exception(exception)
     payload = libvirt_notification.LibvirtErrorPayload(ip=ip, reason=fault)
     notification = libvirt_notification.LibvirtErrorNotification(
         priority=fields.NotificationPriority.ERROR,
@@ -984,7 +962,7 @@ def notify_about_volume_usage(context, vol_usage, host):
 
 @rpc.if_notifications_enabled
 def notify_about_compute_task_error(context, action, instance_uuid,
-                                    request_spec, state, exception, tb):
+                                    request_spec, state, exception):
     """Send a versioned notification about compute task error.
 
     :param context: the request context
@@ -1001,7 +979,7 @@ def notify_about_compute_task_error(context, action, instance_uuid,
         request_spec = objects.RequestSpec.from_primitives(
             context, request_spec, {})
 
-    fault, _ = _get_fault_and_priority_from_exc_and_tb(exception, tb)
+    fault, _ = _get_fault_and_priority_from_exception(exception)
     payload = task_notification.ComputeTaskPayload(
         instance_uuid=instance_uuid, request_spec=request_spec, state=state,
         reason=fault)
@@ -1112,9 +1090,18 @@ def check_num_instances_quota(context, instance_type, min_count,
                               max_count, project_id=None, user_id=None,
                               orig_num_req=None):
     """Enforce quota limits on number of instances created."""
-    # project_id is used for the TooManyInstances error message
+    # project_id is also used for the TooManyInstances error message
     if project_id is None:
         project_id = context.project_id
+    if user_id is None:
+        user_id = context.user_id
+    # Check whether we need to count resources per-user and check a per-user
+    # quota limit. If we have no per-user quota limit defined for a
+    # project/user, we can avoid wasteful resource counting.
+    user_quotas = objects.Quotas.get_all_by_project_and_user(
+        context, project_id, user_id)
+    if not any(r in user_quotas for r in ['instances', 'cores', 'ram']):
+        user_id = None
     # Determine requested cores and ram
     req_cores = max_count * instance_type.vcpus
     req_ram = max_count * instance_type.memory_mb

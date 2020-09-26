@@ -58,6 +58,8 @@ INVALID_FLAVOR_IMAGE_EXCEPTIONS = (
     exception.BadRequirementEmulatorThreadsPolicy,
     exception.CPUThreadPolicyConfigurationInvalid,
     exception.FlavorImageConflict,
+    exception.FlavorDiskTooSmall,
+    exception.FlavorMemoryTooSmall,
     exception.ImageCPUPinningForbidden,
     exception.ImageCPUThreadPolicyForbidden,
     exception.ImageNUMATopologyAsymmetric,
@@ -85,6 +87,9 @@ INVALID_FLAVOR_IMAGE_EXCEPTIONS = (
     exception.PciRequestAliasNotDefined,
     exception.RealtimeConfigurationInvalid,
     exception.RealtimeMaskNotFoundOrInvalid,
+    exception.RequiredMixedInstancePolicy,
+    exception.RequiredMixedOrRealtimeCPUMask,
+    exception.InvalidMixedInstanceDedicatedMask,
 )
 
 MIN_COMPUTE_MOVE_BANDWIDTH = 39
@@ -101,7 +106,8 @@ class ServersController(wsgi.Controller):
         if 'server' not in robj.obj:
             return robj
 
-        link = [l for l in robj.obj['server']['links'] if l['rel'] == 'self']
+        link = [link for link in robj.obj['server'][
+            'links'] if link['rel'] == 'self']
         if link:
             robj['Location'] = link[0]['href']
 
@@ -660,7 +666,8 @@ class ServersController(wsgi.Controller):
         except exception.InvalidInput as err:
             raise exc.HTTPBadRequest(explanation=six.text_type(err))
         if host or node:
-            context.can(server_policies.SERVERS % 'create:forced_host', {})
+            context.can(server_policies.SERVERS % 'create:forced_host',
+                        target=target)
 
         if api_version_request.is_supported(req, min_version='2.74'):
             self._process_hosts_for_create(context, target, server_dict,
@@ -724,8 +731,6 @@ class ServersController(wsgi.Controller):
                 exception.ImageUnacceptable,
                 exception.FixedIpNotFoundForAddress,
                 exception.FlavorNotFound,
-                exception.FlavorDiskTooSmall,
-                exception.FlavorMemoryTooSmall,
                 exception.InvalidMetadata,
                 exception.InvalidVolume,
                 exception.MismatchVolumeAZException,
@@ -748,6 +753,7 @@ class ServersController(wsgi.Controller):
                 exception.InvalidBDMEphemeralSize,
                 exception.InvalidBDMFormat,
                 exception.InvalidBDMSwapSize,
+                exception.InvalidBDMDiskBus,
                 exception.VolumeTypeNotFound,
                 exception.AutoDiskConfigDisabledByImage,
                 exception.InstanceGroupNotFound,
@@ -764,7 +770,8 @@ class ServersController(wsgi.Controller):
         except (exception.PortInUse,
                 exception.InstanceExists,
                 exception.NetworkAmbiguous,
-                exception.NoUniqueMatch) as error:
+                exception.NoUniqueMatch,
+                exception.MixedInstanceNotSupportByComputeService) as error:
             raise exc.HTTPConflict(explanation=error.format_message())
 
         # If the caller wanted a reservation_id, return it
@@ -879,7 +886,10 @@ class ServersController(wsgi.Controller):
         except exception.MigrationNotFound:
             msg = _("Instance has not been resized.")
             raise exc.HTTPBadRequest(explanation=msg)
-        except exception.InstanceIsLocked as e:
+        except (
+            exception.InstanceIsLocked,
+            exception.ServiceUnavailable,
+        ) as e:
             raise exc.HTTPConflict(explanation=e.format_message())
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
@@ -955,9 +965,12 @@ class ServersController(wsgi.Controller):
                 exception.ForbiddenWithAccelerators) as error:
             raise exc.HTTPForbidden(
                 explanation=error.format_message())
-        except (exception.InstanceIsLocked,
-                exception.InstanceNotReady,
-                exception.ServiceUnavailable) as e:
+        except (
+            exception.InstanceIsLocked,
+            exception.InstanceNotReady,
+            exception.MixedInstanceNotSupportByComputeService,
+            exception.ServiceUnavailable,
+        ) as e:
             raise exc.HTTPConflict(explanation=e.format_message())
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
@@ -1105,7 +1118,10 @@ class ServersController(wsgi.Controller):
                                      image_href,
                                      password,
                                      **kwargs)
-        except exception.InstanceIsLocked as e:
+        except (
+            exception.InstanceIsLocked,
+            exception.OperationNotSupportedForVTPM,
+        ) as e:
             raise exc.HTTPConflict(explanation=e.format_message())
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
@@ -1124,12 +1140,11 @@ class ServersController(wsgi.Controller):
             raise exc.HTTPForbidden(explanation=error.format_message())
         except (exception.AutoDiskConfigDisabledByImage,
                 exception.CertificateValidationFailed,
-                exception.FlavorDiskTooSmall,
-                exception.FlavorMemoryTooSmall,
                 exception.ImageNotActive,
                 exception.ImageUnacceptable,
                 exception.InvalidMetadata,
                 exception.InvalidArchitectureName,
+                exception.InvalidVolume,
                 ) as error:
             raise exc.HTTPBadRequest(explanation=error.format_message())
         except INVALID_FLAVOR_IMAGE_EXCEPTIONS as error:

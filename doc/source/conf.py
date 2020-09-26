@@ -47,10 +47,6 @@ extensions = [
     'sphinxcontrib.rsvgconverter',
 ]
 
-# openstackdocstheme options
-repository_name = 'openstack/nova'
-bug_project = 'nova'
-bug_tag = 'doc'
 
 config_generator_config_file = '../../etc/nova/nova-config-generator.conf'
 sample_config_basename = '_static/nova'
@@ -74,7 +70,7 @@ master_doc = 'index'
 copyright = u'2010-present, OpenStack Foundation'
 
 # The name of the Pygments (syntax highlighting) style to use.
-pygments_style = 'sphinx'
+pygments_style = 'native'
 
 # -- Options for man page output ----------------------------------------------
 
@@ -82,22 +78,46 @@ pygments_style = 'sphinx'
 # List of tuples 'sourcefile', 'target', u'title', u'Authors name', 'manual'
 
 _man_pages = [
-    ('nova-api', u'Cloud controller fabric'),
-    ('nova-api-metadata', u'Cloud controller fabric'),
-    ('nova-api-os-compute', u'Cloud controller fabric'),
-    ('nova-compute', u'Cloud controller fabric'),
-    ('nova-conductor', u'Cloud controller fabric'),
-    ('nova-manage', u'Cloud controller fabric'),
-    ('nova-novncproxy', u'Cloud controller fabric'),
-    ('nova-rootwrap', u'Cloud controller fabric'),
-    ('nova-scheduler', u'Cloud controller fabric'),
-    ('nova-serialproxy', u'Cloud controller fabric'),
-    ('nova-spicehtml5proxy', u'Cloud controller fabric'),
-    ('nova-status', u'Cloud controller fabric'),
+    ('nova-api', 'Server for the OpenStack Compute API service.'),
+    (
+        'nova-api-metadata',
+        'Server for the OpenStack Compute metadata API service.',
+    ),
+    (
+        'nova-api-os-compute',
+        'Server for the OpenStack Compute API service.',
+    ),
+    ('nova-compute', 'Server for the OpenStack Compute compute service.'),
+    ('nova-conductor', 'Server for the OpenStack Compute conductor service.'),
+    ('nova-manage', 'Management tool for the OpenStack Compute services.'),
+    (
+        'nova-novncproxy',
+        'Server for the OpenStack Compute VNC console proxy service.'
+    ),
+    (
+        'nova-rootwrap',
+        'Root wrapper daemon for the OpenStack Compute service.',
+    ),
+    (
+        'nova-scheduler',
+        'Server for the OpenStack Compute scheduler service.',
+    ),
+    (
+        'nova-serialproxy',
+        'Server for the OpenStack Compute serial console proxy service.',
+    ),
+    (
+        'nova-spicehtml5proxy',
+        'Server for the OpenStack Compute SPICE console proxy service.',
+    ),
+    (
+        'nova-status',
+        'Inspect configuration status for the OpenStack Compute services.',
+    ),
 ]
 
 man_pages = [
-    ('cli/%s' % name, name, description, [u'OpenStack'], 1)
+    ('cli/%s' % name, name, description, ['openstack@lists.openstack.org'], 1)
     for name, description in _man_pages]
 
 # -- Options for HTML output --------------------------------------------------
@@ -142,11 +162,17 @@ latex_use_xindy = False
 
 # -- Options for openstackdocstheme -------------------------------------------
 
+# openstackdocstheme options
+openstackdocs_repo_name = 'openstack/nova'
+openstackdocs_bug_project = 'nova'
+openstackdocs_bug_tag = 'doc'
+openstackdocs_pdf_link = True
+
 # keep this ordered to keep mriedem happy
 #
 # NOTE(stephenfin): Projects that don't have a release branch, like TripleO and
 # reno, should not be included here
-openstack_projects = [
+openstackdocs_projects = [
     'ceilometer',
     'cinder',
     'cyborg',

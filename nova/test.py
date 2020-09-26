@@ -25,6 +25,7 @@ import nova.monkey_patch  # noqa
 
 import abc
 import collections
+import contextlib
 import copy
 import datetime
 import inspect
@@ -64,11 +65,6 @@ from nova.tests.unit import matchers
 from nova.tests.unit import policy_fixture
 from nova import utils
 from nova.virt import images
-
-if six.PY2:
-    import contextlib2 as contextlib
-else:
-    import contextlib
 
 CONF = cfg.CONF
 
@@ -141,7 +137,7 @@ class NovaExceptionReraiseFormatError(object):
     def _wrap_log_exception(self):
         exc_info = sys.exc_info()
         NovaExceptionReraiseFormatError.real_log_exception(self)
-        six.reraise(*exc_info)
+        raise exc_info[1]
 
 
 # NOTE(melwitt) This needs to be done at import time in order to also catch
@@ -284,6 +280,8 @@ class TestCase(base.BaseTestCase):
         # NOTE(melwitt): Reset the cached set of projects
         quota.UID_QFD_POPULATED_CACHE_BY_PROJECT = set()
         quota.UID_QFD_POPULATED_CACHE_ALL = False
+
+        self.useFixture(nova_fixtures.GenericPoisonFixture())
 
     def _setup_cells(self):
         """Setup a normal cellsv2 environment.
@@ -623,8 +621,9 @@ class TestCase(base.BaseTestCase):
                          baseclass)
 
         for name in sorted(implmethods.keys()):
-            baseargs = utils.getargspec(basemethods[name])
-            implargs = utils.getargspec(implmethods[name])
+            # NOTE(stephenfin): We ignore type annotations
+            baseargs = utils.getargspec(basemethods[name])[:-1]
+            implargs = utils.getargspec(implmethods[name])[:-1]
 
             self.assertEqual(baseargs, implargs,
                              "%s args don't match base class %s" %
@@ -646,8 +645,7 @@ class APICoverage(object):
             testtools.matchers.ContainsAll(api_methods))
 
 
-@six.add_metaclass(abc.ABCMeta)
-class SubclassSignatureTestCase(testtools.TestCase):
+class SubclassSignatureTestCase(testtools.TestCase, metaclass=abc.ABCMeta):
     """Ensure all overridden methods of all subclasses of the class
     under test exactly match the signature of the base class.
 
@@ -746,12 +744,6 @@ class NoDBTestCase(TestCase):
     should derive from this class.
     """
     USES_DB = False
-
-
-class BaseHookTestCase(NoDBTestCase):
-    def assert_has_hook(self, expected_name, func):
-        self.assertTrue(hasattr(func, '__hook_name__'))
-        self.assertEqual(expected_name, func.__hook_name__)
 
 
 class MatchType(object):

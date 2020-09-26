@@ -458,6 +458,17 @@ CPU pinning policy
     an overcommit ratio of 1.0. For example, if a two vCPU guest is pinned to a
     single host core with two threads, then the guest will get a topology of
     one socket, one core, two threads.
+  - ``mixed``: This policy will create an instance combined with the ``shared``
+    policy vCPUs and ``dedicated`` policy vCPUs, as a result, some guest vCPUs
+    will be freely float across host pCPUs and the rest of guest vCPUs will be
+    pinned to host pCPUs. The pinned guest vCPUs are configured using the
+    ``hw:cpu_dedicated_mask`` extra spec.
+
+  .. note::
+
+     The ``hw:cpu_dedicated_mask`` option is only valid if ``hw:cpu_policy``
+     is set to ``mixed`` and cannot be configured with ``hw:cpu_realtime_mask``
+     at the same time.
 
   Valid CPU-THREAD-POLICY values are:
 
@@ -477,8 +488,8 @@ CPU pinning policy
 
   .. note::
 
-     The ``hw:cpu_thread_policy`` option is only valid if ``hw:cpu_policy`` is
-     set to ``dedicated``.
+     The ``hw:cpu_thread_policy`` option is valid if ``hw:cpu_policy`` is set
+     to ``dedicated`` or ``mixed``.
 
 .. _pci_numa_affinity_policy:
 
@@ -601,8 +612,9 @@ CPU real-time policy
   .. important::
 
      While most of your instance vCPUs can run with a real-time policy, you must
-     mark at least one vCPU as non-real-time, to be used for both non-real-time
-     guest processes and emulator overhead (housekeeping) processes.
+     either mark at least one vCPU as non-real-time to be account for emulator
+     overhead (housekeeping) or explicitly configure an :ref:`emulator thread
+     policy <extra-specs-emulator-threads-policy>`.
 
   .. important::
 
@@ -624,14 +636,29 @@ CPU real-time policy
     - ``yes``: The guest vCPUs will have a real-time policy
 
   CPU-REALTIME-MASK (coremask):
-    A coremask indicating which vCPUs **will not** have a real-time policy. This
-    should start with a ``^``. For example, a value of ``^0-1`` indicates that
-    all vCPUs *except* vCPUs ``0`` and ``1`` will have a real-time policy.
+    A coremask indicating which vCPUs **will** or, if starting with a ``^``,
+    **will not** have a real-time policy. For example, a value of ``0-5``
+    indicates that vCPUs ``0`` to ``5`` will have a real-time policy.
+    Conversely, a value of ``^0-1`` indicates that all vCPUs *except* vCPUs
+    ``0`` and ``1`` will have a real-time policy.
 
   .. note::
 
      The ``hw:cpu_realtime_mask`` option is only valid if ``hw:cpu_realtime``
      is set to ``yes``.
+
+  .. versionchanged:: 22.0.0 (Victoria)
+
+     Previously, it was necessary to specify ``hw:cpu_realtime_mask`` when
+     ``hw:cpu_realtime`` was set to yes. Starting in Victoria, it is possible
+     to omit this when an emulator thread policy is configured using the
+     ``hw:emulator_threads_policy`` extra spec.
+
+  .. versionchanged:: 22.0.0 (Victoria)
+
+     Previously, the leading caret was necessary and omitting it would be
+     equivalent to not setting the mask, resulting in a failure to spawn
+     the instance.
 
 .. _extra-specs-emulator-threads-policy:
 
@@ -738,10 +765,14 @@ Hiding hypervisor signature
      As of the 18.0.0 Rocky release, this is only supported by the libvirt
      driver.
 
+     Prior to the 21.0.0 Ussuri release, this was called
+     ``hide_hypervisor_id``. An alias is provided to provide backwards
+     compatibility.
+
   .. code:: console
 
      $ openstack flavor set FLAVOR-NAME \
-         --property hide_hypervisor_id=VALUE
+         --property hw:hide_hypervisor_id=VALUE
 
   Where:
 
@@ -895,3 +926,26 @@ Numbered groupings of resource classes and traits
     See `Granular Resource Request Syntax`_ for more details.
 
 .. _Granular Resource Request Syntax: https://specs.openstack.org/openstack/nova-specs/specs/rocky/implemented/granular-resource-requests.html
+
+.. _vtpm-flavor:
+
+Emulated Virtual TPM
+  If supported by the compute host, you can add an :doc:`emulated trusted
+  platform module (TPM) </admin/emulated-tpm>` to the guest OS.
+
+  .. code:: console
+
+     $ openstack flavor set FLAVOR-NAME \
+         --property hw:tpm_version=$VERSION \
+         --property hw:tpm_model=$MODEL
+
+  ``hw:tpm_version`` is required to enable support. Valid ``$VERSION`` values
+  are:
+
+  - ``1.2`` : Selects TPM version 1.2 support.
+  - ``2.0`` : Selects TPM version 2.0 support.
+
+  ``hw:tpm_model`` is optional. Valid ``$MODEL`` values are:
+
+  - ``tpm-tis``: Selects TIS device model. This is the default value.
+  - ``tpm-crb``: Selects CRB device model. Only valid for TPM version 2.0.

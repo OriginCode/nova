@@ -22,7 +22,6 @@ from nova.compute import vm_states
 from nova.conductor.tasks import live_migrate
 from nova import context as nova_context
 from nova import exception
-from nova.network import model as network_model
 from nova import objects
 from nova.scheduler.client import query
 from nova.scheduler.client import report
@@ -214,9 +213,10 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
     @mock.patch.object(objects.ComputeNode, 'get_by_host_and_nodename')
     def test_check_instance_has_no_numa_passes_non_kvm(self, mock_get):
         self.flags(enable_numa_live_migration=False, group='workarounds')
-        self.task.instance.numa_topology = objects.InstanceNUMATopology(
-            cells=[objects.InstanceNUMACell(id=0, cpuset=set([0]),
-                                            memory=1024)])
+        self.task.instance.numa_topology = objects.InstanceNUMATopology(cells=[
+            objects.InstanceNUMACell(
+                id=0, cpuset=set([0]), pcpuset=set(), memory=1024),
+            ])
         mock_get.return_value = objects.ComputeNode(
             uuid=uuids.cn1, hypervisor_type='xen')
         self.task._check_instance_has_no_numa()
@@ -227,9 +227,10 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
     def test_check_instance_has_no_numa_passes_workaround(
             self, mock_get_min_ver, mock_get):
         self.flags(enable_numa_live_migration=True, group='workarounds')
-        self.task.instance.numa_topology = objects.InstanceNUMATopology(
-            cells=[objects.InstanceNUMACell(id=0, cpuset=set([0]),
-                                            memory=1024)])
+        self.task.instance.numa_topology = objects.InstanceNUMATopology(cells=[
+            objects.InstanceNUMACell(
+                id=0, cpuset=set([0]), pcpuset=set(), memory=1024),
+            ])
         mock_get.return_value = objects.ComputeNode(
             uuid=uuids.cn1, hypervisor_type='qemu')
         self.task._check_instance_has_no_numa()
@@ -243,9 +244,10 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
         self.flags(enable_numa_live_migration=False, group='workarounds')
         mock_get.return_value = objects.ComputeNode(
             uuid=uuids.cn1, hypervisor_type='qemu')
-        self.task.instance.numa_topology = objects.InstanceNUMATopology(
-            cells=[objects.InstanceNUMACell(id=0, cpuset=set([0]),
-                                            memory=1024)])
+        self.task.instance.numa_topology = objects.InstanceNUMATopology(cells=[
+            objects.InstanceNUMACell(
+                id=0, cpuset=set([0]), pcpuset=set(), memory=1024),
+            ])
         self.assertRaises(exception.MigrationPreCheckError,
                           self.task._check_instance_has_no_numa)
         mock_get_min_ver.assert_called_once_with(self.context, 'nova-compute')
@@ -258,9 +260,10 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
         self.flags(enable_numa_live_migration=False, group='workarounds')
         mock_get.return_value = objects.ComputeNode(
             uuid=uuids.cn1, hypervisor_type='qemu')
-        self.task.instance.numa_topology = objects.InstanceNUMATopology(
-            cells=[objects.InstanceNUMACell(id=0, cpuset=set([0]),
-                                            memory=1024)])
+        self.task.instance.numa_topology = objects.InstanceNUMATopology(cells=[
+            objects.InstanceNUMACell(
+                id=0, cpuset=set([0]), pcpuset=set(), memory=1024),
+            ])
         self.task._check_instance_has_no_numa()
         mock_get_min_ver.assert_called_once_with(self.context, 'nova-compute')
 
@@ -597,43 +600,6 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
                 mock.patch.object(self.task, '_check_can_migrate_pci')):
             self.assertRaises(exception.MigrationPreCheckError,
                               self.task._call_livem_checks_on_host, {}, {})
-
-    def test_call_livem_checks_on_host_bind_ports(self):
-        data = objects.LibvirtLiveMigrateData()
-        bindings = {
-            uuids.port1: {'host': 'dest-host'},
-            uuids.port2: {'host': 'dest-host'}
-        }
-
-        @mock.patch.object(self.task, '_check_can_migrate_pci')
-        @mock.patch.object(self.task.compute_rpcapi,
-                           'check_can_live_migrate_destination',
-                           return_value=data)
-        @mock.patch.object(self.task.network_api,
-                           'supports_port_binding_extension',
-                           return_value=True)
-        @mock.patch.object(self.task.network_api,
-                           'bind_ports_to_host', return_value=bindings)
-        def _test(mock_bind_ports_to_host,
-                  mock_supports_port_binding,
-                  mock_check_can_live_migrate_dest,
-                  mock_check_can_migrate_pci):
-            nwinfo = network_model.NetworkInfo([
-                network_model.VIF(uuids.port1),
-                network_model.VIF(uuids.port2)])
-            self.instance.info_cache = objects.InstanceInfoCache(
-                network_info=nwinfo)
-            self.task._call_livem_checks_on_host('dest-host', {})
-            # Assert the migrate_data set on the task based on the port
-            # bindings created.
-            self.assertIn('vifs', data)
-            self.assertEqual(2, len(data.vifs))
-            for vif in data.vifs:
-                self.assertIn('source_vif', vif)
-                self.assertEqual('dest-host', vif.host)
-                self.assertEqual(vif.port_id, vif.source_vif['id'])
-
-        _test()
 
     @mock.patch('nova.network.neutron.API.bind_ports_to_host')
     def test_bind_ports_on_destination_merges_profiles(self, mock_bind_ports):

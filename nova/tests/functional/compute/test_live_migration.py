@@ -41,6 +41,8 @@ class FakeCinderError(object):
 
 
 class LiveMigrationCinderFailure(integrated_helpers._IntegratedTestBase):
+    # Default self.api to the self.admin_api as live migration is admin only
+    ADMIN_API = True
     api_major_version = 'v2.1'
     microversion = 'latest'
 
@@ -54,7 +56,6 @@ class LiveMigrationCinderFailure(integrated_helpers._IntegratedTestBase):
         self.compute2 = self.start_service('compute', host='host2')
 
     def test_live_migrate_attachment_delete_fails(self):
-        self.useFixture(nova_fixtures.CinderFixture(self))
         server = self.api.post_server({
             'server': {
                 'flavorRef': 1,
@@ -104,10 +105,6 @@ class TestVolAttachmentsDuringLiveMigration(
     # Default self.api to the self.admin_api as live migration is admin only
     ADMIN_API = True
     microversion = 'latest'
-
-    def setUp(self):
-        super().setUp()
-        self.cinder = self.useFixture(nova_fixtures.CinderFixture(self))
 
     def _setup_compute_service(self):
         self._start_compute('src')
@@ -167,16 +164,12 @@ class TestVolAttachmentsDuringLiveMigration(
 
         # Migrate the instance and wait until the migration errors out thanks
         # to our mocked version of live_migration raising TestingException
-        self.api.post_server_action(
-            server['id'],
-            {'os-migrateLive': {'host': None, 'block_migration': 'auto'}})
-        self._wait_for_migration_status(server, ['error'])
+        self._live_migrate(server, 'error', server_expected_state='ERROR')
 
         # Assert that we called the fake live_migration method
         mock_lm.assert_called_once()
 
-        # Assert that the instance is listed as ERROR on the source
-        self._wait_for_state_change(server, 'ERROR')
+        # Assert that the instance is on the source
         server = self.api.get_server(server['id'])
         self.assertEqual(src_host, server['OS-EXT-SRV-ATTR:host'])
 
@@ -184,3 +177,42 @@ class TestVolAttachmentsDuringLiveMigration(
         attachments = self.cinder.volume_to_attachment.get(volume_id)
         self.assertIn(src_attachment_id, attachments.keys())
         self.assertEqual(1, len(attachments))
+
+
+class LiveMigrationNeutronInteractionsTest(
+        integrated_helpers._IntegratedTestBase):
+    # NOTE(artom) We need the admin API to force the host when booting the test
+    # server.
+    ADMIN_API = True
+    microversion = 'latest'
+
+    def _setup_compute_service(self):
+        self._start_compute('src')
+        self._start_compute('dest')
+
+    def test_live_migrate_vifs_from_info_cache(self):
+        """Test that bug 1879787 can no longer manifest itself because we get
+        the network_info from the instance info cache, and not Neutron.
+        """
+        def stub_notify(context, instance, event_suffix,
+                        network_info=None, extra_usage_info=None, fault=None):
+            vif = network_info[0]
+            # Make sure we have the correct VIF (the NeutronFixture
+            # deterministically uses port_2 for networks=auto) and that the
+            # profile does not contain `migrating_to`, indicating that we did
+            # not obtain it from the Neutron API.
+            self.assertEqual(self.neutron.port_2['id'], vif['id'])
+            self.assertNotIn('migrating_to', vif['profile'])
+
+        server = self._create_server(networks='auto',
+                                     host=self.computes['src'].host)
+
+        with mock.patch.object(self.computes['src'].manager,
+                              '_notify_about_instance_usage',
+                              side_effect=stub_notify) as mock_notify:
+            self._live_migrate(server, 'completed')
+            server = self.api.get_server(server['id'])
+            self.assertEqual('dest', server['OS-EXT-SRV-ATTR:host'])
+            # We don't care about call arguments here, we just want to be sure
+            # our stub actually got called.
+            mock_notify.assert_called()

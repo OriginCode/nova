@@ -2,21 +2,14 @@
 nova-spicehtml5proxy
 ====================
 
--------------------------------------------------------
-Websocket Proxy for OpenStack Nova SPICE HTML5 consoles
--------------------------------------------------------
-
-:Author: openstack@lists.openstack.org
-:Copyright: OpenStack Foundation
-:Manual section: 1
-:Manual group: cloud computing
+.. program:: nova-spicehtml5proxy
 
 Synopsis
 ========
 
 ::
 
-  nova-spicehtml5proxy [options]
+  nova-spicehtml5proxy [<options>...]
 
 Description
 ===========
@@ -34,7 +27,7 @@ Files
 =====
 
 * ``/etc/nova/nova.conf``
-* ``/etc/nova/policy.json``
+* ``/etc/nova/policy.yaml``
 * ``/etc/nova/rootwrap.conf``
 * ``/etc/nova/rootwrap.d/``
 

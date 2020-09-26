@@ -95,33 +95,12 @@ There are many standard filter classes which may be used
   use a comma. E.g., "value1,value2". All hosts are passed if no extra_specs
   are specified.
 * |ComputeFilter| - passes all hosts that are operational and enabled.
-* |AggregateCoreFilter| - DEPRECATED; filters hosts by CPU core number with per-aggregate
-  :oslo.config:option:`cpu_allocation_ratio` setting. If no
-  per-aggregate value is found, it will fall back to the global default
-  :oslo.config:option:`cpu_allocation_ratio`.
-  If more than one value is found for a host (meaning the host is in two
-  different aggregates with different ratio settings), the minimum value
-  will be used.
 * |IsolatedHostsFilter| - filter based on
   :oslo.config:option:`filter_scheduler.isolated_images`,
   :oslo.config:option:`filter_scheduler.isolated_hosts`
   and :oslo.config:option:`filter_scheduler.restrict_isolated_hosts_to_isolated_images`
   flags.
 * |JsonFilter| - allows simple JSON-based grammar for selecting hosts.
-* |AggregateRamFilter| - DEPRECATED; filters hosts by RAM with per-aggregate
-  :oslo.config:option:`ram_allocation_ratio` setting. If no per-aggregate value
-  is found, it will fall back to the global default
-  :oslo.config:option:`ram_allocation_ratio`.
-  If more than one value is found for a host (meaning the host is in two
-  different aggregates with different ratio settings), the minimum value
-  will be used.
-* |AggregateDiskFilter| - DEPRECATED; filters hosts by disk allocation with per-aggregate
-  :oslo.config:option:`disk_allocation_ratio` setting. If no per-aggregate value
-  is found, it will fall back to the global default
-  :oslo.config:option:`disk_allocation_ratio`.
-  If more than one value is found for a host (meaning the host is in two or more
-  different aggregates with different ratio settings), the minimum value will
-  be used.
 * |NumInstancesFilter| - filters compute nodes by number of instances.
   Nodes with too many instances will be filtered. The host will be
   ignored by the scheduler if more than
@@ -156,8 +135,6 @@ There are many standard filter classes which may be used
   set of instances.
 * |SameHostFilter| - puts the instance on the same host as another instance in
   a set of instances.
-* |RetryFilter| - DEPRECATED; filters hosts that have been attempted for
-  scheduling. Only passes hosts that have not been previously attempted.
 * |AggregateTypeAffinityFilter| - limits instance_type by aggregate.
    This filter passes hosts if no instance_type key is set or
    the instance_type aggregate metadata value contains the name of the
@@ -280,26 +257,6 @@ creation of the new server for the user. The only exception for this rule is
 |JsonFilter|, that takes data from the schedulers ``HostState`` data structure
 directly. Variable naming, such as the ``$free_ram_mb`` example above, should
 be based on those attributes.
-
-The |RetryFilter| filters hosts that have already been attempted for
-scheduling. It only passes hosts that have not been previously attempted. If a
-compute node is raising an exception when spawning an instance, then the
-compute manager will reschedule it by adding the failing host to a retry
-dictionary so that the RetryFilter will not accept it as a possible
-destination. That means that if all of your compute nodes are failing, then the
-RetryFilter will return 0 hosts and the scheduler will raise a NoValidHost
-exception even if the problem is related to 1:N compute nodes. If you see that
-case in the scheduler logs, then your problem is most likely related to a
-compute problem and you should check the compute logs.
-
-.. note:: The ``RetryFilter`` is deprecated since the 20.0.0 (Train) release
-          and will be removed in an upcoming release. Since the 17.0.0 (Queens)
-          release, the scheduler has provided alternate hosts for rescheduling
-          so the scheduler does not need to be called during a reschedule which
-          makes the ``RetryFilter`` useless. See the `Return Alternate Hosts`_
-          spec for details.
-
-.. _Return Alternate Hosts: https://specs.openstack.org/openstack/nova-specs/specs/queens/implemented/return-alternate-hosts.html
 
 The |NUMATopologyFilter| considers the NUMA topology that was specified for the instance
 through the use of flavor extra_specs in combination with the image properties, as
@@ -508,7 +465,7 @@ The Filter Scheduler weighs hosts based on the config option
   host with least RAM available will win (useful for stacking hosts, instead
   of spreading).
   Starting with the Stein release, if per-aggregate value with the key
-  :oslo.config:option:`filter_scheduler.ram_weight_multiplier` is found, this
+  ``ram_weight_multiplier`` is found, this
   value would be chosen as the ram weight multiplier. Otherwise, it will fall
   back to the :oslo.config:option:`filter_scheduler.ram_weight_multiplier`.
   If more than one value is found for a host in aggregate metadata, the minimum
@@ -519,7 +476,7 @@ The Filter Scheduler weighs hosts based on the config option
   host with least CPUs available will win (useful for stacking hosts, instead
   of spreading).
   Starting with the Stein release, if per-aggregate value with the key
-  :oslo.config:option:`filter_scheduler.cpu_weight_multiplier` is found, this
+  ``cpu_weight_multiplier`` is found, this
   value would be chosen as the cpu weight multiplier. Otherwise, it will fall
   back to the :oslo.config:option:`filter_scheduler.cpu_weight_multiplier`. If
   more than one value is found for a host in aggregate metadata, the minimum
@@ -528,7 +485,7 @@ The Filter Scheduler weighs hosts based on the config option
   largest weight winning.  If the multiplier is negative, the host with less disk
   space available will win (useful for stacking hosts, instead of spreading).
   Starting with the Stein release, if per-aggregate value with the key
-  :oslo.config:option:`filter_scheduler.disk_weight_multiplier` is found, this
+  ``disk_weight_multiplier`` is found, this
   value would be chosen as the disk weight multiplier. Otherwise, it will fall
   back to the :oslo.config:option:`filter_scheduler.disk_weight_multiplier`. If
   more than one value is found for a host in aggregate metadata, the minimum value
@@ -550,7 +507,7 @@ The Filter Scheduler weighs hosts based on the config option
   hosts. If the multiplier is positive, the weigher prefer choosing heavy
   workload compute hosts, the weighing has the opposite effect of the default.
   Starting with the Stein release, if per-aggregate value with the key
-  :oslo.config:option:`filter_scheduler.io_ops_weight_multiplier` is found, this
+  ``io_ops_weight_multiplier`` is found, this
   value would be chosen as the IO ops weight multiplier. Otherwise, it will fall
   back to the :oslo.config:option:`filter_scheduler.io_ops_weight_multiplier`.
   If more than one value is found for a host in aggregate metadata, the minimum
@@ -575,7 +532,7 @@ The Filter Scheduler weighs hosts based on the config option
     scheduling issues.
 
   Starting with the Stein release, if per-aggregate value with the key
-  :oslo.config:option:`filter_scheduler.pci_weight_multiplier` is found, this
+  ``pci_weight_multiplier`` is found, this
   value would be chosen as the pci weight multiplier. Otherwise, it will fall
   back to the :oslo.config:option:`filter_scheduler.pci_weight_multiplier`.
   If more than one value is found for a host in aggregate metadata, the
@@ -585,7 +542,7 @@ The Filter Scheduler weighs hosts based on the config option
   weight defines the preferred host for the new instance. For the multiplier
   only a positive value is allowed for the calculation.
   Starting with the Stein release, if per-aggregate value with the key
-  :oslo.config:option:`filter_scheduler.soft_affinity_weight_multiplier` is
+  ``soft_affinity_weight_multiplier`` is
   found, this value would be chosen as the soft affinity weight multiplier.
   Otherwise, it will fall back to the
   :oslo.config:option:`filter_scheduler.soft_affinity_weight_multiplier`.
@@ -597,7 +554,7 @@ The Filter Scheduler weighs hosts based on the config option
   value. The largest weight defines the preferred host for the new instance.
   For the multiplier only a positive value is allowed for the calculation.
   Starting with the Stein release, if per-aggregate value with the key
-  :oslo.config:option:`filter_scheduler.soft_anti_affinity_weight_multiplier`
+  ``soft_anti_affinity_weight_multiplier``
   is found, this value would be chosen as the soft anti-affinity weight
   multiplier. Otherwise, it will fall back to the
   :oslo.config:option:`filter_scheduler.soft_anti_affinity_weight_multiplier`.
@@ -608,7 +565,7 @@ The Filter Scheduler weighs hosts based on the config option
   It considers the build failure counter and can negatively weigh hosts with
   recent failures. This avoids taking computes fully out of rotation.
   Starting with the Stein release, if per-aggregate value with the key
-  :oslo.config:option:`filter_scheduler.build_failure_weight_multiplier` is found,
+  ``build_failure_weight_multiplier`` is found,
   this value would be chosen as the build failure weight multiplier. Otherwise,
   it will fall back to the
   :oslo.config:option:`filter_scheduler.build_failure_weight_multiplier`.
@@ -647,11 +604,8 @@ in :mod:`nova.tests.scheduler`.
 .. |BaseHostFilter| replace:: :class:`BaseHostFilter <nova.scheduler.filters.BaseHostFilter>`
 .. |ComputeCapabilitiesFilter| replace:: :class:`ComputeCapabilitiesFilter <nova.scheduler.filters.compute_capabilities_filter.ComputeCapabilitiesFilter>`
 .. |ComputeFilter| replace:: :class:`ComputeFilter <nova.scheduler.filters.compute_filter.ComputeFilter>`
-.. |AggregateCoreFilter| replace:: :class:`AggregateCoreFilter <nova.scheduler.filters.core_filter.AggregateCoreFilter>`
 .. |IsolatedHostsFilter| replace:: :class:`IsolatedHostsFilter <nova.scheduler.filters.isolated_hosts_filter>`
 .. |JsonFilter| replace:: :class:`JsonFilter <nova.scheduler.filters.json_filter.JsonFilter>`
-.. |AggregateRamFilter| replace:: :class:`AggregateRamFilter <nova.scheduler.filters.ram_filter.AggregateRamFilter>`
-.. |AggregateDiskFilter| replace:: :class:`AggregateDiskFilter <nova.scheduler.filters.disk_filter.AggregateDiskFilter>`
 .. |NumInstancesFilter| replace:: :class:`NumInstancesFilter <nova.scheduler.filters.num_instances_filter.NumInstancesFilter>`
 .. |AggregateNumInstancesFilter| replace:: :class:`AggregateNumInstancesFilter <nova.scheduler.filters.num_instances_filter.AggregateNumInstancesFilter>`
 .. |IoOpsFilter| replace:: :class:`IoOpsFilter <nova.scheduler.filters.io_ops_filter.IoOpsFilter>`
@@ -660,7 +614,6 @@ in :mod:`nova.tests.scheduler`.
 .. |SimpleCIDRAffinityFilter| replace:: :class:`SimpleCIDRAffinityFilter <nova.scheduler.filters.affinity_filter.SimpleCIDRAffinityFilter>`
 .. |DifferentHostFilter| replace:: :class:`DifferentHostFilter <nova.scheduler.filters.affinity_filter.DifferentHostFilter>`
 .. |SameHostFilter| replace:: :class:`SameHostFilter <nova.scheduler.filters.affinity_filter.SameHostFilter>`
-.. |RetryFilter| replace:: :class:`RetryFilter <nova.scheduler.filters.retry_filter.RetryFilter>`
 .. |AggregateTypeAffinityFilter| replace:: :class:`AggregateTypeAffinityFilter <nova.scheduler.filters.type_filter.AggregateTypeAffinityFilter>`
 .. |ServerGroupAntiAffinityFilter| replace:: :class:`ServerGroupAntiAffinityFilter <nova.scheduler.filters.affinity_filter.ServerGroupAntiAffinityFilter>`
 .. |ServerGroupAffinityFilter| replace:: :class:`ServerGroupAffinityFilter <nova.scheduler.filters.affinity_filter.ServerGroupAffinityFilter>`

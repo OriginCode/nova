@@ -17,10 +17,13 @@
 
 import os.path
 
+import fixtures
 import mock
+from oslo_config import cfg
 from oslo_policy import policy as oslo_policy
 from oslo_serialization import jsonutils
 import requests_mock
+import yaml
 
 from nova import context
 from nova import exception
@@ -48,7 +51,9 @@ class PolicyFileTestCase(test.NoDBTestCase):
             # is_admin or not. As a side-effect, policy reset is needed here
             # to flush existing policy cache.
             policy.reset()
-            policy.init()
+            # NOTE(gmann): We do not need to log policy warnings for unit
+            # tests.
+            policy.init(suppress_deprecation_warnings=True)
             rule = oslo_policy.RuleDefault('example:test', "")
             policy._ENFORCER.register_defaults([rule])
 
@@ -86,7 +91,9 @@ class PolicyTestCase(test.NoDBTestCase):
                                     "role:ADMIN or role:sysadmin"),
         ]
         policy.reset()
-        policy.init()
+        # NOTE(gmann): We do not need to log policy warnings for unit
+        # tests.
+        policy.init(suppress_deprecation_warnings=True)
         # before a policy rule can be used, its default has to be registered.
         policy._ENFORCER.register_defaults(rules)
         self.context = context.RequestContext('fake', 'fake', roles=['member'])
@@ -232,7 +239,9 @@ class PolicyTestCase(test.NoDBTestCase):
 class IsAdminCheckTestCase(test.NoDBTestCase):
     def setUp(self):
         super(IsAdminCheckTestCase, self).setUp()
-        policy.init()
+        # NOTE(gmann): We do not need to log policy warnings for unit
+        # tests.
+        policy.init(suppress_deprecation_warnings=True)
 
     def test_init_true(self):
         check = policy.IsAdminCheck('is_admin', 'True')
@@ -331,7 +340,6 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-agents:create",
 "os_compute_api:os-agents:update",
 "os_compute_api:os-agents:delete",
-"os_compute_api:os-baremetal-nodes",
 "os_compute_api:os-evacuate",
 "os_compute_api:os-extended-server-attributes",
 "os_compute_api:os-flavor-access:remove_tenant_access",
@@ -342,7 +350,10 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-flavor-manage:create",
 "os_compute_api:os-flavor-manage:update",
 "os_compute_api:os-flavor-manage:delete",
-"os_compute_api:os-hosts",
+"os_compute_api:os-hosts:update",
+"os_compute_api:os-hosts:reboot",
+"os_compute_api:os-hosts:shutdown",
+"os_compute_api:os-hosts:start",
 "os_compute_api:os-instance-actions:events",
 "os_compute_api:os-lock-server:unlock:unlock_override",
 "os_compute_api:os-migrate-server:migrate",
@@ -390,8 +401,6 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:server-metadata:update_all",
 "os_compute_api:os-suspend-server:suspend",
 "os_compute_api:os-suspend-server:resume",
-"os_compute_api:os-tenant-networks",
-"os_compute_api:extensions",
 "os_compute_api:servers:confirm_resize",
 "os_compute_api:servers:create",
 "os_compute_api:servers:create:attach_network",
@@ -419,13 +428,19 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-flavor-access",
 "os_compute_api:os-flavor-extra-specs:index",
 "os_compute_api:os-flavor-extra-specs:show",
-"os_compute_api:os-floating-ip-pools",
-"os_compute_api:os-floating-ips",
-"os_compute_api:os-multinic",
-"os_compute_api:os-networks:view",
+"os_compute_api:os-floating-ips:add",
+"os_compute_api:os-floating-ips:remove",
+"os_compute_api:os-floating-ips:create",
+"os_compute_api:os-floating-ips:delete",
+"os_compute_api:os-multinic:add",
+"os_compute_api:os-multinic:remove",
 "os_compute_api:os-rescue",
 "os_compute_api:os-unrescue",
-"os_compute_api:os-security-groups",
+"os_compute_api:os-security-groups:create",
+"os_compute_api:os-security-groups:update",
+"os_compute_api:os-security-groups:delete",
+"os_compute_api:os-security-groups:rule:create",
+"os_compute_api:os-security-groups:rule:delete",
 "os_compute_api:os-security-groups:add",
 "os_compute_api:os-security-groups:remove",
 "os_compute_api:os-server-password:clear",
@@ -439,7 +454,10 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-server-groups:delete",
 "os_compute_api:os-shelve:shelve",
 "os_compute_api:os-shelve:unshelve",
-"os_compute_api:os-volumes",
+"os_compute_api:os-volumes:create",
+"os_compute_api:os-volumes:delete",
+"os_compute_api:os-volumes:snapshots:create",
+"os_compute_api:os-volumes:snapshots:delete",
 "os_compute_api:os-volumes-attachments:create",
 "os_compute_api:os-volumes-attachments:delete",
 "os_compute_api:os-volumes-attachments:update",
@@ -449,9 +467,15 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-quota-sets:defaults",
 "os_compute_api:os-availability-zone:list",
 "os_compute_api:limits",
+"os_compute_api:extensions",
+"os_compute_api:os-floating-ip-pools",
 )
 
         self.system_reader_rules = (
+"os_compute_api:os-tenant-networks:list",
+"os_compute_api:os-tenant-networks:show",
+"os_compute_api:os-baremetal-nodes:list",
+"os_compute_api:os-baremetal-nodes:show",
 "os_compute_api:servers:migrations:index",
 "os_compute_api:servers:migrations:show",
 "os_compute_api:os-simple-tenant-usage:list",
@@ -461,6 +485,8 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-instance-usage-audit-log:list",
 "os_compute_api:os-instance-usage-audit-log:show",
 "os_compute_api:os-agents:list",
+"os_compute_api:os-hosts:list",
+"os_compute_api:os-hosts:show",
 "os_compute_api:os-hypervisors:list",
 "os_compute_api:os-hypervisors:list-detail",
 "os_compute_api:os-hypervisors:show",
@@ -469,10 +495,14 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-hypervisors:search",
 "os_compute_api:os-hypervisors:servers",
 "os_compute_api:limits:other_project",
+"os_compute_api:os-networks:list",
+"os_compute_api:os-networks:show",
 )
 
         self.system_reader_or_owner_rules = (
 "os_compute_api:os-simple-tenant-usage:show",
+"os_compute_api:os-security-groups:get",
+"os_compute_api:os-security-groups:show",
 "os_compute_api:os-security-groups:list",
 "os_compute_api:os-volumes-attachments:index",
 "os_compute_api:os-volumes-attachments:show",
@@ -483,6 +513,14 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-server-password:show",
 "os_compute_api:os-server-tags:index",
 "os_compute_api:os-server-tags:show",
+"os_compute_api:os-floating-ips:list",
+"os_compute_api:os-floating-ips:show",
+"os_compute_api:os-volumes:list",
+"os_compute_api:os-volumes:detail",
+"os_compute_api:os-volumes:show",
+"os_compute_api:os-volumes:snapshots:show",
+"os_compute_api:os-volumes:snapshots:list",
+"os_compute_api:os-volumes:snapshots:detail",
 )
 
         self.allow_nobody_rules = (
@@ -537,3 +575,70 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
             self.system_reader_or_owner_rules +
             self.allow_nobody_rules + special_rules)
         self.assertEqual(set([]), result)
+
+
+class PickPolicyFileTestCase(test.NoDBTestCase):
+
+    def setUp(self):
+        super(PickPolicyFileTestCase, self).setUp()
+        self.data = {
+            'rule_admin': 'True',
+            'rule_admin2': 'is_admin:True'
+        }
+        policy.CONF.clear_override('policy_file', group='oslo_policy')
+        self.tmpdir = self.useFixture(fixtures.TempDir())
+        original_search_dirs = cfg._search_dirs
+
+        def fake_search_dirs(dirs, name):
+            dirs.append(self.tmpdir.path)
+            return original_search_dirs(dirs, name)
+
+        self.stub_out('oslo_config.cfg._search_dirs', fake_search_dirs)
+
+    def test_non_config_policy_file(self):
+        tmpfilename = 'nova-policy.yaml'
+        self.flags(policy_file=tmpfilename, group='oslo_policy')
+        selected_policy_file = policy.pick_policy_file(
+            policy_file='non-config-file')
+        self.assertEqual(policy.CONF.oslo_policy.policy_file, tmpfilename)
+        self.assertEqual(selected_policy_file, 'non-config-file')
+
+    def test_overridden_policy_file(self):
+        tmpfilename = 'nova-policy.yaml'
+        self.flags(policy_file=tmpfilename, group='oslo_policy')
+        selected_policy_file = policy.pick_policy_file(policy_file=None)
+        self.assertEqual(policy.CONF.oslo_policy.policy_file, tmpfilename)
+        self.assertEqual(selected_policy_file, tmpfilename)
+
+    def test_only_new_default_policy_file_exist(self):
+        tmpfilename = os.path.join(self.tmpdir.path, 'policy.yaml')
+        with open(tmpfilename, 'w') as fh:
+            yaml.dump(self.data, fh)
+
+        selected_policy_file = policy.pick_policy_file(policy_file=None)
+        self.assertEqual(policy.CONF.oslo_policy.policy_file, 'policy.yaml')
+        self.assertEqual(selected_policy_file, 'policy.yaml')
+
+    @mock.patch.object(policy.CONF, 'get_location')
+    def test_only_old_default_policy_file_exist(self, mock_get):
+        mock_get.return_value = cfg.LocationInfo(cfg.Locations.set_default,
+                                                 'None')
+        tmpfilename = os.path.join(self.tmpdir.path, 'policy.json')
+        with open(tmpfilename, 'w') as fh:
+            jsonutils.dump(self.data, fh)
+
+        selected_policy_file = policy.pick_policy_file(policy_file=None)
+        self.assertEqual(policy.CONF.oslo_policy.policy_file, 'policy.yaml')
+        self.assertEqual(selected_policy_file, 'policy.json')
+
+    def test_both_default_policy_file_exist(self):
+        tmpfilename1 = os.path.join(self.tmpdir.path, 'policy.json')
+        with open(tmpfilename1, 'w') as fh:
+            jsonutils.dump(self.data, fh)
+        tmpfilename2 = os.path.join(self.tmpdir.path, 'policy.yaml')
+        with open(tmpfilename2, 'w') as fh:
+            yaml.dump(self.data, fh)
+
+        selected_policy_file = policy.pick_policy_file(policy_file=None)
+        self.assertEqual(policy.CONF.oslo_policy.policy_file, 'policy.yaml')
+        self.assertEqual(selected_policy_file, 'policy.yaml')

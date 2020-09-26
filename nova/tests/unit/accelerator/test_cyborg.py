@@ -23,6 +23,7 @@ from oslo_serialization import jsonutils
 from nova.accelerator import cyborg
 from nova import context
 from nova import exception
+from nova import objects
 from nova.objects import request_spec
 from nova import test
 from nova.tests.unit import fake_requests
@@ -250,13 +251,15 @@ class CyborgTestCase(test.NoDBTestCase):
         called_params = mock_cyborg_patch.call_args.kwargs['json']
         self.assertEqual(sorted(called_params), sorted(patch_list))
 
+    @mock.patch('nova.accelerator.cyborg._CyborgClient.delete_arqs_by_uuid')
     @mock.patch('nova.accelerator.cyborg._CyborgClient._call_cyborg')
-    def test_bind_arqs_exception(self, mock_call_cyborg):
+    def test_bind_arqs_exception(self, mock_call_cyborg, mock_del_arqs):
         # If Cyborg returns invalid response, raise exception.
         bindings, _ = self._get_bound_arqs()
         mock_call_cyborg.return_value = None, 'Some error'
-        self.assertRaises(exception.AcceleratorRequestOpFailed,
-            self.client.bind_arqs, bindings=bindings)
+        self.assertRaises(exception.AcceleratorRequestBindingFailed,
+             self.client.bind_arqs, bindings=bindings)
+        mock_del_arqs.assert_not_called()
 
     @mock.patch('keystoneauth1.adapter.Adapter.get')
     def test_get_arqs_for_instance(self, mock_cyborg_get):
@@ -368,3 +371,49 @@ class CyborgTestCase(test.NoDBTestCase):
         expected_msg = ('Failed to delete accelerator requests: ' +
                         err_msg + ' Instance ' + instance_uuid)
         self.assertEqual(expected_msg, exc.format_message())
+
+    @mock.patch('nova.accelerator.cyborg._CyborgClient._call_cyborg')
+    def test_delete_arqs_by_uuid(self, mock_call_cyborg):
+        # Happy path
+        mock_call_cyborg.return_value = ('Some Value', None)
+        _, bound_arqs = self._get_bound_arqs()
+        arq_uuids = [arq['uuid'] for arq in bound_arqs]
+        arq_uuid_str = ','.join(arq_uuids)
+        self.client.delete_arqs_by_uuid(arq_uuids)
+        mock_call_cyborg.assert_called_once_with(mock.ANY,
+            self.client.ARQ_URL, params={'arqs': arq_uuid_str})
+
+    @mock.patch('nova.accelerator.cyborg.LOG.error')
+    @mock.patch('nova.accelerator.cyborg._CyborgClient._call_cyborg')
+    def test_delete_arqs_by_uuid_exception(self, mock_call_cyborg, mock_log):
+        mock_call_cyborg.return_value = (None, 'Some error')
+        _, bound_arqs = self._get_bound_arqs()
+        arq_uuids = [arq['uuid'] for arq in bound_arqs]
+        arq_uuid_str = ','.join(arq_uuids)
+        self.client.delete_arqs_by_uuid(arq_uuids)
+        mock_call_cyborg.assert_called_once_with(mock.ANY,
+            self.client.ARQ_URL, params={'arqs': arq_uuid_str})
+        mock_log.assert_called_once_with('Failed to delete ARQs %s',
+                                         arq_uuid_str)
+
+    @mock.patch('keystoneauth1.adapter.Adapter.get')
+    def test_get_arq_uuids_for_instance(self, mock_cyborg_get):
+        # Happy path, without only_resolved=True
+        _, bound_arqs = self._get_bound_arqs()
+        instance_uuid = bound_arqs[0]['instance_uuid']
+        flavor = objects.Flavor(extra_specs={'accel:device_profile': 'dp1'})
+        instance = objects.Instance(flavor=flavor,
+                                    uuid=instance_uuid)
+        query = {"instance": instance_uuid}
+        content = jsonutils.dumps({'arqs': bound_arqs})
+        resp = fake_requests.FakeResponse(200, content)
+        mock_cyborg_get.return_value = resp
+
+        ret_arqs = self.client.get_arq_uuids_for_instance(instance)
+
+        mock_cyborg_get.assert_called_once_with(
+            self.client.ARQ_URL, params=query)
+        bound_arqs = [bound_arq['uuid'] for bound_arq in bound_arqs]
+        bound_arqs.sort()
+        ret_arqs.sort()
+        self.assertEqual(bound_arqs, ret_arqs)

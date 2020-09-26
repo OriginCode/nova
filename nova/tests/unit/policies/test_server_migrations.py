@@ -17,6 +17,7 @@ from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova.api.openstack.compute import server_migrations
 from nova.compute import vm_states
+from nova import objects
 from nova.policies import base as base_policy
 from nova.policies import servers_migrations as policies
 from nova.tests.unit.api.openstack import fakes
@@ -55,6 +56,7 @@ class ServerMigrationsPolicyTest(base.BasePolicyTest):
             self.system_member_context, self.system_reader_context,
             self.system_foo_context, self.project_member_context,
             self.other_project_member_context,
+            self.other_project_reader_context,
             self.project_foo_context, self.project_reader_context
         ]
         # Check that system-reader are able to perform operations
@@ -68,7 +70,9 @@ class ServerMigrationsPolicyTest(base.BasePolicyTest):
         self.reader_unauthorized_contexts = [
             self.system_foo_context, self.other_project_member_context,
             self.project_foo_context, self.project_member_context,
-            self.project_reader_context]
+            self.project_reader_context,
+            self.other_project_reader_context,
+        ]
 
     @mock.patch('nova.compute.api.API.get_migrations_in_progress_by_instance')
     def test_list_server_migrations_policy(self, mock_get):
@@ -82,8 +86,10 @@ class ServerMigrationsPolicyTest(base.BasePolicyTest):
     @mock.patch('nova.compute.api.API.get_migration_by_id_and_instance')
     def test_show_server_migrations_policy(self, mock_show, mock_output):
         rule_name = policies.POLICY_ROOT % 'show'
-        mock_show.return_value = {"migration_type": "live-migration",
-                                  "status": "running"}
+        mock_show.return_value = objects.Migration(
+            migration_type='live-migration',
+            status='running',
+        )
         self.common_policy_check(self.reader_authorized_contexts,
                                  self.reader_unauthorized_contexts,
                                  rule_name, self.controller.show,
@@ -142,7 +148,8 @@ class ServerMigrationsNoLegacyPolicyTest(ServerMigrationsScopeTypePolicyTest):
             self.system_member_context, self.system_reader_context,
             self.system_foo_context, self.project_member_context,
             self.project_reader_context, self.project_foo_context,
-            self.other_project_member_context
+            self.other_project_member_context,
+            self.other_project_reader_context,
         ]
         # Check that system reader is able to perform operations
         # for server migrations.
@@ -155,6 +162,7 @@ class ServerMigrationsNoLegacyPolicyTest(ServerMigrationsScopeTypePolicyTest):
             self.legacy_admin_context, self.project_admin_context,
             self.system_foo_context, self.project_member_context,
             self.other_project_member_context,
+            self.other_project_reader_context,
             self.project_foo_context, self.project_reader_context
         ]
 
@@ -192,7 +200,8 @@ class ServerMigrationsOverridePolicyTest(ServerMigrationsNoLegacyPolicyTest):
             self.legacy_admin_context, self.system_member_context,
             self.system_reader_context, self.system_foo_context,
             self.other_project_member_context,
-            self.project_foo_context, self.project_reader_context
+            self.project_foo_context, self.project_reader_context,
+            self.other_project_reader_context,
         ]
         # Check that system reader is able to perform operations
         # for server migrations.
@@ -204,5 +213,6 @@ class ServerMigrationsOverridePolicyTest(ServerMigrationsNoLegacyPolicyTest):
         # for server migrations.
         self.reader_unauthorized_contexts = [
             self.legacy_admin_context, self.system_foo_context,
-            self.other_project_member_context, self.project_foo_context
+            self.other_project_member_context, self.project_foo_context,
+            self.other_project_reader_context,
         ]

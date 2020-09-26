@@ -18,11 +18,12 @@ import io
 
 import fixtures
 import mock
+from oslo_utils import units
 
 from nova import conf
 from nova.objects import fields as obj_fields
 from nova.tests import fixtures as nova_fixtures
-from nova.tests.functional import test_servers as base
+from nova.tests.functional import integrated_helpers
 from nova.tests.unit.virt.libvirt import fake_imagebackend
 from nova.tests.unit.virt.libvirt import fakelibvirt
 
@@ -30,11 +31,17 @@ from nova.tests.unit.virt.libvirt import fakelibvirt
 CONF = conf.CONF
 
 
-class ServersTestBase(base.ServersTestBase):
+class ServersTestBase(integrated_helpers._IntegratedTestBase):
+    """A libvirt-specific variant of the integrated test base."""
 
     ADDITIONAL_FILTERS = []
 
     def setUp(self):
+        self.flags(instances_path=self.useFixture(fixtures.TempDir()).path)
+
+        self.computes = {}
+        self.compute_rp_uuids = {}
+
         super(ServersTestBase, self).setUp()
 
         # Replace libvirt with fakelibvirt
@@ -97,53 +104,61 @@ class ServersTestBase(base.ServersTestBase):
 
         return self.start_service('scheduler')
 
-    def _get_connection(self, host_info, pci_info=None,
-                        libvirt_version=fakelibvirt.FAKE_LIBVIRT_VERSION,
-                        mdev_info=None, hostname=None):
+    def _get_connection(
+        self, host_info=None, pci_info=None, mdev_info=None,
+        libvirt_version=None, qemu_version=None, hostname=None,
+    ):
+        if not host_info:
+            host_info = fakelibvirt.HostInfo(
+                cpu_nodes=2, cpu_sockets=1, cpu_cores=2, cpu_threads=2,
+                kB_mem=(16 * units.Gi) // units.Ki,
+            )
+
         # sanity check
         self.assertGreater(16, host_info.cpus,
             "Host.get_online_cpus is only accounting for 16 CPUs but you're "
             "requesting %d; change the mock or your test" % host_info.cpus)
 
+        libvirt_version = libvirt_version or fakelibvirt.FAKE_LIBVIRT_VERSION
+        qemu_version = qemu_version or fakelibvirt.FAKE_QEMU_VERSION
+
         fake_connection = fakelibvirt.Connection(
             'qemu:///system',
             version=libvirt_version,
-            hv_version=fakelibvirt.FAKE_QEMU_VERSION,
+            hv_version=qemu_version,
             host_info=host_info,
             pci_info=pci_info,
             mdev_info=mdev_info,
             hostname=hostname)
         return fake_connection
 
-    def start_computes(self, host_info_dict=None, save_rp_uuids=False):
-        """Start compute services. The started services will be saved in
-        self.computes, keyed by hostname.
+    def start_compute(
+        self, hostname='compute1', host_info=None, pci_info=None,
+        mdev_info=None, libvirt_version=None, qemu_version=None,
+    ):
+        """Start a compute service.
 
-        :param host_info_dict: A hostname -> fakelibvirt.HostInfo object
-                               dictionary representing the libvirt HostInfo of
-                               each compute host. If None, the default is to
-                               start 2 computes, named test_compute0 and
-                               test_compute1, with 2 NUMA nodes, 2 cores per
-                               node, 2 threads per core, and 16GB of RAM.
-        :param save_rp_uuids: If True, save the resource provider UUID of each
-                              started compute in self.compute_rp_uuids, keyed
-                              by hostname.
+        The started service will be saved in self.computes, keyed by hostname.
+
+        :param hostname: A hostname.
+        :param host_info: A fakelibvirt.HostInfo object for the host. Defaults
+            to a HostInfo with 2 NUMA nodes, 2 cores per node, 2 threads per
+            core, and 16GB of RAM.
+        :returns: The hostname of the created service, which can be used to
+            lookup the created service and UUID of the assocaited resource
+            provider.
         """
-        if host_info_dict is None:
-            host_info = fakelibvirt.HostInfo(cpu_nodes=2, cpu_sockets=1,
-                                             cpu_cores=2, cpu_threads=2,
-                                             kB_mem=15740000)
-            host_info_dict = {'test_compute0': host_info,
-                              'test_compute1': host_info}
 
-        def start_compute(host, host_info):
-            fake_connection = self._get_connection(host_info=host_info,
-                                                   hostname=host)
+        def _start_compute(hostname, host_info):
+            fake_connection = self._get_connection(
+                host_info, pci_info, mdev_info, libvirt_version, qemu_version,
+                hostname,
+            )
             # This is fun. Firstly we need to do a global'ish mock so we can
             # actually start the service.
             with mock.patch('nova.virt.libvirt.host.Host.get_connection',
                             return_value=fake_connection):
-                compute = self.start_service('compute', host=host)
+                compute = self.start_service('compute', host=hostname)
                 # Once that's done, we need to tweak the compute "service" to
                 # make sure it returns unique objects. We do this inside the
                 # mock context to avoid a small window between the end of the
@@ -152,21 +167,17 @@ class ServersTestBase(base.ServersTestBase):
                 compute.driver._host.get_connection = lambda: fake_connection
             return compute
 
-        self.computes = {}
-        self.compute_rp_uuids = {}
-        for host, host_info in host_info_dict.items():
-            # NOTE(artom) A lambda: foo construct returns the value of foo at
-            # call-time, so if the value of foo changes with every iteration of
-            # a loop, every call to the lambda will return a different value of
-            # foo. Because that's not what we want in our lambda further up,
-            # we can't put it directly in the for loop, and need to introduce
-            # the start_compute function to create a scope in which host and
-            # host_info do not change with every iteration of the for loop.
-            self.computes[host] = start_compute(host, host_info)
-            if save_rp_uuids:
-                self.compute_rp_uuids[host] = self.placement_api.get(
-                    '/resource_providers?name=%s' % host).body[
-                    'resource_providers'][0]['uuid']
+        # ensure we haven't already registered services with these hostnames
+        self.assertNotIn(hostname, self.computes)
+        self.assertNotIn(hostname, self.compute_rp_uuids)
+
+        self.computes[hostname] = _start_compute(hostname, host_info)
+
+        self.compute_rp_uuids[hostname] = self.placement.get(
+            '/resource_providers?name=%s' % hostname).body[
+            'resource_providers'][0]['uuid']
+
+        return hostname
 
 
 class LibvirtNeutronFixture(nova_fixtures.NeutronFixture):
@@ -250,6 +261,7 @@ class LibvirtNeutronFixture(nova_fixtures.NeutronFixture):
                 'subnet_id': subnet_1['id']
             }
         ],
+        'binding:vif_details': {},
         'binding:vif_type': 'ovs',
         'binding:vnic_type': 'normal',
     }
@@ -264,6 +276,7 @@ class LibvirtNeutronFixture(nova_fixtures.NeutronFixture):
                 'subnet_id': subnet_1['id']
             }
         ],
+        'binding:vif_details': {},
         'binding:vif_type': 'ovs',
         'binding:vnic_type': 'normal',
     }
@@ -278,6 +291,7 @@ class LibvirtNeutronFixture(nova_fixtures.NeutronFixture):
                 'subnet_id': subnet_2['id']
             }
         ],
+        'binding:vif_details': {},
         'binding:vif_type': 'ovs',
         'binding:vnic_type': 'normal',
     }
@@ -292,6 +306,7 @@ class LibvirtNeutronFixture(nova_fixtures.NeutronFixture):
                 'subnet_id': subnet_3['id']
             }
         ],
+        'binding:vif_details': {},
         'binding:vif_type': 'ovs',
         'binding:vnic_type': 'normal',
     }
@@ -307,11 +322,8 @@ class LibvirtNeutronFixture(nova_fixtures.NeutronFixture):
             }
         ],
         'binding:vif_type': 'hw_veb',
-        'binding:vnic_type': 'direct',
         'binding:vif_details': {'vlan': 42},
-        'binding:profile': {'pci_vendor_info': '1377:0047',
-                            'pci_slot': '0000:81:00.1',
-                            'physical_network': 'physnet4'},
+        'binding:vnic_type': 'direct',
     }
 
     def __init__(self, test):
@@ -342,6 +354,15 @@ class LibvirtNeutronFixture(nova_fixtures.NeutronFixture):
         # network_2_port_1 below at the update call
         port = copy.deepcopy(port)
         port.update(body['port'])
+
+        # the tenant ID is normally extracted from credentials in the request
+        # and is not present in the body
+        if 'tenant_id' not in port:
+            port['tenant_id'] = nova_fixtures.NeutronFixture.tenant_id
+
+        # similarly, these attributes are set by neutron itself
+        port['admin_state_up'] = True
+
         self._ports[port['id']] = port
         # this copy is here as nova sometimes modifies the returned port
         # locally and we want to avoid that nova modifies the fixture internals

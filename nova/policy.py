@@ -19,12 +19,12 @@ import re
 
 from oslo_config import cfg
 from oslo_log import log as logging
+from oslo_policy import opts
 from oslo_policy import policy
 from oslo_utils import excutils
 
 
 from nova import exception
-from nova.i18n import _LE, _LW
 from nova import policies
 
 
@@ -40,6 +40,35 @@ USER_BASED_RESOURCES = ['os-keypairs']
 # rules whether were updated.
 saved_file_rules = []
 KEY_EXPR = re.compile(r'%\((\w+)\)s')
+
+# TODO(gmann): Remove setting the default value of config policy_file
+# once oslo_policy change the default value to 'policy.yaml'.
+# https://github.com/openstack/oslo.policy/blob/a626ad12fe5a3abd49d70e3e5b95589d279ab578/oslo_policy/opts.py#L49
+DEFAULT_POLICY_FILE = 'policy.yaml'
+opts.set_defaults(cfg.CONF, DEFAULT_POLICY_FILE)
+
+
+def pick_policy_file(policy_file):
+    # TODO(gmann): We have changed the default value of
+    # CONF.oslo_policy.policy_file option to 'policy.yaml' in Victoria
+    # release. To avoid breaking any deployment relying on default
+    # value, we need to add this is fallback logic to pick the old default
+    # policy file (policy.json) if exist. We can to remove this fallback
+    # logic sometime in future.
+    if policy_file:
+        return policy_file
+
+    if CONF.oslo_policy.policy_file == DEFAULT_POLICY_FILE:
+        location = CONF.get_location('policy_file', 'oslo_policy').location
+        if CONF.find_file(CONF.oslo_policy.policy_file):
+            return CONF.oslo_policy.policy_file
+        elif location in [cfg.Locations.opt_default,
+                          cfg.Locations.set_default]:
+            old_default = 'policy.json'
+            if CONF.find_file(old_default):
+                return old_default
+    # Return overridden value
+    return CONF.oslo_policy.policy_file
 
 
 def reset():
@@ -68,11 +97,12 @@ def init(policy_file=None, rules=None, default_rule=None, use_conf=True,
     global saved_file_rules
 
     if not _ENFORCER:
-        _ENFORCER = policy.Enforcer(CONF,
-                                    policy_file=policy_file,
-                                    rules=rules,
-                                    default_rule=default_rule,
-                                    use_conf=use_conf)
+        _ENFORCER = policy.Enforcer(
+            CONF,
+            policy_file=pick_policy_file(policy_file),
+            rules=rules,
+            default_rule=default_rule,
+            use_conf=use_conf)
         # NOTE(gmann): Explictly disable the warnings for policies
         # changing their default check_str. During policy-defaults-refresh
         # work, all the policy defaults have been changed and warning for
@@ -115,10 +145,12 @@ def _warning_for_deprecated_user_based_rules(rules):
                 if resource in rule[0]]:
             continue
         if 'user_id' in KEY_EXPR.findall(rule[1]):
-            LOG.warning(_LW("The user_id attribute isn't supported in the "
-                            "rule '%s'. All the user_id based policy "
-                            "enforcement will be removed in the "
-                            "future."), rule[0])
+            LOG.warning(
+                "The user_id attribute isn't supported in the rule '%s'. "
+                "All the user_id based policy enforcement will be removed in "
+                "the future.",
+                rule[0]
+            )
 
 
 def set_rules(rules, overwrite=True, use_conf=False):
@@ -178,7 +210,7 @@ def authorize(context, action, target=None, do_raise=True, exc=None):
                                      do_raise=do_raise, exc=exc, action=action)
     except policy.PolicyNotRegistered:
         with excutils.save_and_reraise_exception():
-            LOG.exception(_LE('Policy not registered'))
+            LOG.exception('Policy not registered')
     except policy.InvalidScope:
         LOG.debug('Policy check for %(action)s failed with scope check '
                   '%(credentials)s',

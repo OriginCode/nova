@@ -1080,6 +1080,96 @@ class TestUtils(TestUtilsBase):
         self.assertResourceRequestsEqual(expected, rr)
         self.assertFalse(rr.cpu_pinning_requested)
 
+    def _test_resource_request_init_with_mixed_cpus(self, extra_specs):
+        flavor = objects.Flavor(
+            vcpus=4, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=0,
+            extra_specs=extra_specs)
+        rs = objects.RequestSpec(flavor=flavor)
+        expected = FakeResourceRequest()
+        expected._rg_by_id[None] = objects.RequestGroup(
+            use_same_provider=False,
+            resources={
+                'PCPU': 2,
+                'VCPU': 2,
+                'MEMORY_MB': 1024,
+                'DISK_GB': 15,
+            },
+            required_traits=set(),
+        )
+        rr = utils.ResourceRequest(rs)
+        self.assertResourceRequestsEqual(expected, rr)
+
+    def test_resource_request_init_with_mixed_cpus_dedicated(self):
+        """Ensure the mixed instance, which is generated through
+        'hw:cpu_dedicated_mask' extra spec, properly requests the PCPU, VCPU,
+        MEMORY_MB and DISK_GB resources.
+        """
+        extra_specs = {
+            'hw:cpu_policy': 'mixed',
+            'hw:cpu_dedicated_mask': '2,3'
+        }
+        self._test_resource_request_init_with_mixed_cpus(extra_specs)
+
+    def test_resource_request_init_with_mixed_cpus_realtime(self):
+        """Ensure the mixed instance, which is generated through real-time CPU
+        interface, properly requests the PCPU, VCPU, MEMORY_BM and DISK_GB
+        resources.
+        """
+        extra_specs = {
+            'hw:cpu_policy': 'mixed',
+            "hw:cpu_realtime": "yes",
+            "hw:cpu_realtime_mask": '2,3'
+        }
+        self._test_resource_request_init_with_mixed_cpus(extra_specs)
+
+    def _test_resource_request_init_with_mixed_cpus_iso_emu(self, extra_specs):
+        flavor = objects.Flavor(
+            vcpus=4, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=0,
+            extra_specs=extra_specs)
+        rs = objects.RequestSpec(flavor=flavor)
+        expected = FakeResourceRequest()
+        expected._rg_by_id[None] = objects.RequestGroup(
+            use_same_provider=False,
+            resources={
+                # An extra PCPU resource is requested due to 'ISOLATE' emulator
+                # thread policy.
+                'PCPU': 3,
+                'VCPU': 2,
+                'MEMORY_MB': 1024,
+                'DISK_GB': 15,
+            },
+            required_traits=set(),
+        )
+        rr = utils.ResourceRequest(rs)
+        self.assertResourceRequestsEqual(expected, rr)
+
+    def test_resource_request_init_with_mixed_cpus_iso_emu_realtime(self):
+        """Ensure the mixed instance, which is generated through the
+        'hw:cpu_dedicated_mask' extra spec, specs, properly requests the PCPU,
+        VCPU, MEMORY_MB, DISK_GB resources, ensure an extra PCPU resource is
+        requested due to a ISOLATE emulator thread policy.
+        """
+        extra_specs = {
+            'hw:cpu_policy': 'mixed',
+            'hw:cpu_dedicated_mask': '2,3',
+            'hw:emulator_threads_policy': 'isolate',
+        }
+        self._test_resource_request_init_with_mixed_cpus_iso_emu(extra_specs)
+
+    def test_resource_request_init_with_mixed_cpus_iso_emu_dedicated(self):
+        """Ensure the mixed instance, which is generated through realtime extra
+        specs, properly requests the PCPU, VCPU, MEMORY_MB, DISK_GB resources,
+        ensure an extra PCPU resource is requested due to a ISOLATE emulator
+        thread policy.
+        """
+        extra_specs = {
+            'hw:cpu_policy': 'mixed',
+            "hw:cpu_realtime": "yes",
+            "hw:cpu_realtime_mask": '2,3',
+            'hw:emulator_threads_policy': 'isolate',
+        }
+        self._test_resource_request_init_with_mixed_cpus_iso_emu(extra_specs)
+
     def test_resource_request_init_is_bfv(self):
         flavor = objects.Flavor(
             vcpus=1, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=1555)
@@ -1116,6 +1206,56 @@ class TestUtils(TestUtilsBase):
             },
         )
         rs = objects.RequestSpec(flavor=flavor, is_bfv=False)
+        rr = utils.ResourceRequest(rs)
+        self.assertResourceRequestsEqual(expected, rr)
+
+    def test_resource_request_with_vtpm_1_2(self):
+        flavor = objects.Flavor(
+            vcpus=1, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=0,
+            extra_specs={'hw:tpm_version': '1.2', 'hw:tpm_model': 'tpm-tis'},
+        )
+        image = objects.ImageMeta(
+            properties=objects.ImageMetaProps(
+                hw_tpm_version='1.2',
+                hw_tpm_model='tpm-tis',
+            )
+        )
+        expected = FakeResourceRequest()
+        expected._rg_by_id[None] = objects.RequestGroup(
+            use_same_provider=False,
+            required_traits={'COMPUTE_SECURITY_TPM_1_2'},
+            resources={
+                'VCPU': 1,
+                'MEMORY_MB': 1024,
+                'DISK_GB': 15,
+            },
+        )
+        rs = objects.RequestSpec(flavor=flavor, image=image, is_bfv=False)
+        rr = utils.ResourceRequest(rs)
+        self.assertResourceRequestsEqual(expected, rr)
+
+    def test_resource_request_with_vtpm_2_0(self):
+        flavor = objects.Flavor(
+            vcpus=1, memory_mb=1024, root_gb=10, ephemeral_gb=5, swap=0,
+            extra_specs={'hw:tpm_version': '2.0', 'hw:tpm_model': 'tpm-crb'},
+        )
+        image = objects.ImageMeta(
+            properties=objects.ImageMetaProps(
+                hw_tpm_version='2.0',
+                hw_tpm_model='tpm-crb',
+            )
+        )
+        expected = FakeResourceRequest()
+        expected._rg_by_id[None] = objects.RequestGroup(
+            use_same_provider=False,
+            required_traits={'COMPUTE_SECURITY_TPM_2_0'},
+            resources={
+                'VCPU': 1,
+                'MEMORY_MB': 1024,
+                'DISK_GB': 15,
+            },
+        )
+        rs = objects.RequestSpec(flavor=flavor, image=image, is_bfv=False)
         rr = utils.ResourceRequest(rs)
         self.assertResourceRequestsEqual(expected, rr)
 

@@ -175,14 +175,26 @@ class ImageMetaProps(base.NovaObject):
     # Version 1.23: Added 'hw_pmu' field
     # Version 1.24: Added 'hw_mem_encryption' field
     # Version 1.25: Added 'hw_pci_numa_affinity_policy' field
+    # Version 1.26: Added 'mixed' to 'hw_cpu_policy' field
+    # Version 1.27: Added 'hw_tpm_model' and 'hw_tpm_version' fields
     # NOTE(efried): When bumping this version, the version of
     # ImageMetaPropsPayload must also be bumped. See its docstring for details.
-    VERSION = '1.25'
+    VERSION = '1.27'
 
     def obj_make_compatible(self, primitive, target_version):
         super(ImageMetaProps, self).obj_make_compatible(primitive,
                                                         target_version)
         target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 27):
+            primitive.pop('hw_tpm_model', None)
+            primitive.pop('hw_tpm_version', None)
+        if target_version < (1, 26):
+            policy = primitive.get('hw_cpu_policy', None)
+            if policy == fields.CPUAllocationPolicy.MIXED:
+                raise exception.ObjectActionError(
+                    action='obj_make_compatible',
+                    reason='hw_cpu_policy=%s not supported in version %s' %
+                           (policy, target_version))
         if target_version < (1, 25):
             primitive.pop('hw_pci_numa_affinity_policy', None)
         if target_version < (1, 24):
@@ -394,6 +406,11 @@ class ImageMetaProps(base.NovaObject):
 
         # boolean - If true, this will enable the virtio-multiqueue feature
         'hw_vif_multiqueue_enabled': fields.FlexibleBooleanField(),
+
+        # name of emulated TPM model to use.
+        'hw_tpm_model': fields.TPMModelField(),
+        # version of emulated TPM to use.
+        'hw_tpm_version': fields.TPMVersionField(),
 
         # if true download using bittorrent
         'img_bittorrent': fields.FlexibleBooleanField(),

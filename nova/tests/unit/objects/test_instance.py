@@ -597,8 +597,11 @@ class _TestInstanceObject(object):
     def test_save_updates_numa_topology(self, mock_fdo, mock_update,
             mock_extra_update):
         fake_obj_numa_topology = objects.InstanceNUMATopology(cells=[
-            objects.InstanceNUMACell(id=0, cpuset=set([0]), memory=128),
-            objects.InstanceNUMACell(id=1, cpuset=set([1]), memory=128)])
+            objects.InstanceNUMACell(id=0, cpuset=set([0]), pcpuset=set(),
+                memory=128),
+            objects.InstanceNUMACell(id=1, cpuset=set([1]), pcpuset=set(),
+                memory=128),
+        ])
         fake_obj_numa_topology.instance_uuid = uuids.instance
         jsonified = fake_obj_numa_topology._to_json()
 
@@ -1438,6 +1441,13 @@ class _TestInstanceObject(object):
                     getattr(inst.migration_context, 'new_' + attr_name))
                 self.assertIs(inst_value, migration_context_value)
 
+        with inst.mutated_migration_context(revert=True):
+            for attr_name in instance._MIGRATION_CONTEXT_ATTRS:
+                inst_value = getattr(inst, attr_name)
+                migration_context_value = (
+                    getattr(inst.migration_context, 'old_' + attr_name))
+                self.assertIs(inst_value, migration_context_value)
+
         for attr_name in instance._MIGRATION_CONTEXT_ATTRS:
             inst_value = getattr(inst, attr_name)
             self.assertIs(expected_objs[attr_name], inst_value)
@@ -1620,6 +1630,27 @@ class TestInstanceObject(test_objects._LocalTest,
     def test_save_objectfield_reraises_if_not_instance_related(self):
         self._test_save_objectfield_fk_constraint_fails(
                 'other_foreign_key', db_exc.DBReferenceError)
+
+    def test_remove_pci_device_and_request(self):
+        instance = fake_instance.fake_instance_obj(self.context)
+        pci_device = objects.PciDevice(request_id=uuids.req)
+        pci_request = objects.InstancePCIRequest(request_id=uuids.req)
+        other_device = objects.PciDevice(request_id=uuids.other_req)
+        other_request = objects.InstancePCIRequest(request_id=uuids.other_req)
+        instance.add_pci_device_and_request(pci_device, pci_request)
+        instance.add_pci_device_and_request(other_device, other_request)
+
+        self.assertIn(pci_device, instance.pci_devices)
+        self.assertIn(pci_request, instance.pci_requests.requests)
+        self.assertIn(other_device, instance.pci_devices)
+        self.assertIn(other_request, instance.pci_requests.requests)
+
+        instance.remove_pci_device_and_request(pci_device)
+
+        self.assertNotIn(pci_device, instance.pci_devices)
+        self.assertNotIn(pci_request, instance.pci_requests.requests)
+        self.assertIn(other_device, instance.pci_devices)
+        self.assertIn(other_request, instance.pci_requests.requests)
 
 
 class TestRemoteInstanceObject(test_objects._RemoteTest,

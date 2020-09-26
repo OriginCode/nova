@@ -23,7 +23,6 @@ from oslo_utils import importutils
 import six
 
 import nova.conf
-from nova.i18n import _
 import nova.privsep.fs
 from nova import utils
 
@@ -64,7 +63,7 @@ def unmount_share(mount_path, export_path):
         if 'target is busy' in six.text_type(exc):
             LOG.debug("The share %s is still in use.", export_path)
         else:
-            LOG.exception(_("Couldn't unmount the share %s"), export_path)
+            LOG.exception("Couldn't unmount the share %s", export_path)
 
 
 class RemoteFilesystem(object):
@@ -108,8 +107,7 @@ class RemoteFilesystem(object):
                               compression=compression)
 
 
-@six.add_metaclass(abc.ABCMeta)
-class RemoteFilesystemDriver(object):
+class RemoteFilesystemDriver(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def create_file(self, host, dst_path, on_execute, on_completion):
         """Create file on the remote system.
@@ -191,10 +189,13 @@ class SshDriver(RemoteFilesystemDriver):
                           on_execute=on_execute, on_completion=on_completion)
 
     def copy_file(self, src, dst, on_execute, on_completion, compression):
+        args = ['scp']
+        if compression:
+            args.append('-C')
         # As far as ploop disks are in fact directories we add '-r' argument
-        processutils.execute('scp', '-r', src, dst,
-                             on_execute=on_execute,
-                             on_completion=on_completion)
+        args.extend(['-r', src, dst])
+        processutils.execute(
+            *args, on_execute=on_execute, on_completion=on_completion)
 
 
 class RsyncDriver(RemoteFilesystemDriver):

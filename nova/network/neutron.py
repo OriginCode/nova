@@ -37,7 +37,6 @@ import nova.conf
 from nova import context as nova_context
 from nova.db import base
 from nova import exception
-from nova import hooks
 from nova.i18n import _
 from nova.network import constants
 from nova.network import model as network_model
@@ -102,7 +101,6 @@ def get_binding_profile(port):
     return port.get(constants.BINDING_PROFILE, {}) or {}
 
 
-@hooks.add_hook('instance_network_info')
 def update_instance_cache_with_nw_info(impl, context, instance, nw_info=None):
     if instance.deleted:
         LOG.debug('Instance is deleted, no further info cache update',
@@ -528,7 +526,7 @@ class API(base.Base):
             # need resource allocation manipulation in placement but might also
             # need a new scheduling if resource on this host is not available.
             if port.get(constants.RESOURCE_REQUEST, None):
-                msg = _(
+                msg = (
                     "The auto-created port %(port_id)s is being deleted due "
                     "to its network having QoS policy.")
                 LOG.info(msg, {'port_id': port_id})
@@ -690,7 +688,7 @@ class API(base.Base):
             self._reset_port_dns_name(network, port_id, neutron)
 
     def _validate_requested_port_ids(self, context, instance, neutron,
-                                     requested_networks, attach=False):
+                                     requested_networks):
         """Processes and validates requested networks for allocation.
 
         Iterates over the list of NetworkRequest objects, validating the
@@ -705,9 +703,6 @@ class API(base.Base):
         :type neutron: neutronclient.v2_0.client.Client
         :param requested_networks: List of user-requested networks and/or ports
         :type requested_networks: nova.objects.NetworkRequestList
-        :param attach: Boolean indicating if a port is being attached to an
-            existing running instance. Should be False during server create.
-        :type attach: bool
         :returns: tuple of:
             - ports: dict mapping of port id to port dict
             - ordered_networks: list of nova.objects.NetworkRequest objects
@@ -721,8 +716,6 @@ class API(base.Base):
             attached to another instance.
         :raises nova.exception.PortNotUsableDNS: If a requested port has a
             value assigned to its dns_name attribute.
-        :raises nova.exception.AttachSRIOVPortNotSupported: If a requested port
-            is an SR-IOV port and ``attach=True``.
         """
         ports = {}
         ordered_networks = []
@@ -759,16 +752,6 @@ class API(base.Base):
 
                     # Make sure the port is usable
                     _ensure_no_port_binding_failure(port)
-
-                    # Make sure the port can be attached.
-                    if attach:
-                        # SR-IOV port attach is not supported.
-                        vnic_type = port.get('binding:vnic_type',
-                                             network_model.VNIC_TYPE_NORMAL)
-                        if vnic_type in network_model.VNIC_TYPES_SRIOV:
-                            raise exception.AttachSRIOVPortNotSupported(
-                                port_id=port['id'],
-                                instance_uuid=instance.uuid)
 
                     # If requesting a specific port, automatically process
                     # the network for that port as if it were explicitly
@@ -915,9 +898,6 @@ class API(base.Base):
                 return {}
 
         # if this function is directly called without a requested_network param
-        # or if it is indirectly called through allocate_port_for_instance()
-        # with None params=(network_id=None, requested_ip=None, port_id=None,
-        # pci_request_id=None):
         if (not requested_networks or
             requested_networks.is_single_unspecified or
             requested_networks.auto_allocate):
@@ -1008,21 +988,18 @@ class API(base.Base):
 
         return requests_and_created_ports
 
-    def allocate_for_instance(self, context, instance, vpn,
+    def allocate_for_instance(self, context, instance,
                               requested_networks,
                               security_groups=None, bind_host_id=None,
-                              attach=False, resource_provider_mapping=None):
+                              resource_provider_mapping=None):
         """Allocate network resources for the instance.
 
         :param context: The request context.
         :param instance: nova.objects.instance.Instance object.
-        :param vpn: A boolean, ignored by this driver.
         :param requested_networks: objects.NetworkRequestList object.
         :param security_groups: None or security groups to allocate for
             instance.
         :param bind_host_id: the host ID to attach to the ports being created.
-        :param attach: Boolean indicating if a port is being attached to an
-            existing running instance. Should be False during server create.
         :param resource_provider_mapping: a dict keyed by ids of the entities
             (for example Neutron port) requesting resources for this instance
             mapped to a list of resource provider UUIDs that are fulfilling
@@ -1056,8 +1033,7 @@ class API(base.Base):
         # See bug 1849657.
         requested_ports_dict, ordered_networks = (
             self._validate_requested_port_ids(
-                context, instance, admin_client, requested_networks,
-                attach=attach))
+                context, instance, admin_client, requested_networks))
 
         nets = self._validate_requested_network_ids(
             context, instance, neutron, requested_networks, ordered_networks)
@@ -1700,20 +1676,6 @@ class API(base.Base):
         update_instance_cache_with_nw_info(self, context, instance,
                                            network_model.NetworkInfo([]))
 
-    def allocate_port_for_instance(self, context, instance, port_id,
-                                   network_id=None, requested_ip=None,
-                                   bind_host_id=None, tag=None):
-        """Allocate a port for the instance."""
-        requested_networks = objects.NetworkRequestList(
-            objects=[objects.NetworkRequest(network_id=network_id,
-                                            address=requested_ip,
-                                            port_id=port_id,
-                                            pci_request_id=None,
-                                            tag=tag)])
-        return self.allocate_for_instance(context, instance, vpn=False,
-                requested_networks=requested_networks,
-                bind_host_id=bind_host_id, attach=True)
-
     def deallocate_port_for_instance(self, context, instance, port_id):
         """Remove a specified port from the instance.
 
@@ -1753,8 +1715,7 @@ class API(base.Base):
         # Delete the VirtualInterface for the given port_id.
         vif = objects.VirtualInterface.get_by_uuid(context, port_id)
         if vif:
-            if 'tag' in vif and vif.tag:
-                self._delete_nic_metadata(instance, vif)
+            self._delete_nic_metadata(instance, vif)
             vif.destroy()
         else:
             LOG.debug('VirtualInterface not found for port: %s',
@@ -1788,6 +1749,10 @@ class API(base.Base):
         return self.get_instance_nw_info(context, instance), port_allocation
 
     def _delete_nic_metadata(self, instance, vif):
+        if not instance.device_metadata:
+            # nothing to delete
+            return
+
         for device in instance.device_metadata.devices:
             if (isinstance(device, objects.NetworkInterfaceMetadata) and
                     device.mac == vif.address):
@@ -3415,7 +3380,7 @@ class API(base.Base):
             vnic_type = p.get('binding:vnic_type')
             if (vnic_type in network_model.VNIC_TYPES_SRIOV and
                     migration is not None and
-                    migration['migration_type'] != constants.LIVE_MIGRATION):
+                    not migration.is_live_migration):
                 # Note(adrianc): for live migration binding profile was already
                 # updated in conductor when calling bind_ports_to_host()
                 if not pci_mapping:
@@ -3437,9 +3402,9 @@ class API(base.Base):
             # allocation key in the port binding. However during resize, cold
             # migrate, evacuate and unshelve we have to set the binding here.
             # Also note that during unshelve no migration object is created.
-            if (p.get('resource_request') and
-                    (migration is None or
-                     migration['migration_type'] != constants.LIVE_MIGRATION)):
+            if p.get('resource_request') and (
+                migration is None or not migration.is_live_migration
+            ):
                 if not provider_mappings:
                     # TODO(gibi): Remove this check when compute RPC API is
                     # bumped to 6.0

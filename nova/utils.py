@@ -18,7 +18,6 @@
 """Utilities and helper functions."""
 
 import contextlib
-import copy
 import datetime
 import functools
 import hashlib
@@ -46,14 +45,12 @@ from oslo_utils import excutils
 from oslo_utils import importutils
 from oslo_utils import strutils
 from oslo_utils import timeutils
-from oslo_utils import units
 import six
 from six.moves import range
 
-from nova import block_device
 import nova.conf
 from nova import exception
-from nova.i18n import _, _LE, _LW
+from nova.i18n import _
 from nova import safe_utils
 
 profiler = importutils.try_import('osprofiler.profiler')
@@ -77,12 +74,6 @@ SM_SKIP_KEYS = (
     'mappings', 'block_device_mapping',
     # Modern names
     'img_mappings', 'img_block_device_mapping',
-)
-# Image attributes which Cinder stores in volume image metadata
-# as regular properties
-VIM_IMAGE_ATTRIBUTES = (
-    'image_id', 'image_name', 'size', 'checksum',
-    'container_format', 'disk_format', 'min_ram', 'min_disk',
 )
 
 _FILE_CACHE = {}
@@ -299,7 +290,7 @@ def parse_server_string(server_str):
         return (address, port)
 
     except (ValueError, netaddr.AddrFormatError):
-        LOG.error(_LE('Invalid server_string: %s'), server_str)
+        LOG.error('Invalid server_string: %s', server_str)
         return ('', '')
 
 
@@ -372,16 +363,14 @@ def sanitize_hostname(hostname, default_name=None):
 
     def truncate_hostname(name):
         if len(name) > 63:
-            LOG.warning(_LW("Hostname %(hostname)s is longer than 63, "
-                            "truncate it to %(truncated_name)s"),
-                            {'hostname': name, 'truncated_name': name[:63]})
+            LOG.warning("Hostname %(hostname)s is longer than 63, "
+                        "truncate it to %(truncated_name)s",
+                        {'hostname': name, 'truncated_name': name[:63]})
         return name[:63]
 
-    if isinstance(hostname, six.text_type):
+    if isinstance(hostname, str):
         # Remove characters outside the Unicode range U+0000-U+00FF
-        hostname = hostname.encode('latin-1', 'ignore')
-        if six.PY3:
-            hostname = hostname.decode('latin-1')
+        hostname = hostname.encode('latin-1', 'ignore').decode('latin-1')
 
     hostname = truncate_hostname(hostname)
     hostname = re.sub('[ _]', '-', hostname)
@@ -495,7 +484,7 @@ def tempdir(**kwargs):
         try:
             shutil.rmtree(tmpdir)
         except OSError as e:
-            LOG.error(_LE('Could not remove tmpdir: %s'), e)
+            LOG.error('Could not remove tmpdir: %s', e)
 
 
 class UndoManager(object):
@@ -548,6 +537,8 @@ def instance_meta(instance):
         return metadata_to_dict(instance['metadata'])
 
 
+# TODO(stephenfin): Instance.system_metadata is always a dict now (thanks,
+# o.vo) so this check (and the function as a whole) can be removed
 def instance_sys_meta(instance):
     if not instance.get('system_metadata'):
         return {}
@@ -595,7 +586,7 @@ class ExceptionHelper(object):
             try:
                 return func(*args, **kwargs)
             except messaging.ExpectedException as e:
-                six.reraise(*e.exc_info)
+                raise e.exc_info[1]
         return wrapper
 
 
@@ -698,6 +689,11 @@ def spawn_n(func, *args, **kwargs):
     eventlet.spawn_n(context_wrapper, *args, **kwargs)
 
 
+def tpool_execute(func, *args, **kwargs):
+    """Run func in a native thread"""
+    eventlet.tpool.execute(func, *args, **kwargs)
+
+
 def is_none_string(val):
     """Check if a string represents a None value.
     """
@@ -783,89 +779,6 @@ def get_image_from_system_metadata(system_meta):
     return image_meta
 
 
-def get_bdm_image_metadata(context, image_api, volume_api,
-                           block_device_mapping, legacy_bdm=True):
-    """Attempt to retrive image metadata from a given block_device_mapping.
-
-    If we are booting from a volume, we need to get the volume details from
-    Cinder and make sure we pass the metadata back accordingly.
-
-    :param context: request context
-    :param image_api: Image API
-    :param volume_api: Volume API
-    :param block_device_mapping:
-    :param legacy_bdm:
-    """
-    if not block_device_mapping:
-        return {}
-
-    for bdm in block_device_mapping:
-        if (legacy_bdm and
-                block_device.get_device_letter(
-                   bdm.get('device_name', '')) != 'a'):
-            continue
-        elif not legacy_bdm and bdm.get('boot_index') != 0:
-            continue
-
-        volume_id = bdm.get('volume_id')
-        snapshot_id = bdm.get('snapshot_id')
-        if snapshot_id:
-            # NOTE(alaski): A volume snapshot inherits metadata from the
-            # originating volume, but the API does not expose metadata
-            # on the snapshot itself.  So we query the volume for it below.
-            snapshot = volume_api.get_snapshot(context, snapshot_id)
-            volume_id = snapshot['volume_id']
-
-        if bdm.get('image_id'):
-            try:
-                image_id = bdm['image_id']
-                image_meta = image_api.get(context, image_id)
-                return image_meta
-            except Exception:
-                raise exception.InvalidBDMImage(id=image_id)
-        elif volume_id:
-            try:
-                volume = volume_api.get(context, volume_id)
-            except exception.CinderConnectionFailed:
-                raise
-            except Exception:
-                raise exception.InvalidBDMVolume(id=volume_id)
-
-            if not volume.get('bootable', True):
-                raise exception.InvalidBDMVolumeNotBootable(id=volume_id)
-
-            return get_image_metadata_from_volume(volume)
-    return {}
-
-
-def get_image_metadata_from_volume(volume):
-    properties = copy.copy(volume.get('volume_image_metadata', {}))
-    image_meta = {'properties': properties}
-    # Volume size is no longer related to the original image size,
-    # so we take it from the volume directly. Cinder creates
-    # volumes in Gb increments, and stores size in Gb, whereas
-    # glance reports size in bytes. As we're returning glance
-    # metadata here, we need to convert it.
-    image_meta['size'] = volume.get('size', 0) * units.Gi
-    # NOTE(yjiang5): restore the basic attributes
-    # NOTE(mdbooth): These values come from volume_glance_metadata
-    # in cinder. This is a simple key/value table, and all values
-    # are strings. We need to convert them to ints to avoid
-    # unexpected type errors.
-    for attr in VIM_IMAGE_ATTRIBUTES:
-        val = properties.pop(attr, None)
-        if attr in ('min_ram', 'min_disk'):
-            image_meta[attr] = int(val or 0)
-    # NOTE(mriedem): Set the status to 'active' as a really old hack
-    # from when this method was in the compute API class and is
-    # needed for _validate_flavor_image which makes sure the image
-    # is 'active'. For volume-backed servers, if the volume is not
-    # available because the image backing the volume is not active,
-    # then the compute API trying to reserve the volume should fail.
-    image_meta['status'] = 'active'
-    return image_meta
-
-
 def get_hash_str(base_str):
     """Returns string that represents MD5 hash of base_str (in hex format).
 
@@ -896,8 +809,6 @@ def get_obj_repr_unicode(obj):
     else it converts the repr() to unicode.
     """
     obj_repr = repr(obj)
-    if not six.PY3:
-        obj_repr = six.text_type(obj_repr, 'utf-8')
     return obj_repr
 
 
@@ -1126,13 +1037,10 @@ def generate_hostid(host, project_id):
     return ""
 
 
-if six.PY2:
-    nested_contexts = contextlib.nested
-else:
-    @contextlib.contextmanager
-    def nested_contexts(*contexts):
-        with contextlib.ExitStack() as stack:
-            yield [stack.enter_context(c) for c in contexts]
+@contextlib.contextmanager
+def nested_contexts(*contexts):
+    with contextlib.ExitStack() as stack:
+        yield [stack.enter_context(c) for c in contexts]
 
 
 def normalize_rc_name(rc_name):

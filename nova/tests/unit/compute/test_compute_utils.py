@@ -19,7 +19,6 @@
 import copy
 import datetime
 import string
-import traceback
 
 import mock
 from oslo_serialization import jsonutils
@@ -88,17 +87,10 @@ class ComputeValidateDeviceTestCase(test.NoDBTestCase):
     def setUp(self):
         super(ComputeValidateDeviceTestCase, self).setUp()
         self.context = context.RequestContext('fake', 'fake')
-        # check if test name includes "xen"
-        if 'xen' in self.id():
-            self.flags(compute_driver='xenapi.XenAPIDriver')
-            self.instance = objects.Instance(
-                uuid=uuidutils.generate_uuid(dashed=False),
-                root_device_name=None, default_ephemeral_device=None)
-        else:
-            self.instance = objects.Instance(
-                uuid=uuidutils.generate_uuid(dashed=False),
-                root_device_name='/dev/vda',
-                default_ephemeral_device='/dev/vdb')
+        self.instance = objects.Instance(
+            uuid=uuidutils.generate_uuid(dashed=False),
+            root_device_name='/dev/vda',
+            default_ephemeral_device='/dev/vdb')
 
         flavor = objects.Flavor(**test_flavor.fake_flavor)
         self.instance.system_metadata = {}
@@ -198,33 +190,6 @@ class ComputeValidateDeviceTestCase(test.NoDBTestCase):
         self.instance.default_swap_device = "/dev/vdb"
         device = self._validate_device()
         self.assertEqual(device, '/dev/vdc')
-
-    def test_ephemeral_xenapi(self):
-        self.instance.flavor.ephemeral_gb = 10
-        self.instance.flavor.swap = 0
-        device = self._validate_device()
-        self.assertEqual(device, '/dev/xvdc')
-
-    def test_swap_xenapi(self):
-        self.instance.flavor.ephemeral_gb = 0
-        self.instance.flavor.swap = 10
-        device = self._validate_device()
-        self.assertEqual(device, '/dev/xvdb')
-
-    def test_swap_and_ephemeral_xenapi(self):
-        self.instance.flavor.ephemeral_gb = 10
-        self.instance.flavor.swap = 10
-        device = self._validate_device()
-        self.assertEqual(device, '/dev/xvdd')
-
-    def test_swap_and_one_attachment_xenapi(self):
-        self.instance.flavor.ephemeral_gb = 0
-        self.instance.flavor.swap = 10
-        device = self._validate_device()
-        self.assertEqual(device, '/dev/xvdb')
-        self.data.append(self._fake_bdm(device))
-        device = self._validate_device()
-        self.assertEqual(device, '/dev/xvdd')
 
     def test_no_dev_root_device_name_get_next_name(self):
         self.instance['root_device_name'] = 'vda'
@@ -406,12 +371,7 @@ class UsageInfoTestCase(test.TestCase):
         self.context = context.RequestContext(self.user_id, self.project_id)
         self.flavor = objects.Flavor.get_by_name(self.context, 'm1.tiny')
 
-        def fake_show(meh, context, id, **kwargs):
-            return {'id': 1, 'properties': {'kernel_id': 1, 'ramdisk_id': 1}}
-
         self.flags(group='glance', api_servers=['http://localhost:9292'])
-        self.stub_out('nova.tests.unit.image.fake._FakeImageService.show',
-                      fake_show)
         fake_network.set_stub_network_methods(self)
         fake_server_actions.stub_out_action_events(self)
 
@@ -733,11 +693,10 @@ class UsageInfoTestCase(test.TestCase):
             # To get exception trace, raise and catch an exception
             raise test.TestingException('Volume swap error.')
         except Exception as ex:
-            tb = traceback.format_exc()
             compute_utils.notify_about_volume_swap(
                 self.context, instance, 'fake-compute',
                 fields.NotificationPhase.ERROR,
-                uuids.old_volume_id, uuids.new_volume_id, ex, tb)
+                uuids.old_volume_id, uuids.new_volume_id, ex)
 
         self.assertEqual(len(fake_notifier.VERSIONED_NOTIFICATIONS), 1)
         notification = fake_notifier.VERSIONED_NOTIFICATIONS[0]
@@ -1397,6 +1356,46 @@ class ComputeUtilsQuotaTestCase(test.TestCase):
                 self.assertEqual('1, 1, 512', e.kwargs['allowed'])
             else:
                 self.fail("Exception not raised")
+
+    @mock.patch('nova.objects.Quotas.get_all_by_project_and_user')
+    @mock.patch('nova.objects.Quotas.check_deltas')
+    def test_check_num_instances_omits_user_if_no_user_quota(self, mock_check,
+                                                             mock_get):
+        # Return no per-user quota.
+        mock_get.return_value = {'project_id': self.context.project_id,
+                                 'user_id': self.context.user_id}
+        fake_flavor = objects.Flavor(vcpus=1, memory_mb=512)
+        compute_utils.check_num_instances_quota(
+            self.context, fake_flavor, 1, 1)
+        deltas = {'instances': 1, 'cores': 1, 'ram': 512}
+        # Verify that user_id has not been passed along to scope the resource
+        # counting.
+        mock_check.assert_called_once_with(
+            self.context, deltas, self.context.project_id, user_id=None,
+            check_project_id=self.context.project_id, check_user_id=None)
+
+    @mock.patch('nova.objects.Quotas.get_all_by_project_and_user')
+    @mock.patch('nova.objects.Quotas.check_deltas')
+    def test_check_num_instances_passes_user_if_user_quota(self, mock_check,
+                                                           mock_get):
+        for resource in ['instances', 'cores', 'ram']:
+            # Return some per-user quota for each of the instance-related
+            # resources.
+            mock_get.return_value = {'project_id': self.context.project_id,
+                                     'user_id': self.context.user_id,
+                                     resource: 5}
+            fake_flavor = objects.Flavor(vcpus=1, memory_mb=512)
+            compute_utils.check_num_instances_quota(
+                self.context, fake_flavor, 1, 1)
+            deltas = {'instances': 1, 'cores': 1, 'ram': 512}
+            # Verify that user_id is passed along to scope the resource
+            # counting and limit checking.
+            mock_check.assert_called_once_with(
+                self.context, deltas, self.context.project_id,
+                user_id=self.context.user_id,
+                check_project_id=self.context.project_id,
+                check_user_id=self.context.user_id)
+            mock_check.reset_mock()
 
 
 class IsVolumeBackedInstanceTestCase(test.TestCase):

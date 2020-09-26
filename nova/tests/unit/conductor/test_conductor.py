@@ -26,6 +26,7 @@ from oslo_utils import timeutils
 from oslo_versionedobjects import exception as ovo_exc
 import six
 
+from nova.accelerator import cyborg
 from nova import block_device
 from nova.compute import flavors
 from nova.compute import rpcapi as compute_rpcapi
@@ -48,6 +49,7 @@ from nova import objects
 from nova.objects import base as obj_base
 from nova.objects import block_device as block_device_obj
 from nova.objects import fields
+from nova.objects import request_spec
 from nova.scheduler.client import query
 from nova.scheduler import utils as scheduler_utils
 from nova import test
@@ -388,6 +390,7 @@ class _BaseTaskTestCase(object):
         compute_rebuild_args['migration'] = migration
         compute_rebuild_args['node'] = node
         compute_rebuild_args['limits'] = limits
+        compute_rebuild_args['accel_uuids'] = []
 
         return rebuild_args, compute_rebuild_args
 
@@ -583,7 +586,7 @@ class _BaseTaskTestCase(object):
 
         mock_getaz.return_value = 'myaz'
         mock_create_bind_arqs.side_effect = (
-            exc.AcceleratorRequestOpFailed(op='', msg=''))
+            exc.AcceleratorRequestBindingFailed(arqs=[], msg=''))
 
         self.conductor.build_instances(self.context,
                 instances=instances,
@@ -605,10 +608,10 @@ class _BaseTaskTestCase(object):
         # in the above flow. So, we compare the fields instead.
         mock_cleanup.assert_has_calls([
             mock.call(self.context, test.MatchType(objects.Instance),
-                      test.MatchType(exc.AcceleratorRequestOpFailed),
+                      test.MatchType(exc.AcceleratorRequestBindingFailed),
                       test.MatchType(dict), None),
             mock.call(self.context, test.MatchType(objects.Instance),
-                      test.MatchType(exc.AcceleratorRequestOpFailed),
+                      test.MatchType(exc.AcceleratorRequestBindingFailed),
                       test.MatchType(dict), None),
         ])
         call_list = mock_cleanup.call_args_list
@@ -826,7 +829,7 @@ class _BaseTaskTestCase(object):
         mock_notify.assert_called_once_with(
             self.context, 'build_instances',
             instance.uuid, test.MatchType(dict), 'error',
-            test.MatchType(exc.MaxRetriesExceeded), test.MatchType(str))
+            test.MatchType(exc.MaxRetriesExceeded))
 
     @mock.patch.object(conductor_manager.ComputeTaskManager,
             '_destroy_build_request')
@@ -1778,6 +1781,7 @@ class _BaseTaskTestCase(object):
         rebuild_args, _ = self._prepare_rebuild_args(
             {'host': None, 'recreate': True})
         fake_spec = objects.RequestSpec()
+        fake_spec.flavor = inst_obj.flavor
         rebuild_args['request_spec'] = fake_spec
 
         with test.nested(
@@ -1845,6 +1849,7 @@ class _BaseTaskTestCase(object):
         fake_selection = objects.Selection(service_host=expected_host,
                 nodename=expected_node, limits=None)
         fake_spec = objects.RequestSpec(ignore_hosts=[uuids.ignored_host])
+        fake_spec.flavor = inst_obj.flavor
         rebuild_args, compute_args = self._prepare_rebuild_args(
             {'host': None, 'node': expected_node, 'limits': expected_limits,
              'request_spec': fake_spec, 'recreate': True})
@@ -2228,13 +2233,11 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
         mock_notify.assert_called_once_with(
             test.MatchType(context.RequestContext), 'build_instances',
             instance.uuid, test.MatchType(dict), 'error',
-            test.MatchType(Exception), test.MatchType(str))
+            test.MatchType(Exception))
         request_spec_dict = mock_notify.call_args_list[0][0][3]
         for key in ('instance_type', 'num_instances', 'instance_properties',
                     'image'):
             self.assertIn(key, request_spec_dict)
-        tb = mock_notify.call_args_list[0][0][6]
-        self.assertIn('Traceback (most recent call last):', tb)
 
     @mock.patch('nova.objects.TagList.destroy')
     @mock.patch('nova.objects.TagList.create')
@@ -2465,13 +2468,11 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
         mock_notify.assert_called_once_with(
             test.MatchType(context.RequestContext), 'build_instances',
             instance.uuid, test.MatchType(dict), 'error',
-            test.MatchType(exc.TooManyInstances), test.MatchType(str))
+            test.MatchType(exc.TooManyInstances))
         request_spec_dict = mock_notify.call_args_list[0][0][3]
         for key in ('instance_type', 'num_instances', 'instance_properties',
                     'image'):
             self.assertIn(key, request_spec_dict)
-        tb = mock_notify.call_args_list[0][0][6]
-        self.assertIn('Traceback (most recent call last):', tb)
 
     @mock.patch('nova.compute.rpcapi.ComputeAPI.build_and_run_instance')
     @mock.patch('nova.objects.quotas.Quotas.check_deltas')
@@ -2552,11 +2553,11 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
             self, mock_create_bind_arqs, mock_cleanup):
         # Exceptions in _create_and_bind_arqs result in cleanup
         mock_create_bind_arqs.side_effect = (
-            exc.AcceleratorRequestOpFailed(op='', msg=''))
+            exc.AcceleratorRequestBindingFailed(arqs=[], msg=''))
 
         try:
             self._do_schedule_and_build_instances_test(self.params)
-        except exc.AcceleratorRequestOpFailed:
+        except exc.AcceleratorRequestBindingFailed:
             pass
 
         mock_cleanup.assert_called_once_with(
@@ -2564,6 +2565,26 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
             self.params['build_requests'], self.params['request_specs'],
             self.params['block_device_mapping'], self.params['tags'],
             mock.ANY)
+
+    @mock.patch.object(request_spec.RequestSpec, "get_request_group_mapping")
+    @mock.patch.object(cyborg, "get_client")
+    @mock.patch.object(
+        conductor_manager.ComputeTaskManager, '_create_and_bind_arqs')
+    def test__create_and_bind_arq_for_instance(
+            self, mock_create_bind_arqs, mock_client, mock_request_mappings):
+        # Exceptions in _create_and_bind_arqs result in cleanup
+        arqs = ["fake-arq-uuid"]
+        mock_create_bind_arqs.side_effect = (
+            exc.AcceleratorRequestBindingFailed(arqs=arqs, msg=''))
+        mock_client.return_value = mock.Mock()
+        instance = mock.Mock()
+        instance.uuid = "fake-uuid"
+        ex = self.assertRaises(exc.AcceleratorRequestBindingFailed,
+            self.conductor._create_and_bind_arq_for_instance,
+            None, instance, mock.Mock(), request_spec.RequestSpec())
+
+        self.assertIn('Failed to bind accelerator requests', ex.message)
+        mock_client.return_value.delete_arqs_by_uuid.assert_called_with(arqs)
 
     def test_map_instance_to_cell_already_mapped(self):
         """Tests a scenario where an instance is already mapped to a cell
@@ -2712,19 +2733,19 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
             mock.call(
                 test.MatchType(context.RequestContext), 'build_instances',
                 bare_br.instance_uuid, test.MatchType(dict), 'error',
-                test.MatchType(Exception), test.MatchType(str)),
+                test.MatchType(Exception)),
             mock.call(
                 test.MatchType(context.RequestContext), 'build_instances',
                 inst_br.instance_uuid, test.MatchType(dict), 'error',
-                test.MatchType(Exception), test.MatchType(str)),
+                test.MatchType(Exception)),
             mock.call(
                 test.MatchType(context.RequestContext), 'build_instances',
                 deleted_br.instance_uuid, test.MatchType(dict), 'error',
-                test.MatchType(Exception), test.MatchType(str)),
+                test.MatchType(Exception)),
             mock.call(
                 test.MatchType(context.RequestContext), 'build_instances',
                 fast_deleted_br.instance_uuid, test.MatchType(dict), 'error',
-                test.MatchType(Exception), test.MatchType(str))],
+                test.MatchType(Exception))],
             any_order=True)
 
         for i in range(0, 3):
@@ -2760,7 +2781,7 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
         mock_notify.assert_called_once_with(
             test.MatchType(context.RequestContext), 'build_instances',
             inst.uuid, test.MatchType(dict), 'error',
-            test.MatchType(Exception), test.MatchType(str))
+            test.MatchType(Exception))
         # traceback.format_exc() returns 'NoneType'
         # because an exception is not raised in this test.
         # So the argument for traceback is not checked.
@@ -3480,13 +3501,11 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
         mock_notify.assert_called_once_with(
             self.context, 'build_instances',
             instance.uuid, test.MatchType(dict), 'error',
-            test.MatchType(exc.MaxRetriesExceeded), test.MatchType(str))
+            test.MatchType(exc.MaxRetriesExceeded))
         request_spec_dict = mock_notify.call_args_list[0][0][3]
         for key in ('instance_type', 'num_instances', 'instance_properties',
                     'image'):
             self.assertIn(key, request_spec_dict)
-        tb = mock_notify.call_args_list[0][0][6]
-        self.assertIn('Traceback (most recent call last):', tb)
 
     @mock.patch('nova.compute.utils.notify_about_compute_task_error')
     @mock.patch('nova.objects.Instance.save')
@@ -3518,13 +3537,11 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
         mock_notify.assert_called_once_with(
             self.context, 'build_instances',
             instance.uuid, test.MatchType(dict), 'error',
-            test.MatchType(exc.NoValidHost), test.MatchType(str))
+            test.MatchType(exc.NoValidHost))
         request_spec_dict = mock_notify.call_args_list[0][0][3]
         for key in ('instance_type', 'num_instances', 'instance_properties',
                     'image'):
             self.assertIn(key, request_spec_dict)
-        tb = mock_notify.call_args_list[0][0][6]
-        self.assertIn('Traceback (most recent call last):', tb)
 
     @mock.patch('nova.scheduler.utils.claim_resources', return_value=True)
     @mock.patch('nova.scheduler.utils.fill_provider_mapping')

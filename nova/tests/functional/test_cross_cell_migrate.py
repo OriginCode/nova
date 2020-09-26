@@ -177,8 +177,8 @@ class TestMultiCellMigrate(integrated_helpers.ProviderUsageBaseTestCase):
         return server
 
     def stub_image_create(self):
-        """Stubs the _FakeImageService.create method to track created images"""
-        original_create = self.image_service.create
+        """Stubs the GlanceFixture.create method to track created images"""
+        original_create = self.glance.create
 
         def image_create_snooper(*args, **kwargs):
             image = original_create(*args, **kwargs)
@@ -186,7 +186,7 @@ class TestMultiCellMigrate(integrated_helpers.ProviderUsageBaseTestCase):
             return image
 
         _p = mock.patch.object(
-            self.image_service, 'create', side_effect=image_create_snooper)
+            self.glance, 'create', side_effect=image_create_snooper)
         _p.start()
         self.addCleanup(_p.stop)
 
@@ -963,6 +963,10 @@ class TestMultiCellMigrate(integrated_helpers.ProviderUsageBaseTestCase):
             server2['id'], {'migrate': {'host': 'host2'}})
         self._wait_for_migration_status(server2, ['error'])
 
+    @mock.patch('nova.compute.api.API._get_source_compute_service',
+        new=mock.Mock())
+    @mock.patch('nova.servicegroup.api.API.service_is_up',
+        new=mock.Mock(return_value=True))
     def test_poll_unconfirmed_resizes_with_upcall(self):
         """Tests the _poll_unconfirmed_resizes periodic task with a cross-cell
         resize once the instance is in VERIFY_RESIZE status on the dest host.
@@ -993,6 +997,10 @@ class TestMultiCellMigrate(integrated_helpers.ProviderUsageBaseTestCase):
         self._assert_confirm(
             server, source_rp_uuid, target_rp_uuid, new_flavor)
 
+    @mock.patch('nova.compute.api.API._get_source_compute_service',
+        new=mock.Mock())
+    @mock.patch('nova.servicegroup.api.API.service_is_up',
+        new=mock.Mock(return_value=True))
     def test_poll_unconfirmed_resizes_with_no_upcall(self):
         """Tests the _poll_unconfirmed_resizes periodic task with a cross-cell
         resize once the instance is in VERIFY_RESIZE status on the dest host.
@@ -1116,13 +1124,11 @@ class TestMultiCellMigrate(integrated_helpers.ProviderUsageBaseTestCase):
 
         # Now hard reboot the server in the source cell and it should go back
         # to ACTIVE.
-        self.api.post_server_action(server['id'], {'reboot': {'type': 'HARD'}})
-        self._wait_for_state_change(server, 'ACTIVE')
+        self._reboot_server(server, hard=True)
 
         # Now retry the resize without the fault in the target host to make
         # sure things are OK (no duplicate entry errors in the target DB).
-        self.api.post_server_action(server['id'], body)
-        self._wait_for_state_change(server, 'VERIFY_RESIZE')
+        self._resize_server(server, flavor2)
 
     def _assert_instance_not_in_cell(self, cell_name, server_id):
         cell = self.cell_mappings[cell_name]
@@ -1189,10 +1195,8 @@ class TestMultiCellMigrate(integrated_helpers.ProviderUsageBaseTestCase):
 
         # Now hard reboot the server in the source cell and it should go back
         # to ACTIVE.
-        self.api.post_server_action(server['id'], {'reboot': {'type': 'HARD'}})
-        self._wait_for_state_change(server, 'ACTIVE')
+        self._reboot_server(server, hard=True)
 
         # Now retry the resize without the fault in the target host to make
         # sure things are OK (no duplicate entry errors in the target DB).
-        self.api.post_server_action(server['id'], body)
-        self._wait_for_state_change(server, 'VERIFY_RESIZE')
+        self._resize_server(server, flavor2)

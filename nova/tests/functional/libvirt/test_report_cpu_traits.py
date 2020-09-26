@@ -51,6 +51,28 @@ class LibvirtReportTraitsTestBase(
 
 
 class LibvirtReportTraitsTests(LibvirtReportTraitsTestBase):
+    # These must match the capabilities in
+    # nova.virt.libvirt.driver.LibvirtDriver.capabilities
+    expected_libvirt_driver_capability_traits = set([
+        trait for trait in [
+            ost.COMPUTE_ACCELERATORS,
+            ost.COMPUTE_DEVICE_TAGGING,
+            ost.COMPUTE_NET_ATTACH_INTERFACE,
+            ost.COMPUTE_NET_ATTACH_INTERFACE_WITH_TAG,
+            ost.COMPUTE_VOLUME_ATTACH_WITH_TAG,
+            ost.COMPUTE_VOLUME_EXTEND,
+            ost.COMPUTE_VOLUME_MULTI_ATTACH,
+            ost.COMPUTE_TRUSTED_CERTS,
+            ost.COMPUTE_IMAGE_TYPE_AKI,
+            ost.COMPUTE_IMAGE_TYPE_AMI,
+            ost.COMPUTE_IMAGE_TYPE_ARI,
+            ost.COMPUTE_IMAGE_TYPE_ISO,
+            ost.COMPUTE_IMAGE_TYPE_QCOW2,
+            ost.COMPUTE_IMAGE_TYPE_RAW,
+            ost.COMPUTE_RESCUE_BFV,
+        ]
+    ])
+
     def test_report_cpu_traits(self):
         self.assertEqual([], self._get_all_providers())
         self.start_compute()
@@ -59,7 +81,10 @@ class LibvirtReportTraitsTests(LibvirtReportTraitsTestBase):
         # trait values are coming from fakelibvirt's baselineCPU result.
         # COMPUTE_NODE is always set on the compute node provider.
         traits = self._get_provider_traits(self.host_uuid)
-        for trait in ('HW_CPU_X86_VMX', 'HW_CPU_X86_AESNI', 'COMPUTE_NODE'):
+        for trait in (
+            'HW_CPU_X86_VMX', 'HW_CPU_X86_INTEL_VMX', 'HW_CPU_X86_AESNI',
+            'COMPUTE_NODE',
+        ):
             self.assertIn(trait, traits)
 
         self._create_trait('CUSTOM_TRAITS')
@@ -74,10 +99,14 @@ class LibvirtReportTraitsTests(LibvirtReportTraitsTestBase):
         # and it's not in the baseline for the host.
         traits = set(self._get_provider_traits(self.host_uuid))
         expected_traits = self.expected_libvirt_driver_capability_traits.union(
-            [u'HW_CPU_X86_VMX', u'HW_CPU_X86_AESNI', u'CUSTOM_TRAITS',
-             # The periodic restored the COMPUTE_NODE trait.
-             u'COMPUTE_NODE']
-        )
+            [
+                'HW_CPU_X86_VMX',
+                'HW_CPU_X86_INTEL_VMX',
+                'HW_CPU_X86_AESNI',
+                'CUSTOM_TRAITS',
+                # The periodic restored the COMPUTE_NODE trait.
+                'COMPUTE_NODE',
+            ])
         for trait in expected_traits:
             self.assertIn(trait, traits)
 

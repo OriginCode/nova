@@ -68,7 +68,7 @@ class ImageMetaPayload(base.NotificationPayloadBase):
     #   * created_at
     #
     # c. It cannot be got in the boot from volume case.
-    #    See VIM_IMAGE_ATTRIBUTES in nova/utils.py.
+    #    See VIM_IMAGE_ATTRIBUTES in nova/block_device.py.
     #
     #   * id (not 'image_id')
     #   * visibility
@@ -120,7 +120,9 @@ class ImageMetaPropsPayload(base.NotificationPayloadBase):
     # Version 1.1: Added 'gop', 'virtio' and  'none' to hw_video_model field
     # Version 1.2: Added hw_pci_numa_affinity_policy field
     # Version 1.3: Added hw_mem_encryption, hw_pmu and hw_time_hpet fields
-    VERSION = '1.3'
+    # Version 1.4: Added 'mixed' to hw_cpu_policy field
+    # Version 1.5: Added 'hw_tpm_model' and 'hw_tpm_version' fields
+    VERSION = '1.5'
 
     SCHEMA = {
         k: ('image_meta_props', k) for k in image_meta.ImageMetaProps.fields}

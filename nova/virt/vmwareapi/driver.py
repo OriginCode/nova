@@ -37,6 +37,7 @@ from nova.compute import power_state
 from nova.compute import task_states
 from nova.compute import utils as compute_utils
 import nova.conf
+from nova import context as nova_context
 from nova import exception
 from nova.i18n import _
 from nova import objects
@@ -108,12 +109,6 @@ class VMwareVCDriver(driver.ComputeDriver):
             CONF.vmware.host_password is None):
             raise Exception(_("Must specify host_ip, host_username and "
                               "host_password to use vmwareapi.VMwareVCDriver"))
-
-        if CONF.vnc.keymap:
-            LOG.warning('The option "[vnc] keymap" has been deprecated in '
-                        'favor of the VMWare-specific "[vmware] vnc_keymap" '
-                        'option. Please update nova.conf to address this '
-                        'change')
 
         self._datastore_regex = None
         if CONF.vmware.datastore_regex:
@@ -201,13 +196,6 @@ class VMwareVCDriver(driver.ComputeDriver):
                 self._datastore_regex = None
 
     def init_host(self, host):
-        LOG.warning('The vmwareapi driver is deprecated and may be removed in '
-                    'a future release. The driver is not tested by the '
-                    'OpenStack project nor does it have clear maintainer(s) '
-                    'and thus its quality can not be ensured. If you are '
-                    'using the driver in production please let us know in '
-                    'freenode IRC and/or the openstack-discuss mailing list.')
-
         vim = self._session.vim
         if vim is None:
             self._session._create_session()
@@ -623,7 +611,8 @@ class VMwareVCDriver(driver.ComputeDriver):
         if block_device_info is not None:
             try:
                 self._detach_instance_volumes(instance, block_device_info)
-            except vexc.ManagedObjectNotFoundException:
+            except (vexc.ManagedObjectNotFoundException,
+                    exception.InstanceNotFound):
                 LOG.warning('Instance does not exists. Proceeding to '
                             'delete instance properties on datastore',
                             instance=instance)
@@ -650,7 +639,11 @@ class VMwareVCDriver(driver.ComputeDriver):
         """Rescue the specified instance."""
         self._vmops.rescue(context, instance, network_info, image_meta)
 
-    def unrescue(self, instance, network_info):
+    def unrescue(
+        self,
+        context: nova_context.RequestContext,
+        instance: 'objects.Instance',
+    ):
         """Unrescue the specified instance."""
         self._vmops.unrescue(instance)
 

@@ -783,15 +783,13 @@ restricting flavors via host aggregates.
     cfg.ListOpt('enabled_perf_events',
                default=[],
                help= """
+Performance events to monitor and collect statistics for.
+
 This will allow you to specify a list of events to monitor low-level
-performance of guests, and collect related statsitics via the libvirt
-driver, which in turn uses the Linux kernel's `perf` infrastructure.
+performance of guests, and collect related statistics via the libvirt
+driver, which in turn uses the Linux kernel's ``perf`` infrastructure.
 With this config attribute set, Nova will generate libvirt guest XML to
-monitor the specified events.  For more information, refer to the
-"Performance monitoring events" section here:
-https://libvirt.org/formatdomain.html#elementsPerf.  And here:
-https://libvirt.org/html/libvirt-libvirt-domain.html -- look for
-``VIR_PERF_PARAM_*``
+monitor the specified events.
 
 For example, to monitor the count of CPU cycles (total/elapsed) and the
 count of cache misses, enable them as follows::
@@ -800,12 +798,11 @@ count of cache misses, enable them as follows::
     enabled_perf_events = cpu_clock, cache_misses
 
 Possible values: A string list.  The list of supported events can be
-found here: https://libvirt.org/formatdomain.html#elementsPerf.
+found `here`__. Note that Intel CMT events - ``cmt``, ``mbmbt`` and
+``mbml`` - are unsupported by recent Linux kernel versions (4.14+) and will be
+ignored by nova.
 
-Note that support for Intel CMT events (`cmt`, `mbmbt`, `mbml`) is
-deprecated, and will be removed in the "Stein" release.  That's because
-the upstream Linux kernel (from 4.14 onwards) has deleted support for
-Intel CMT, because it is broken by design.
+__ https://libvirt.org/formatdomain.html#elementsPerf.
 """),
     cfg.IntOpt('num_pcie_ports',
                default=0,
@@ -940,6 +937,50 @@ Create sparse logical volumes (with virtualsize) if this flag is set to True.
     cfg.StrOpt('images_rbd_ceph_conf',
                default='',  # default determined by librados
                help='Path to the ceph configuration file to use'),
+    cfg.StrOpt('images_rbd_glance_store_name',
+               default='',
+               help="""
+The name of the Glance store that represents the rbd cluster in use by
+this node. If set, this will allow Nova to request that Glance copy an
+image from an existing non-local store into the one named by this option
+before booting so that proper Copy-on-Write behavior is maintained.
+
+Related options:
+
+* images_type - must be set to ``rbd``
+* images_rbd_glance_copy_poll_interval - controls the status poll frequency
+* images_rbd_glance_copy_timeout - controls the overall copy timeout
+"""),
+    cfg.IntOpt('images_rbd_glance_copy_poll_interval',
+               default=15,
+               help="""
+The interval in seconds with which to poll Glance after asking for it
+to copy an image to the local rbd store. This affects how often we ask
+Glance to report on copy completion, and thus should be short enough that
+we notice quickly, but not too aggressive that we generate undue load on
+the Glance server.
+
+Related options:
+
+* images_type - must be set to ``rbd``
+* images_rbd_glance_store_name - must be set to a store name
+"""),
+    cfg.IntOpt('images_rbd_glance_copy_timeout',
+               default=600,
+               help="""
+The overall maximum time we will wait for Glance to complete an image
+copy to our local rbd store. This should be long enough to allow large
+images to be copied over the network link between our local store and the
+one where images typically reside. The downside of setting this too long
+is just to catch the case where the image copy is stalled or proceeding too
+slowly to be useful. Actual errors will be reported by Glance and noticed
+according to the poll interval.
+
+Related options:
+* images_type - must be set to ``rbd``
+* images_rbd_glance_store_name - must be set to a store name
+* images_rbd_glance_copy_poll_interval - controls the failure time-to-notice
+"""),
     cfg.StrOpt('hw_disk_discard',
                choices=('ignore', 'unmap'),
                help="""
@@ -1095,6 +1136,27 @@ The libvirt UUID of the secret for the rbd_user volumes.
                default=5,
                help="""
 The RADOS client timeout in seconds when initially connecting to the cluster.
+"""),
+    cfg.IntOpt('rbd_destroy_volume_retry_interval',
+               default=5,
+               min=0,
+               help="""
+Number of seconds to wait between each consecutive retry to destroy a
+RBD volume.
+
+Related options:
+
+* [libvirt]/images_type = 'rbd'
+"""),
+    cfg.IntOpt('rbd_destroy_volume_retries',
+               default=12,
+               min=0,
+               help="""
+Number of retries to destroy a RBD volume.
+
+Related options:
+
+* [libvirt]/images_type = 'rbd'
 """),
 ]
 
@@ -1362,6 +1424,49 @@ For example::
 ]
 
 
+libvirt_vtpm_opts = [
+    cfg.BoolOpt('swtpm_enabled',
+        default=False,
+        help="""
+Enable emulated TPM (Trusted Platform Module) in guests.
+"""),
+    cfg.StrOpt('swtpm_user',
+        default='tss',
+        help="""
+User that swtpm binary runs as.
+
+When using emulated TPM, the ``swtpm`` binary will run to emulate a TPM
+device. The user this binary runs as depends on libvirt configuration, with
+``tss`` being the default.
+
+In order to support cold migration and resize, nova needs to know what user
+the swtpm binary is running as in order to ensure that files get the proper
+ownership after being moved between nodes.
+
+Related options:
+
+* ``swtpm_group`` must also be set.
+"""),
+    cfg.StrOpt('swtpm_group',
+        default='tss',
+        help="""
+Group that swtpm binary runs as.
+
+When using emulated TPM, the ``swtpm`` binary will run to emulate a TPM
+device. The user this binary runs as depends on libvirt configuration, with
+``tss`` being the default.
+
+In order to support cold migration and resize, nova needs to know what group
+the swtpm binary is running as in order to ensure that files get the proper
+ownership after being moved between nodes.
+
+Related options:
+
+* ``swtpm_user`` must also be set.
+"""),
+]
+
+
 ALL_OPTS = list(itertools.chain(
     libvirt_general_opts,
     libvirt_imagebackend_opts,
@@ -1381,6 +1486,7 @@ ALL_OPTS = list(itertools.chain(
     libvirt_virtio_queue_sizes,
     libvirt_volume_nvmeof_opts,
     libvirt_pmem_opts,
+    libvirt_vtpm_opts,
 ))
 
 

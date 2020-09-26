@@ -2,21 +2,14 @@
 nova-api-metadata
 =================
 
---------------------------------
-Server for the Nova Metadata API
---------------------------------
-
-:Author: openstack@lists.openstack.org
-:Copyright: OpenStack Foundation
-:Manual section: 1
-:Manual group: cloud computing
+.. program:: nova-api-metadata
 
 Synopsis
 ========
 
 ::
 
-  nova-api-metadata [options]
+  nova-api-metadata [<options>...]
 
 Description
 ===========
@@ -36,7 +29,7 @@ Files
 
 * ``/etc/nova/nova.conf``
 * ``/etc/nova/api-paste.ini``
-* ``/etc/nova/policy.json``
+* ``/etc/nova/policy.yaml``
 * ``/etc/nova/rootwrap.conf``
 * ``/etc/nova/rootwrap.d/``
 

@@ -13,6 +13,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import ddt
 import fixtures
 import mock
 from oslo_utils.fixture import uuidsentinel as uuids
@@ -28,10 +29,10 @@ from nova import exception
 from nova.image import glance
 from nova import objects
 from nova import test
+from nova.tests import fixtures as nova_fixtures
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit import fake_block_device
 from nova.tests.unit import fake_instance
-from nova.tests.unit.image import fake
 
 
 CONF = nova.conf.CONF
@@ -48,6 +49,7 @@ class MockSetAdminPassword(object):
         self.password = password
 
 
+@ddt.ddt
 class ServerActionsControllerTestV21(test.TestCase):
     image_uuid = '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6'
     image_base_url = 'http://localhost:9292/images/'
@@ -67,8 +69,9 @@ class ServerActionsControllerTestV21(test.TestCase):
         self.stub_out('nova.objects.Instance.save', lambda *a, **kw: None)
 
         fakes.stub_out_compute_api_snapshot(self)
-        fake.stub_out_image_service(self)
+        self.useFixture(nova_fixtures.GlanceFixture(self))
         self.flags(enable_instance_password=True, group='api')
+        # TODO(stephenfin): Use uuidsentinel instead of this
         self._image_href = '155d900f-4e14-4e4c-a73d-069cbf4541e6'
 
         self.controller = self._get_controller()
@@ -87,7 +90,7 @@ class ServerActionsControllerTestV21(test.TestCase):
         self.image_api = glance.API()
         # Assume that anything that hits the compute API and looks for a
         # RequestSpec doesn't care about it, since testing logic that deep
-        # should be done in nova.tests.unit.compute.test_compute_api.
+        # should be done in nova.tests.unit.compute.test_api.
         mock_reqspec = mock.patch('nova.objects.RequestSpec')
         mock_reqspec.start()
         self.addCleanup(mock_reqspec.stop)
@@ -379,12 +382,22 @@ class ServerActionsControllerTestV21(test.TestCase):
         # pep3333 requires applications produces headers which are str
         self.assertEqual(str, type(robj['location']))
 
+    @ddt.data(
+        exception.InstanceIsLocked(instance_uuid=uuids.instance),
+        exception.OperationNotSupportedForVTPM(
+            instance_uuid=uuids.instance, operation='foo'),
+    )
+    @mock.patch('nova.compute.api.API.rebuild')
+    def test_rebuild__http_conflict_error(self, exc, mock_rebuild):
+        mock_rebuild.side_effect = exc
+        self.assertRaises(
+            webob.exc.HTTPConflict,
+            self.controller._action_rebuild,
+            self.req, uuids.instance,
+            body={'rebuild': {'imageRef': uuids.image}})
+
     def test_rebuild_raises_conflict_on_invalid_state(self):
-        body = {
-            "rebuild": {
-                "imageRef": self._image_href,
-            },
-        }
+        body = {'rebuild': {'imageRef': uuids.image}}
 
         def fake_rebuild(*args, **kwargs):
             raise exception.InstanceInvalidState(attr='fake_attr',
@@ -578,7 +591,7 @@ class ServerActionsControllerTestV21(test.TestCase):
 
             return image_meta
 
-        self.stub_out('nova.tests.unit.image.fake._FakeImageService.show',
+        self.stub_out('nova.tests.fixtures.GlanceFixture.show',
                       return_image_meta)
         body = {
             "rebuild": {
@@ -630,7 +643,7 @@ class ServerActionsControllerTestV21(test.TestCase):
 
             return image_meta
 
-        self.stub_out('nova.tests.unit.image.fake._FakeImageService.show',
+        self.stub_out('nova.tests.fixtures.GlanceFixture.show',
                       return_image_meta)
         self.stub_out('nova.compute.api.API.get', wrap_get)
         self.stub_out('nova.objects.Instance.save', fake_save)
@@ -667,6 +680,21 @@ class ServerActionsControllerTestV21(test.TestCase):
         }
 
         mock_rebuild.side_effect = exception.InvalidArchitectureName('arm64')
+
+        self.assertRaises(webob.exc.HTTPBadRequest,
+                          self.controller._action_rebuild,
+                          self.req, FAKE_UUID, body=body)
+
+    @mock.patch.object(compute_api.API, 'rebuild')
+    def test_rebuild_raise_invalid_volume_exc(self, mock_rebuild):
+        """Make sure that we can't rebuild with an InvalidVolume exception."""
+        body = {
+            "rebuild": {
+                "imageRef": self._image_href,
+            },
+        }
+
+        mock_rebuild.side_effect = exception.InvalidVolume('error')
 
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller._action_rebuild,

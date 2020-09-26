@@ -29,7 +29,9 @@ from oslo_utils import importutils
 import six
 
 import nova.conf
+from nova import context as nova_context
 from nova.i18n import _
+from nova import objects
 from nova.virt import event as virtevent
 
 CONF = nova.conf.CONF
@@ -136,8 +138,8 @@ class ComputeDriver(object):
     """Base class for compute drivers.
 
     The interface to this class talks in terms of 'instances' (Amazon EC2 and
-    internal Nova terminology), by which we mean 'running virtual machine'
-    (XenAPI terminology) or domain (Xen or libvirt terminology).
+    internal Nova terminology), by which we mean 'running virtual machine' or
+    domain (libvirt terminology).
 
     An instance has an ID, which is the identifier chosen by Nova to represent
     the instance further up the stack.  This is unfortunately also called a
@@ -180,6 +182,7 @@ class ComputeDriver(object):
         "supports_pcpus": False,
         "supports_accelerators": False,
         "supports_bfv_rescue": False,
+        "supports_vtpm": False,
 
         # Image type support flags
         "supports_image_type_aki": False,
@@ -283,7 +286,7 @@ class ComputeDriver(object):
                 admin_password, allocations, bdms, detach_block_devices,
                 attach_block_devices, network_info=None,
                 evacuate=False, block_device_info=None,
-                preserve_ephemeral=False):
+                preserve_ephemeral=False, accel_uuids=None):
         """Destroy and re-make this instance.
 
         A 'rebuild' effectively purges all existing data from the system and
@@ -320,6 +323,7 @@ class ComputeDriver(object):
                                   attached to the instance.
         :param preserve_ephemeral: True if the default ephemeral storage
                                    partition must be preserved on rebuild
+        :param accel_uuids: Accelerator UUIDs.
         """
         raise NotImplementedError()
 
@@ -455,6 +459,8 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
+    # TODO(stephenfin): This was only implemented (properly) for XenAPI and
+    # should be removed.
     def get_console_pool_info(self, console_type):
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
@@ -542,6 +548,8 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
+    # TODO(stephenfin): This was only implemented (properly) for XenAPI and
+    # should be removed.
     def get_all_bw_counters(self, instances):
         """Return bandwidth usage counters for each interface on each
            running VM.
@@ -722,6 +730,8 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
+    # TODO(stephenfin): This was only implemented (properly) for XenAPI and
+    # should be removed.
     def post_interrupted_snapshot_cleanup(self, context, instance):
         """Cleans up any resources left after an interrupted snapshot.
 
@@ -872,6 +882,8 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
+    # TODO(stephenfin): This was only implemented (properly) for XenAPI and
+    # should be removed.
     def set_bootable(self, instance, is_bootable):
         """Set the ability to power on/off an instance.
 
@@ -879,12 +891,16 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
-    def unrescue(self, instance, network_info):
+    def unrescue(
+        self,
+        context: nova_context.RequestContext,
+        instance: 'objects.Instance',
+    ):
         """Unrescue the specified instance.
 
+        :param context: security context
         :param instance: nova.objects.instance.Instance
         """
-        # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
     def power_off(self, instance, timeout=0, retry_interval=0):
@@ -1338,6 +1354,8 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
+    # TODO(stephenfin): This was only implemented (properly) for XenAPI and
+    # should be removed.
     def reset_network(self, instance):
         """reset networking for specified instance."""
         # TODO(Vek): Need to pass context in for access to auth_token
@@ -1351,21 +1369,8 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
-    def inject_file(self, instance, b64_path, b64_contents):
-        """Writes a file on the specified instance.
-
-        The first parameter is an instance of nova.compute.service.Instance,
-        and so the instance is being specified as instance.name. The second
-        parameter is the base64-encoded path to which the file is to be
-        written on the instance; the third is the contents of the file, also
-        base64-encoded.
-
-        NOTE(russellb) This method is deprecated and will be removed once it
-        can be removed from nova.compute.manager.
-        """
-        # TODO(Vek): Need to pass context in for access to auth_token
-        raise NotImplementedError()
-
+    # TODO(stephenfin): This was only implemented (properly) for XenAPI and
+    # should be removed.
     def change_instance_metadata(self, context, instance, diff):
         """Applies a diff to the instance metadata.
 
@@ -1521,10 +1526,9 @@ class ComputeDriver(object):
 
         All counters are long integers.
 
-        This method is optional.  On some platforms (e.g. XenAPI) performance
-        statistics can be retrieved directly in aggregate form, without Nova
-        having to do the aggregation.  On those platforms, this method is
-        unused.
+        This method is optional.  On some platforms performance statistics can
+        be retrieved directly in aggregate form, without Nova having to do the
+        aggregation.  On those platforms, this method is unused.
 
         Note that this function takes an instance ID.
 
@@ -1565,6 +1569,8 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
+    # TODO(stephenfin): This was only implemented (properly) for XenAPI and
+    # should be removed.
     def add_to_aggregate(self, context, aggregate, host, **kwargs):
         """Add a compute host to an aggregate.
 
@@ -1584,6 +1590,8 @@ class ComputeDriver(object):
         # NOTE(jogo) Currently only used for XenAPI-Pool
         raise NotImplementedError()
 
+    # TODO(stephenfin): This was only implemented (properly) for XenAPI and
+    # should be removed.
     def remove_from_aggregate(self, context, aggregate, host, **kwargs):
         """Remove a compute host from an aggregate.
 
@@ -1602,6 +1610,8 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
+    # TODO(stephenfin): This was only implemented (properly) for XenAPI and
+    # should be removed.
     def undo_aggregate_operation(self, context, op, aggregate,
                                   host, set_error=True):
         """Undo for Resource Pools."""
@@ -1640,6 +1650,8 @@ class ComputeDriver(object):
         # Refresh and check again.
         return nodename in self.get_available_nodes(refresh=True)
 
+    # TODO(stephenfin): This was only implemented (properly) for XenAPI and
+    # should be removed.
     def get_per_instance_usage(self):
         """Get information about instance resource usage.
 
@@ -1863,6 +1875,17 @@ class ComputeDriver(object):
         """
         return False
 
+    def cleanup_lingering_instance_resources(self, instance):
+        """Cleanup resources occupied by lingering instance.
+
+        For example, cleanup other specific resources or whatever we
+        add in the future.
+
+        :param instance: nova.objects.instance.Instance
+        :returns: True if the cleanup is successful, else false.
+        """
+        return True
+
 
 def load_compute_driver(virtapi, compute_driver=None):
     """Load a compute driver module.
@@ -1894,13 +1917,9 @@ def load_compute_driver(virtapi, compute_driver=None):
             return driver
         raise ValueError()
     except ImportError:
-        LOG.exception(_("Unable to load the virtualization driver"))
+        LOG.exception("Unable to load the virtualization driver")
         sys.exit(1)
     except ValueError:
         LOG.exception("Compute driver '%s' from 'nova.virt' is not of type "
                       "'%s'", compute_driver, str(ComputeDriver))
         sys.exit(1)
-
-
-def is_xenapi():
-    return CONF.compute_driver == 'xenapi.XenAPIDriver'

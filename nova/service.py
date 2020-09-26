@@ -34,7 +34,7 @@ import nova.conf
 from nova import context
 from nova import debugger
 from nova import exception
-from nova.i18n import _, _LE, _LI, _LW
+from nova.i18n import _
 from nova import objects
 from nova.objects import base as objects_base
 from nova.objects import service as service_obj
@@ -71,8 +71,8 @@ def _create_service_ref(this_service, context):
 
 def _update_service_ref(service):
     if service.version != service_obj.SERVICE_VERSION:
-        LOG.info(_LI('Updating service version for %(binary)s on '
-                     '%(host)s from %(old)i to %(new)i'),
+        LOG.info('Updating service version for %(binary)s on '
+                 '%(host)s from %(old)i to %(new)i',
                  {'binary': service.binary,
                   'host': service.host,
                   'old': service.version,
@@ -89,18 +89,7 @@ def setup_profiler(binary, host):
             project="nova",
             service=binary,
             host=host)
-        LOG.info(_LI("OSProfiler is enabled."))
-
-
-def assert_eventlet_uses_monotonic_clock():
-    from eventlet import hubs
-    import monotonic
-
-    hub = hubs.get_hub()
-    if hub.clock is not monotonic.monotonic:
-        raise RuntimeError(
-            'eventlet hub is not using a monotonic clock - '
-            'periodic tasks will be affected by drifts of system time.')
+        LOG.info("OSProfiler is enabled.")
 
 
 class Service(service.Service):
@@ -163,10 +152,8 @@ class Service(service.Service):
         # outside of oslo.db.
         context.CELL_CACHE = {}
 
-        assert_eventlet_uses_monotonic_clock()
-
         verstr = version.version_string_with_package()
-        LOG.info(_LI('Starting %(topic)s node (version %(version)s)'),
+        LOG.info('Starting %(topic)s node (version %(version)s)',
                   {'topic': self.topic, 'version': verstr})
         self.basic_config_check()
         self.manager.init_host()
@@ -282,7 +269,7 @@ class Service(service.Service):
         try:
             self.service_ref.destroy()
         except exception.NotFound:
-            LOG.warning(_LW('Service killed that has no database entry'))
+            LOG.warning('Service killed that has no database entry')
 
     def stop(self):
         """stop the service and clean up."""
@@ -295,7 +282,7 @@ class Service(service.Service):
         try:
             self.manager.cleanup_host()
         except Exception:
-            LOG.exception(_LE('Service error occurred during cleanup_host'))
+            LOG.exception('Service error occurred during cleanup_host')
             pass
 
         super(Service, self).stop()
@@ -312,7 +299,7 @@ class Service(service.Service):
             with utils.tempdir():
                 pass
         except Exception as e:
-            LOG.error(_LE('Temporary directory is invalid: %s'), e)
+            LOG.error('Temporary directory is invalid: %s', e)
             sys.exit(1)
 
     def reset(self):

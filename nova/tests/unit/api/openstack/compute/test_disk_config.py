@@ -17,7 +17,6 @@ import datetime
 
 import mock
 from oslo_serialization import jsonutils
-import six
 
 from nova.api.openstack import compute
 from nova.compute import api as compute_api
@@ -25,9 +24,9 @@ from nova import context as nova_context
 from nova import exception
 from nova import objects
 from nova import test
+from nova.tests import fixtures
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit import fake_instance
-import nova.tests.unit.image.fake
 
 
 MANUAL_INSTANCE_UUID = fakes.FAKE_UUID
@@ -96,18 +95,12 @@ class DiskConfigTestCaseV21(test.TestCase):
         self.app = compute.APIRouterV21()
 
     def _get_expected_msg_for_invalid_disk_config(self):
-        if six.PY3:
-            return ('{{"badRequest": {{"message": "Invalid input for'
-                    ' field/attribute {0}. Value: {1}. \'{1}\' is'
-                    ' not one of [\'AUTO\', \'MANUAL\']", "code": 400}}}}')
-        else:
-            return ('{{"badRequest": {{"message": "Invalid input for'
-                    ' field/attribute {0}. Value: {1}. u\'{1}\' is'
-                    ' not one of [\'AUTO\', \'MANUAL\']", "code": 400}}}}')
+        return ('{{"badRequest": {{"message": "Invalid input for'
+                ' field/attribute {0}. Value: {1}. \'{1}\' is'
+                ' not one of [\'AUTO\', \'MANUAL\']", "code": 400}}}}')
 
     def _setup_fake_image_service(self):
-        self.image_service = nova.tests.unit.image.fake.stub_out_image_service(
-                self)
+        self.image_service = self.useFixture(fixtures.GlanceFixture(self))
         timestamp = datetime.datetime(2011, 1, 1, 1, 2, 3)
         image = {'id': '88580842-f50a-11e2-8d3a-f23c91aec05e',
                  'name': 'fakeimage7',
@@ -122,10 +115,6 @@ class DiskConfigTestCaseV21(test.TestCase):
                  'size': '74185822',
                  'properties': {'auto_disk_config': 'Disabled'}}
         self.image_service.create(None, image)
-
-    def tearDown(self):
-        super(DiskConfigTestCaseV21, self).tearDown()
-        nova.tests.unit.image.fake.FakeImageService_reset()
 
     def assertDiskConfig(self, dict_, value):
         self.assertIn(API_DISK_CONFIG, dict_)

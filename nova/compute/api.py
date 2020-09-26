@@ -58,7 +58,6 @@ from nova.db import base
 from nova.db.sqlalchemy import api as db_api
 from nova import exception
 from nova import exception_wrapper
-from nova import hooks
 from nova.i18n import _
 from nova.image import glance
 from nova.network import constants
@@ -106,6 +105,11 @@ AGGREGATE_ACTION_ADD = 'Add'
 MIN_COMPUTE_SYNC_COMPUTE_STATUS_DISABLED = 38
 MIN_COMPUTE_CROSS_CELL_RESIZE = 47
 MIN_COMPUTE_SAME_HOST_COLD_MIGRATE = 48
+
+# TODO(huaqiang): Remove in Wallaby
+MIN_VER_NOVA_COMPUTE_MIXED_POLICY = 52
+
+SUPPORT_ACCELERATOR_SERVICE_FOR_REBUILD = 53
 
 # FIXME(danms): Keep a global cache of the cells we find the
 # first time we look. This needs to be refreshed on a timer or
@@ -227,18 +231,38 @@ def check_instance_lock(function):
 
 
 def reject_sev_instances(operation):
-    """Decorator.  Raise OperationNotSupportedForSEV if instance has SEV
-    enabled.
+    """Reject requests to decorated function if instance has SEV enabled.
+
+    Raise OperationNotSupportedForSEV if instance has SEV enabled.
     """
 
     def outer(f):
-        @six.wraps(f)
+        @functools.wraps(f)
         def inner(self, context, instance, *args, **kw):
             if hardware.get_mem_encryption_constraint(instance.flavor,
                                                       instance.image_meta):
                 raise exception.OperationNotSupportedForSEV(
                     instance_uuid=instance.uuid,
                     operation=operation)
+            return f(self, context, instance, *args, **kw)
+        return inner
+    return outer
+
+
+def reject_vtpm_instances(operation):
+    """Reject requests to decorated function if instance has vTPM enabled.
+
+    Raise OperationNotSupportedForVTPM if instance has vTPM enabled.
+    """
+
+    def outer(f):
+        @functools.wraps(f)
+        def inner(self, context, instance, *args, **kw):
+            if hardware.get_vtpm_constraint(
+                instance.flavor, instance.image_meta,
+            ):
+                raise exception.OperationNotSupportedForVTPM(
+                    instance_uuid=instance.uuid, operation=operation)
             return f(self, context, instance, *args, **kw)
         return inner
     return outer
@@ -285,14 +309,27 @@ def _get_image_meta_obj(image_meta_dict):
     return image_meta
 
 
-def block_accelerators(func):
-    @functools.wraps(func)
-    def wrapper(self, context, instance, *args, **kwargs):
-        dp_name = instance.flavor.extra_specs.get('accel:device_profile')
-        if dp_name:
-            raise exception.ForbiddenWithAccelerators()
-        return func(self, context, instance, *args, **kwargs)
-    return wrapper
+def block_accelerators(until_service=None):
+    def inner(func):
+        @functools.wraps(func)
+        def wrapper(self, context, instance, *args, **kwargs):
+            # NOTE(brinzhang): Catch a request operating a mixed instance,
+            # make sure all nova-compute services have been upgraded and
+            # support the accelerators.
+            dp_name = instance.flavor.extra_specs.get('accel:device_profile')
+            service_support = False
+            if not dp_name:
+                service_support = True
+            elif until_service:
+                min_version = objects.service.get_minimum_version_all_cells(
+                    nova_context.get_admin_context(), ['nova-compute'])
+                if min_version >= until_service:
+                    service_support = True
+            if not service_support:
+                raise exception.ForbiddenWithAccelerators()
+            return func(self, context, instance, *args, **kwargs)
+        return wrapper
+    return inner
 
 
 @profiler.trace_cls("compute_api")
@@ -590,7 +627,12 @@ class API(base.Base):
             return
 
         image_properties = image.get('properties', {})
-        if image_properties.get('cinder_encryption_key_id'):
+        # NOTE(lyarwood) Skip this check when image_id is None indicating that
+        # the instance is booting from a volume that was itself initially
+        # created from an image. As such we don't care if
+        # cinder_encryption_key_id was against the original image as we are now
+        # booting from an encrypted volume.
+        if image_properties.get('cinder_encryption_key_id') and image_id:
             reason = _('Direct booting of an image uploaded from an '
                        'encrypted volume is unsupported.')
             raise exception.ImageUnacceptable(image_id=image_id,
@@ -712,6 +754,28 @@ class API(base.Base):
             image, instance_type, validate_numa=validate_numa,
             validate_pci=validate_pci)
 
+    # TODO(huaqiang): Remove in Wallaby when there is no nova-compute node
+    # having a version prior to Victoria.
+    @staticmethod
+    def _check_compute_service_for_mixed_instance(numa_topology):
+        """Check if the nova-compute service is ready to support mixed instance
+        when the CPU allocation policy is 'mixed'.
+        """
+        # No need to check the instance with no NUMA topology associated with.
+        if numa_topology is None:
+            return
+
+        # No need to check if instance CPU policy is not 'mixed'
+        if numa_topology.cpu_policy != fields_obj.CPUAllocationPolicy.MIXED:
+            return
+
+        # Catch a request creating a mixed instance, make sure all nova-compute
+        # service have been upgraded and support the mixed policy.
+        minimal_version = objects.service.get_minimum_version_all_cells(
+            nova_context.get_admin_context(), ['nova-compute'])
+        if minimal_version < MIN_VER_NOVA_COMPUTE_MIXED_POLICY:
+            raise exception.MixedInstanceNotSupportByComputeService()
+
     @staticmethod
     def _validate_flavor_image_numa_pci(image, instance_type,
                                         validate_numa=True,
@@ -746,8 +810,7 @@ class API(base.Base):
         # Only validate values of flavor/image so the return results of
         # following 'get' functions are not used.
         hardware.get_number_of_serial_ports(instance_type, image_meta)
-        if hardware.is_realtime_enabled(instance_type):
-            hardware.vcpus_realtime_topology(instance_type, image_meta)
+        hardware.get_realtime_cpu_constraint(instance_type, image_meta)
         hardware.get_cpu_topology_constraints(instance_type, image_meta)
         if validate_numa:
             hardware.numa_get_constraints(instance_type, image_meta)
@@ -1435,7 +1498,7 @@ class API(base.Base):
                         "when booting from volume")
                 raise exception.CertificateValidationFailed(message=msg)
             image_id = None
-            boot_meta = utils.get_bdm_image_metadata(
+            boot_meta = block_device.get_bdm_image_metadata(
                 context, self.image_api, self.volume_api, block_device_mapping,
                 legacy_bdm)
 
@@ -1450,6 +1513,12 @@ class API(base.Base):
                     user_data, metadata, access_ip_v4, access_ip_v6,
                     requested_networks, config_drive, auto_disk_config,
                     reservation_id, max_count, supports_port_resource_request)
+
+        # TODO(huaqiang): Remove in Wallaby
+        # check nova-compute nodes have been updated to Victoria to support the
+        # mixed CPU policy for creating a new instance.
+        numa_topology = base_options.get('numa_topology')
+        self._check_compute_service_for_mixed_instance(numa_topology)
 
         # max_net_count is the maximum number of instances requested by the
         # user adjusted for any network quota constraints, including
@@ -1742,6 +1811,13 @@ class API(base.Base):
                     "(source: 'blank', dest: 'volume') need to have non-zero "
                     "size"))
 
+            # NOTE(lyarwood): Ensure the disk_bus is at least known to Nova.
+            # The virt driver may reject this later but for now just ensure
+            # it's listed as an acceptable value of the DiskBus field class.
+            disk_bus = bdm.disk_bus if 'disk_bus' in bdm else None
+            if disk_bus and disk_bus not in fields_obj.DiskBus.ALL:
+                raise exception.InvalidBDMDiskBus(disk_bus=disk_bus)
+
         ephemeral_size = sum(bdm.volume_size or instance_type['ephemeral_gb']
                 for bdm in block_device_mappings
                 if block_device.new_format_is_ephemeral(bdm))
@@ -1928,7 +2004,6 @@ class API(base.Base):
                         "is specified.")
                 raise exception.InvalidFixedIpAndMaxCountRequest(reason=msg)
 
-    @hooks.add_hook("create_instance")
     def create(self, context, instance_type,
                image_href, kernel_id=None, ramdisk_id=None,
                min_count=None, max_count=None,
@@ -3337,7 +3412,8 @@ class API(base.Base):
             if img_arch:
                 fields_obj.Architecture.canonicalize(img_arch)
 
-    @block_accelerators
+    @reject_vtpm_instances(instance_actions.REBUILD)
+    @block_accelerators(until_service=SUPPORT_ACCELERATOR_SERVICE_FOR_REBUILD)
     # TODO(stephenfin): We should expand kwargs out to named args
     @check_instance_lock
     @check_instance_state(vm_state=[vm_states.ACTIVE, vm_states.STOPPED,
@@ -3439,6 +3515,12 @@ class API(base.Base):
         self._checks_for_create_and_rebuild(context, image_id, image,
                 flavor, metadata, files_to_inject, root_bdm)
 
+        # Check the state of the volume. If it is not in-use, an exception
+        # will occur when creating attachment during reconstruction,
+        # resulting in the failure of reconstruction and the instance
+        # turning into an error state.
+        self._check_volume_status(context, bdms)
+
         # NOTE(sean-k-mooney): When we rebuild with a new image we need to
         # validate that the NUMA topology does not change as we do a NOOP claim
         # in resource tracker. As such we cannot allow the resource usage or
@@ -3471,6 +3553,8 @@ class API(base.Base):
             # Add the new ones
             new_sys_metadata = utils.get_system_metadata_from_image(
                 image, flavor)
+
+            new_sys_metadata.update({'image_base_image_ref': image_id})
 
             instance.system_metadata.update(new_sys_metadata)
             instance.save()
@@ -3537,6 +3621,17 @@ class API(base.Base):
                 orig_sys_metadata=orig_sys_metadata, bdms=bdms,
                 preserve_ephemeral=preserve_ephemeral, host=host,
                 request_spec=request_spec)
+
+    def _check_volume_status(self, context, bdms):
+        """Check whether the status of the volume is "in-use".
+
+        :param context: A context.RequestContext
+        :param bdms: BlockDeviceMappingList of BDMs for the instance
+        """
+        for bdm in bdms:
+            if bdm.volume_id:
+                vol = self.volume_api.get(context, bdm.volume_id)
+                self.volume_api.check_attached(context, vol)
 
     @staticmethod
     def _validate_numa_rebuild(instance, image, flavor):
@@ -3702,10 +3797,40 @@ class API(base.Base):
                                               migration.dest_compute,
                                               reqspec)
 
+    @staticmethod
+    def _get_source_compute_service(context, migration):
+        """Find the source compute Service object given the Migration.
+
+        :param context: nova auth RequestContext target at the destination
+            compute cell
+        :param migration: Migration object for the move operation
+        :return: Service object representing the source host nova-compute
+        """
+        if migration.cross_cell_move:
+            # The source compute could be in another cell so look up the
+            # HostMapping to determine the source cell.
+            hm = objects.HostMapping.get_by_host(
+                context, migration.source_compute)
+            with nova_context.target_cell(context, hm.cell_mapping) as cctxt:
+                return objects.Service.get_by_compute_host(
+                    cctxt, migration.source_compute)
+        # Same-cell migration so just use the context we have.
+        return objects.Service.get_by_compute_host(
+            context, migration.source_compute)
+
     @check_instance_lock
     @check_instance_state(vm_state=[vm_states.RESIZED])
     def confirm_resize(self, context, instance, migration=None):
-        """Confirms a migration/resize and deletes the 'old' instance."""
+        """Confirms a migration/resize and deletes the 'old' instance.
+
+        :param context: nova auth RequestContext
+        :param instance: Instance object to confirm the resize
+        :param migration: Migration object; provided if called from the
+            _poll_unconfirmed_resizes periodic task on the dest compute.
+        :raises: MigrationNotFound if migration is not provided and a migration
+            cannot be found for the instance with status "finished".
+        :raises: ServiceUnavailable if the source compute service is down.
+        """
         elevated = context.elevated()
         # NOTE(melwitt): We're not checking quota here because there isn't a
         # change in resource usage when confirming a resize. Resource
@@ -3715,6 +3840,13 @@ class API(base.Base):
         if migration is None:
             migration = objects.Migration.get_by_instance_and_status(
                 elevated, instance.uuid, 'finished')
+
+        # Check if the source compute service is up before modifying the
+        # migration record because once we do we cannot come back through this
+        # method since it will be looking for a "finished" status migration.
+        source_svc = self._get_source_compute_service(context, migration)
+        if not self.servicegroup_api.service_is_up(source_svc):
+            raise exception.ServiceUnavailable()
 
         migration.status = 'confirming'
         migration.save()
@@ -3816,7 +3948,9 @@ class API(base.Base):
 
         return node
 
-    @block_accelerators
+    # TODO(stephenfin): This logic would be so much easier to grok if we
+    # finally split resize and cold migration into separate code paths
+    @block_accelerators()
     @check_instance_lock
     @check_instance_state(vm_state=[vm_states.ACTIVE, vm_states.STOPPED])
     @check_instance_host(check_is_up=True)
@@ -3851,6 +3985,12 @@ class API(base.Base):
         else:
             new_instance_type = flavors.get_flavor_by_flavor_id(
                     flavor_id, read_deleted="no")
+            # NOTE(wenping): We use this instead of the 'block_accelerator'
+            # decorator since the operation can differ depending on args,
+            # and for resize we have two flavors to worry about, we should
+            # reject resize with new flavor with accelerator.
+            if new_instance_type.extra_specs.get('accel:device_profile'):
+                raise exception.ForbiddenWithAccelerators()
             # Check to see if we're resizing to a zero-disk flavor which is
             # only supported with volume-backed servers.
             if (new_instance_type.get('root_gb') == 0 and
@@ -3919,6 +4059,12 @@ class API(base.Base):
         if not same_instance_type:
             request_spec.numa_topology = hardware.numa_get_constraints(
                 new_instance_type, instance.image_meta)
+            # TODO(huaqiang): Remove in Wallaby
+            # check nova-compute nodes have been updated to Victoria to resize
+            # instance to a new mixed instance from a dedicated or shared
+            # instance.
+            self._check_compute_service_for_mixed_instance(
+                request_spec.numa_topology)
 
         instance.task_state = task_states.RESIZE_PREP
         instance.progress = 0
@@ -4013,7 +4159,8 @@ class API(base.Base):
             allow_same_host = CONF.allow_resize_to_same_host
         return allow_same_host
 
-    @block_accelerators
+    @reject_vtpm_instances(instance_actions.SHELVE)
+    @block_accelerators()
     @check_instance_lock
     @check_instance_state(vm_state=[vm_states.ACTIVE, vm_states.STOPPED,
                                     vm_states.PAUSED, vm_states.SUSPENDED])
@@ -4024,6 +4171,14 @@ class API(base.Base):
         hypervisor.
         """
         instance.task_state = task_states.SHELVING
+
+        # NOTE(aarents): Ensure image_base_image_ref is present as it will be
+        # needed during unshelve and instance rebuild done before Bug/1893618
+        # Fix dropped it.
+        instance.system_metadata.update(
+                {'image_base_image_ref': instance.image_ref}
+        )
+
         instance.save(expected_task_state=[None])
 
         self._record_action_start(context, instance, instance_actions.SHELVE)
@@ -4178,7 +4333,7 @@ class API(base.Base):
         return self.compute_rpcapi.get_instance_diagnostics(context,
                                                             instance=instance)
 
-    @block_accelerators
+    @block_accelerators()
     @reject_sev_instances(instance_actions.SUSPEND)
     @check_instance_lock
     @check_instance_state(vm_state=[vm_states.ACTIVE])
@@ -4198,6 +4353,7 @@ class API(base.Base):
         self._record_action_start(context, instance, instance_actions.RESUME)
         self.compute_rpcapi.resume_instance(context, instance)
 
+    @reject_vtpm_instances(instance_actions.RESCUE)
     @check_instance_lock
     @check_instance_state(vm_state=[vm_states.ACTIVE, vm_states.STOPPED,
                                     vm_states.ERROR])
@@ -4229,10 +4385,7 @@ class API(base.Base):
 
         bdms = objects.BlockDeviceMappingList.get_by_instance_uuid(
                     context, instance.uuid)
-        for bdm in bdms:
-            if bdm.volume_id:
-                vol = self.volume_api.get(context, bdm.volume_id)
-                self.volume_api.check_attached(context, vol)
+        self._check_volume_status(context, bdms)
 
         volume_backed = compute_utils.is_volume_backed_instance(
             context, instance, bdms)
@@ -4634,27 +4787,6 @@ class API(base.Base):
                                    supports_multiattach=supports_multiattach,
                                    delete_on_termination=delete_on_termination)
 
-    # TODO(stephenfin): Fold this back in now that cells v1 no longer needs to
-    # override it.
-    def _detach_volume(self, context, instance, volume):
-        """Detach volume from instance.
-
-        This method is separated to make it easier for cells version
-        to override.
-        """
-        try:
-            self.volume_api.begin_detaching(context, volume['id'])
-        except exception.InvalidInput as exc:
-            raise exception.InvalidVolume(reason=exc.format_message())
-        attachments = volume.get('attachments', {})
-        attachment_id = None
-        if attachments and instance.uuid in attachments:
-            attachment_id = attachments[instance.uuid]['attachment_id']
-        self._record_action_start(
-            context, instance, instance_actions.DETACH_VOLUME)
-        self.compute_rpcapi.detach_volume(context, instance=instance,
-                volume_id=volume['id'], attachment_id=attachment_id)
-
     def _detach_volume_shelved_offloaded(self, context, instance, volume):
         """Detach a volume from an instance in shelved offloaded state.
 
@@ -4694,7 +4826,18 @@ class API(base.Base):
         if instance.vm_state == vm_states.SHELVED_OFFLOADED:
             self._detach_volume_shelved_offloaded(context, instance, volume)
         else:
-            self._detach_volume(context, instance, volume)
+            try:
+                self.volume_api.begin_detaching(context, volume['id'])
+            except exception.InvalidInput as exc:
+                raise exception.InvalidVolume(reason=exc.format_message())
+            attachments = volume.get('attachments', {})
+            attachment_id = None
+            if attachments and instance.uuid in attachments:
+                attachment_id = attachments[instance.uuid]['attachment_id']
+            self._record_action_start(
+                context, instance, instance_actions.DETACH_VOLUME)
+            self.compute_rpcapi.detach_volume(context, instance=instance,
+                    volume_id=volume['id'], attachment_id=attachment_id)
 
     def _count_attachments_for_swap(self, ctxt, volume):
         """Counts the number of attachments for a swap-related volume.
@@ -4894,7 +5037,8 @@ class API(base.Base):
                                                      diff=diff)
         return _metadata
 
-    @block_accelerators
+    @block_accelerators()
+    @reject_vtpm_instances(instance_actions.LIVE_MIGRATION)
     @reject_sev_instances(instance_actions.LIVE_MIGRATION)
     @check_instance_lock
     @check_instance_state(vm_state=[vm_states.ACTIVE, vm_states.PAUSED])
@@ -5024,7 +5168,8 @@ class API(base.Base):
         self.compute_rpcapi.live_migration_abort(context,
                 instance, migration.id)
 
-    @block_accelerators
+    @reject_vtpm_instances(instance_actions.EVACUATE)
+    @block_accelerators(until_service=SUPPORT_ACCELERATOR_SERVICE_FOR_REBUILD)
     @check_instance_state(vm_state=[vm_states.ACTIVE, vm_states.STOPPED,
                                     vm_states.ERROR])
     def evacuate(self, context, instance, host, on_shared_storage,
@@ -5058,12 +5203,10 @@ class API(base.Base):
 
         # NOTE(danms): Create this as a tombstone for the source compute
         # to find and cleanup. No need to pass it anywhere else.
-        migration = objects.Migration(context,
-                                      source_compute=instance.host,
-                                      source_node=instance.node,
-                                      instance_uuid=instance.uuid,
-                                      status='accepted',
-                                      migration_type='evacuation')
+        migration = objects.Migration(
+            context, source_compute=instance.host, source_node=instance.node,
+            instance_uuid=instance.uuid, status='accepted',
+            migration_type=fields_obj.MigrationType.EVACUATION)
         if host:
             migration.dest_compute = host
         migration.create()
@@ -6053,9 +6196,11 @@ class AggregateAPI(base.Base):
 
         aggregate.add_host(host_name)
         self.query_client.update_aggregates(context, [aggregate])
+        nodes = objects.ComputeNodeList.get_all_by_host(context, host_name)
+        node_name = nodes[0].hypervisor_hostname
         try:
             self.placement_client.aggregate_add_host(
-                context, aggregate.uuid, host_name=host_name)
+                context, aggregate.uuid, host_name=node_name)
         except (exception.ResourceProviderNotFound,
                 exception.ResourceProviderAggregateRetrievalFailed,
                 exception.ResourceProviderUpdateFailed,
@@ -6069,7 +6214,7 @@ class AggregateAPI(base.Base):
             LOG.warning("Failed to associate %s with a placement "
                         "aggregate: %s. This may be corrected after running "
                         "nova-manage placement sync_aggregates.",
-                        host_name, err)
+                        node_name, err)
         self._update_az_cache_for_host(context, host_name, aggregate.metadata)
         # NOTE(jogo): Send message to host to support resource pools
         self.compute_rpcapi.add_aggregate_host(context,
@@ -6107,11 +6252,13 @@ class AggregateAPI(base.Base):
         # we change anything on the nova side because if we did the nova stuff
         # first we can't re-attempt this from the compute API if cleaning up
         # placement fails.
+        nodes = objects.ComputeNodeList.get_all_by_host(context, host_name)
+        node_name = nodes[0].hypervisor_hostname
         try:
             # Anything else this raises is handled in the route handler as
             # either a 409 (ResourceProviderUpdateConflict) or 500.
             self.placement_client.aggregate_remove_host(
-                context, aggregate.uuid, host_name)
+                context, aggregate.uuid, node_name)
         except exception.ResourceProviderNotFound as err:
             # If the resource provider is not found then it's likely not part
             # of the aggregate anymore anyway since provider aggregates are
@@ -6119,7 +6266,7 @@ class AggregateAPI(base.Base):
             # are just a grouping concept around resource providers. Log and
             # continue.
             LOG.warning("Failed to remove association of %s with a placement "
-                        "aggregate: %s.", host_name, err)
+                        "aggregate: %s.", node_name, err)
 
         aggregate.delete_host(host_name)
         self.query_client.update_aggregates(context, [aggregate])

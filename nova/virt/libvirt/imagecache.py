@@ -29,7 +29,6 @@ from oslo_concurrency import lockutils
 from oslo_concurrency import processutils
 from oslo_log import log as logging
 from oslo_utils import encodeutils
-import six
 
 import nova.conf
 import nova.privsep.path
@@ -95,10 +94,7 @@ class ImageCacheManager(imagecache.ImageCacheManager):
         self.unexplained_images, self.originals, and self.back_swap_images.
         """
 
-        if six.PY2:
-            digest_size = hashlib.sha1().digestsize * 2
-        else:
-            digest_size = hashlib.sha1().digest_size * 2
+        digest_size = hashlib.sha1().digest_size * 2
         for ent in os.listdir(base_dir):
             if len(ent) == digest_size:
                 self._store_image(base_dir, ent, original=True)
@@ -359,8 +355,6 @@ class ImageCacheManager(imagecache.ImageCacheManager):
         try:
             # If the cache is on a different device than the instance dir then
             # it does not consume the same disk resource as instances.
-            # NOTE(gibi): this does not work on Windows properly as st_dev is
-            # always 0
             if (os.stat(CONF.instances_path).st_dev !=
                     os.stat(self.cache_dir).st_dev):
                 return 0

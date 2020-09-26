@@ -15,16 +15,19 @@
 import sys
 import textwrap
 import time
+import typing as ty
 
 import fixtures
 from lxml import etree
 from oslo_log import log as logging
 from oslo_utils.fixture import uuidsentinel as uuids
+from oslo_utils import versionutils
 
 from nova import conf
 from nova.objects import fields as obj_fields
 from nova.tests.unit.virt.libvirt import fake_libvirt_data
 from nova.virt.libvirt import config as vconfig
+from nova.virt.libvirt import driver as libvirt_driver
 
 
 # Allow passing None to the various connect methods
@@ -126,10 +129,12 @@ VIR_DOMAIN_START_PAUSED = 1
 #  hardcoding the numerical values)
 VIR_FROM_QEMU = 100
 VIR_FROM_DOMAIN = 200
+VIR_FROM_SECRET = 300
 VIR_FROM_NWFILTER = 330
 VIR_FROM_REMOTE = 340
 VIR_FROM_RPC = 345
 VIR_FROM_NODEDEV = 666
+
 VIR_ERR_INVALID_ARG = 8
 VIR_ERR_NO_SUPPORT = 3
 VIR_ERR_XML_ERROR = 27
@@ -143,6 +148,7 @@ VIR_ERR_SYSTEM_ERROR = 900
 VIR_ERR_INTERNAL_ERROR = 950
 VIR_ERR_CONFIG_UNSUPPORTED = 951
 VIR_ERR_NO_NODE_DEVICE = 667
+VIR_ERR_INVALID_SECRET = 65
 VIR_ERR_NO_SECRET = 66
 VIR_ERR_AGENT_UNRESPONSIVE = 86
 VIR_ERR_ARGUMENT_UNSUPPORTED = 74
@@ -167,6 +173,10 @@ VIR_DOMAIN_BLOCK_COMMIT_RELATIVE = 4
 VIR_CONNECT_LIST_DOMAINS_ACTIVE = 1
 VIR_CONNECT_LIST_DOMAINS_INACTIVE = 2
 
+# virConnectListAllNodeDevices flags
+VIR_CONNECT_LIST_NODE_DEVICES_CAP_PCI_DEV = 2
+VIR_CONNECT_LIST_NODE_DEVICES_CAP_NET = 16
+
 # secret type
 VIR_SECRET_USAGE_TYPE_NONE = 0
 VIR_SECRET_USAGE_TYPE_VOLUME = 1
@@ -174,9 +184,11 @@ VIR_SECRET_USAGE_TYPE_CEPH = 2
 VIR_SECRET_USAGE_TYPE_ISCSI = 3
 
 # Libvirt version to match MIN_LIBVIRT_VERSION in driver.py
-FAKE_LIBVIRT_VERSION = 4000000
+FAKE_LIBVIRT_VERSION = versionutils.convert_version_to_int(
+    libvirt_driver.MIN_LIBVIRT_VERSION)
 # Libvirt version to match MIN_QEMU_VERSION in driver.py
-FAKE_QEMU_VERSION = 2011000
+FAKE_QEMU_VERSION = versionutils.convert_version_to_int(
+    libvirt_driver.MIN_QEMU_VERSION)
 
 PCI_VEND_ID = '8086'
 PCI_VEND_NAME = 'Intel Corporation'
@@ -220,11 +232,12 @@ class FakePCIDevice(object):
     - X540 Ethernet Controller Virtual Function (8086:1515)
     """
 
+    pci_default_parent = "pci_0000_80_01_0"
     pci_device_template = textwrap.dedent("""
         <device>
           <name>pci_0000_81_%(slot)02x_%(function)d</name>
           <path>/sys/devices/pci0000:80/0000:80:01.0/0000:81:%(slot)02x.%(function)d</path>
-          <parent>pci_0000_80_01_0</parent>
+          <parent>%(parent)s</parent>
           <driver>
             <name>%(driver)s</name>
           </driver>
@@ -257,7 +270,7 @@ class FakePCIDevice(object):
     is_capable_of_mdevs = False
 
     def __init__(self, dev_type, slot, function, iommu_group, numa_node,
-                 vf_ratio=None, multiple_gpu_types=False):
+                 vf_ratio=None, multiple_gpu_types=False, parent=None):
         """Populate pci devices
 
         :param dev_type: (string) Indicates the type of the device (PCI, PF,
@@ -347,6 +360,7 @@ class FakePCIDevice(object):
             'capability': capability,
             'iommu_group': iommu_group,
             'numa_node': numa_node,
+            'parent': parent or self.pci_default_parent
         }
         # -1 is the sentinel set in /sys/bus/pci/devices/*/numa_node
         # for no NUMA affinity. When the numa_node is set to -1 on a device
@@ -449,7 +463,7 @@ class HostPCIDevicesInfo(object):
                 iommu_group=iommu_group,
                 numa_node=numa_node_pf,
                 vf_ratio=vf_ratio)
-
+            pf_dev_name = pci_dev_name
             # Generate VFs
             for _ in range(vf_ratio):
                 function += 1
@@ -471,7 +485,8 @@ class HostPCIDevicesInfo(object):
                     function=function,
                     iommu_group=iommu_group,
                     numa_node=numa_node_pf,
-                    vf_ratio=vf_ratio)
+                    vf_ratio=vf_ratio,
+                    parent=pf_dev_name)
 
             slot += 1
 
@@ -535,7 +550,7 @@ class HostMdevDevicesInfo(object):
 class HostInfo(object):
 
     def __init__(self, cpu_nodes=1, cpu_sockets=1, cpu_cores=2, cpu_threads=1,
-                 kB_mem=4096):
+                 kB_mem=4096, mempages=None):
         """Create a new Host Info object
 
         :param cpu_nodes: (int) the number of NUMA cell, 1 for unusual
@@ -559,7 +574,7 @@ class HostInfo(object):
         self.cpu_vendor = "Intel"
         self.numa_topology = NUMATopology(self.cpu_nodes, self.cpu_sockets,
                                           self.cpu_cores, self.cpu_threads,
-                                          self.kB_mem)
+                                          self.kB_mem, mempages)
 
 
 class NUMATopology(vconfig.LibvirtConfigCapsNUMATopology):
@@ -771,22 +786,6 @@ class libvirtError(Exception):
         return self.err[8]
 
 
-class NWFilter(object):
-    def __init__(self, connection, xml):
-        self._connection = connection
-
-        self._xml = xml
-        self._parse_xml(xml)
-
-    def _parse_xml(self, xml):
-        tree = etree.fromstring(xml)
-        root = tree.find('.')
-        self._name = root.get('name')
-
-    def undefine(self):
-        self._connection._remove_filter(self)
-
-
 class NodeDevice(object):
 
     def __init__(self, connection, xml=None):
@@ -799,7 +798,8 @@ class NodeDevice(object):
     def _parse_xml(self, xml):
         tree = etree.fromstring(xml)
         root = tree.find('.')
-        self._name = root.get('name')
+        self._name = root.find('name').text
+        self._parent = root.find('parent').text
 
     def attach(self):
         pass
@@ -809,6 +809,18 @@ class NodeDevice(object):
 
     def reset(self):
         pass
+
+    def XMLDesc(self, flags: int) -> str:
+        return self._xml
+
+    def parent(self) -> str:
+        return self._parent
+
+    def name(self) -> str:
+        return self._name
+
+    def listCaps(self) -> ty.List[str]:
+        return [self.name().split('_')[0]]
 
 
 class Domain(object):
@@ -823,6 +835,7 @@ class Domain(object):
         self._has_saved_state = False
         self._snapshots = {}
         self._id = self._connection._id_counter
+        self._job_type = VIR_DOMAIN_JOB_UNBOUNDED
 
     def _parse_definition(self, xml):
         try:
@@ -884,6 +897,25 @@ class Domain(object):
             features['acpi'] = True
 
         definition['features'] = features
+
+        cpu_pins = {}
+
+        pins = tree.findall('./cputune/vcpupin')
+        for pin in pins:
+            cpu_pins[pin.get('vcpu')] = pin.get('cpuset')
+
+        definition['cpu_pins'] = cpu_pins
+
+        emulator_pin = tree.find('./cputune/emulatorpin')
+        if emulator_pin is not None:
+            definition['emulator_pin'] = emulator_pin.get('cpuset')
+
+        memnodes = {}
+
+        for node in tree.findall('./numatune/memnode'):
+            memnodes[node.get('cellid')] = node.get('nodeset')
+
+        definition['memnodes'] = memnodes
 
         devices = {}
 
@@ -1125,6 +1157,24 @@ class Domain(object):
       </target>
     </memory>
             ''' % vpmem
+        cputune = ''
+        for vcpu, cpuset in self._def['cpu_pins'].items():
+            cputune += '<vcpupin vcpu="%d" cpuset="%s"/>' % (int(vcpu), cpuset)
+        emulatorpin = None
+        if 'emulator_pin' in self._def:
+            emulatorpin = ('<emulatorpin cpuset="%s"/>' %
+                           self._def['emulator_pin'])
+        if cputune or emulatorpin:
+            cputune = '<cputune>%s%s</cputune>' % (emulatorpin, cputune)
+
+        numatune = ''
+        for cellid, nodeset in self._def['memnodes'].items():
+            numatune += '<memnode cellid="%d" nodeset="%s"/>' % (int(cellid),
+                                                                 nodeset)
+            numatune += '<memory nodeset="%s"/>' % ','.join(
+                self._def['memnodes'].values())
+        if numatune:
+            numatune = '<numatune>%s</numatune>' % numatune
 
         serial_console = ''
         if CONF.serial_console.enabled:
@@ -1151,6 +1201,8 @@ class Domain(object):
   <on_poweroff>destroy</on_poweroff>
   <on_reboot>restart</on_reboot>
   <on_crash>restart</on_crash>
+  %(cputune)s
+  %(numatune)s
   <devices>
     <emulator>/usr/bin/kvm</emulator>
     %(disks)s
@@ -1189,7 +1241,9 @@ class Domain(object):
                 'nics': nics,
                 'hostdevs': hostdevs,
                 'vpmems': vpmems,
-                'serial_console': serial_console}
+                'serial_console': serial_console,
+                'cputune': cputune,
+                'numatune': numatune}
 
     def managedSave(self, flags):
         self._connection._mark_not_running(self)
@@ -1252,7 +1306,17 @@ class Domain(object):
         return [0] * 12
 
     def jobStats(self, flags=0):
-        return {}
+        # NOTE(artom) By returning VIR_DOMAIN_JOB_UNBOUNDED, we're pretending a
+        # job is constantly running. Tests are expected to call the
+        # complete_job or fail_job methods when they're ready for jobs (read:
+        # live migrations) to "complete".
+        return {'type': self._job_type}
+
+    def complete_job(self):
+        self._job_type = VIR_DOMAIN_JOB_COMPLETED
+
+    def fail_job(self):
+        self._job_type = VIR_DOMAIN_JOB_FAILED
 
     def injectNMI(self, flags=0):
         return 0
@@ -1277,10 +1341,41 @@ class DomainSnapshot(object):
 
 
 class Secret(object):
-    """A stub Secret class. Not currently returned by any test, but required to
-    exist for introspection.
-    """
-    pass
+    def __init__(self, connection, xml):
+        self._connection = connection
+        self._xml = xml
+        self._parse_xml(xml)
+        self._value = None
+
+    def _parse_xml(self, xml):
+        tree = etree.fromstring(xml)
+        self._uuid = tree.find('./uuid').text
+        self._private = tree.get('private') == 'yes'
+
+    def setValue(self, value, flags=0):
+        self._value = value
+        return 0
+
+    def value(self, flags=0):
+        if self._value is None:
+            raise make_libvirtError(
+                libvirtError,
+                "secret '%s' does not have a value" % self._uuid,
+                error_code=VIR_ERR_NO_SECRET,
+                error_domain=VIR_FROM_SECRET)
+            pass
+
+        if self._private:
+            raise make_libvirtError(
+                libvirtError,
+                'secret is private',
+                error_code=VIR_ERR_INVALID_SECRET,
+                error_domain=VIR_FROM_SECRET)
+
+        return self._value
+
+    def undefine(self):
+        self._connection._remove_secret(self)
 
 
 class Connection(object):
@@ -1314,8 +1409,8 @@ class Connection(object):
         self._vms = {}
         self._running_vms = {}
         self._id_counter = 1  # libvirt reserves 0 for the hypervisor.
-        self._nwfilters = {}
         self._nodedevs = {}
+        self._secrets = {}
         self._event_callbacks = {}
         self.fakeLibVersion = version
         self.fakeVersion = hv_version
@@ -1326,17 +1421,17 @@ class Connection(object):
         self.mdev_info = mdev_info or HostMdevDevicesInfo(devices={})
         self.hostname = hostname or 'compute1'
 
-    def _add_filter(self, nwfilter):
-        self._nwfilters[nwfilter._name] = nwfilter
-
-    def _remove_filter(self, nwfilter):
-        del self._nwfilters[nwfilter._name]
-
     def _add_nodedev(self, nodedev):
         self._nodedevs[nodedev._name] = nodedev
 
     def _remove_nodedev(self, nodedev):
         del self._nodedevs[nodedev._name]
+
+    def _add_secret(self, secret):
+        self._secrets[secret._uuid] = secret
+
+    def _remove_secret(self, secret):
+        del self._secrets[secret._uuid]
 
     def _mark_running(self, dom):
         self._running_vms[self._id_counter] = dom
@@ -1589,20 +1684,6 @@ class Connection(object):
                     error_code=VIR_ERR_INTERNAL_ERROR,
                     error_domain=VIR_FROM_QEMU)
 
-    def nwfilterLookupByName(self, name):
-        try:
-            return self._nwfilters[name]
-        except KeyError:
-            raise make_libvirtError(
-                    libvirtError,
-                    "no nwfilter with matching name %s" % name,
-                    error_code=VIR_ERR_NO_NWFILTER,
-                    error_domain=VIR_FROM_NWFILTER)
-
-    def nwfilterDefineXML(self, xml):
-        nwfilter = NWFilter(self, xml)
-        self._add_filter(nwfilter)
-
     def device_lookup_by_name(self, dev_name):
         return self.pci_info.get_device_by_name(dev_name)
 
@@ -1657,7 +1738,16 @@ class Connection(object):
         pass
 
     def secretDefineXML(self, xml):
-        pass
+        secret = Secret(self, xml)
+        self._add_secret(secret)
+        return secret
+
+    def listAllDevices(self, flags):
+        # Note this is incomplete as we do not filter
+        # based on the flags however it is enough for our
+        # current testing.
+        return [NodeDevice(self, xml=dev.XMLDesc(0))
+                for dev in self.pci_info.devices.values()]
 
 
 def openAuth(uri, auth, flags=0):
@@ -1711,7 +1801,6 @@ virNodeDevice = NodeDevice
 
 virConnect = Connection
 virSecret = Secret
-virNWFilter = NWFilter
 
 
 class FakeLibvirtFixture(fixtures.Fixture):
@@ -1739,6 +1828,19 @@ class FakeLibvirtFixture(fixtures.Fixture):
         self.useFixture(fixtures.MockPatch(
             'nova.pci.utils.get_ifname_by_pci_address',
             return_value='fake_pf_interface_name'))
+
+        # libvirt calls out to sysfs to get the vfs ID during macvtap plug
+        self.useFixture(fixtures.MockPatch(
+            'nova.pci.utils.get_vf_num_by_pci_address', return_value=1))
+
+        # libvirt calls out to privsep to set the mac and vlan of a macvtap
+        self.useFixture(fixtures.MockPatch(
+            'nova.privsep.linux_net.set_device_macaddr_and_vlan'))
+
+        # libvirt calls out to privsep to set the port state during macvtap
+        # plug
+        self.useFixture(fixtures.MockPatch(
+            'nova.privsep.linux_net.set_device_macaddr'))
 
         # Don't assume that the system running tests has a valid machine-id
         self.useFixture(fixtures.MockPatch(

@@ -16,14 +16,10 @@ import six
 
 from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional.api import client
-from nova.tests.functional import test_servers
+from nova.tests.functional import integrated_helpers
 
 
-class ConfigurableMaxDiskDevicesTest(test_servers.ServersTestBase):
-    def setUp(self):
-        super(ConfigurableMaxDiskDevicesTest, self).setUp()
-        self.cinder = self.useFixture(
-            nova_fixtures.CinderFixture(self))
+class ConfigurableMaxDiskDevicesTest(integrated_helpers._IntegratedTestBase):
 
     def _wait_for_volume_attach(self, server_id, volume_id):
         for i in range(0, 100):

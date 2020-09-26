@@ -28,7 +28,7 @@ import six
 import webob.exc
 from webob import util as woutil
 
-from nova.i18n import _, _LE
+from nova.i18n import _
 
 LOG = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ class ConvertedException(webob.exc.WSGIHTTPException):
             try:
                 self.title = woutil.status_reasons[self.code]
             except KeyError:
-                msg = _LE("Improper or unknown HTTP status code used: %d")
+                msg = "Improper or unknown HTTP status code used: %d"
                 LOG.error(msg, code)
                 self.title = woutil.status_generic_reasons[self.code // 100]
         self.explanation = explanation
@@ -95,7 +95,7 @@ class NovaException(Exception):
     def _log_exception(self):
         # kwargs doesn't match a variable in the message
         # log the issue and the kwargs
-        LOG.exception(_LE('Exception in string format operation'))
+        LOG.exception('Exception in string format operation')
         for name, value in self.kwargs.items():
             LOG.error("%s: %s" % (name, value))  # noqa
 
@@ -249,6 +249,11 @@ class TooManyDiskDevices(InvalidBDM):
     msg_fmt = _('The maximum allowed number of disk devices (%(maximum)d) to '
                 'attach to a single instance has been exceeded.')
     code = 403
+
+
+class InvalidBDMDiskBus(InvalidBDM):
+    msg_fmr = _("Block Device Mapping is invalid: The provided disk bus "
+                "%(disk_bus)s is not valid.")
 
 
 class InvalidAttribute(Invalid):
@@ -506,7 +511,7 @@ class ComputeResourcesUnavailable(ServiceUnavailable):
 
 
 class HypervisorUnavailable(NovaException):
-    msg_fmt = _("Connection to the hypervisor is broken on host: %(host)s")
+    msg_fmt = _("Connection to the hypervisor is broken on host")
 
 
 class ComputeServiceUnavailable(ServiceUnavailable):
@@ -524,6 +529,12 @@ class UnableToMigrateToSelf(Invalid):
 
 class OperationNotSupportedForSEV(NovaException):
     msg_fmt = _("Operation '%(operation)s' not supported for SEV-enabled "
+                "instance (%(instance_uuid)s).")
+    code = 409
+
+
+class OperationNotSupportedForVTPM(NovaException):
+    msg_fmt = _("Operation '%(operation)s' not supported for vTPM-enabled "
                 "instance (%(instance_uuid)s).")
     code = 409
 
@@ -589,6 +600,10 @@ class ImageUnacceptable(Invalid):
 class ImageBadRequest(Invalid):
     msg_fmt = _("Request of image %(image_id)s got BadRequest response: "
                 "%(response)s")
+
+
+class ImageImportImpossible(Invalid):
+    msg_fmt = _("Import of image %(image_id)s refused: %(reason)s")
 
 
 class ImageQuotaExceeded(NovaException):
@@ -698,17 +713,9 @@ class ImageDeleteConflict(NovaException):
     msg_fmt = _("Conflict deleting image. Reason: %(reason)s.")
 
 
-class ImageHandlerUnsupported(NovaException):
-    msg_fmt = _("Error: unsupported image handler %(image_handler)s.")
-
-
 class PreserveEphemeralNotSupported(Invalid):
     msg_fmt = _("The current driver does not support "
                 "preserving ephemeral partitions.")
-
-
-class StorageRepositoryNotFound(NotFound):
-    msg_fmt = _("Cannot find SR to read/write VDI.")
 
 
 class InstanceMappingNotFound(NotFound):
@@ -1178,10 +1185,6 @@ class BootFromVolumeRequiredForZeroDiskFlavor(Forbidden):
                 "zero disk.")
 
 
-class InsufficientFreeMemory(NovaException):
-    msg_fmt = _("Insufficient free memory on compute node to start %(uuid)s.")
-
-
 class NoValidHost(NovaException):
     msg_fmt = _("No valid host was found. %(reason)s")
 
@@ -1240,6 +1243,7 @@ class PortLimitExceeded(QuotaError):
     msg_fmt = _("Maximum number of ports exceeded")
 
 
+# TODO(stephenfin): Remove this XenAPI relic
 class AggregateError(NovaException):
     msg_fmt = _("Aggregate %(aggregate_id)s: action '%(action)s' "
                 "caused an error: %(reason)s.")
@@ -1336,6 +1340,11 @@ class InterfaceAttachFailed(NovaException):
 class InterfaceAttachFailedNoNetwork(Invalid):
     msg_fmt = _("No specific network was requested and none are available "
                 "for project '%(project_id)s'.")
+
+
+class InterfaceAttachPciClaimFailed(Invalid):
+    msg_fmt = _("Failed to claim PCI device for %(instance_uuid)s during "
+                "interface attach")
 
 
 class InterfaceDetachFailed(Invalid):
@@ -1436,19 +1445,6 @@ class OrphanedObjectError(NovaException):
 
 class ObjectActionError(NovaException):
     msg_fmt = _('Object action %(action)s failed because: %(reason)s')
-
-
-class AgentError(NovaException):
-    msg_fmt = _('Error during following call to agent: %(method)s')
-
-
-class AgentTimeout(AgentError):
-    msg_fmt = _('Unable to contact guest agent. '
-                'The following call timed out: %(method)s')
-
-
-class AgentNotImplemented(AgentError):
-    msg_fmt = _('Agent does not support the call: %(method)s')
 
 
 class InstanceGroupNotFound(NotFound):
@@ -1898,9 +1894,8 @@ class LibguestfsCannotReadKernel(Invalid):
 
 
 class RealtimeMaskNotFoundOrInvalid(Invalid):
-    msg_fmt = _("Realtime policy needs vCPU(s) mask configured with at least "
-                "1 RT vCPU and 1 ordinary vCPU. See hw:cpu_realtime_mask "
-                "or hw_cpu_realtime_mask")
+    msg_fmt = _("Use of realtime CPUs requires either one or more "
+                "non-realtime CPU(s) or offloaded emulator threads.")
 
 
 class OsInfoNotFound(NotFound):
@@ -2317,5 +2312,46 @@ class AcceleratorRequestOpFailed(NovaException):
     msg_fmt = _("Failed to %(op)s accelerator requests: %(msg)s")
 
 
+class AcceleratorRequestBindingFailed(NovaException):
+    msg_fmt = _("Failed to bind accelerator requests: %(msg)s")
+
+    def __init__(self, arqs, **kwargs):
+        super().__init__(message=self.msg_fmt, **kwargs)
+        self.arqs = arqs or []
+
+
 class InvalidLibvirtGPUConfig(NovaException):
     msg_fmt = _('Invalid configuration for GPU devices: %(reason)s')
+
+
+class RequiredMixedInstancePolicy(Invalid):
+    msg_fmt = _("Cannot specify 'hw:cpu_dedicated_mask' without the "
+                "'mixed' policy.")
+
+
+class RequiredMixedOrRealtimeCPUMask(Invalid):
+    msg_fmt = _("Dedicated CPU set can be specified from either "
+                "'hw:cpu_dedicated_mask' or 'hw:cpu_realtime_mask' when "
+                "using 'mixed' CPU policy. 'hw:cpu_dedicated_mask' and "
+                "'hw:cpu_realtime_mask' can not be specified at the same "
+                "time, or be specified with none of them.")
+
+
+class MixedInstanceNotSupportByComputeService(NovaException):
+    msg_fmt = _("To support 'mixed' policy instance 'nova-compute' service "
+                "must be upgraded to 'Victoria' or later.")
+
+
+class InvalidMixedInstanceDedicatedMask(Invalid):
+    msg_fmt = _("Mixed instance must have at least 1 pinned vCPU and 1 "
+                "unpinned vCPU. See 'hw:cpu_dedicated_mask'.")
+
+
+class ProviderConfigException(NovaException):
+    """Exception indicating an error occurred processing provider config files.
+
+    This class is used to avoid a raised exception inadvertently being caught
+    and mishandled by the resource tracker.
+    """
+    msg_fmt = _("An error occurred while processing "
+                "a provider config file: %(error)s")

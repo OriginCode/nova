@@ -31,10 +31,6 @@ class TestVolAttachmentsDuringPreLiveMigration(
     ADMIN_API = True
     microversion = 'latest'
 
-    def setUp(self):
-        super().setUp()
-        self.cinder = self.useFixture(nova_fixtures.CinderFixture(self))
-
     def _setup_compute_service(self):
         self._start_compute('src')
         self._start_compute('dest')
@@ -86,7 +82,7 @@ class TestVolAttachmentsDuringPreLiveMigration(
         # Migrate the instance and wait until the migration errors out thanks
         # to our mocked version of pre_live_migration raising
         # test.TestingException
-        self._live_migrate(server, 'error')
+        self._live_migrate(server, 'failed')
 
         # Assert that we called the fake pre_live_migration method
         mock_plm.assert_called_once()

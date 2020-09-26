@@ -73,7 +73,9 @@ class InstanceActionsPolicyTest(base.BasePolicyTest):
         self.system_reader_unauthorized_contexts = [
             self.system_foo_context, self.other_project_member_context,
             self.project_foo_context, self.project_member_context,
-            self.project_reader_context]
+            self.project_reader_context,
+            self.other_project_reader_context,
+        ]
 
         self.project_or_system_reader_authorized_contexts = [
             self.legacy_admin_context, self.system_admin_context,
@@ -84,7 +86,8 @@ class InstanceActionsPolicyTest(base.BasePolicyTest):
 
         self.project_or_system_reader_unauthorized_contexts = [
             self.system_foo_context,
-            self.other_project_member_context
+            self.other_project_member_context,
+            self.other_project_reader_context,
         ]
 
     def _set_policy_rules(self, overwrite=True):
@@ -150,7 +153,7 @@ class InstanceActionsDeprecatedPolicyTest(base.BasePolicyTest):
     """Test os-instance-actions APIs Deprecated policies.
 
     This class checks if deprecated policy rules are overridden
-    by user on policy.json file then they still work because
+    by user on policy.yaml file then they still work because
     oslo.policy add deprecated rules in logical OR condition
     and enforces them for policy checks if overridden.
     """
@@ -188,7 +191,7 @@ class InstanceActionsDeprecatedPolicyTest(base.BasePolicyTest):
             self.admin_or_owner_req.environ['nova.context'])
 
         # Check for success as admin_or_owner role. Deprecated rule
-        # has been overridden with admin checks in policy.json
+        # has been overridden with admin checks in policy.yaml
         # If admin role pass it means overridden rule is enforced by
         # olso.policy because new default is system reader and the old
         # default is admin.
@@ -295,7 +298,9 @@ class InstanceActionsNoLegacyPolicyTest(InstanceActionsPolicyTest):
             self.system_foo_context, self.legacy_admin_context,
             self.other_project_member_context,
             self.project_foo_context, self.project_member_context,
-            self.project_reader_context]
+            self.project_reader_context,
+            self.other_project_reader_context,
+        ]
 
         # Check that system or projct reader is able to
         # show the instance actions events.
@@ -310,5 +315,6 @@ class InstanceActionsNoLegacyPolicyTest(InstanceActionsPolicyTest):
         # show the instance actions events.
         self.project_or_system_reader_unauthorized_contexts = [
             self.legacy_admin_context, self.project_foo_context,
-            self.system_foo_context, self.other_project_member_context
+            self.system_foo_context, self.other_project_member_context,
+            self.other_project_reader_context,
         ]

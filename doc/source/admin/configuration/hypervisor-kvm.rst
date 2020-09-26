@@ -135,8 +135,7 @@ system or find a system with this support.
    and enable the VT option.
 
 If KVM acceleration is not supported, configure Compute to use a different
-hypervisor, such as ``QEMU`` or ``Xen``. See :ref:`compute_qemu` or
-:ref:`compute_xen_api` for details.
+hypervisor, such as :ref:`QEMU <compute_qemu>`.
 
 These procedures help you load the kernel modules for Intel-based and AMD-based
 processors if they do not load automatically during KVM installation.
@@ -259,6 +258,36 @@ Local `LVM volumes
 <https://en.wikipedia.org/wiki/Logical_Volume_Manager_(Linux)>`__ can also be
 used. Set the :oslo.config:option:`libvirt.images_volume_group` configuration
 option to the name of the LVM group you have created.
+
+Direct download of images from Ceph
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When the Glance image service is set up with the Ceph backend and Nova is using
+a local ephemeral store (``[libvirt]/images_type!=rbd``), it is possible to
+configure Nova to download images directly into the local compute image cache.
+
+With the following configuration, images are downloaded using the RBD export
+command instead of using the Glance HTTP API. In some situations, especially
+for very large images, this could be substantially faster and can improve the
+boot times of instances.
+
+On the Glance API node in ``glance-api.conf``:
+
+.. code-block:: ini
+
+   [DEFAULT]
+   show_image_direct_url=true
+
+On the Nova compute node in nova.conf:
+
+.. code-block:: ini
+
+   [glance]
+   enable_rbd_download=true
+   rbd_user=glance
+   rbd_pool=images
+   rbd_ceph_conf=/etc/ceph/ceph.conf
+   rbd_connect_timeout=5
 
 Specify the CPU model of KVM guests
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

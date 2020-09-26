@@ -44,6 +44,7 @@ class AgentsPolicyTest(base.BasePolicyTest):
             self.system_member_context, self.system_reader_context,
             self.system_foo_context, self.project_member_context,
             self.other_project_member_context,
+            self.other_project_reader_context,
             self.project_foo_context, self.project_reader_context
         ]
 
@@ -63,7 +64,8 @@ class AgentsPolicyTest(base.BasePolicyTest):
         self.reader_unauthorized_contexts = [
             self.system_foo_context, self.other_project_member_context,
             self.project_foo_context, self.project_member_context,
-            self.project_reader_context]
+            self.project_reader_context, self.other_project_reader_context,
+        ]
 
     @mock.patch('nova.db.api.agent_build_destroy')
     def test_delete_agent_policy(self, mock_delete):
@@ -142,7 +144,8 @@ class AgentsScopeTypePolicyTest(AgentsPolicyTest):
             self.system_reader_context, self.project_admin_context,
             self.system_foo_context, self.project_member_context,
             self.other_project_member_context,
-            self.project_foo_context, self.project_reader_context
+            self.project_foo_context, self.project_reader_context,
+            self.other_project_reader_context,
         ]
 
         # Check that system admin, member and reader are able to read the
@@ -156,14 +159,15 @@ class AgentsScopeTypePolicyTest(AgentsPolicyTest):
             self.system_foo_context, self.legacy_admin_context,
             self.project_admin_context, self.project_member_context,
             self.other_project_member_context,
-            self.project_foo_context, self.project_reader_context
+            self.project_foo_context, self.project_reader_context,
+            self.other_project_reader_context,
         ]
 
 
 class AgentsDeprecatedPolicyTest(base.BasePolicyTest):
     """Test os-agents APIs Deprecated policies.
     This class checks if deprecated policy rules are
-    overridden by user on policy.json file then they
+    overridden by user on policy.yaml file then they
     still work because oslo.policy add deprecated rules
     in logical OR condition and enforce them for policy
     checks if overridden.
@@ -192,7 +196,7 @@ class AgentsDeprecatedPolicyTest(base.BasePolicyTest):
         # Test to verify if deprecatd overridden policy is working.
 
         # check for success as admin role. Deprecated rule
-        # has been overridden with admin checks in policy.json
+        # has been overridden with admin checks in policy.yaml
         # If admin role pass it means overridden rule is enforced by
         # olso.policy because new default is system reader and the old
         # default is admin.

@@ -9,8 +9,6 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
-from __future__ import absolute_import
-
 import collections
 import mock
 
@@ -31,7 +29,6 @@ from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import integrated_helpers
 from nova.tests.functional import test_servers
-from nova.tests.unit.image import fake as image_fake
 
 CONF = config.CONF
 INCOMPLETE_CONSUMER_ID = '00000000-0000-0000-0000-000000000000'
@@ -642,10 +639,10 @@ class TestNovaManagePlacementHealAllocations(
                 }
             ]
         }
-        self.placement_api.put('/allocations/%s' % server['id'], alloc_body)
+        self.placement.put('/allocations/%s' % server['id'], alloc_body)
         # Make sure we did that correctly. Use version 1.12 so we can assert
         # the project_id and user_id are based on the sentinel values.
-        allocations = self.placement_api.get(
+        allocations = self.placement.get(
             '/allocations/%s' % server['id'], version='1.12').body
         self.assertEqual(INCOMPLETE_CONSUMER_ID, allocations['project_id'])
         self.assertEqual(INCOMPLETE_CONSUMER_ID, allocations['user_id'])
@@ -668,7 +665,7 @@ class TestNovaManagePlacementHealAllocations(
             'Successfully updated allocations for', output)
         self.assertIn('Processed 1 instances.', output)
         # Now assert that the consumer was actually updated.
-        allocations = self.placement_api.get(
+        allocations = self.placement.get(
             '/allocations/%s' % server['id'], version='1.12').body
         self.assertEqual(server['tenant_id'], allocations['project_id'])
         self.assertEqual(server['user_id'], allocations['user_id'])
@@ -785,6 +782,121 @@ class TestNovaManagePlacementHealAllocations(
         self.assertIn('Found 1 candidate instances', output)
         self.assertIn('Processed 0 instances.', output)
 
+    def test_heal_allocations_force_allocation(self):
+        """Tests the case that a specific instance allocations are
+        forcefully changed.
+        1. create server without allocations
+        2. heal allocations without forcing them.
+           Assert the allocations match the flavor
+        3. update the allocations to change MEMORY_MB to not match the flavor
+        4. run heal allocations without --force.
+           Assert the allocations still have the bogus
+           MEMORY_MB value since they were not forcefully updated.
+        5. run heal allocations with --force.
+           Assert the allocations match the flavor again
+        6. run heal allocations again.
+           You should get rc=4 back since nothing changed.
+        """
+        # 1. Create server that we will forcefully heal specifically.
+        server, rp_uuid = self._boot_and_assert_no_allocations(
+            self.flavor, 'cell1', volume_backed=True)
+
+        # 2. heal allocations without forcing them
+        result = self.cli.heal_allocations(
+            verbose=True, instance_uuid=server['id']
+        )
+        self.assertEqual(0, result, self.output.getvalue())
+
+        # assert the allocations match the flavor
+        allocs = self._get_allocations_by_server_uuid(
+          server['id'])[rp_uuid]['resources']
+        self.assertEqual(self.flavor['vcpus'], allocs['VCPU'])
+        self.assertEqual(self.flavor['ram'], allocs['MEMORY_MB'])
+
+        # 3. update the allocations to change MEMORY_MB
+        # to not match the flavor
+        alloc_body = {
+            "allocations": [
+                {
+                    "resource_provider": {
+                        "uuid": rp_uuid
+                    },
+                    "resources": {
+                        "MEMORY_MB": 1024,
+                        "VCPU": self.flavor['vcpus'],
+                        "DISK_GB": self.flavor['disk']
+                    }
+                }
+            ]
+        }
+        self.placement.put('/allocations/%s' % server['id'], alloc_body)
+
+        # Check allocation to see if memory has changed
+        allocs = self._get_allocations_by_server_uuid(
+            server['id'])[rp_uuid]['resources']
+        self.assertEqual(self.flavor['vcpus'], allocs['VCPU'])
+        self.assertEqual(1024, allocs['MEMORY_MB'])
+
+        # 4. run heal allocations without --force
+        result = self.cli.heal_allocations(
+            verbose=True, instance_uuid=server['id']
+        )
+        self.assertEqual(0, result, self.output.getvalue())
+        self.assertIn(
+            'Successfully updated allocations for',
+            self.output.getvalue())
+
+        # assert the allocations still have the bogus memory
+        allocs = self._get_allocations_by_server_uuid(
+          server['id'])[rp_uuid]['resources']
+        self.assertEqual(1024, allocs['MEMORY_MB'])
+
+        # call heal without force flag
+        # rc should be 4 since force flag was not used.
+        result = self.cli.heal_allocations(
+            verbose=True, instance_uuid=server['id']
+        )
+        self.assertEqual(4, result, self.output.getvalue())
+
+        # call heal with force flag and dry run
+        result = self.cli.heal_allocations(
+            dry_run=True, verbose=True,
+            instance_uuid=server['id'],
+            force=True
+        )
+        self.assertEqual(4, result, self.output.getvalue())
+        self.assertIn(
+            '[dry-run] Update allocations for instance',
+            self.output.getvalue())
+
+        # assert nothing has changed after dry run
+        allocs = self._get_allocations_by_server_uuid(
+          server['id'])[rp_uuid]['resources']
+        self.assertEqual(1024, allocs['MEMORY_MB'])
+
+        # 5. run heal allocations with --force
+        result = self.cli.heal_allocations(
+            verbose=True, instance_uuid=server['id'],
+            force=True
+        )
+        self.assertEqual(0, result, self.output.getvalue())
+        self.assertIn('Force flag passed for instance',
+                      self.output.getvalue())
+        self.assertIn('Successfully updated allocations',
+                      self.output.getvalue())
+
+        # assert the allocations match the flavor again
+        allocs = self._get_allocations_by_server_uuid(
+            server['id'])[rp_uuid]['resources']
+        self.assertEqual(self.flavor['ram'], allocs['MEMORY_MB'])
+
+        # 6. run heal allocations again and you should get rc=4
+        # back since nothing changed
+        result = self.cli.heal_allocations(
+            verbose=True, instance_uuid=server['id']
+        )
+        self.assertEqual(4, result, self.output.getvalue())
+
 
 class TestNovaManagePlacementHealPortAllocations(
         test_servers.PortResourceRequestBasedSchedulingTestBase):
@@ -838,7 +950,7 @@ class TestNovaManagePlacementHealPortAllocations(
         return server, updated_ports
 
     def _assert_placement_updated(self, server, ports):
-        rsp = self.placement_api.get(
+        rsp = self.placement.get(
             '/allocations/%s' % server['id'],
             version=1.28).body
 
@@ -878,7 +990,7 @@ class TestNovaManagePlacementHealPortAllocations(
             self._assert_port_updated(port['id'])
 
     def _assert_placement_not_updated(self, server):
-        allocations = self.placement_api.get(
+        allocations = self.placement.get(
             '/allocations/%s' % server['id']).body['allocations']
         self.assertEqual(1, len(allocations))
         self.assertIn(self.compute1_rp_uuid, allocations)
@@ -998,10 +1110,10 @@ class TestNovaManagePlacementHealPortAllocations(
 
         # NOTE(gibi): putting empty allocation will delete the consumer in
         # placement
-        allocations = self.placement_api.get(
+        allocations = self.placement.get(
             '/allocations/%s' % server['id'], version=1.28).body
         allocations['allocations'] = {}
-        self.placement_api.put(
+        self.placement.put(
             '/allocations/%s' % server['id'], allocations, version=1.28)
 
         # let's trigger a heal
@@ -1041,7 +1153,7 @@ class TestNovaManagePlacementHealPortAllocations(
                 }
             ]
         }
-        self.placement_api.put('/allocations/%s' % server['id'], alloc_body)
+        self.placement.put('/allocations/%s' % server['id'], alloc_body)
 
         # let's trigger a heal
         result = self.cli.heal_allocations(verbose=True, max_count=2)
@@ -1069,10 +1181,10 @@ class TestNovaManagePlacementHealPortAllocations(
 
         # NOTE(gibi): putting empty allocation will delete the consumer in
         # placement
-        allocations = self.placement_api.get(
+        allocations = self.placement.get(
             '/allocations/%s' % server['id'], version=1.28).body
         allocations['allocations'] = {}
-        self.placement_api.put(
+        self.placement.put(
             '/allocations/%s' % server['id'], allocations, version=1.28)
 
         # let's trigger a heal
@@ -1652,8 +1764,6 @@ class TestNovaManagePlacementAudit(
 class TestDBArchiveDeletedRows(integrated_helpers._IntegratedTestBase):
     """Functional tests for the "nova-manage db archive_deleted_rows" CLI."""
     api_major_version = 'v2.1'
-    _image_ref_parameter = 'imageRef'
-    _flavor_ref_parameter = 'flavorRef'
 
     def setUp(self):
         super(TestDBArchiveDeletedRows, self).setUp()
@@ -1703,15 +1813,13 @@ class TestDBArchiveDeletedRowsMultiCell(integrated_helpers.InstanceHelperMixin,
     def setUp(self):
         super(TestDBArchiveDeletedRowsMultiCell, self).setUp()
         self.useFixture(nova_fixtures.NeutronFixture(self))
+        self.useFixture(nova_fixtures.GlanceFixture(self))
         self.useFixture(func_fixtures.PlacementFixture())
 
         api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
             api_version='v2.1'))
         # We need the admin api to forced_host for server create
         self.api = api_fixture.admin_api
-
-        image_fake.stub_out_image_service(self)
-        self.addCleanup(image_fake.FakeImageService_reset)
 
         self.start_service('conductor')
         self.start_service('scheduler')

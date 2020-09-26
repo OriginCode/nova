@@ -43,6 +43,7 @@ class ServicesPolicyTest(base.BasePolicyTest):
             self.system_member_context, self.system_reader_context,
             self.system_foo_context, self.project_member_context,
             self.other_project_member_context,
+            self.other_project_reader_context,
             self.project_foo_context, self.project_reader_context
         ]
 
@@ -62,7 +63,9 @@ class ServicesPolicyTest(base.BasePolicyTest):
         self.reader_unauthorized_contexts = [
             self.system_foo_context, self.other_project_member_context,
             self.project_foo_context, self.project_member_context,
-            self.project_reader_context]
+            self.project_reader_context,
+            self.other_project_reader_context,
+        ]
 
     def test_delete_service_policy(self):
         rule_name = "os_compute_api:os-services:delete"
@@ -128,6 +131,7 @@ class ServicesScopeTypePolicyTest(ServicesPolicyTest):
             self.system_reader_context, self.system_foo_context,
             self.project_admin_context, self.project_member_context,
             self.other_project_member_context,
+            self.other_project_reader_context,
             self.project_foo_context, self.project_reader_context
         ]
 
@@ -142,6 +146,7 @@ class ServicesScopeTypePolicyTest(ServicesPolicyTest):
             self.system_foo_context, self.legacy_admin_context,
             self.project_admin_context, self.project_member_context,
             self.other_project_member_context,
+            self.other_project_reader_context,
             self.project_foo_context, self.project_reader_context
         ]
 
@@ -150,7 +155,7 @@ class ServicesDeprecatedPolicyTest(base.BasePolicyTest):
     """Test os-services APIs Deprecated policies.
 
     This class checks if deprecated policy rules are
-    overridden by user on policy.json file then they
+    overridden by user on policy.yaml file then they
     still work because oslo.policy add deprecated rules
     in logical OR condition and enforce them for policy
     checks if overridden.
@@ -180,7 +185,7 @@ class ServicesDeprecatedPolicyTest(base.BasePolicyTest):
         # Test to verify if deprecatd overridden policy is working.
 
         # check for success as member role. Deprecated rule
-        # has been overridden with member checks in policy.json
+        # has been overridden with member checks in policy.yaml
         # If member role pass it means overridden rule is enforced by
         # olso.policy because new default is system admin and the old
         # default is admin.

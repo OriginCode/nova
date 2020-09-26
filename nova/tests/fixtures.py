@@ -15,11 +15,11 @@
 #    under the License.
 
 """Fixtures for Nova tests."""
-from __future__ import absolute_import
 
 import collections
 from contextlib import contextmanager
 import copy
+import datetime
 import logging as std_logging
 import os
 import random
@@ -58,6 +58,7 @@ from nova.network import constants as neutron_constants
 from nova.network import model as network_model
 from nova import objects
 from nova.objects import base as obj_base
+from nova.objects import fields as obj_fields
 from nova.objects import service as service_obj
 import nova.privsep
 from nova import quota as nova_quota
@@ -67,13 +68,13 @@ from nova import service
 from nova.tests.functional.api import client
 from nova.tests.unit import fake_requests
 
-_TRUE_VALUES = ('True', 'true', '1', 'yes')
-
 CONF = cfg.CONF
-DB_SCHEMA = {'main': "", 'api': ""}
+LOG = logging.getLogger(__name__)
+
+DB_SCHEMA = collections.defaultdict(str)
 SESSION_CONFIGURED = False
 
-LOG = logging.getLogger(__name__)
+PROJECT_ID = '6f70656e737461636b20342065766572'
 
 
 class ServiceFixture(fixtures.Fixture):
@@ -155,7 +156,7 @@ class StandardLogging(fixtures.Fixture):
         root.setLevel(std_logging.DEBUG)
 
         # supports collecting debug level for local runs
-        if os.environ.get('OS_DEBUG') in _TRUE_VALUES:
+        if os.environ.get('OS_DEBUG') in ('True', 'true', '1', 'yes'):
             level = std_logging.DEBUG
         else:
             level = std_logging.INFO
@@ -249,8 +250,11 @@ class SingleCellSimple(fixtures.Fixture):
     instances_created=False to init.
     """
 
-    def __init__(self, instances_created=True):
+    def __init__(
+        self, instances_created=True, project_id=PROJECT_ID,
+    ):
         self.instances_created = instances_created
+        self.project_id = project_id
 
     def setUp(self):
         super(SingleCellSimple, self).setUp()
@@ -296,7 +300,7 @@ class SingleCellSimple(fixtures.Fixture):
             'created_at': None,
             'instance_uuid': instance_uuid,
             'cell_id': (self.instances_created and 1 or None),
-            'project_id': 'project',
+            'project_id': self.project_id,
             'cell_mapping': (
                 self.instances_created and self._fake_cell_get() or None),
         }
@@ -326,8 +330,12 @@ class SingleCellSimple(fixtures.Fixture):
 
     @contextmanager
     def _fake_target_cell(self, context, target_cell):
-        # NOTE(danms): Just pass through the context without actually
-        # targeting anything.
+        # Just do something simple and set/unset the cell_uuid on the context.
+        if target_cell:
+            context.cell_uuid = getattr(target_cell, 'uuid',
+                                        uuidsentinel.cell1)
+        else:
+            context.cell_uuid = None
         yield context
 
     def _fake_set_target_cell(self, context, cell_mapping):
@@ -394,12 +402,12 @@ class CellDatabases(fixtures.Fixture):
         # NOTE(melwitt): See the regular Database fixture for why
         # we do this.
         global DB_SCHEMA
-        if not DB_SCHEMA['main']:
+        if not DB_SCHEMA[('main', None)]:
             ctxt_mgr = self._ctxt_mgrs[connection_str]
             engine = ctxt_mgr.writer.get_engine()
             conn = engine.connect()
             migration.db_sync(database='main')
-            DB_SCHEMA['main'] = "".join(line for line
+            DB_SCHEMA[('main', None)] = "".join(line for line
                                         in conn.connection.iterdump())
             engine.dispose()
 
@@ -560,11 +568,11 @@ class CellDatabases(fixtures.Fixture):
         with fixtures.MonkeyPatch(
                 'nova.db.sqlalchemy.api.get_context_manager',
                 get_context_manager):
-            self._cache_schema(connection_str)
             engine = ctxt_mgr.writer.get_engine()
             engine.dispose()
+            self._cache_schema(connection_str)
             conn = engine.connect()
-            conn.connection.executescript(DB_SCHEMA['main'])
+            conn.connection.executescript(DB_SCHEMA[('main', None)])
 
     def setUp(self):
         super(CellDatabases, self).setUp()
@@ -598,7 +606,7 @@ class CellDatabases(fixtures.Fixture):
 
 
 class Database(fixtures.Fixture):
-    def __init__(self, database='main', connection=None):
+    def __init__(self, database='main', version=None, connection=None):
         """Create a database fixture.
 
         :param database: The type of database, 'main', or 'api'
@@ -612,6 +620,7 @@ class Database(fixtures.Fixture):
             session.configure(CONF)
             SESSION_CONFIGURED = True
         self.database = database
+        self.version = version
         if database == 'main':
             if connection is not None:
                 ctxt_mgr = session.create_context_manager(
@@ -624,12 +633,12 @@ class Database(fixtures.Fixture):
 
     def _cache_schema(self):
         global DB_SCHEMA
-        if not DB_SCHEMA[self.database]:
+        if not DB_SCHEMA[(self.database, self.version)]:
             engine = self.get_engine()
             conn = engine.connect()
-            migration.db_sync(database=self.database)
-            DB_SCHEMA[self.database] = "".join(line for line
-                                               in conn.connection.iterdump())
+            migration.db_sync(database=self.database, version=self.version)
+            DB_SCHEMA[(self.database, self.version)] = "".join(
+                line for line in conn.connection.iterdump())
             engine.dispose()
 
     def cleanup(self):
@@ -637,45 +646,15 @@ class Database(fixtures.Fixture):
         engine.dispose()
 
     def reset(self):
-        self._cache_schema()
         engine = self.get_engine()
         engine.dispose()
+        self._cache_schema()
         conn = engine.connect()
-        conn.connection.executescript(DB_SCHEMA[self.database])
+        conn.connection.executescript(
+            DB_SCHEMA[(self.database, self.version)])
 
     def setUp(self):
         super(Database, self).setUp()
-        self.reset()
-        self.addCleanup(self.cleanup)
-
-
-class DatabaseAtVersion(fixtures.Fixture):
-    def __init__(self, version, database='main'):
-        """Create a database fixture.
-
-        :param version: Max version to sync to (or None for current)
-        :param database: The type of database, 'main', 'api'
-        """
-        super(DatabaseAtVersion, self).__init__()
-        self.database = database
-        self.version = version
-        if database == 'main':
-            self.get_engine = session.get_engine
-        elif database == 'api':
-            self.get_engine = session.get_api_engine
-
-    def cleanup(self):
-        engine = self.get_engine()
-        engine.dispose()
-
-    def reset(self):
-        engine = self.get_engine()
-        engine.dispose()
-        engine.connect()
-        migration.db_sync(version=self.version, database=self.database)
-
-    def setUp(self):
-        super(DatabaseAtVersion, self).setUp()
         self.reset()
         self.addCleanup(self.cleanup)
 
@@ -772,20 +751,14 @@ class WarningsFixture(fixtures.Fixture):
         # this gets kind of crazy given the way that upstream python libs use
         # this.
         warnings.simplefilter("once", DeprecationWarning)
-        warnings.filterwarnings('ignore',
-                                message='With-statements now directly support'
-                                        ' multiple context managers')
-        # NOTE(sdague): nova does not use pkg_resources directly, this
-        # is all very long standing deprecations about other tools
-        # using it. None of this is useful to Nova development.
-        warnings.filterwarnings('ignore',
-            module='pkg_resources')
+
         # NOTE(sdague): this remains an unresolved item around the way
         # forward on is_admin, the deprecation is definitely really premature.
         warnings.filterwarnings('ignore',
             message='Policy enforcement is depending on the value of is_admin.'
                     ' This key is deprecated. Please update your policy '
                     'file to use the standard policy values.')
+
         # NOTE(mriedem): Ignore scope check UserWarnings from oslo.policy.
         warnings.filterwarnings('ignore',
                                 message="Policy .* failed scope check",
@@ -872,9 +845,10 @@ class OSAPIFixture(fixtures.Fixture):
 
     """
 
-    def __init__(self, api_version='v2',
-                 project_id='6f70656e737461636b20342065766572',
-                 use_project_id_in_urls=False, stub_keystone=True):
+    def __init__(
+        self, api_version='v2', project_id=PROJECT_ID,
+        use_project_id_in_urls=False, stub_keystone=True,
+    ):
         """Constructor
 
         :param api_version: the API version that we're interested in
@@ -1195,7 +1169,7 @@ class NeutronFixture(fixtures.Fixture):
     """A fixture to boot instances with neutron ports"""
 
     # the default project_id in OsaAPIFixtures
-    tenant_id = '6f70656e737461636b20342065766572'
+    tenant_id = PROJECT_ID
 
     network_1 = {
         'id': '3cb9bc59-5699-4588-a4b1-b87f96708bc6',
@@ -1358,8 +1332,9 @@ class NeutronFixture(fixtures.Fixture):
         'project_id': tenant_id,
         'device_id': '',
         'binding:profile': {},
-        'binding:vnic_type': 'normal',
+        'binding:vif_details': {},
         'binding:vif_type': 'ovs',
+        'binding:vnic_type': 'normal',
         'port_security_enabled': True,
         'security_groups': [
             security_group['id'],
@@ -1384,8 +1359,9 @@ class NeutronFixture(fixtures.Fixture):
         'project_id': tenant_id,
         'device_id': '',
         'binding:profile': {},
-        'binding:vnic_type': 'normal',
+        'binding:vif_details': {},
         'binding:vif_type': 'ovs',
+        'binding:vnic_type': 'normal',
         'port_security_enabled': True,
         'security_groups': [
             security_group['id'],
@@ -1410,8 +1386,9 @@ class NeutronFixture(fixtures.Fixture):
         'project_id': tenant_id,
         'device_id': '',
         'binding:profile': {},
-        'binding:vnic_type': 'normal',
+        'binding:vif_details': {},
         'binding:vif_type': 'ovs',
+        'binding:vnic_type': 'normal',
         'resource_request': {
             "resources": {
                     orc.NET_BW_IGR_KILOBIT_PER_SEC: 1000,
@@ -1495,7 +1472,132 @@ class NeutronFixture(fixtures.Fixture):
         'device_id': '',
         'resource_request': {},
         'binding:profile': {},
+        'binding:vif_details': {'vlan': 100},
+        'binding:vif_type': 'hw_veb',
         'binding:vnic_type': 'direct',
+        'port_security_enabled': False,
+    }
+
+    sriov_port2 = {
+        'id': '3f675f19-8b2d-479d-9d42-054644a95a04',
+        'name': '',
+        'description': '',
+        'network_id': network_2['id'],
+        'admin_state_up': True,
+        'status': 'ACTIVE',
+        'mac_address': '52:54:00:1e:59:c5',
+        'fixed_ips': [
+            {
+                'ip_address': '192.168.13.2',
+                'subnet_id': subnet_2['id']
+            }
+        ],
+        'tenant_id': tenant_id,
+        'project_id': tenant_id,
+        'device_id': '',
+        'resource_request': {},
+        'binding:profile': {},
+        'binding:vnic_type': 'direct',
+        'binding:vif_type': 'hw_veb',
+        'binding:vif_details': {'vlan': 100},
+        'port_security_enabled': False,
+    }
+
+    sriov_pf_port = {
+        'id': 'ce2a6ff9-573d-493e-9498-8100953e6f00',
+        'name': '',
+        'description': '',
+        'network_id': network_2['id'],
+        'admin_state_up': True,
+        'status': 'ACTIVE',
+        'mac_address': '52:54:00:1e:59:c6',
+        'fixed_ips': [
+            {
+                'ip_address': '192.168.13.2',
+                'subnet_id': subnet_2['id']
+            }
+        ],
+        'tenant_id': tenant_id,
+        'project_id': tenant_id,
+        'device_id': '',
+        'resource_request': {},
+        'binding:profile': {},
+        'binding:vnic_type': 'direct-physical',
+        'binding:vif_type': 'hostdev_physical',
+        'binding:vif_details': {'vlan': 100},
+        'port_security_enabled': False,
+    }
+
+    sriov_pf_port2 = {
+        'id': 'ad2fd6c2-2c55-4c46-abdc-a8ec0d5f6a29',
+        'name': '',
+        'description': '',
+        'network_id': network_2['id'],
+        'admin_state_up': True,
+        'status': 'ACTIVE',
+        'mac_address': '52:54:00:1e:59:c7',
+        'fixed_ips': [
+            {
+                'ip_address': '192.168.13.2',
+                'subnet_id': subnet_2['id']
+            }
+        ],
+        'tenant_id': tenant_id,
+        'project_id': tenant_id,
+        'device_id': '',
+        'resource_request': {},
+        'binding:profile': {},
+        'binding:vnic_type': 'direct-physical',
+        'binding:vif_type': 'hostdev_physical',
+        'binding:vif_details': {'vlan': 100},
+        'port_security_enabled': False,
+    }
+
+    macvtap_port = {
+        'id': '6eada1f1-6311-428c-a7a5-52b35cabc8fd',
+        'name': '',
+        'description': '',
+        'network_id': network_2['id'],
+        'admin_state_up': True,
+        'status': 'ACTIVE',
+        'mac_address': '52:54:00:1e:59:c8',
+        'fixed_ips': [
+            {
+                'ip_address': '192.168.13.4',
+                'subnet_id': subnet_2['id']
+            }
+        ],
+        'tenant_id': tenant_id,
+        'project_id': tenant_id,
+        'device_id': '',
+        'binding:profile': {},
+        'binding:vnic_type': 'macvtap',
+        'binding:vif_type': 'hw_veb',
+        'binding:vif_details': {'vlan': 100},
+        'port_security_enabled': False,
+    }
+
+    macvtap_port2 = {
+        'id': 'fc79cc0c-93e9-4613-9f78-34c828d92e9f',
+        'name': '',
+        'description': '',
+        'network_id': network_2['id'],
+        'admin_state_up': True,
+        'status': 'ACTIVE',
+        'mac_address': '52:54:00:1e:59:c9',
+        'fixed_ips': [
+            {
+                'ip_address': '192.168.13.4',
+                'subnet_id': subnet_2['id']
+            }
+        ],
+        'tenant_id': tenant_id,
+        'project_id': tenant_id,
+        'device_id': '',
+        'binding:profile': {},
+        'binding:vnic_type': 'macvtap',
+        'binding:vif_type': 'hw_veb',
+        'binding:vif_details': {'vlan': 100},
         'port_security_enabled': False,
     }
 
@@ -1524,6 +1626,8 @@ class NeutronFixture(fixtures.Fixture):
             "required": ["CUSTOM_PHYSNET2", "CUSTOM_VNIC_TYPE_DIRECT"]
         },
         'binding:profile': {},
+        'binding:vif_details': {},
+        'binding:vif_type': 'hw_veb',
         'binding:vnic_type': 'direct',
         'port_security_enabled': False,
     }
@@ -1553,6 +1657,8 @@ class NeutronFixture(fixtures.Fixture):
             "required": ["CUSTOM_PHYSNET2", "CUSTOM_VNIC_TYPE_MACVTAP"]
         },
         'binding:profile': {},
+        'binding:vif_details': {},
+        'binding:vif_type': 'hw_veb',
         'binding:vnic_type': 'macvtap',
         'port_security_enabled': False,
     }
@@ -1943,11 +2049,323 @@ class EventReporterStub(fixtures.Fixture):
             lambda *args, **kwargs: mock.MagicMock()))
 
 
+class GlanceFixture(fixtures.Fixture):
+    """A fixture for simulating Glance."""
+
+    # NOTE(justinsb): The OpenStack API can't upload an image?
+    # So, make sure we've got one..
+    timestamp = datetime.datetime(2011, 1, 1, 1, 2, 3)
+
+    image1 = {
+        'id': '155d900f-4e14-4e4c-a73d-069cbf4541e6',
+        'name': 'fakeimage123456',
+        'created_at': timestamp,
+        'updated_at': timestamp,
+        'deleted_at': None,
+        'deleted': False,
+        'status': 'active',
+        'is_public': False,
+        'container_format': 'raw',
+        'disk_format': 'raw',
+        'size': '25165824',
+        'min_ram': 0,
+        'min_disk': 0,
+        'protected': False,
+        'visibility': 'public',
+        'tags': ['tag1', 'tag2'],
+        'properties': {
+            'kernel_id': 'nokernel',
+            'ramdisk_id': 'nokernel',
+            'architecture': obj_fields.Architecture.X86_64,
+        },
+    }
+
+    image2 = {
+        'id': 'a2459075-d96c-40d5-893e-577ff92e721c',
+        'name': 'fakeimage123456',
+        'created_at': timestamp,
+        'updated_at': timestamp,
+        'deleted_at': None,
+        'deleted': False,
+        'status': 'active',
+        'is_public': True,
+        'container_format': 'ami',
+        'disk_format': 'ami',
+        'size': '58145823',
+        'min_ram': 0,
+        'min_disk': 0,
+        'protected': False,
+        'visibility': 'public',
+        'tags': [],
+        'properties': {
+            'kernel_id': 'nokernel',
+            'ramdisk_id': 'nokernel',
+        },
+    }
+
+    image3 = {
+        'id': '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6',
+        'name': 'fakeimage123456',
+        'created_at': timestamp,
+        'updated_at': timestamp,
+        'deleted_at': None,
+        'deleted': False,
+        'status': 'active',
+        'is_public': True,
+        'container_format': 'bare',
+        'disk_format': 'raw',
+        'size': '83594576',
+        'min_ram': 0,
+        'min_disk': 0,
+        'protected': False,
+        'visibility': 'public',
+        'tags': ['tag3', 'tag4'],
+        'properties': {
+            'kernel_id': 'nokernel',
+            'ramdisk_id': 'nokernel',
+            'architecture': obj_fields.Architecture.X86_64,
+        },
+    }
+
+    image4 = {
+        'id': 'cedef40a-ed67-4d10-800e-17455edce175',
+        'name': 'fakeimage123456',
+        'created_at': timestamp,
+        'updated_at': timestamp,
+        'deleted_at': None,
+        'deleted': False,
+        'status': 'active',
+        'is_public': True,
+        'container_format': 'ami',
+        'disk_format': 'ami',
+        'size': '84035174',
+        'min_ram': 0,
+        'min_disk': 0,
+        'protected': False,
+        'visibility': 'public',
+        'tags': [],
+        'properties': {
+            'kernel_id': 'nokernel',
+            'ramdisk_id': 'nokernel',
+        },
+    }
+
+    image5 = {
+        'id': 'c905cedb-7281-47e4-8a62-f26bc5fc4c77',
+        'name': 'fakeimage123456',
+        'created_at': timestamp,
+        'updated_at': timestamp,
+        'deleted_at': None,
+        'deleted': False,
+        'status': 'active',
+        'is_public': True,
+        'container_format': 'ami',
+        'disk_format': 'ami',
+        'size': '26360814',
+        'min_ram': 0,
+        'min_disk': 0,
+        'protected': False,
+        'visibility': 'public',
+        'tags': [],
+        'properties': {
+            'kernel_id': '155d900f-4e14-4e4c-a73d-069cbf4541e6',
+            'ramdisk_id': None,
+        },
+    }
+
+    auto_disk_config_disabled_image = {
+        'id': 'a440c04b-79fa-479c-bed1-0b816eaec379',
+        'name': 'fakeimage6',
+        'created_at': timestamp,
+        'updated_at': timestamp,
+        'deleted_at': None,
+        'deleted': False,
+        'status': 'active',
+        'is_public': False,
+        'container_format': 'ova',
+        'disk_format': 'vhd',
+        'size': '49163826',
+        'min_ram': 0,
+        'min_disk': 0,
+        'protected': False,
+        'visibility': 'public',
+        'tags': [],
+        'properties': {
+            'kernel_id': 'nokernel',
+            'ramdisk_id': 'nokernel',
+            'architecture': obj_fields.Architecture.X86_64,
+            'auto_disk_config': 'False',
+        },
+    }
+
+    auto_disk_config_enabled_image = {
+        'id': '70a599e0-31e7-49b7-b260-868f441e862b',
+        'name': 'fakeimage7',
+        'created_at': timestamp,
+        'updated_at': timestamp,
+        'deleted_at': None,
+        'deleted': False,
+        'status': 'active',
+        'is_public': False,
+        'container_format': 'ova',
+        'disk_format': 'vhd',
+        'size': '74185822',
+        'min_ram': 0,
+        'min_disk': 0,
+        'protected': False,
+        'visibility': 'public',
+        'tags': [],
+        'properties': {
+            'kernel_id': 'nokernel',
+            'ramdisk_id': 'nokernel',
+            'architecture': obj_fields.Architecture.X86_64,
+            'auto_disk_config': 'True',
+        },
+    }
+
+    def __init__(self, test):
+        super().__init__()
+        self.test = test
+        self.images = {}
+
+    def setUp(self):
+        super().setUp()
+
+        self.test.useFixture(
+            ConfPatcher(group='glance', api_servers=['http://localhost:9292'])
+        )
+        self.test.stub_out(
+            'nova.image.glance.API.get_remote_image_service',
+            lambda context, image_href: (self, image_href))
+        self.test.stub_out(
+            'nova.image.glance.get_default_image_service',
+            lambda: self)
+
+        self.create(None, self.image1)
+        self.create(None, self.image2)
+        self.create(None, self.image3)
+        self.create(None, self.image4)
+        self.create(None, self.image5)
+        self.create(None, self.auto_disk_config_disabled_image)
+        self.create(None, self.auto_disk_config_enabled_image)
+
+        self._imagedata = {}
+
+    # TODO(bcwaldon): implement optional kwargs such as limit, sort_dir
+    def detail(self, context, **kwargs):
+        """Return list of detailed image information."""
+        return copy.deepcopy(list(self.images.values()))
+
+    def download(
+        self, context, image_id, data=None, dst_path=None, trusted_certs=None,
+    ):
+        self.show(context, image_id)
+        if data:
+            data.write(self._imagedata.get(image_id, b''))
+        elif dst_path:
+            with open(dst_path, 'wb') as data:
+                data.write(self._imagedata.get(image_id, b''))
+
+    def show(
+        self, context, image_id, include_locations=False, show_deleted=True,
+    ):
+        """Get data about specified image.
+
+        Returns a dict containing image data for the given opaque image id.
+        """
+        image = self.images.get(str(image_id))
+        if image:
+            return copy.deepcopy(image)
+
+        LOG.warning(
+            'Unable to find image id %s.  Have images: %s',
+            image_id, self.images)
+        raise exception.ImageNotFound(image_id=image_id)
+
+    def create(self, context, metadata, data=None):
+        """Store the image data and return the new image id.
+
+        :raises: Duplicate if the image already exist.
+
+        """
+        image_id = str(metadata.get('id', uuidutils.generate_uuid()))
+        metadata['id'] = image_id
+        if image_id in self.images:
+            raise exception.CouldNotUploadImage(image_id=image_id)
+
+        image_meta = copy.deepcopy(metadata)
+
+        # Glance sets the size value when an image is created, so we
+        # need to do that here to fake things out if it's not provided
+        # by the caller. This is needed to avoid a KeyError in the
+        # image-size API.
+        if 'size' not in image_meta:
+            image_meta['size'] = None
+
+        # Similarly, Glance provides the status on the image once it's created
+        # and this is checked in the compute API when booting a server from
+        # this image, so we just fake it out to be 'active' even though this
+        # is mostly a lie on a newly created image.
+        if 'status' not in metadata:
+            image_meta['status'] = 'active'
+
+        # The owner of the image is by default the request context project_id.
+        if context and 'owner' not in image_meta.get('properties', {}):
+            # Note that normally "owner" is a top-level field in an image
+            # resource in glance but we have to fake this out for the images
+            # proxy API by throwing it into the generic "properties" dict.
+            image_meta.get('properties', {})['owner'] = context.project_id
+
+        self.images[image_id] = image_meta
+
+        if data:
+            self._imagedata[image_id] = data.read()
+
+        return self.images[image_id]
+
+    def update(self, context, image_id, metadata, data=None,
+               purge_props=False):
+        """Replace the contents of the given image with the new data.
+
+        :raises: ImageNotFound if the image does not exist.
+        """
+        if not self.images.get(image_id):
+            raise exception.ImageNotFound(image_id=image_id)
+
+        if purge_props:
+            self.images[image_id] = copy.deepcopy(metadata)
+        else:
+            image = self.images[image_id]
+
+            try:
+                image['properties'].update(metadata.pop('properties'))
+            except KeyError:
+                pass
+
+            image.update(metadata)
+
+        return self.images[image_id]
+
+    def delete(self, context, image_id):
+        """Delete the given image.
+
+        :raises: ImageNotFound if the image does not exist.
+        """
+        removed = self.images.pop(image_id, None)
+        if not removed:
+            raise exception.ImageNotFound(image_id=image_id)
+
+    def get_location(self, context, image_id):
+        if image_id in self.images:
+            return 'fake_location'
+        return None
+
+
 class CinderFixture(fixtures.Fixture):
     """A fixture to volume operations with the new Cinder attach/detach API"""
 
     # the default project_id in OSAPIFixtures
-    tenant_id = '6f70656e737461636b20342065766572'
+    tenant_id = PROJECT_ID
 
     SWAP_OLD_VOL = 'a07f71dc-8151-4e7d-a0cc-cd24a3f11113'
     SWAP_NEW_VOL = '227cc671-f30b-4488-96fd-7d0bf13648d8'
@@ -2674,3 +3092,23 @@ class CyborgFixture(fixtures.Fixture):
             'nova.accelerator.cyborg._CyborgClient.'
             'delete_arqs_for_instance',
             side_effect=self.fake_delete_arqs_for_instance)).mock
+
+
+class GenericPoisonFixture(fixtures.Fixture):
+    POISON_THESE = (
+        ('netifaces.interfaces',
+         'a test environment should not be inspecting real interfaces on the '
+         'test node'),
+    )
+
+    def setUp(self):
+        def poison_configure(method, reason):
+            def fail(*a, **k):
+                raise Exception('This test invokes %s, which is bad (%s); you '
+                                'should mock it.' % (method, reason))
+            return fail
+
+        super(GenericPoisonFixture, self).setUp()
+        for meth, why in self.POISON_THESE:
+            self.useFixture(fixtures.MonkeyPatch(
+                meth, poison_configure(meth, why)))

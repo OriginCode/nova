@@ -37,7 +37,6 @@ Defines which driver to use for controlling virtualization.
 Possible values:
 
 * ``libvirt.LibvirtDriver``
-* ``xenapi.XenAPIDriver``
 * ``fake.FakeDriver``
 * ``ironic.IronicDriver``
 * ``vmwareapi.VMwareVCDriver``
@@ -662,6 +661,20 @@ Possible Values:
 * 0 : treated as unlimited.
 * Any positive integer representing maximum concurrent builds.
 """),
+    cfg.IntOpt('max_concurrent_snapshots',
+        default=5,
+        min=0,
+        help="""
+Maximum number of instance snapshot operations to run concurrently.
+This limit is enforced to prevent snapshots overwhelming the
+host/network/storage and causing failure. This value can be set per
+compute node.
+
+Possible Values:
+
+* 0 : treated as unlimited.
+* Any positive integer representing maximum concurrent snapshots.
+"""),
     cfg.IntOpt('max_concurrent_live_migrations',
         default=1,
         min=0,
@@ -953,6 +966,19 @@ Possible values:
 
 * -1 means unlimited
 * Any integer >= 0 represents the maximum allowed
+"""),
+    cfg.StrOpt('provider_config_location',
+        default='/etc/nova/provider_config/',
+        help="""
+Location of YAML files containing resource provider configuration data.
+
+These files allow the operator to specify additional custom inventory and
+traits to assign to one or more resource providers.
+
+Additional documentation is available here:
+
+  https://docs.openstack.org/nova/latest/admin/managing-resource-providers.html
+
 """),
 ]
 
