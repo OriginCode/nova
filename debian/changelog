@@ -1,3 +1,9 @@
+nova (2:22.0.0~rc1-1) experimental; urgency=medium
+
+  * New upstream release.
+
+ -- Thomas Goirand <zigo@debian.org>  Sat, 26 Sep 2020 10:27:10 +0200
+
 nova (2:21.1.0-2) unstable; urgency=medium
 
   * Add dosfstools as depends to nova-compute, needed for ephemeral storage.
