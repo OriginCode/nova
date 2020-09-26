@@ -2,6 +2,7 @@ nova (2:22.0.0~rc1-1) experimental; urgency=medium
 
   * New upstream release.
   * Fixed (build-)depends for this release.
+  * Removed fix-requirements.txt.patch.
 
  -- Thomas Goirand <zigo@debian.org>  Sat, 26 Sep 2020 10:27:10 +0200
 
