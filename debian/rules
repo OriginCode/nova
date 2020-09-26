@@ -97,10 +97,15 @@ endif
 
 	pkgos-readd-keystone-authtoken-missing-options $(NOVA_CONF) keystone_authtoken nova
 
+	mkdir -p $(CURDIR)/debian/nova-common/etc/nova/policy.d
 	PYTHONPATH=$(CURDIR)/debian/tmp/usr/lib/python3/dist-packages oslopolicy-sample-generator \
-		--output-file=$(CURDIR)/debian/nova-common/usr/share/nova-common/policy.json \
-		--format json \
+		--output-file=$(CURDIR)/debian/nova-common/etc/nova/policy.d/00_default_policy.yaml \
+		--format yaml \
 		--namespace nova
+
+	# Use the policy.d folder
+	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf oslo_policy policy_dirs /etc/nova/policy.d
+
 
 	# Otherwise, this is set to the build dir
 	pkgos-fix-config-default $(NOVA_CONF) DEFAULT pybasedir /usr/lib/python3/dist-packages
