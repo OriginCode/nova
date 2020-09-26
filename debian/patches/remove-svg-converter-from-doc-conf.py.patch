@@ -14,4 +14,4 @@ Index: nova/doc/source/conf.py
 -    'sphinxcontrib.rsvgconverter',
  ]
  
- # openstackdocstheme options
+ 
