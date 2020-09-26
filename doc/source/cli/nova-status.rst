@@ -143,11 +143,6 @@ Upgrade
 
   * Checks for the policy files is not JSON-formatted.
 
-  **21.0.0 (Ussuri)**
-
-  * Checks for the policy files are not automatically overwritten with
-    new defaults.
-
 See Also
 ========
 
