@@ -285,6 +285,8 @@ Conflicts:
  nova-compute-lxc,
  nova-compute-qemu,
  nova-compute-xen,
+Breaks:
+ qemu-system-common (<< 1:4.0),
 Description: OpenStack Compute - compute node (KVM)
  OpenStack is a reliable cloud infrastructure. Its mission is to produce
  the ubiquitous cloud computing platform that will meet the needs of public
@@ -351,6 +353,8 @@ Conflicts:
  nova-compute-kvm,
  nova-compute-lxc,
  nova-compute-xen,
+Breaks:
+ qemu-system-common (<< 1:4.0),
 Description: OpenStack Compute - compute node (QEmu)
  OpenStack is a reliable cloud infrastructure. Its mission is to produce
  the ubiquitous cloud computing platform that will meet the needs of public
