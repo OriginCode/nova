@@ -274,7 +274,7 @@ Depends:
  nova-compute,
  python3-libvirt,
  qemu-block-extra,
- qemu-kvm | kvm,
+ qemu-system-x86 (>= 1:5.0),
  ${misc:Depends},
 Provides:
  nova-compute-hypervisor,
