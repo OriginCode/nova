@@ -4,6 +4,7 @@ nova (2:22.0.0-1) unstable; urgency=medium
   * Fix version depends on qemu (as Nova requires min 4.0 now).
   * Uploading to unstable.
   * Fixed debian/watch.
+  * Add a debian/salsa-ci.yml.
 
  -- Thomas Goirand <zigo@debian.org>  Thu, 08 Oct 2020 12:04:08 +0200
 
