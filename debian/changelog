@@ -2,6 +2,7 @@ nova (2:22.0.0-1) unstable; urgency=medium
 
   * New upstream release.
   * Fix version depends on qemu (as Nova requires min 4.0 now).
+  * Uploading to unstable.
 
  -- Thomas Goirand <zigo@debian.org>  Thu, 08 Oct 2020 12:04:08 +0200
 
