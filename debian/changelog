@@ -1,6 +1,8 @@
 nova (2:22.0.0-2) unstable; urgency=medium
 
   * Rename old policy.json instead of deleting it.
+  * Set DEB_BUILD_OPTIONS: nocheck DEB_BUILD_PROFILES: nocheck in the
+    debian/salsa-ci.yml file.
 
  -- Thomas Goirand <zigo@debian.org>  Tue, 20 Oct 2020 11:31:30 +0200
 
