@@ -1,3 +1,10 @@
+nova (2:22.0.0-3) unstable; urgency=medium
+
+  * Exclude a number of tests which are failing under non-i386 buildd
+    (Closes: #976590, #976954). See LP bug: 1909972.
+
+ -- Thomas Goirand <zigo@debian.org>  Mon, 04 Jan 2021 08:08:28 +0100
+
 nova (2:22.0.0-2) unstable; urgency=medium
 
   * Rename old policy.json instead of deleting it.
