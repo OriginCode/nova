@@ -1,3 +1,9 @@
+nova (2:22.0.1-1) unstable; urgency=medium
+
+  * New upstream point release.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 19 Jan 2021 10:10:02 +0100
+
 nova (2:22.0.0-3) unstable; urgency=medium
 
   * Exclude a number of tests which are failing under non-i386 buildd
