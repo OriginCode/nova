@@ -3297,8 +3297,7 @@ class ComputeManager(manager.Manager):
                          injected_files, new_pass, orig_sys_metadata,
                          bdms, recreate, on_shared_storage,
                          preserve_ephemeral, migration,
-                         scheduled_node, limits, request_spec,
-                         accel_uuids=None):
+                         scheduled_node, limits, request_spec, accel_uuids):
         """Destroy and re-make this instance.
 
         A 'rebuild' effectively purges all existing data from the system and
