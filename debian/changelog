@@ -3,6 +3,7 @@ nova (2:23.0.0~rc1-1) experimental; urgency=medium
   * Tune nova-api-{,metadata-}uwsgi.ini for performance.
   * New upstream release.
   * Removed (build-)depends versions when satisfied in Bullseye.
+  * Fixed (build-)depends for this release.
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 26 Mar 2021 09:01:12 +0100
 
