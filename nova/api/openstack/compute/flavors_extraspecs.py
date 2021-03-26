@@ -13,7 +13,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import six
 import webob
 
 from nova.api.openstack import api_version_request
@@ -44,8 +43,8 @@ class FlavorExtraSpecsController(wsgi.Controller):
             # NOTE(gmann): Max length for numeric value is being checked
             # explicitly as json schema cannot have max length check for
             # numeric value
-            if isinstance(value, (six.integer_types, float)):
-                value = six.text_type(value)
+            if isinstance(value, (int, float)):
+                value = str(value)
                 try:
                     utils.check_string_length(value, 'extra_specs value',
                                               max_length=255)

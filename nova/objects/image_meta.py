@@ -15,7 +15,6 @@
 import copy
 
 from oslo_utils import versionutils
-import six
 
 from nova import exception
 from nova import objects
@@ -177,14 +176,26 @@ class ImageMetaProps(base.NovaObject):
     # Version 1.25: Added 'hw_pci_numa_affinity_policy' field
     # Version 1.26: Added 'mixed' to 'hw_cpu_policy' field
     # Version 1.27: Added 'hw_tpm_model' and 'hw_tpm_version' fields
+    # Version 1.28: Added 'socket' to 'hw_pci_numa_affinity_policy'
+    # Version 1.29: Added 'hw_input_bus' field
     # NOTE(efried): When bumping this version, the version of
     # ImageMetaPropsPayload must also be bumped. See its docstring for details.
-    VERSION = '1.27'
+    VERSION = '1.29'
 
     def obj_make_compatible(self, primitive, target_version):
         super(ImageMetaProps, self).obj_make_compatible(primitive,
                                                         target_version)
         target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 29):
+            primitive.pop('hw_input_bus', None)
+        if target_version < (1, 28):
+            policy = primitive.get('hw_pci_numa_affinity_policy', None)
+            if policy == fields.PCINUMAAffinityPolicy.SOCKET:
+                raise exception.ObjectActionError(
+                    action='obj_make_compatible',
+                    reason='hw_numa_affinity_policy=%s not supported '
+                           'in version %s' %
+                           (policy, target_version))
         if target_version < (1, 27):
             primitive.pop('hw_tpm_model', None)
             primitive.pop('hw_tpm_version', None)
@@ -321,6 +332,9 @@ class ImageMetaProps(base.NovaObject):
 
         # This indicates the guest needs UEFI firmware
         'hw_firmware_type': fields.FirmwareTypeField(),
+
+        # name of the input bus type to use, e.g. usb, virtio
+        'hw_input_bus': fields.InputBusField(),
 
         # boolean - used to trigger code to inject networking when booting a CD
         # image with a network boot image
@@ -624,9 +638,9 @@ class ImageMetaProps(base.NovaObject):
                 setattr(self, key, image_props[key])
 
     def _set_attr_from_trait_names(self, image_props):
-        for trait in [six.text_type(k[6:]) for k, v in image_props.items()
-                      if six.text_type(k).startswith("trait:") and
-                      six.text_type(v) == six.text_type('required')]:
+        for trait in [str(k[6:]) for k, v in image_props.items()
+                      if str(k).startswith("trait:") and
+                      str(v) == 'required']:
             if 'traits_required' not in self:
                 self.traits_required = []
             self.traits_required.append(trait)

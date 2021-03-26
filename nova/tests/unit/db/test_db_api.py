@@ -36,10 +36,7 @@ from oslo_utils import fixture as utils_fixture
 from oslo_utils.fixture import uuidsentinel
 from oslo_utils import timeutils
 from oslo_utils import uuidutils
-import six
-from six.moves import range
 from sqlalchemy import Column
-from sqlalchemy.dialects import sqlite
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import inspect
@@ -829,7 +826,7 @@ class SqlAlchemyDbApiTestCase(DbTestCase):
 
         self.assertEqual(1, len(result))
         self.assertEqual(2, len(result['host1']))
-        self.assertEqual(six.text_type, type(result['host1'][0]))
+        self.assertEqual(str, type(result['host1'][0]))
 
         result = test2(ctxt)
 
@@ -1692,6 +1689,14 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
             self.assertEqual(meta, self.sample_data['metadata'])
             sys_meta = utils.metadata_to_dict(inst['system_metadata'])
             self.assertEqual(sys_meta, self.sample_data['system_metadata'])
+
+    def test_instance_get_with_meta(self):
+        inst_id = self.create_instance_with_args().id
+        inst = db.instance_get(self.ctxt, inst_id)
+        meta = utils.metadata_to_dict(inst['metadata'])
+        self.assertEqual(meta, self.sample_data['metadata'])
+        sys_meta = utils.metadata_to_dict(inst['system_metadata'])
+        self.assertEqual(sys_meta, self.sample_data['system_metadata'])
 
     def test_instance_update(self):
         instance = self.create_instance_with_args()
@@ -2611,11 +2616,11 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
             self.ctxt, instance['uuid'],
             {'access_ip_v4': netaddr.IPAddress('1.2.3.4'),
              'access_ip_v6': netaddr.IPAddress('::1')})
-        self.assertIsInstance(instance['access_ip_v4'], six.string_types)
-        self.assertIsInstance(instance['access_ip_v6'], six.string_types)
+        self.assertIsInstance(instance['access_ip_v4'], str)
+        self.assertIsInstance(instance['access_ip_v6'], str)
         instance = db.instance_get_by_uuid(self.ctxt, instance['uuid'])
-        self.assertIsInstance(instance['access_ip_v4'], six.string_types)
-        self.assertIsInstance(instance['access_ip_v6'], six.string_types)
+        self.assertIsInstance(instance['access_ip_v4'], str)
+        self.assertIsInstance(instance['access_ip_v6'], str)
 
     @mock.patch('nova.db.sqlalchemy.api._check_instance_exists_in_project',
                 return_value=None)
@@ -2647,6 +2652,44 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
         db.instance_destroy(ctxt, instance['uuid'])
         self.assertRaises(exception.InstanceNotFound,
                           db.instance_destroy, ctxt, instance['uuid'])
+
+    def test_instance_destroy_already_destroyed_race(self):
+        # Test the scenario where the instance record still exists when we
+        # begin instance_destroy but becomes deleted by a racing request
+        # before we call query.soft_delete.
+        ctxt = context.get_admin_context()
+        instance = self.create_instance_with_args()
+
+        # Save the real implementation of _instance_get_by_uuid before we mock
+        # it later.
+        real_get_i = sqlalchemy_api._instance_get_by_uuid
+
+        # We will delete the instance record before we begin and mock
+        # _instance_get_by_uuid to simulate the instance still existing at the
+        # beginning of instance_destroy by returning the instance only the
+        # first time it is called.
+        # We want to actually delete the instance record so that we can verify
+        # the behavior and handling when query.soft_delete is called after the
+        # record has been deleted.
+        db.instance_destroy(ctxt, instance['uuid'])
+
+        # Mock the _instance_get_by_uuid method to return the instance object
+        # the first time it is called and pass through to the real
+        # implementation for any subsequent calls.
+        def fake_get_i(*a, **kw):
+            if not fake_get_i.called:
+                fake_get_i.called = True
+                return instance
+            return real_get_i(*a, **kw)
+
+        with mock.patch.object(sqlalchemy_api,
+                               '_instance_get_by_uuid') as mock_get_i:
+            fake_get_i.called = False
+            mock_get_i.side_effect = fake_get_i
+            # We expect InstanceNotFound to be raised in the case of the
+            # record having already been deleted.
+            self.assertRaises(exception.InstanceNotFound,
+                              db.instance_destroy, ctxt, instance['uuid'])
 
     def test_instance_destroy_hard(self):
         ctxt = context.get_admin_context()
@@ -4621,68 +4664,6 @@ class BlockDeviceMappingTestCase(test.TestCase):
         self.assertEqual(bdm2['instance_uuid'], self.instance2['uuid'])
 
 
-class AgentBuildTestCase(test.TestCase, ModelsObjectComparatorMixin):
-
-    """Tests for db.api.agent_build_* methods."""
-
-    def setUp(self):
-        super(AgentBuildTestCase, self).setUp()
-        self.ctxt = context.get_admin_context()
-
-    def test_agent_build_create_and_get_all(self):
-        self.assertEqual(0, len(db.agent_build_get_all(self.ctxt)))
-        agent_build = db.agent_build_create(self.ctxt, {'os': 'GNU/HURD'})
-        all_agent_builds = db.agent_build_get_all(self.ctxt)
-        self.assertEqual(1, len(all_agent_builds))
-        self._assertEqualObjects(agent_build, all_agent_builds[0])
-
-    def test_agent_build_get_by_triple(self):
-        agent_build = db.agent_build_create(
-            self.ctxt, {'hypervisor': 'kvm', 'os': 'FreeBSD',
-                        'architecture': fields.Architecture.X86_64})
-        self.assertIsNone(db.agent_build_get_by_triple(
-            self.ctxt, 'kvm', 'FreeBSD', 'i386'))
-        self._assertEqualObjects(agent_build, db.agent_build_get_by_triple(
-            self.ctxt, 'kvm', 'FreeBSD', fields.Architecture.X86_64))
-
-    def test_agent_build_destroy(self):
-        agent_build = db.agent_build_create(self.ctxt, {})
-        self.assertEqual(1, len(db.agent_build_get_all(self.ctxt)))
-        db.agent_build_destroy(self.ctxt, agent_build.id)
-        self.assertEqual(0, len(db.agent_build_get_all(self.ctxt)))
-
-    def test_agent_build_update(self):
-        agent_build = db.agent_build_create(self.ctxt, {'os': 'HaikuOS'})
-        db.agent_build_update(self.ctxt, agent_build.id, {'os': 'ReactOS'})
-        self.assertEqual('ReactOS', db.agent_build_get_all(self.ctxt)[0].os)
-
-    def test_agent_build_destroy_destroyed(self):
-        agent_build = db.agent_build_create(self.ctxt, {})
-        db.agent_build_destroy(self.ctxt, agent_build.id)
-        self.assertRaises(exception.AgentBuildNotFound,
-            db.agent_build_destroy, self.ctxt, agent_build.id)
-
-    def test_agent_build_update_destroyed(self):
-        agent_build = db.agent_build_create(self.ctxt, {'os': 'HaikuOS'})
-        db.agent_build_destroy(self.ctxt, agent_build.id)
-        self.assertRaises(exception.AgentBuildNotFound,
-            db.agent_build_update, self.ctxt, agent_build.id, {'os': 'OS/2'})
-
-    def test_agent_build_exists(self):
-        values = {'hypervisor': 'kvm', 'os': 'FreeBSD',
-                  'architecture': fields.Architecture.X86_64}
-        db.agent_build_create(self.ctxt, values)
-        self.assertRaises(exception.AgentBuildExists, db.agent_build_create,
-                          self.ctxt, values)
-
-    def test_agent_build_get_all_by_hypervisor(self):
-        values = {'hypervisor': 'kvm', 'os': 'FreeBSD',
-                  'architecture': fields.Architecture.X86_64}
-        created = db.agent_build_create(self.ctxt, values)
-        actual = db.agent_build_get_all(self.ctxt, hypervisor='kvm')
-        self._assertEqualListsOfObjects([created], actual)
-
-
 class VirtualInterfaceTestCase(test.TestCase, ModelsObjectComparatorMixin):
     def setUp(self):
         super(VirtualInterfaceTestCase, self).setUp()
@@ -5872,200 +5853,6 @@ class CertificateTestCase(test.TestCase, ModelsObjectComparatorMixin):
         self._assertEqualObjects(self.created[1], cert[0])
 
 
-class BwUsageTestCase(test.TestCase, ModelsObjectComparatorMixin):
-
-    _ignored_keys = ['id', 'deleted', 'deleted_at', 'created_at', 'updated_at']
-
-    def setUp(self):
-        super(BwUsageTestCase, self).setUp()
-        self.ctxt = context.get_admin_context()
-        self.useFixture(test.TimeOverride())
-
-    def test_bw_usage_get_by_uuids(self):
-        now = timeutils.utcnow()
-        start_period = now - datetime.timedelta(seconds=10)
-        start_period_str = start_period.isoformat()
-        uuid3_refreshed = now - datetime.timedelta(seconds=5)
-        uuid3_refreshed_str = uuid3_refreshed.isoformat()
-
-        expected_bw_usages = {
-            'fake_uuid1': {'uuid': 'fake_uuid1',
-                           'mac': 'fake_mac1',
-                           'start_period': start_period,
-                           'bw_in': 100,
-                           'bw_out': 200,
-                           'last_ctr_in': 12345,
-                           'last_ctr_out': 67890,
-                           'last_refreshed': now},
-            'fake_uuid2': {'uuid': 'fake_uuid2',
-                           'mac': 'fake_mac2',
-                           'start_period': start_period,
-                           'bw_in': 200,
-                           'bw_out': 300,
-                           'last_ctr_in': 22345,
-                           'last_ctr_out': 77890,
-                           'last_refreshed': now},
-            'fake_uuid3': {'uuid': 'fake_uuid3',
-                           'mac': 'fake_mac3',
-                           'start_period': start_period,
-                           'bw_in': 400,
-                           'bw_out': 500,
-                           'last_ctr_in': 32345,
-                           'last_ctr_out': 87890,
-                           'last_refreshed': uuid3_refreshed}
-        }
-
-        bw_usages = db.bw_usage_get_by_uuids(self.ctxt,
-                ['fake_uuid1', 'fake_uuid2'], start_period_str)
-        # No matches
-        self.assertEqual(len(bw_usages), 0)
-
-        # Add 3 entries
-        db.bw_usage_update(self.ctxt, 'fake_uuid1',
-                'fake_mac1', start_period_str,
-                100, 200, 12345, 67890)
-        db.bw_usage_update(self.ctxt, 'fake_uuid2',
-                'fake_mac2', start_period_str,
-                100, 200, 42, 42)
-        # Test explicit refreshed time
-        db.bw_usage_update(self.ctxt, 'fake_uuid3',
-                'fake_mac3', start_period_str,
-                400, 500, 32345, 87890,
-                last_refreshed=uuid3_refreshed_str)
-        # Update 2nd entry
-        db.bw_usage_update(self.ctxt, 'fake_uuid2',
-                'fake_mac2', start_period_str,
-                200, 300, 22345, 77890)
-
-        bw_usages = db.bw_usage_get_by_uuids(self.ctxt,
-                ['fake_uuid1', 'fake_uuid2', 'fake_uuid3'], start_period_str)
-        self.assertEqual(len(bw_usages), 3)
-        for usage in bw_usages:
-            self._assertEqualObjects(expected_bw_usages[usage['uuid']], usage,
-                                     ignored_keys=self._ignored_keys)
-
-    def _test_bw_usage_update(self, **expected_bw_usage):
-        bw_usage = db.bw_usage_update(self.ctxt, **expected_bw_usage)
-        self._assertEqualObjects(expected_bw_usage, bw_usage,
-                                 ignored_keys=self._ignored_keys)
-
-        uuid = expected_bw_usage['uuid']
-        mac = expected_bw_usage['mac']
-        start_period = expected_bw_usage['start_period']
-        bw_usage = db.bw_usage_get(self.ctxt, uuid, start_period, mac)
-        self._assertEqualObjects(expected_bw_usage, bw_usage,
-                                 ignored_keys=self._ignored_keys)
-
-    def _create_bw_usage(self, context, uuid, mac, start_period, bw_in, bw_out,
-                         last_ctr_in, last_ctr_out, id, last_refreshed=None):
-        with sqlalchemy_api.get_context_manager(context).writer.using(context):
-            bwusage = models.BandwidthUsage()
-            bwusage.start_period = start_period
-            bwusage.uuid = uuid
-            bwusage.mac = mac
-            bwusage.last_refreshed = last_refreshed
-            bwusage.bw_in = bw_in
-            bwusage.bw_out = bw_out
-            bwusage.last_ctr_in = last_ctr_in
-            bwusage.last_ctr_out = last_ctr_out
-            bwusage.id = id
-            bwusage.save(context.session)
-
-    def test_bw_usage_update_exactly_one_record(self):
-        now = timeutils.utcnow()
-        start_period = now - datetime.timedelta(seconds=10)
-        uuid = 'fake_uuid'
-
-        # create two equal bw_usages with IDs 1 and 2
-        for id in range(1, 3):
-            bw_usage = {'uuid': uuid,
-                        'mac': 'fake_mac',
-                        'start_period': start_period,
-                        'bw_in': 100,
-                        'bw_out': 200,
-                        'last_ctr_in': 12345,
-                        'last_ctr_out': 67890,
-                        'last_refreshed': now,
-                        'id': id}
-            self._create_bw_usage(self.ctxt, **bw_usage)
-
-        # check that we have two equal bw_usages
-        self.assertEqual(
-            2, len(db.bw_usage_get_by_uuids(self.ctxt, [uuid], start_period)))
-
-        # update 'last_ctr_in' field in one bw_usage
-        updated_bw_usage = {'uuid': uuid,
-                            'mac': 'fake_mac',
-                            'start_period': start_period,
-                            'bw_in': 100,
-                            'bw_out': 200,
-                            'last_ctr_in': 54321,
-                            'last_ctr_out': 67890,
-                            'last_refreshed': now}
-        result = db.bw_usage_update(self.ctxt, **updated_bw_usage)
-
-        # check that only bw_usage with ID 1 was updated
-        self.assertEqual(1, result['id'])
-        self._assertEqualObjects(updated_bw_usage, result,
-                                 ignored_keys=self._ignored_keys)
-
-    def test_bw_usage_get(self):
-        now = timeutils.utcnow()
-        start_period = now - datetime.timedelta(seconds=10)
-        start_period_str = start_period.isoformat()
-
-        expected_bw_usage = {'uuid': 'fake_uuid1',
-                             'mac': 'fake_mac1',
-                             'start_period': start_period,
-                             'bw_in': 100,
-                             'bw_out': 200,
-                             'last_ctr_in': 12345,
-                             'last_ctr_out': 67890,
-                             'last_refreshed': now}
-
-        bw_usage = db.bw_usage_get(self.ctxt, 'fake_uuid1', start_period_str,
-                                   'fake_mac1')
-        self.assertIsNone(bw_usage)
-        self._test_bw_usage_update(**expected_bw_usage)
-
-    def test_bw_usage_update_new(self):
-        now = timeutils.utcnow()
-        start_period = now - datetime.timedelta(seconds=10)
-
-        expected_bw_usage = {'uuid': 'fake_uuid1',
-                             'mac': 'fake_mac1',
-                             'start_period': start_period,
-                             'bw_in': 100,
-                             'bw_out': 200,
-                             'last_ctr_in': 12345,
-                             'last_ctr_out': 67890,
-                             'last_refreshed': now}
-
-        self._test_bw_usage_update(**expected_bw_usage)
-
-    def test_bw_usage_update_existing(self):
-        now = timeutils.utcnow()
-        start_period = now - datetime.timedelta(seconds=10)
-
-        expected_bw_usage = {'uuid': 'fake_uuid1',
-                             'mac': 'fake_mac1',
-                             'start_period': start_period,
-                             'bw_in': 100,
-                             'bw_out': 200,
-                             'last_ctr_in': 12345,
-                             'last_ctr_out': 67890,
-                             'last_refreshed': now}
-
-        self._test_bw_usage_update(**expected_bw_usage)
-
-        expected_bw_usage['bw_in'] = 300
-        expected_bw_usage['bw_out'] = 400
-        expected_bw_usage['last_ctr_in'] = 23456
-        expected_bw_usage['last_ctr_out'] = 78901
-
-        self._test_bw_usage_update(**expected_bw_usage)
-
-
 class Ec2TestCase(test.TestCase):
 
     def setUp(self):
@@ -6288,17 +6075,24 @@ class ArchiveTestCase(test.TestCase, ModelsObjectComparatorMixin):
                         instance_actions_events=1)
         self._assertEqualObjects(expected, results[0])
 
-        # Archive 1 row deleted before 2017-01-03. instance_action_events
-        # should be the table with row deleted due to FK contraints
+        # Archive 1 row deleted before 2017-01-03
+        # Because the instances table will be processed first, tables that
+        # refer to it (instance_actions and instance_action_events) will be
+        # visited and archived in the same transaction as the instance, to
+        # avoid orphaning the instance record (archive dependent records in one
+        # transaction)
         before_date = dateutil_parser.parse('2017-01-03', fuzzy=True)
         results = db.archive_deleted_rows(max_rows=1, before=before_date)
-        expected = dict(instance_actions_events=1)
+        expected = dict(instances=1,
+                        instance_actions=1,
+                        instance_actions_events=1)
         self._assertEqualObjects(expected, results[0])
-        # Archive all other rows deleted before 2017-01-03. This should
-        # delete row in instance_actions, then row in instances due to FK
-        # constraints
+        # Try to archive all other rows deleted before 2017-01-03. This should
+        # not archive anything because the instances table and tables that
+        # refer to it (instance_actions and instance_action_events) were all
+        # archived in the last run.
         results = db.archive_deleted_rows(max_rows=100, before=before_date)
-        expected = dict(instances=1, instance_actions=1)
+        expected = {}
         self._assertEqualObjects(expected, results[0])
 
         # Verify we have 4 left in main
@@ -6320,7 +6114,7 @@ class ArchiveTestCase(test.TestCase, ModelsObjectComparatorMixin):
 
     def test_archive_deleted_rows_for_every_uuid_table(self):
         tablenames = []
-        for model_class in six.itervalues(models.__dict__):
+        for model_class in models.__dict__.values():
             if hasattr(model_class, "__tablename__"):
                 tablenames.append(model_class.__tablename__)
         tablenames.sort()
@@ -6432,18 +6226,7 @@ class ArchiveTestCase(test.TestCase, ModelsObjectComparatorMixin):
 
     def _check_sqlite_version_less_than_3_7(self):
         # SQLite doesn't enforce foreign key constraints without a pragma.
-        dialect = self.engine.url.get_dialect()
-        if dialect == sqlite.dialect:
-            # We're seeing issues with foreign key support in SQLite 3.6.20
-            # SQLAlchemy doesn't support it at all with < SQLite 3.6.19
-            # It works fine in SQLite 3.7.
-            # So return early to skip this test if running SQLite < 3.7
-            import sqlite3
-            tup = sqlite3.sqlite_version_info
-            if tup[0] < 3 or (tup[0] == 3 and tup[1] < 7):
-                self.skipTest(
-                    'sqlite version too old for reliable SQLA foreign_keys')
-            self.conn.execute("PRAGMA foreign_keys = ON")
+        self.enforce_fk_constraints(engine=self.engine)
 
     def test_archive_deleted_rows_for_migrations(self):
         # migrations.instance_uuid depends on instances.uuid
@@ -6457,19 +6240,8 @@ class ArchiveTestCase(test.TestCase, ModelsObjectComparatorMixin):
         ins_stmt = self.migrations.insert().values(instance_uuid=instance_uuid,
                                                    deleted=0)
         self.conn.execute(ins_stmt)
-        # The first try to archive instances should fail, due to FK.
-        num = sqlalchemy_api._archive_deleted_rows_for_table(self.metadata,
-                                                             "instances",
-                                                             max_rows=None,
-                                                             before=None)
-        self.assertEqual(0, num[0])
-        # Then archiving migrations should work.
-        num = sqlalchemy_api._archive_deleted_rows_for_table(self.metadata,
-                                                             "migrations",
-                                                             max_rows=None,
-                                                             before=None)
-        self.assertEqual(1, num[0])
-        # Then archiving instances should work.
+        # Archiving instances should result in migrations related to the
+        # instances also being archived.
         num = sqlalchemy_api._archive_deleted_rows_for_table(self.metadata,
                                                              "instances",
                                                              max_rows=None,

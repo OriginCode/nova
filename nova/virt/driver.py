@@ -26,7 +26,6 @@ import os_resource_classes as orc
 import os_traits
 from oslo_log import log as logging
 from oslo_utils import importutils
-import six
 
 import nova.conf
 from nova import context as nova_context
@@ -102,7 +101,6 @@ def block_device_info_get_mapping(block_device_info):
 # trait, it needs to be (made) standard, and must be prefixed with
 # "COMPUTE_".
 CAPABILITY_TRAITS_MAP = {
-    # Added in os-traits 0.7.0.
     "supports_attach_interface": os_traits.COMPUTE_NET_ATTACH_INTERFACE,
     "supports_device_tagging": os_traits.COMPUTE_DEVICE_TAGGING,
     "supports_tagged_attach_interface":
@@ -110,11 +108,8 @@ CAPABILITY_TRAITS_MAP = {
     "supports_tagged_attach_volume": os_traits.COMPUTE_VOLUME_ATTACH_WITH_TAG,
     "supports_extend_volume": os_traits.COMPUTE_VOLUME_EXTEND,
     "supports_multiattach": os_traits.COMPUTE_VOLUME_MULTI_ATTACH,
-    # Added in os-traits 0.8.0.
     "supports_trusted_certs": os_traits.COMPUTE_TRUSTED_CERTS,
     "supports_accelerators": os_traits.COMPUTE_ACCELERATORS,
-
-    # Image type support flags, added in os-traits 0.12.0
     "supports_image_type_aki": os_traits.COMPUTE_IMAGE_TYPE_AKI,
     "supports_image_type_ami": os_traits.COMPUTE_IMAGE_TYPE_AMI,
     "supports_image_type_ari": os_traits.COMPUTE_IMAGE_TYPE_ARI,
@@ -125,13 +120,25 @@ CAPABILITY_TRAITS_MAP = {
     "supports_image_type_vhd": os_traits.COMPUTE_IMAGE_TYPE_VHD,
     "supports_image_type_vhdx": os_traits.COMPUTE_IMAGE_TYPE_VHDX,
     "supports_image_type_vmdk": os_traits.COMPUTE_IMAGE_TYPE_VMDK,
-    # Added in os-traits 2.0.0
     "supports_image_type_ploop": os_traits.COMPUTE_IMAGE_TYPE_PLOOP,
-    # Added in os-traits 2.1.0.
     "supports_migrate_to_same_host": os_traits.COMPUTE_SAME_HOST_COLD_MIGRATE,
-    # Added in os-traits 2.2.0.
     "supports_bfv_rescue": os_traits.COMPUTE_RESCUE_BFV,
+    "supports_secure_boot": os_traits.COMPUTE_SECURITY_UEFI_SECURE_BOOT,
 }
+
+
+def _check_image_type_exclude_list(capability, supported):
+    """Enforce the exclusion list on image_type capabilites.
+
+    :param capability: The supports_image_type_foo capability being checked
+    :param supported: The flag indicating whether the virt driver *can*
+                      support the given image type.
+    :returns: True if the virt driver *can* support the image type and
+              if it is not listed in the config to be excluded.
+    """
+    image_type = capability.replace('supports_image_type_', '')
+    return (supported and
+            image_type not in CONF.compute.image_type_exclude_list)
 
 
 class ComputeDriver(object):
@@ -183,6 +190,7 @@ class ComputeDriver(object):
         "supports_accelerators": False,
         "supports_bfv_rescue": False,
         "supports_vtpm": False,
+        "supports_secure_boot": False,
 
         # Image type support flags
         "supports_image_type_aki": False,
@@ -459,12 +467,6 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
-    # TODO(stephenfin): This was only implemented (properly) for XenAPI and
-    # should be removed.
-    def get_console_pool_info(self, console_type):
-        # TODO(Vek): Need to pass context in for access to auth_token
-        raise NotImplementedError()
-
     def get_console_output(self, context, instance):
         """Get console output for an instance
 
@@ -545,16 +547,6 @@ class ComputeDriver(object):
         :return: Has a big overlap to the return value of the older interface
             :func:`get_diagnostics`
         :rtype: nova.virt.diagnostics.Diagnostics
-        """
-        raise NotImplementedError()
-
-    # TODO(stephenfin): This was only implemented (properly) for XenAPI and
-    # should be removed.
-    def get_all_bw_counters(self, instances):
-        """Return bandwidth usage counters for each interface on each
-           running VM.
-
-        :param instances: nova.objects.instance.InstanceList
         """
         raise NotImplementedError()
 
@@ -730,16 +722,6 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
-    # TODO(stephenfin): This was only implemented (properly) for XenAPI and
-    # should be removed.
-    def post_interrupted_snapshot_cleanup(self, context, instance):
-        """Cleans up any resources left after an interrupted snapshot.
-
-        :param context: security context
-        :param instance: nova.objects.instance.Instance
-        """
-        pass
-
     def finish_migration(self, context, migration, instance, disk_info,
                          network_info, image_meta, resize_instance,
                          allocations, block_device_info=None, power_on=True):
@@ -879,15 +861,6 @@ class ComputeDriver(object):
         :param rescue_password: new root password to set for rescue.
         :param dict block_device_info:
             The block device mapping of the instance.
-        """
-        raise NotImplementedError()
-
-    # TODO(stephenfin): This was only implemented (properly) for XenAPI and
-    # should be removed.
-    def set_bootable(self, instance, is_bootable):
-        """Set the ability to power on/off an instance.
-
-        :param instance: nova.objects.instance.Instance
         """
         raise NotImplementedError()
 
@@ -1113,6 +1086,10 @@ class ComputeDriver(object):
         """
         traits = {}
         for capability, supported in self.capabilities.items():
+            if capability.startswith('supports_image_type_'):
+                supported = _check_image_type_exclude_list(capability,
+                                                           supported)
+
             if capability in CAPABILITY_TRAITS_MAP:
                 traits[CAPABILITY_TRAITS_MAP[capability]] = supported
 
@@ -1354,13 +1331,6 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
-    # TODO(stephenfin): This was only implemented (properly) for XenAPI and
-    # should be removed.
-    def reset_network(self, instance):
-        """reset networking for specified instance."""
-        # TODO(Vek): Need to pass context in for access to auth_token
-        pass
-
     def set_admin_password(self, instance, new_pass):
         """Set the root password on the specified instance.
 
@@ -1368,21 +1338,6 @@ class ComputeDriver(object):
         :param new_pass: the new password
         """
         raise NotImplementedError()
-
-    # TODO(stephenfin): This was only implemented (properly) for XenAPI and
-    # should be removed.
-    def change_instance_metadata(self, context, instance, diff):
-        """Applies a diff to the instance metadata.
-
-        This is an optional driver method which is used to publish
-        changes to the instance's metadata to the hypervisor.  If the
-        hypervisor has no means of publishing the instance metadata to
-        the instance, then this method should not be implemented.
-
-        :param context: security context
-        :param instance: nova.objects.instance.Instance
-        """
-        pass
 
     def inject_network_info(self, instance, nw_info):
         """inject network info for specified instance."""
@@ -1569,54 +1524,6 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
-    # TODO(stephenfin): This was only implemented (properly) for XenAPI and
-    # should be removed.
-    def add_to_aggregate(self, context, aggregate, host, **kwargs):
-        """Add a compute host to an aggregate.
-
-        The counter action to this is :func:`remove_from_aggregate`
-
-        :param nova.context.RequestContext context:
-            The security context.
-        :param nova.objects.aggregate.Aggregate aggregate:
-            The aggregate which should add the given `host`
-        :param str host:
-            The name of the host to add to the given `aggregate`.
-        :param dict kwargs:
-            A free-form thingy...
-
-        :return: None
-        """
-        # NOTE(jogo) Currently only used for XenAPI-Pool
-        raise NotImplementedError()
-
-    # TODO(stephenfin): This was only implemented (properly) for XenAPI and
-    # should be removed.
-    def remove_from_aggregate(self, context, aggregate, host, **kwargs):
-        """Remove a compute host from an aggregate.
-
-        The counter action to this is :func:`add_to_aggregate`
-
-        :param nova.context.RequestContext context:
-            The security context.
-        :param nova.objects.aggregate.Aggregate aggregate:
-            The aggregate which should remove the given `host`
-        :param str host:
-            The name of the host to remove from the given `aggregate`.
-        :param dict kwargs:
-            A free-form thingy...
-
-        :return: None
-        """
-        raise NotImplementedError()
-
-    # TODO(stephenfin): This was only implemented (properly) for XenAPI and
-    # should be removed.
-    def undo_aggregate_operation(self, context, op, aggregate,
-                                  host, set_error=True):
-        """Undo for Resource Pools."""
-        raise NotImplementedError()
-
     def get_volume_connector(self, instance):
         """Get connector information for the instance for attaching to volumes.
 
@@ -1649,15 +1556,6 @@ class ComputeDriver(object):
             return True
         # Refresh and check again.
         return nodename in self.get_available_nodes(refresh=True)
-
-    # TODO(stephenfin): This was only implemented (properly) for XenAPI and
-    # should be removed.
-    def get_per_instance_usage(self):
-        """Get information about instance resource usage.
-
-        :returns: dict of  nova uuid => dict of usage info
-        """
-        return {}
 
     def instance_on_disk(self, instance):
         """Checks access of instance files on the host.
@@ -1693,7 +1591,7 @@ class ComputeDriver(object):
         """
 
         if not self._compute_event_callback:
-            LOG.debug("Discarding event %s", six.text_type(event))
+            LOG.debug("Discarding event %s", str(event))
             return
 
         if not isinstance(event, virtevent.Event):
@@ -1701,7 +1599,7 @@ class ComputeDriver(object):
                 _("Event must be an instance of nova.virt.event.Event"))
 
         try:
-            LOG.debug("Emitting event %s", six.text_type(event))
+            LOG.debug("Emitting event %s", str(event))
             self._compute_event_callback(event)
         except Exception as ex:
             LOG.error("Exception dispatching event %(event)s: %(ex)s",

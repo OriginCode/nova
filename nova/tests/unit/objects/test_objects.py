@@ -25,7 +25,6 @@ from oslo_utils import timeutils
 from oslo_versionedobjects import base as ovo_base
 from oslo_versionedobjects import exception as ovo_exc
 from oslo_versionedobjects import fixture
-import six
 
 from nova import context
 from nova import exception
@@ -257,7 +256,7 @@ class FakeIndirectionHack(fixture.FakeIndirectionAPI):
         objinst = self._ser.deserialize_entity(
             context, self._ser.serialize_entity(
                 context, objinst))
-        objmethod = six.text_type(objmethod)
+        objmethod = str(objmethod)
         args = self._ser.deserialize_entity(
             None, self._ser.serialize_entity(None, args))
         kwargs = self._ser.deserialize_entity(
@@ -272,9 +271,9 @@ class FakeIndirectionHack(fixture.FakeIndirectionAPI):
 
     def object_class_action(self, context, objname, objmethod, objver,
                             args, kwargs):
-        objname = six.text_type(objname)
-        objmethod = six.text_type(objmethod)
-        objver = six.text_type(objver)
+        objname = str(objname)
+        objmethod = str(objmethod)
+        objver = str(objver)
         args = self._ser.deserialize_entity(
             None, self._ser.serialize_entity(None, args))
         kwargs = self._ser.deserialize_entity(
@@ -292,9 +291,9 @@ class FakeIndirectionHack(fixture.FakeIndirectionAPI):
 
     def object_class_action_versions(self, context, objname, objmethod,
                                      object_versions, args, kwargs):
-        objname = six.text_type(objname)
-        objmethod = six.text_type(objmethod)
-        object_versions = {six.text_type(o): six.text_type(v)
+        objname = str(objname)
+        objmethod = str(objmethod)
+        object_versions = {str(o): str(v)
                            for o, v in object_versions.items()}
         args, kwargs = self._canonicalize_args(context, args, kwargs)
         objver = object_versions[objname]
@@ -956,11 +955,11 @@ class TestObjectSerializer(_BaseTestCase):
         thing = {'key': obj}
         primitive = ser.serialize_entity(self.context, thing)
         self.assertEqual(1, len(primitive))
-        for item in six.itervalues(primitive):
+        for item in primitive.values():
             self.assertNotIsInstance(item, base.NovaObject)
         thing2 = ser.deserialize_entity(self.context, primitive)
         self.assertEqual(1, len(thing2))
-        for item in six.itervalues(thing2):
+        for item in thing2.values():
             self.assertIsInstance(item, MyObj)
 
         # object-action updates dict case
@@ -1045,14 +1044,12 @@ class TestRegistry(test.NoDBTestCase):
 # they come with a corresponding version bump in the affected
 # objects
 object_data = {
-    'Agent': '1.0-c0c092abaceb6f51efe5d82175f15eba',
-    'AgentList': '1.0-5a7380d02c3aaf2a32fc8115ae7ca98c',
     'Aggregate': '1.3-f315cb68906307ca2d1cca84d4753585',
     'AggregateList': '1.3-3ea55a050354e72ef3306adefa553957',
     'BandwidthUsage': '1.2-c6e4c779c7f40f2407e3d70022e3cd1c',
     'BandwidthUsageList': '1.2-5fe7475ada6fe62413cbfcc06ec70746',
     'BlockDeviceMapping': '1.20-45a6ad666ddf14bbbedece2293af77e2',
-    'BlockDeviceMappingList': '1.17-1e568eecb91d06d4112db9fd656de235',
+    'BlockDeviceMappingList': '1.18-73bcbbae5ef5e8adcedbc821db869306',
     'BuildRequest': '1.3-077dee42bed93f8a5b62be77657b7152',
     'BuildRequestList': '1.0-cd95608eccb89fbc702c8b52f38ec738',
     'CellMapping': '1.1-5d652928000a5bc369d79d5bde7e497d',
@@ -1077,7 +1074,7 @@ object_data = {
     'HyperVLiveMigrateData': '1.4-e265780e6acfa631476c8170e8d6fce0',
     'IDEDeviceBus': '1.0-29d4c9f27ac44197f01b6ac1b7e16502',
     'ImageMeta': '1.8-642d1b2eb3e880a367f37d72dd76162d',
-    'ImageMetaProps': '1.27-f3f17d5e35146a0dbb56420ffc4f3990',
+    'ImageMetaProps': '1.29-5c02bd7b1e050ef39513d3fca728e543',
     'Instance': '2.7-d187aec68cad2e4d8b8a03a68e4739ce',
     'InstanceAction': '1.2-9a5abc87fdd3af46f45731960651efb5',
     'InstanceActionEvent': '1.4-5b1f361bd81989f8bb2c20bb7e8a4cb4',
@@ -1095,7 +1092,7 @@ object_data = {
     'InstanceMappingList': '1.3-d34b6ebb076d542ae0f8b440534118da',
     'InstanceNUMACell': '1.6-25d9120d83a18356f4146f2a6fe2cc8d',
     'InstanceNUMATopology': '1.3-ec0030cb0402a49c96da7051c037082a',
-    'InstancePCIRequest': '1.3-f6d324f1c337fad4f34892ed5f484c9a',
+    'InstancePCIRequest': '1.4-b27808ae189699df27f8f5b908b6393e',
     'InstancePCIRequests': '1.1-65e38083177726d806684cb1cc0136d2',
     'KeyPair': '1.4-1244e8d1b103cc69d038ed78ab3a8cc6',
     'KeyPairList': '1.3-94aad3ac5c938eef4b5e83da0212f506',
@@ -1108,7 +1105,7 @@ object_data = {
     'MigrationList': '1.5-36793f8d65bae421bd5564d09a4de7be',
     'MonitorMetric': '1.1-53b1db7c4ae2c531db79761e7acc52ba',
     'MonitorMetricList': '1.1-15ecf022a68ddbb8c2a6739cfc9f8f5e',
-    'NUMACell': '1.4-7695303e820fa855d76954be2eb2680e',
+    'NUMACell': '1.5-2592de3c926a7840d763bcc85f81afa7',
     'NUMAPagesTopology': '1.1-edab9fa2dc43c117a38d600be54b4542',
     'NUMATopology': '1.2-c63fad38be73b6afd04715c9c1b29220',
     'NUMATopologyLimits': '1.1-4235c5da7a76c7e36075f0cd2f5cf922',
@@ -1118,7 +1115,7 @@ object_data = {
     'NetworkRequestList': '1.1-15ecf022a68ddbb8c2a6739cfc9f8f5e',
     'NicDiagnostics': '1.0-895e9ad50e0f56d5258585e3e066aea5',
     'PCIDeviceBus': '1.0-2b891cb77e42961044689f3dc2718995',
-    'PciDevice': '1.6-25ca0542a22bc25386a72c0065a79c01',
+    'PciDevice': '1.7-680e4c590aae154958ccf9677774413b',
     'PciDeviceList': '1.3-52ff14355491c8c580bdc0ba34c26210',
     'PciDevicePool': '1.1-3f5ddc3ff7bfa14da7f6c7e9904cc000',
     'PciDevicePoolList': '1.1-15ecf022a68ddbb8c2a6739cfc9f8f5e',
@@ -1127,7 +1124,7 @@ object_data = {
     'QuotasNoOp': '1.3-d1593cf969c81846bc8192255ea95cce',
     'RequestGroup': '1.3-0458d350a8ec9d0673f9be5640a990ce',
     'RequestLevelParams': '1.0-1e5c8c18bd44cd233c8b32509c99d06f',
-    'RequestSpec': '1.13-e1aa38b2bf3f8547474ee9e4c0aa2745',
+    'RequestSpec': '1.14-2cdbda368ca07e10905dc5fe96908a58',
     'Resource': '1.0-d8a2abbb380da583b995fd118f6a8953',
     'ResourceList': '1.0-4a53826625cc280e15fae64a575e0879',
     'ResourceMetadata': '1.0-77509ea1ea0dd750d5864b9bd87d3f9d',

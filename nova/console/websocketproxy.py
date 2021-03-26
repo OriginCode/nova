@@ -19,15 +19,14 @@ Leverages websockify.py by Joel Martin
 '''
 
 import copy
+from http import cookies as Cookie
 import socket
 import sys
+from urllib import parse as urlparse
 
 from oslo_log import log as logging
 from oslo_utils import encodeutils
 from oslo_utils import importutils
-import six
-from six.moves import http_cookies as Cookie
-import six.moves.urllib.parse as urlparse
 import websockify
 
 from nova.compute import rpcapi as compute_rpcapi
@@ -66,7 +65,7 @@ class TenantSock(object):
             # flatten frames onto queue
             for frame in new_frames:
                 self.queue.extend(
-                    [six.binary_type(chr(c), 'ascii') for c in frame])
+                    [bytes(chr(c), 'ascii') for c in frame])
 
             if closed:
                 break

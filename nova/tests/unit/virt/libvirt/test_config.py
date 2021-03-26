@@ -2059,27 +2059,6 @@ class LibvirtConfigGuestInterfaceTest(LibvirtConfigBaseTest):
         obj2.parse_str(xml)
         self.assertXmlEqual(xml, obj2.to_xml())
 
-    def test_config_bridge_xen(self):
-        obj = config.LibvirtConfigGuestInterface()
-        obj.net_type = "bridge"
-        obj.source_dev = "br0"
-        obj.mac_addr = "CA:FE:BE:EF:CA:FE"
-        obj.script = "/path/to/test-vif-openstack"
-
-        xml = obj.to_xml()
-        self.assertXmlEqual(xml, """
-            <interface type="bridge">
-              <mac address="CA:FE:BE:EF:CA:FE"/>
-              <source bridge="br0"/>
-              <script path="/path/to/test-vif-openstack"/>
-            </interface>""")
-
-        # parse the xml from the first object into a new object and make sure
-        # they are the same
-        obj2 = config.LibvirtConfigGuestInterface()
-        obj2.parse_str(xml)
-        self.assertXmlEqual(xml, obj2.to_xml())
-
     def test_config_8021Qbh(self):
         obj = config.LibvirtConfigGuestInterface()
         obj.net_type = "direct"
@@ -2306,6 +2285,21 @@ class LibvirtConfigGuestInterfaceTest(LibvirtConfigBaseTest):
         self.assertNotIsInstance(obj.device_addr,
                              config.LibvirtConfigGuestDeviceAddressDrive)
 
+    def test_config_interface_alias(self):
+        xml = """
+            <interface type='network'>
+                <mac address='52:54:00:14:6f:50'/>
+                <source network='default' bridge='virbr0'/>
+                <target dev='vnet0'/>
+                <model type='virtio'/>
+                <alias name='net0'/>
+            </interface>"""
+
+        obj = config.LibvirtConfigGuestInterface()
+        obj.parse_str(xml)
+
+        self.assertEqual('net0', obj.alias)
+
 
 class LibvirtConfigGuestFeatureTest(LibvirtConfigBaseTest):
 
@@ -2460,100 +2454,6 @@ class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
               </idmap>
             </domain>""", xml)
 
-    def test_config_xen_pv(self):
-        obj = config.LibvirtConfigGuest()
-        obj.virt_type = "xen"
-        obj.memory = 100 * units.Mi
-        obj.vcpus = 2
-        obj.cpuset = set([0, 1, 3, 4, 5])
-        obj.name = "demo"
-        obj.uuid = "b38a3f43-4be2-4046-897f-b67c2f5e0147"
-        obj.os_type = "linux"
-        obj.os_kernel = "/tmp/vmlinuz"
-        obj.os_initrd = "/tmp/ramdisk"
-        obj.os_cmdline = "console=xvc0"
-
-        disk = config.LibvirtConfigGuestDisk()
-        disk.source_type = "file"
-        disk.source_path = "/tmp/img"
-        disk.target_dev = "/dev/xvda"
-        disk.target_bus = "xen"
-
-        obj.add_device(disk)
-
-        xml = obj.to_xml()
-        self.assertXmlEqual(xml, """
-            <domain type="xen">
-              <uuid>b38a3f43-4be2-4046-897f-b67c2f5e0147</uuid>
-              <name>demo</name>
-              <memory>104857600</memory>
-              <vcpu cpuset="0-1,3-5">2</vcpu>
-              <os>
-                <type>linux</type>
-                <kernel>/tmp/vmlinuz</kernel>
-                <initrd>/tmp/ramdisk</initrd>
-                <cmdline>console=xvc0</cmdline>
-              </os>
-              <devices>
-                <disk type="file" device="disk">
-                  <source file="/tmp/img"/>
-                  <target bus="xen" dev="/dev/xvda"/>
-                </disk>
-              </devices>
-            </domain>""")
-
-    def test_config_xen_hvm(self):
-        obj = config.LibvirtConfigGuest()
-        obj.virt_type = "xen"
-        obj.memory = 100 * units.Mi
-        obj.vcpus = 2
-        obj.cpuset = set([0, 1, 3, 4, 5])
-        obj.name = "demo"
-        obj.uuid = "b38a3f43-4be2-4046-897f-b67c2f5e0147"
-        obj.os_type = "hvm"
-        obj.os_loader = '/usr/lib/xen/boot/hvmloader'
-        obj.os_root = "root=xvda"
-        obj.os_cmdline = "console=xvc0"
-        obj.features = [
-            config.LibvirtConfigGuestFeatureACPI(),
-            config.LibvirtConfigGuestFeatureAPIC(),
-            config.LibvirtConfigGuestFeaturePAE(),
-        ]
-
-        disk = config.LibvirtConfigGuestDisk()
-        disk.source_type = "file"
-        disk.source_path = "/tmp/img"
-        disk.target_dev = "/dev/xvda"
-        disk.target_bus = "xen"
-
-        obj.add_device(disk)
-
-        xml = obj.to_xml()
-        self.assertXmlEqual(xml, """
-            <domain type="xen">
-              <uuid>b38a3f43-4be2-4046-897f-b67c2f5e0147</uuid>
-              <name>demo</name>
-              <memory>104857600</memory>
-              <vcpu cpuset="0-1,3-5">2</vcpu>
-              <os>
-                <type>hvm</type>
-                <loader>/usr/lib/xen/boot/hvmloader</loader>
-                <cmdline>console=xvc0</cmdline>
-                <root>root=xvda</root>
-              </os>
-              <features>
-                <acpi/>
-                <apic/>
-                <pae/>
-              </features>
-              <devices>
-                <disk type="file" device="disk">
-                  <source file="/tmp/img"/>
-                  <target bus="xen" dev="/dev/xvda"/>
-                </disk>
-              </devices>
-            </domain>""")
-
     def test_config_kvm(self):
         obj = fake_libvirt_data.fake_kvm_guest()
 
@@ -2572,22 +2472,76 @@ class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
         obj.vcpus = 1
         obj.name = "uefi"
         obj.uuid = "f01cf68d-515c-4daf-b85f-ef1424d93bfc"
-        obj.os_type = "x86_64"
-        obj.os_loader = '/tmp/OVMF_CODE.fd'
+        obj.os_type = "hvm"
+        obj.os_mach_type = "pc-q35-5.1"
+        obj.os_loader = '/tmp/OVMF_CODE.secboot.fd'
         obj.os_loader_type = 'pflash'
+        obj.os_loader_secure = True
         xml = obj.to_xml()
 
-        self.assertXmlEqual(xml, """
+        self.assertXmlEqual(
+            """
             <domain type="kvm">
               <uuid>f01cf68d-515c-4daf-b85f-ef1424d93bfc</uuid>
               <name>uefi</name>
               <memory>104857600</memory>
               <vcpu>1</vcpu>
               <os>
-                <type>x86_64</type>
-                <loader readonly='yes' type='pflash'>/tmp/OVMF_CODE.fd</loader>
+                <type machine="pc-q35-5.1">hvm</type>
+                <loader secure='yes' readonly='yes' type='pflash'>/tmp/OVMF_CODE.secboot.fd</loader>
               </os>
-            </domain>""")
+            </domain>""",  # noqa: E501
+            xml,
+        )
+
+    def _test_config_uefi_autoconfigure(self, secure):
+        obj = config.LibvirtConfigGuest()
+        obj.virt_type = "kvm"
+        obj.memory = 100 * units.Mi
+        obj.vcpus = 1
+        obj.name = "uefi"
+        obj.uuid = "f01cf68d-515c-4daf-b85f-ef1424d93bfc"
+        obj.os_type = "hvm"
+        obj.os_firmware = "efi"
+        obj.os_mach_type = "pc-q35-5.1"
+        obj.os_loader_secure = secure
+        return obj.to_xml()
+
+    def test_config_uefi_autoconfigure(self):
+        xml = self._test_config_uefi_autoconfigure(secure=False)
+
+        self.assertXmlEqual(
+            xml,
+            """
+            <domain type="kvm">
+              <uuid>f01cf68d-515c-4daf-b85f-ef1424d93bfc</uuid>
+              <name>uefi</name>
+              <memory>104857600</memory>
+              <vcpu>1</vcpu>
+              <os firmware="efi">
+                <type machine="pc-q35-5.1">hvm</type>
+                <loader secure="no"/>
+              </os>
+            </domain>""",
+        )
+
+    def test_config_uefi_autoconfigure_secure(self):
+        xml = self._test_config_uefi_autoconfigure(secure=True)
+
+        self.assertXmlEqual(
+            xml,
+            """
+            <domain type="kvm">
+              <uuid>f01cf68d-515c-4daf-b85f-ef1424d93bfc</uuid>
+              <name>uefi</name>
+              <memory>104857600</memory>
+              <vcpu>1</vcpu>
+              <os firmware="efi">
+                <type machine="pc-q35-5.1">hvm</type>
+                <loader secure="yes"/>
+              </os>
+            </domain>""",
+        )
 
     def test_config_boot_menu(self):
         obj = config.LibvirtConfigGuest()
@@ -2596,7 +2550,7 @@ class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
         obj.vcpus = 2
         obj.name = "bootmenu"
         obj.uuid = "f01cf68d-515c-4daf-b85f-ef1424d93bfc"
-        obj.os_type = "fake"
+        obj.os_type = "hvm"
         obj.os_bootmenu = True
         xml = obj.to_xml()
 
@@ -2607,7 +2561,7 @@ class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
               <memory>104857600</memory>
               <vcpu>2</vcpu>
               <os>
-                <type>fake</type>
+                <type>hvm</type>
                 <bootmenu enable="yes"/>
               </os>
             </domain>""")
@@ -2619,7 +2573,7 @@ class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
         obj.vcpus = 2
         obj.name = "perf"
         obj.uuid = "f01cf68d-515c-4daf-b85f-ef1424d93bfc"
-        obj.os_type = "fake"
+        obj.os_type = "hvm"
         obj.perf_events = ['cmt', 'mbml']
         xml = obj.to_xml()
 
@@ -2630,7 +2584,7 @@ class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
               <memory>104857600</memory>
               <vcpu>2</vcpu>
               <os>
-                <type>fake</type>
+                <type>hvm</type>
               </os>
               <perf>
                 <event enabled="yes" name="cmt"/>
@@ -2762,7 +2716,7 @@ class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
         xmldoc = """
           <domain>
             <os>
-              <type>x86_64</type>
+              <type>hvm</type>
               <loader readonly='yes' type='pflash'>/tmp/OVMF_CODE.fd</loader>
             </os>
           </domain>
@@ -2771,7 +2725,7 @@ class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
         obj.parse_str(xmldoc)
 
         self.assertIsNone(obj.virt_type)
-        self.assertEqual('x86_64', obj.os_type)
+        self.assertEqual('hvm', obj.os_type)
         self.assertIsNone(obj.os_mach_type)
         self.assertIsNone(obj.os_kernel)
         self.assertEqual('/tmp/OVMF_CODE.fd', obj.os_loader)
@@ -2927,6 +2881,21 @@ class LibvirtConfigGuestSnapshotTest(LibvirtConfigBaseTest):
         obj.parse_dom(xmldoc)
 
         self.assertTrue(obj.driver_iommu)
+
+    def test_config_alias_parse(self):
+        xml = """
+            <disk type="file" device="disk">
+              <source file="/tmp/hello.qcow2"/>
+              <target bus="virtio" dev="/dev/sda"/>
+              <serial>7a97c4a3-6f59-41d4-bf47-191d7f97f8e9</serial>
+               <alias name='virtio-disk0'/>
+            </disk>"""
+        xmldoc = etree.fromstring(xml)
+
+        obj = config.LibvirtConfigGuestDisk()
+        obj.parse_dom(xmldoc)
+
+        self.assertEqual('virtio-disk0', obj.alias)
 
 
 class LibvirtConfigNodeDeviceTest(LibvirtConfigBaseTest):
@@ -3169,6 +3138,26 @@ class LibvirtConfigNodeDeviceTest(LibvirtConfigBaseTest):
                               config.LibvirtConfigNodeDeviceMdevInformation)
         self.assertEqual("nvidia-11", obj.mdev_information.type)
         self.assertEqual(12, obj.mdev_information.iommu_group)
+
+    def test_config_vdpa_device(self):
+        xmlin = """
+        <device>
+          <name>vdpa_vdpa0</name>
+          <path>/sys/devices/pci0000:00/0000:00:02.2/0000:06:00.2/vdpa0</path>
+          <parent>pci_0000_06_00_2</parent>
+          <driver>
+            <name>vhost_vdpa</name>
+          </driver>
+          <capability type='vdpa'>
+            <chardev>/dev/vhost-vdpa-0</chardev>
+          </capability>
+        </device>"""
+
+        obj = config.LibvirtConfigNodeDevice()
+        obj.parse_str(xmlin)
+        self.assertIsInstance(
+            obj.vdpa_capability, config.LibvirtConfigNodeDeviceVDPACap)
+        self.assertEqual("/dev/vhost-vdpa-0", obj.vdpa_capability.dev_path)
 
 
 class LibvirtConfigNodeDevicePciCapTest(LibvirtConfigBaseTest):
@@ -3646,9 +3635,30 @@ class LibvirtConfigGuestMetadataNovaTest(LibvirtConfigBaseTest):
 
         meta.flavor = flavor
 
+        meta.ports = config.LibvirtConfigGuestMetaNovaPorts(
+            ports=[
+                config.LibvirtConfigGuestMetaNovaPort(
+                    '567a4527-b0e4-4d0a-bcc2-71fda37897f7',
+                    ips=[
+                        config.LibvirtConfigGuestMetaNovaIp(
+                            'fixed', '192.168.1.1', '4'),
+                        config.LibvirtConfigGuestMetaNovaIp(
+                            'fixed', 'fe80::f95c:b030:7094', '6'),
+                        config.LibvirtConfigGuestMetaNovaIp(
+                            'floating', '11.22.33.44', '4')]),
+                config.LibvirtConfigGuestMetaNovaPort(
+                    'a3ca97e2-0cf9-4159-9bfc-afd55bc13ead',
+                    ips=[
+                        config.LibvirtConfigGuestMetaNovaIp(
+                            'fixed', '10.0.0.1', '4'),
+                        config.LibvirtConfigGuestMetaNovaIp(
+                            'fixed', 'fdf8:f53b:82e4::52', '6'),
+                        config.LibvirtConfigGuestMetaNovaIp(
+                            'floating', '1.2.3.4', '4')])])
+
         xml = meta.to_xml()
         self.assertXmlEqual(xml, """
-    <nova:instance xmlns:nova='http://openstack.org/xmlns/libvirt/nova/1.0'>
+    <nova:instance xmlns:nova='http://openstack.org/xmlns/libvirt/nova/1.1'>
       <nova:package version="2014.2.3"/>
       <nova:name>moonbuggy</nova:name>
       <nova:creationTime>2009-02-13 23:31:30</nova:creationTime>
@@ -3666,6 +3676,18 @@ class LibvirtConfigGuestMetadataNovaTest(LibvirtConfigBaseTest):
          uuid="f241e906-010e-4917-ae81-53f4fb8aa021">moonshot</nova:project>
       </nova:owner>
       <nova:root type="image" uuid="fe55c69a-8b2e-4bbc-811a-9ad2023a0426"/>
+      <nova:ports>
+        <nova:port uuid="567a4527-b0e4-4d0a-bcc2-71fda37897f7">
+          <nova:ip type="fixed" address="192.168.1.1" ipVersion="4"/>
+          <nova:ip type="fixed" address="fe80::f95c:b030:7094" ipVersion="6"/>
+          <nova:ip type="floating" address="11.22.33.44" ipVersion="4"/>
+        </nova:port>
+        <nova:port uuid="a3ca97e2-0cf9-4159-9bfc-afd55bc13ead">
+          <nova:ip type="fixed" address="10.0.0.1" ipVersion="4"/>
+          <nova:ip type="fixed" address="fdf8:f53b:82e4::52" ipVersion="6"/>
+          <nova:ip type="floating" address="1.2.3.4" ipVersion="4"/>
+        </nova:port>
+      </nova:ports>
     </nova:instance>
         """)
 
@@ -3871,7 +3893,7 @@ class LibvirtConfigGuestVPMEMTest(LibvirtConfigBaseTest):
           </memory>""")
 
 
-class LibvirtConfigVideoModelsTests(LibvirtConfigBaseTest):
+class LibvirtConfigDomainCapsVideoModelsTests(LibvirtConfigBaseTest):
 
     def test_parse_video_model(self):
 
@@ -3895,7 +3917,7 @@ class LibvirtConfigVideoModelsTests(LibvirtConfigBaseTest):
         self.assertNotIn('gop', obj.models)
 
 
-class LibvirtConfigDiskBusesTests(LibvirtConfigBaseTest):
+class LibvirtConfigDomainCapsDiskBusesTests(LibvirtConfigBaseTest):
 
     def test_parse_disk_buses(self):
 
@@ -3998,6 +4020,50 @@ class LibvirtConfigDomainCapsDevicesTests(LibvirtConfigBaseTest):
             obj.disk, config.LibvirtConfigDomainCapsDiskBuses)
         self.assertIsInstance(
             obj.video, config.LibvirtConfigDomainCapsVideoModels)
+
+
+class LibvirtConfigDomainCapsOSTests(LibvirtConfigBaseTest):
+
+    def test_parse_domain_caps_os(self):
+        xml = """
+        <os supported="yes">
+          <enum name="firmware">
+            <value>efi</value>
+          </enum>
+          <loader supported="yes">
+            <value>/usr/share/edk2/ovmf/OVMF_CODE.fd</value>
+            <value>/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd</value>
+            <enum name="type">
+              <value>rom</value>
+              <value>pflash</value>
+            </enum>
+            <enum name="readonly">
+              <value>yes</value>
+              <value>no</value>
+            </enum>
+            <enum name="secure">
+              <value>no</value>
+              <value>yes</value>
+            </enum>
+          </loader>
+        </os>
+        """
+
+        obj = config.LibvirtConfigDomainCapsOS()
+        obj.parse_str(xml)
+
+        self.assertTrue(obj.supported)
+        self.assertTrue(obj.loader_supported)
+        self.assertTrue(obj.uefi_autoconfig_supported)
+        self.assertEqual(
+            [
+                '/usr/share/edk2/ovmf/OVMF_CODE.fd',
+                '/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd',
+            ],
+            obj.loader_paths,
+        )
+        self.assertTrue(obj.uefi_supported)
+        self.assertTrue(obj.secure_boot_supported)
 
 
 class LibvirtConfigTPMTest(LibvirtConfigBaseTest):

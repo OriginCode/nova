@@ -36,7 +36,6 @@ from oslo_serialization import jsonutils
 from oslo_utils import encodeutils
 from oslo_utils.fixture import uuidsentinel as uuids
 import requests
-import six
 import webob
 
 from nova.api.metadata import base
@@ -322,12 +321,14 @@ class MetadataTestCase(test.TestCase):
                          'uuid': 'e5fe5518-0288-4fa3-b0c4-c79764101b85',
                          'root_device_name': None,
                          'default_ephemeral_device': None,
-                         'default_swap_device': None})
+                         'default_swap_device': None,
+                         'context': self.context})
         instance_ref1 = objects.Instance(**{'id': 0,
                          'uuid': 'b65cee2f-8c69-4aeb-be2f-f79742548fc2',
                          'root_device_name': '/dev/sda1',
                          'default_ephemeral_device': None,
-                         'default_swap_device': None})
+                         'default_swap_device': None,
+                         'context': self.context})
 
         def fake_bdm_get(ctxt, uuid):
             return [fake_block_device.FakeDbBlockDeviceDict(
@@ -366,10 +367,12 @@ class MetadataTestCase(test.TestCase):
                     'swap': '/dev/sdc',
                     'ebs0': '/dev/sdh'}
 
-        self.assertEqual(base._format_instance_mapping(self.context,
-                         instance_ref0), block_device._DEFAULT_MAPPINGS)
-        self.assertEqual(base._format_instance_mapping(self.context,
-                         instance_ref1), expected)
+        self.assertEqual(
+            base._format_instance_mapping(instance_ref0),
+            block_device._DEFAULT_MAPPINGS)
+        self.assertEqual(
+            base._format_instance_mapping(instance_ref1),
+            expected)
 
     def test_pubkey(self):
         md = fake_InstanceMetadata(self, self.instance.obj_clone())
@@ -929,7 +932,7 @@ class OpenStackMetadataTestCase(test.TestCase):
                 # Verify the warning message is the one we expect which is the
                 # first and only arg to the first and only call to the warning.
                 self.assertIn('Passing insecure dynamic vendordata requests',
-                              six.text_type(warning_calls[0][0]))
+                              str(warning_calls[0][0]))
             self.assertEqual('10.0.0.1', vd['static'].get('ldap'))
             self.assertEqual('10.0.0.2', vd['static'].get('ad'))
 

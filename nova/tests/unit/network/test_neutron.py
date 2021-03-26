@@ -31,8 +31,6 @@ from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 from oslo_utils import uuidutils
 import requests_mock
-import six
-from six.moves import range
 
 from nova import context
 from nova.db.sqlalchemy import api as db_api
@@ -177,7 +175,7 @@ class TestNeutronClient(test.NoDBTestCase):
         exc = self.assertRaises(
             exception.Forbidden,
             client.create_port)
-        self.assertIsInstance(exc.format_message(), six.text_type)
+        self.assertIsInstance(exc.format_message(), str)
 
     def test_withtoken_context_is_admin(self):
         self.flags(endpoint_override='http://anyhost/', group='neutron')
@@ -439,8 +437,8 @@ class TestAPIBase(test.TestCase):
         info_cache['created_at'] = timeutils.utcnow()
         info_cache['deleted_at'] = timeutils.utcnow()
         info_cache['updated_at'] = timeutils.utcnow()
-        info_cache['network_info'] = model.NetworkInfo.hydrate(six.text_type(
-                                    jsonutils.dumps(nw_info)))
+        info_cache['network_info'] = model.NetworkInfo.hydrate(
+                                    str(jsonutils.dumps(nw_info)))
         return info_cache
 
     def _fake_instance_object_with_info_cache(self, instance):
@@ -1829,7 +1827,7 @@ class TestAPI(TestAPIBase):
                                self.api.validate_networks, self.context,
                                requested_networks, 1)
 
-        self.assertIn(uuids.my_netid1, six.text_type(ex))
+        self.assertIn(uuids.my_netid1, str(ex))
         mock_get_client.assert_called_once_with(self.context)
         mocked_client.list_networks.assert_called_once_with(
             id=[uuids.my_netid1])
@@ -1848,8 +1846,8 @@ class TestAPI(TestAPIBase):
                                self.api.validate_networks,
                                self.context, requested_networks, 1)
 
-        self.assertIn(uuids.my_netid2, six.text_type(ex))
-        self.assertIn(uuids.my_netid3, six.text_type(ex))
+        self.assertIn(uuids.my_netid2, str(ex))
+        self.assertIn(uuids.my_netid3, str(ex))
         mock_get_client.assert_called_once_with(self.context)
         mocked_client.list_networks.assert_called_once_with(id=ids)
 
@@ -3535,10 +3533,10 @@ class TestAPI(TestAPIBase):
         self.assertFalse(tunneled)
         self.assertIsNone(physnet_name)
 
-    def _test_get_port_vnic_info(self, mock_get_client,
-                                 binding_vnic_type,
-                                 expected_vnic_type,
-                                 port_resource_request=None):
+    def _test_get_port_vnic_info(
+        self, mock_get_client, binding_vnic_type, expected_vnic_type,
+        port_resource_request=None, numa_policy=None
+    ):
         test_port = {
             'port': {'id': 'my_port_id2',
                       'network_id': 'net-id',
@@ -3550,22 +3548,25 @@ class TestAPI(TestAPIBase):
         if port_resource_request:
             test_port['port'][
                 constants.RESOURCE_REQUEST] = port_resource_request
+        if numa_policy:
+            test_port['port'][constants.NUMA_POLICY] = numa_policy
 
         mock_get_client.reset_mock()
         mock_client = mock_get_client.return_value
         mock_client.show_port.return_value = test_port
 
-        vnic_type, trusted, network_id, resource_request = (
+        vnic_type, trusted, network_id, resource_request, numa = (
             self.api._get_port_vnic_info(
                 self.context, mock_client, test_port['port']['id']))
 
         mock_client.show_port.assert_called_once_with(test_port['port']['id'],
             fields=['binding:vnic_type', 'binding:profile', 'network_id',
-                    constants.RESOURCE_REQUEST])
+                    constants.RESOURCE_REQUEST, constants.NUMA_POLICY])
         self.assertEqual(expected_vnic_type, vnic_type)
         self.assertEqual('net-id', network_id)
         self.assertIsNone(trusted)
         self.assertEqual(port_resource_request, resource_request)
+        self.assertEqual(numa_policy, numa)
 
     @mock.patch.object(neutronapi, 'get_client', return_value=mock.MagicMock())
     def test_get_port_vnic_info_1(self, mock_get_client):
@@ -3581,6 +3582,14 @@ class TestAPI(TestAPIBase):
     def test_get_port_vnic_info_3(self, mock_get_client):
         self._test_get_port_vnic_info(mock_get_client, None,
                                       model.VNIC_TYPE_NORMAL)
+
+    @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
+    def test_get_port_vnic_info_4(self, mock_get_client):
+        policies = ['required', 'legacy', 'preferred']
+        for policy_name in policies:
+            self._test_get_port_vnic_info(
+                mock_get_client, None, model.VNIC_TYPE_NORMAL,
+                numa_policy=policy_name)
 
     @mock.patch.object(neutronapi, 'get_client')
     def test_get_port_vnic_info_requested_resources(self, mock_get_client):
@@ -3614,11 +3623,11 @@ class TestAPI(TestAPIBase):
         mock_client.list_extensions.return_value = test_ext_list
         result = self.api._get_port_vnic_info(
             self.context, mock_client, test_port['port']['id'])
-        vnic_type, trusted, network_id, resource_requests = result
+        vnic_type, trusted, network_id, resource_requests, _ = result
 
         mock_client.show_port.assert_called_once_with(test_port['port']['id'],
             fields=['binding:vnic_type', 'binding:profile', 'network_id',
-                    constants.RESOURCE_REQUEST])
+                    constants.RESOURCE_REQUEST, constants.NUMA_POLICY])
         self.assertEqual(model.VNIC_TYPE_DIRECT, vnic_type)
         self.assertEqual('net-id', network_id)
         self.assertTrue(trusted)
@@ -4075,7 +4084,7 @@ class TestAPI(TestAPIBase):
                                   '(Network ID is %(net_id)s)' %
                                   {'instance': instance.uuid,
                                    'net_id': uuids.my_netid1})
-        self.assertEqual(expected_exception_msg, six.text_type(exc))
+        self.assertEqual(expected_exception_msg, str(exc))
         mock_client.delete_port.assert_called_once_with(uuids.port_id)
 
     @mock.patch('nova.network.neutron.LOG')
@@ -4099,7 +4108,7 @@ class TestAPI(TestAPIBase):
                                   '(Network ID is %(net_id)s)' %
                                   {'instance': instance.uuid,
                                    'net_id': uuids.my_netid1})
-        self.assertEqual(expected_exception_msg, six.text_type(exc))
+        self.assertEqual(expected_exception_msg, str(exc))
         mock_client.delete_port.assert_called_once_with(uuids.port_id)
         self.assertTrue(mock_log.exception.called)
 
@@ -4694,7 +4703,7 @@ class TestAPI(TestAPIBase):
         self.assertIn(
             "Provider mappings are not available to the compute service but "
             "are required for ports with a resource request.",
-            six.text_type(ex))
+            str(ex))
 
     @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
     def test_update_port_bindings_for_instance_with_resource_req_live_mig(
@@ -4930,8 +4939,8 @@ class TestAPI(TestAPIBase):
                     self.api.setup_networks_on_host,
                     self.context, instance, host='new-host', teardown=True)
                 # Make sure both ports show up in the exception message.
-                self.assertIn(uuids.port1, six.text_type(ex))
-                self.assertIn(uuids.port2, six.text_type(ex))
+                self.assertIn(uuids.port1, str(ex))
+                self.assertIn(uuids.port2, str(ex))
         self.api._clear_migration_port_profile.assert_called_once_with(
             self.context, instance, get_client_mock.return_value,
             get_ports['ports'])
@@ -5215,7 +5224,9 @@ class TestAPI(TestAPIBase):
         self.assertEqual(
             {
                 uuids.rp1: {
-                    'NET_BW_EGR_KILOBIT_PER_SEC': 1000
+                    "resources": {
+                        'NET_BW_EGR_KILOBIT_PER_SEC': 1000
+                    }
                 }
             },
             port_allocation)
@@ -5761,26 +5772,28 @@ class TestAPI(TestAPIBase):
                 objects.NetworkRequest(port_id=uuids.portid_3),
                 objects.NetworkRequest(port_id=uuids.portid_4),
                 objects.NetworkRequest(port_id=uuids.portid_5),
-                objects.NetworkRequest(port_id=uuids.trusted_port)])
+                objects.NetworkRequest(port_id=uuids.trusted_port),
+                objects.NetworkRequest(port_id=uuids.portid_vdpa)])
         pci_requests = objects.InstancePCIRequests(requests=[])
         # _get_port_vnic_info should be called for every NetworkRequest with a
         # port_id attribute (so six times)
         mock_get_port_vnic_info.side_effect = [
-            (model.VNIC_TYPE_DIRECT, None, 'netN', None),
+            (model.VNIC_TYPE_DIRECT, None, 'netN', None, None),
             (model.VNIC_TYPE_NORMAL, None, 'netN',
-             mock.sentinel.resource_request1),
-            (model.VNIC_TYPE_MACVTAP, None, 'netN', None),
-            (model.VNIC_TYPE_MACVTAP, None, 'netN', None),
-            (model.VNIC_TYPE_DIRECT_PHYSICAL, None, 'netN', None),
+             mock.sentinel.resource_request1, None),
+            (model.VNIC_TYPE_MACVTAP, None, 'netN', None, None),
+            (model.VNIC_TYPE_MACVTAP, None, 'netN', None, None),
+            (model.VNIC_TYPE_DIRECT_PHYSICAL, None, 'netN', None, None),
             (model.VNIC_TYPE_DIRECT, True, 'netN',
-             mock.sentinel.resource_request2),
+             mock.sentinel.resource_request2, None),
+            (model.VNIC_TYPE_VDPA, None, 'netN', None, None),
         ]
         # _get_physnet_tunneled_info should be called for every NetworkRequest
         # (so seven times)
         mock_get_physnet_tunneled_info.side_effect = [
             ('physnet1', False), ('physnet1', False), ('', True),
             ('physnet1', False), ('physnet2', False), ('physnet3', False),
-            ('physnet4', False),
+            ('physnet4', False), ('physnet1', False)
         ]
         api = neutronapi.API()
 
@@ -5797,12 +5810,13 @@ class TestAPI(TestAPIBase):
                 mock.sentinel.request_group1,
                 mock.sentinel.request_group2],
             port_resource_requests)
-        self.assertEqual(5, len(pci_requests.requests))
+        self.assertEqual(6, len(pci_requests.requests))
         has_pci_request_id = [net.pci_request_id is not None for net in
                               requested_networks.objects]
         self.assertEqual(pci_requests.requests[3].spec[0]["dev_type"],
                          "type-PF")
-        expected_results = [True, False, False, True, True, True, True]
+        self.assertEqual(pci_requests.requests[5].spec[0]["dev_type"], "vdpa")
+        expected_results = [True, False, False, True, True, True, True, True]
         self.assertEqual(expected_results, has_pci_request_id)
         # Make sure only the trusted VF has the 'trusted' tag set in the spec.
         for pci_req in pci_requests.requests:
@@ -5816,7 +5830,7 @@ class TestAPI(TestAPIBase):
 
         # Only the port with a resource_request will have pci_req.requester_id.
         self.assertEqual(
-            [None, None, None, None, uuids.trusted_port],
+            [None, None, None, None, uuids.trusted_port, None],
             [pci_req.requester_id for pci_req in pci_requests.requests])
 
         self.assertCountEqual(
@@ -6267,6 +6281,105 @@ class TestAPI(TestAPIBase):
             request_groups[0].requester_id)
 
         mock_get_client.assert_called_once_with(self.context, admin=True)
+
+    def test_get_segment_ids_for_network_no_segment_ext(self):
+        with mock.patch.object(
+            self.api, '_has_segment_extension', return_value=False
+        ):
+            self.assertEqual(
+                [], self.api.get_segment_ids_for_network(self.context,
+                                                         uuids.network_id))
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_get_segment_ids_for_network_passes(self, mock_client):
+        subnets = {'subnets': [{'segment_id': uuids.segment_id}]}
+        mocked_client = mock.create_autospec(client.Client)
+        mock_client.return_value = mocked_client
+        mocked_client.list_subnets.return_value = subnets
+        with mock.patch.object(
+            self.api, '_has_segment_extension', return_value=True
+        ):
+            res = self.api.get_segment_ids_for_network(
+                self.context, uuids.network_id)
+        self.assertEqual([uuids.segment_id], res)
+        mocked_client.list_subnets.assert_called_once_with(
+            network_id=uuids.network_id, fields='segment_id')
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_get_segment_ids_for_network_with_no_segments(self, mock_client):
+        subnets = {'subnets': [{'segment_id': None}]}
+        mocked_client = mock.create_autospec(client.Client)
+        mock_client.return_value = mocked_client
+        mocked_client.list_subnets.return_value = subnets
+        with mock.patch.object(
+            self.api, '_has_segment_extension', return_value=True
+        ):
+            res = self.api.get_segment_ids_for_network(
+                self.context, uuids.network_id)
+        self.assertEqual([], res)
+        mocked_client.list_subnets.assert_called_once_with(
+            network_id=uuids.network_id, fields='segment_id')
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_get_segment_ids_for_network_fails(self, mock_client):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_client.return_value = mocked_client
+        mocked_client.list_subnets.side_effect = (
+            exceptions.NeutronClientException(status_code=404))
+        with mock.patch.object(
+            self.api, '_has_segment_extension', return_value=True
+        ):
+            self.assertRaises(exception.InvalidRoutedNetworkConfiguration,
+                              self.api.get_segment_ids_for_network,
+                              self.context, uuids.network_id)
+
+    def test_get_segment_id_for_subnet_no_segment_ext(self):
+        with mock.patch.object(
+            self.api, '_has_segment_extension', return_value=False
+        ):
+            self.assertIsNone(
+                self.api.get_segment_id_for_subnet(self.context,
+                                                   uuids.subnet_id))
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_get_segment_id_for_subnet_passes(self, mock_client):
+        subnet = {'subnet': {'segment_id': uuids.segment_id}}
+        mocked_client = mock.create_autospec(client.Client)
+        mock_client.return_value = mocked_client
+        mocked_client.show_subnet.return_value = subnet
+        with mock.patch.object(
+            self.api, '_has_segment_extension', return_value=True
+        ):
+            res = self.api.get_segment_id_for_subnet(
+                self.context, uuids.subnet_id)
+        self.assertEqual(uuids.segment_id, res)
+        mocked_client.show_subnet.assert_called_once_with(uuids.subnet_id)
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_get_segment_id_for_subnet_with_no_segment(self, mock_client):
+        subnet = {'subnet': {}}
+        mocked_client = mock.create_autospec(client.Client)
+        mock_client.return_value = mocked_client
+        mocked_client.show_subnet.return_value = subnet
+        with mock.patch.object(
+            self.api, '_has_segment_extension', return_value=True
+        ):
+            self.assertIsNone(
+                self.api.get_segment_id_for_subnet(self.context,
+                                                   uuids.subnet_id))
+
+    @mock.patch.object(neutronapi, 'get_client')
+    def test_get_segment_id_for_subnet_fails(self, mock_client):
+        mocked_client = mock.create_autospec(client.Client)
+        mock_client.return_value = mocked_client
+        mocked_client.show_subnet.side_effect = (
+            exceptions.NeutronClientException(status_code=404))
+        with mock.patch.object(
+            self.api, '_has_segment_extension', return_value=True
+        ):
+            self.assertRaises(exception.InvalidRoutedNetworkConfiguration,
+                              self.api.get_segment_id_for_subnet,
+                              self.context, uuids.subnet_id)
 
 
 class TestAPIModuleMethods(test.NoDBTestCase):

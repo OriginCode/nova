@@ -1401,6 +1401,11 @@ class NeutronFixture(fixtures.Fixture):
         ],
     }
 
+    # Fixtures inheriting from NeutronFixture can redefine the default port
+    # that create_port() is duplicating for creating a new port by using this
+    # variable
+    default_port = copy.deepcopy(port_2)
+
     # network_2 does not have security groups enabled - that's okay since most
     # of these ports are SR-IOV'y anyway
     network_2 = {
@@ -1798,19 +1803,25 @@ class NeutronFixture(fixtures.Fixture):
             return fake_requests.FakeResponse(
                 404, content='Port %s not found' % port_id)
 
-        host = data['binding']['host']
-        # We assume that every binding that is created is inactive.
-        # This is only true from the current nova code perspective where
-        # explicit binding creation only happen for migration where the port
-        # is already actively bound to the source host.
-        # TODO(gibi): enhance update_port to detect if the port is bound by
-        # the update and create a binding internally in _port_bindings. Then
-        # we can change the logic here to mimic neutron better by making the
-        # first binding active by default.
-        data['binding']['status'] = 'INACTIVE'
-        self._port_bindings[port_id][host] = copy.deepcopy(data['binding'])
+        port = self._ports[port_id]
+        binding = copy.deepcopy(data['binding'])
 
-        return fake_requests.FakeResponse(200, content=jsonutils.dumps(data))
+        # NOTE(stephenfin): We don't allow changing of backend
+        binding['vif_type'] = port['binding:vif_type']
+        binding['vif_details'] = port['binding:vif_details']
+        binding['vnic_type'] = port['binding:vnic_type']
+
+        # the first binding is active by default
+        if not self._port_bindings[port_id]:
+            binding['status'] = 'ACTIVE'
+        else:
+            binding['status'] = 'INACTIVE'
+
+        self._port_bindings[port_id][binding['host']] = binding
+
+        return fake_requests.FakeResponse(
+            200, content=jsonutils.dumps({'binding': binding}),
+        )
 
     def _get_failure_response_if_port_or_binding_not_exists(
             self, port_id, host):
@@ -1833,12 +1844,7 @@ class NeutronFixture(fixtures.Fixture):
 
         return fake_requests.FakeResponse(204)
 
-    def activate_port_binding(self, context, client, port_id, host):
-        failure = self._get_failure_response_if_port_or_binding_not_exists(
-            port_id, host)
-        if failure is not None:
-            return failure
-
+    def _activate_port_binding(self, port_id, host):
         # It makes sure that only one binding is active for a port
         for h, binding in self._port_bindings[port_id].items():
             if h == host:
@@ -1847,6 +1853,14 @@ class NeutronFixture(fixtures.Fixture):
                 binding['status'] = 'ACTIVE'
             else:
                 binding['status'] = 'INACTIVE'
+
+    def activate_port_binding(self, context, client, port_id, host):
+        failure = self._get_failure_response_if_port_or_binding_not_exists(
+            port_id, host)
+        if failure is not None:
+            return failure
+
+        self._activate_port_binding(port_id, host)
 
         return fake_requests.FakeResponse(200)
 
@@ -1897,14 +1911,16 @@ class NeutronFixture(fixtures.Fixture):
     def _get_active_binding(self, port_id):
         for host, binding in self._port_bindings[port_id].items():
             if binding['status'] == 'ACTIVE':
-                return binding
+                return host, copy.deepcopy(binding)
+
+        return None, {}
 
     def _merge_in_active_binding(self, port):
         """Update the port dict with the currently active port binding"""
         if port['id'] not in self._port_bindings:
             return
 
-        binding = self._get_active_binding(port['id']) or {}
+        _, binding = self._get_active_binding(port['id'])
         for key, value in binding.items():
             # keys in the binding is like 'vnic_type' but in the port response
             # they are like 'binding:vnic_type'. Except for the host_id that
@@ -1954,6 +1970,11 @@ class NeutronFixture(fixtures.Fixture):
         return {'networks': self._list_resource(
             self._networks, retrieve_all, **_params)}
 
+    def show_subnet(self, subnet_id, **_params):
+        if subnet_id not in self._subnets:
+            raise neutron_client_exc.NeutronClientException()
+        return {'subnet': copy.deepcopy(self._subnets[subnet_id])}
+
     def list_subnets(self, retrieve_all=True, **_params):
         # NOTE(gibi): The fixture does not support filtering for subnets
         return {'subnets': copy.deepcopy(list(self._subnets.values()))}
@@ -1971,10 +1992,10 @@ class NeutronFixture(fixtures.Fixture):
         # created. This is port_2. So if that port is not created yet then
         # that is the one created here.
         new_port = copy.deepcopy(body['port'])
-        new_port.update(copy.deepcopy(self.port_2))
-        if self.port_2['id'] in self._ports:
-            # If port_2 is already created then create a new port based on
-            # the request body, the port_2 as a template, and assign new
+        new_port.update(copy.deepcopy(self.default_port))
+        if self.default_port['id'] in self._ports:
+            # If the port is already created then create a new port based on
+            # the request body, the default port as a template, and assign new
             # port_id and mac_address for the new port
             # we need truly random uuids instead of named sentinels as some
             # tests needs more than 3 ports
@@ -1990,13 +2011,43 @@ class NeutronFixture(fixtures.Fixture):
         return {'port': copy.deepcopy(new_port)}
 
     def update_port(self, port_id, body=None):
-        # TODO(gibi): check if the port update binds the port and update the
-        # internal _port_bindings dict accordingly. Such a binding always
-        # becomes and active port binding of the port.
         port = self._ports[port_id]
         # We need to deepcopy here as well as the body can have a nested dict
         # which can be modified by the caller after this update_port call
         port.update(copy.deepcopy(body['port']))
+
+        # update port binding
+
+        if (
+            'binding:host_id' in body['port'] and
+            body['port']['binding:host_id'] is None
+        ):
+            # if the host_id is explicitly set to None, delete the binding
+            host, _ = self._get_active_binding(port_id)
+            del self._port_bindings[port_id][host]
+        else:
+            # else it's an update
+            if 'binding:host_id' in body['port']:
+                # if the host ID is present, update that specific binding
+                host = body['port']['binding:host_id']
+            else:
+                # else update the active one
+                host, _ = self._get_active_binding(port_id)
+
+            self._port_bindings[port_id][host] = {
+                'host': host,
+                'status': 'ACTIVE',
+                'profile': copy.deepcopy(
+                    body['port'].get('binding:profile') or {},
+                ),
+                'vif_details': port.get('binding:vif_details') or {},
+                'vif_type': port['binding:vif_type'],
+                'vnic_type': port['binding:vnic_type'],
+            }
+
+            # mark any other active bindings as inactive
+            self._activate_port_binding(port_id, host)
+
         return {'port': copy.deepcopy(port)}
 
     def show_quota(self, project_id):
@@ -2575,11 +2626,16 @@ class CinderFixture(fixtures.Fixture):
                             _attachment['connector'].get('host')))
             attachment['connector'] = connector
             LOG.info('Updating volume attachment: %s', attachment_id)
-            attachment_ref = {'driver_volume_type': 'fake_type',
-                              'id': attachment_id,
-                              'connection_info': {'data':
-                                                  {'foo': 'bar',
-                                                   'target_lun': '1'}}}
+            attachment_ref = {
+                'id': attachment_id,
+                'connection_info': {
+                    'driver_volume_type': 'fake',
+                    'data': {
+                        'foo': 'bar',
+                        'target_lun': '1'
+                    }
+                }
+            }
             if attachment_id == self.SWAP_ERR_ATTACH_ID:
                 # This intentionally triggers a TypeError for the
                 # instance.volume_swap.error versioned notification tests.
@@ -3049,7 +3105,10 @@ class CyborgFixture(fixtures.Fixture):
            This function uses bindings indexed by instance UUID to
            populate the bound ARQ templates in CyborgFixture.bound_arq_list.
         """
-        arq_host_rp_list = CyborgFixture.bindings_by_instance[instance_uuid]
+        arq_host_rp_list = CyborgFixture.bindings_by_instance.get(
+                instance_uuid)
+        if not arq_host_rp_list:
+            return []
         # The above looks like:
         # [{'hostname': $hostname,
         #   'device_rp_uuid': $device_rp_uuid,
@@ -3071,7 +3130,7 @@ class CyborgFixture(fixtures.Fixture):
 
     @staticmethod
     def fake_delete_arqs_for_instance(instance_uuid):
-        return None
+        CyborgFixture.bindings_by_instance.pop(instance_uuid, None)
 
     def setUp(self):
         super(CyborgFixture, self).setUp()
@@ -3096,9 +3155,14 @@ class CyborgFixture(fixtures.Fixture):
 
 class GenericPoisonFixture(fixtures.Fixture):
     POISON_THESE = (
-        ('netifaces.interfaces',
-         'a test environment should not be inspecting real interfaces on the '
-         'test node'),
+        (
+            'netifaces.interfaces',
+            'tests should not be inspecting real interfaces on the test node',
+        ),
+        (
+            'os.uname',
+            'tests should not be inspecting host information on the test node',
+        ),
     )
 
     def setUp(self):
@@ -3110,5 +3174,16 @@ class GenericPoisonFixture(fixtures.Fixture):
 
         super(GenericPoisonFixture, self).setUp()
         for meth, why in self.POISON_THESE:
-            self.useFixture(fixtures.MonkeyPatch(
-                meth, poison_configure(meth, why)))
+            # attempt to mock only if not already mocked
+            location, attribute = meth.rsplit('.', 1)
+            components = location.split('.')
+            try:
+                current = __import__(components[0], {}, {})
+                for component in components[1:]:
+                    current = getattr(current, component)
+                if not isinstance(getattr(current, attribute), mock.Mock):
+                    self.useFixture(fixtures.MonkeyPatch(
+                        meth, poison_configure(meth, why)))
+            except ImportError:
+                self.useFixture(fixtures.MonkeyPatch(
+                    meth, poison_configure(meth, why)))

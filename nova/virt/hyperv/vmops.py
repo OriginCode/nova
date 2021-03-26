@@ -41,6 +41,7 @@ from nova import exception
 from nova.i18n import _
 from nova import objects
 from nova.objects import fields
+from nova import version
 from nova.virt import configdrive
 from nova.virt import hardware
 from nova.virt.hyperv import block_device_manager
@@ -395,7 +396,8 @@ class VMOps(object):
                                 cpus_per_numa_node,
                                 CONF.hyperv.limit_cpu_features,
                                 dynamic_memory_ratio,
-                                host_shutdown_action=host_shutdown_action)
+                                host_shutdown_action=host_shutdown_action,
+                                chassis_asset_tag=version.product_string())
 
         self._configure_remotefx(instance, vm_gen)
 
@@ -656,7 +658,7 @@ class VMOps(object):
 
         inst_md = instance_metadata.InstanceMetadata(
                       instance, content=injected_files, extra_md=extra_md,
-                      network_info=network_info, request_context=context)
+                      network_info=network_info)
 
         configdrive_path_iso = self._pathutils.get_configdrive_path(
             instance.name, constants.DVD_FORMAT, rescue=rescue)

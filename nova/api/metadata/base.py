@@ -24,7 +24,6 @@ from oslo_log import log as logging
 from oslo_serialization import base64
 from oslo_serialization import jsonutils
 from oslo_utils import timeutils
-import six
 
 from nova.api.metadata import password
 from nova.api.metadata import vendordata_dynamic
@@ -112,8 +111,7 @@ class InstanceMetadata(object):
     """Instance metadata."""
 
     def __init__(self, instance, address=None, content=None, extra_md=None,
-                 network_info=None, network_metadata=None,
-                 request_context=None):
+                 network_info=None, network_metadata=None):
         """Creation of this object should basically cover all time consuming
         collection.  Methods after that should not cause time delays due to
         network operations or lengthy cpu operations.
@@ -124,7 +122,12 @@ class InstanceMetadata(object):
         if not content:
             content = []
 
+        # NOTE(gibi): this is not a cell targeted context even if we are called
+        # in a situation when the instance is in a different cell than the
+        # metadata service itself.
         ctxt = context.get_admin_context()
+
+        self.mappings = _format_instance_mapping(instance)
 
         # NOTE(danms): Sanitize the instance to limit the amount of stuff
         # inside that may not pickle well (i.e. context). We also touch
@@ -146,8 +149,6 @@ class InstanceMetadata(object):
 
         self.security_groups = security_group_api.get_instance_security_groups(
             ctxt, instance)
-
-        self.mappings = _format_instance_mapping(ctxt, instance)
 
         if instance.user_data is not None:
             self.userdata_raw = base64.decode_as_bytes(instance.user_data)
@@ -204,12 +205,9 @@ class InstanceMetadata(object):
         # contain the admin password for the instance, and we shouldn't
         # pass that to external services.
         self.vendordata_providers = {
-            'StaticJSON': vendordata_json.JsonFileVendorData(
-                instance=instance, address=address,
-                extra_md=extra_md, network_info=network_info),
+            'StaticJSON': vendordata_json.JsonFileVendorData(),
             'DynamicJSON': vendordata_dynamic.DynamicVendorData(
-                instance=instance, address=address,
-                network_info=network_info, context=request_context)
+                instance=instance)
         }
 
     def _route_configuration(self):
@@ -696,9 +694,8 @@ def get_metadata_by_instance_id(instance_id, address, ctxt=None):
         return InstanceMetadata(instance, address)
 
 
-def _format_instance_mapping(ctxt, instance):
-    bdms = objects.BlockDeviceMappingList.get_by_instance_uuid(
-            ctxt, instance.uuid)
+def _format_instance_mapping(instance):
+    bdms = instance.get_bdms()
     return block_device.instance_block_mapping(instance, bdms)
 
 
@@ -720,7 +717,7 @@ def ec2_md_print(data):
         return output[:-1]
     elif isinstance(data, list):
         return '\n'.join(data)
-    elif isinstance(data, (bytes, six.text_type)):
+    elif isinstance(data, (bytes, str)):
         return data
     else:
         return str(data)

@@ -54,8 +54,6 @@ from oslo_utils import excutils
 from oslo_utils import strutils
 from oslo_utils import timeutils
 from oslo_utils import units
-import six
-from six.moves import range
 
 from nova.accelerator import cyborg
 from nova import block_device
@@ -87,7 +85,6 @@ from nova.objects import instance as obj_instance
 from nova.objects import migrate_data as migrate_data_obj
 from nova.pci import request as pci_req_module
 from nova.pci import whitelist
-from nova import rpc
 from nova import safe_utils
 from nova.scheduler.client import query
 from nova.scheduler.client import report
@@ -106,10 +103,8 @@ CONF = nova.conf.CONF
 
 LOG = logging.getLogger(__name__)
 
-get_notifier = functools.partial(rpc.get_notifier, service='compute')
-wrap_exception = functools.partial(exception_wrapper.wrap_exception,
-                                   get_notifier=get_notifier,
-                                   binary='nova-compute')
+wrap_exception = functools.partial(
+    exception_wrapper.wrap_exception, service='compute', binary='nova-compute')
 
 
 @contextlib.contextmanager
@@ -530,7 +525,7 @@ class ComputeVirtAPI(virtapi.VirtAPI):
 class ComputeManager(manager.Manager):
     """Manages the running instances from creation to destruction."""
 
-    target = messaging.Target(version='5.12')
+    target = messaging.Target(version='6.0')
 
     def __init__(self, compute_driver=None, *args, **kwargs):
         """Load configuration options and connect to the hypervisor."""
@@ -543,7 +538,6 @@ class ComputeManager(manager.Manager):
         self.volume_api = cinder.API()
         self.image_api = glance.API()
         self._last_bw_usage_poll = 0.0
-        self._bw_usage_supported = True
         self.compute_api = compute.API()
         self.compute_rpcapi = compute_rpcapi.ComputeAPI()
         self.compute_task_api = conductor.ComputeTaskAPI()
@@ -576,6 +570,9 @@ class ComputeManager(manager.Manager):
 
         super(ComputeManager, self).__init__(service_name="compute",
                                              *args, **kwargs)
+
+        # TODO(sbauza): Remove this call once we delete the V5Proxy class
+        self.additional_endpoints.append(_ComputeV5Proxy(self))
 
         # NOTE(russellb) Load the driver last.  It may call back into the
         # compute manager via the virtapi, so we want it to be fully
@@ -797,7 +794,7 @@ class ComputeManager(manager.Manager):
             if data:
                 shared_storage = (self.compute_rpcapi.
                                   check_instance_shared_storage(context,
-                                  instance, data, host=host))
+                                  data, instance=instance, host=host))
         except NotImplementedError:
             LOG.debug('Hypervisor driver does not support '
                       'instance shared storage check, '
@@ -1027,11 +1024,6 @@ class ComputeManager(manager.Manager):
             LOG.debug("Instance in transitional state %s at start-up "
                       "clearing task state",
                       instance.task_state, instance=instance)
-            try:
-                self._post_interrupted_snapshot_cleanup(context, instance)
-            except Exception:
-                # we don't want that an exception blocks the init_host
-                LOG.exception('Failed to cleanup snapshot.', instance=instance)
             instance.task_state = None
             instance.save()
 
@@ -1411,6 +1403,13 @@ class ComputeManager(manager.Manager):
                 eventlet.semaphore.BoundedSemaphore(
                     CONF.compute.max_concurrent_disk_ops)
 
+        if CONF.compute.max_disk_devices_to_attach == 0:
+            msg = _('[compute]max_disk_devices_to_attach has been set to 0, '
+                    'which will prevent instances from being able to boot. '
+                    'Set -1 for unlimited or set >= 1 to limit the maximum '
+                    'number of disk devices.')
+            raise exception.InvalidConfiguration(msg)
+
         self.driver.init_host(host=self.host)
         context = nova.context.get_admin_context()
         instances = objects.InstanceList.get_by_host(
@@ -1500,7 +1499,7 @@ class ComputeManager(manager.Manager):
                 LOG.error(
                     "Could not retrieve compute node resource provider %s and "
                     "therefore unable to error out any instances stuck in "
-                    "BUILDING state. Error: %s", cn_uuid, six.text_type(e))
+                    "BUILDING state. Error: %s", cn_uuid, str(e))
                 continue
 
             not_handled_consumers = (set(allocations) -
@@ -1564,34 +1563,6 @@ class ComputeManager(manager.Manager):
             return self.driver.get_info(instance, use_cache=False).state
         except exception.InstanceNotFound:
             return power_state.NOSTATE
-
-    # TODO(stephenfin): Remove this once we bump the compute API to v6.0
-    def get_console_topic(self, context):
-        """Retrieves the console host for a project on this host.
-
-        Currently this is just set in the flags for each compute host.
-
-        """
-        # TODO(mdragon): perhaps make this variable by console_type?
-        return 'console.%s' % CONF.console_host
-
-    # TODO(stephenfin): Remove this once we bump the compute API to v6.0
-    @wrap_exception()
-    def get_console_pool_info(self, context, console_type):
-        return self.driver.get_console_pool_info(console_type)
-
-    # TODO(stephenfin): Remove this as it's nova-network only
-    @wrap_exception()
-    def refresh_instance_security_rules(self, context, instance):
-        """Tell the virtualization driver to refresh security rules for
-        an instance.
-
-        Passes straight through to the virtualization driver.
-
-        Synchronize the call because we may still be in the middle of
-        creating the instance.
-        """
-        pass
 
     def _await_block_device_map_created(self, context, vol_id):
         # TODO(yamahata): creating volume simultaneously
@@ -1979,7 +1950,7 @@ class ComputeManager(manager.Manager):
             # booting from volume, and will be recorded as an instance fault.
             # Maintain the original exception message which most likely has
             # useful details which the standard InvalidBDM error message lacks.
-            raise exception.InvalidBDM(six.text_type(ex))
+            raise exception.InvalidBDM(str(ex))
 
     def _update_instance_after_spawn(self, instance,
                                      vm_state=vm_states.ACTIVE):
@@ -2096,10 +2067,10 @@ class ComputeManager(manager.Manager):
     @reverts_task_state
     @wrap_instance_fault
     def build_and_run_instance(self, context, instance, image, request_spec,
-                     filter_properties, admin_password=None,
+                     filter_properties, accel_uuids, admin_password=None,
                      injected_files=None, requested_networks=None,
                      security_groups=None, block_device_mapping=None,
-                     node=None, limits=None, host_list=None, accel_uuids=None):
+                     node=None, limits=None, host_list=None):
 
         @utils.synchronized(instance.uuid)
         def _locked_do_build_and_run_instance(*args, **kwargs):
@@ -2230,8 +2201,6 @@ class ComputeManager(manager.Manager):
                     instance=instance)
                 self._cleanup_allocated_networks(context, instance,
                     requested_networks)
-                self._cleanup_volumes(context, instance,
-                    block_device_mapping, raise_exc=False)
                 compute_utils.add_instance_fault_from_exc(context,
                         instance, e, sys.exc_info(),
                         fault_message=e.kwargs['reason'])
@@ -2319,6 +2288,8 @@ class ComputeManager(manager.Manager):
         port_id, to resource provider UUID that provides resource for that
         RequestGroup. Or None if the request_spec was None.
         """
+        # TODO(sbauza): Remove this conditional once we only support
+        # RPC API 6.0
         if request_spec:
             return request_spec.get_request_group_mapping()
         else:
@@ -2351,12 +2322,13 @@ class ComputeManager(manager.Manager):
             try:
                 compute_utils\
                     .update_pci_request_spec_with_allocated_interface_name(
-                        context, self.reportclient, instance, provider_mapping)
+                        context, self.reportclient,
+                        instance.pci_requests.requests, provider_mapping)
             except (exception.AmbiguousResourceProviderForPCIRequest,
                     exception.UnexpectedResourceProviderNameForPCIRequest
                     ) as e:
                 raise exception.BuildAbortException(
-                    reason=six.text_type(e), instance_uuid=instance.uuid)
+                    reason=str(e), instance_uuid=instance.uuid)
 
         # TODO(Luyao) cut over to get_allocs_for_consumer
         allocs = self.reportclient.get_allocations_for_consumer(
@@ -2488,7 +2460,7 @@ class ComputeManager(manager.Manager):
                     phase=fields.NotificationPhase.ERROR, exception=e,
                     bdms=block_device_mapping)
             raise exception.RescheduledException(
-                    instance_uuid=instance.uuid, reason=six.text_type(e))
+                    instance_uuid=instance.uuid, reason=str(e))
 
         # NOTE(alaski): This is only useful during reschedules, remove it now.
         instance.system_metadata.pop('network_allocated', None)
@@ -2646,10 +2618,10 @@ class ComputeManager(manager.Manager):
                     ctxt.reraise = False
                     LOG.warning('Could not clean up failed build,'
                                 ' not rescheduling. Error: %s',
-                                six.text_type(exc2))
+                                str(exc2))
                     raise exception.BuildAbortException(
                             instance_uuid=instance.uuid,
-                            reason=six.text_type(exc))
+                            reason=str(exc))
                 finally:
                     # Call Cyborg to delete accelerator requests
                     compute_utils.delete_arqs_if_needed(context, instance)
@@ -2724,7 +2696,7 @@ class ComputeManager(manager.Manager):
                 LOG.warning(
                     'Failed to update network info cache when cleaning up '
                     'allocated networks. Stale VIFs may be left on this host.'
-                    'Error: %s', six.text_type(exc)
+                    'Error: %s', str(exc)
                 )
                 return
 
@@ -2742,7 +2714,7 @@ class ComputeManager(manager.Manager):
             # mostly ignored
             LOG.warning(
                 'Cleaning up VIFs failed for instance. Error: %s',
-                six.text_type(exc), instance=instance,
+                str(exc), instance=instance,
             )
         else:
             LOG.debug('Unplugged VIFs for instance', instance=instance)
@@ -2780,7 +2752,7 @@ class ComputeManager(manager.Manager):
                 # Provide a warning that something is amiss.
                 with excutils.save_and_reraise_exception():
                     LOG.warning('Failed to deallocate network for instance; '
-                                'retrying. Error: %s', six.text_type(e),
+                                'retrying. Error: %s', str(e),
                                 instance=instance)
 
         try:
@@ -3357,8 +3329,7 @@ class ComputeManager(manager.Manager):
         :param limits: Overcommit limits set by the scheduler. If a host was
                        specified by the user, this will be None
         :param request_spec: a RequestSpec object used to schedule the instance
-        :param accel_uuids: a list of cyborg ARQ uuids or None if the RPC API
-                            is <=5.11
+        :param accel_uuids: a list of cyborg ARQ uuids
 
         """
         # recreate=True means the instance is being evacuated from a failed
@@ -3472,19 +3443,11 @@ class ComputeManager(manager.Manager):
                 self._notify_instance_rebuild_error(context, instance, e, bdms)
                 raise
             else:
-                instance.apply_migration_context()
-                # NOTE (ndipanov): This save will now update the host and node
-                # attributes making sure that next RT pass is consistent since
-                # it will be based on the instance and not the migration DB
-                # entry.
-                instance.host = self.host
-                instance.node = scheduled_node
-                instance.save()
-                instance.drop_migration_context()
-
-                # NOTE (ndipanov): Mark the migration as done only after we
-                # mark the instance as belonging to this host.
-                self._set_migration_status(migration, 'done')
+                # NOTE(gibi): Let the resource tracker set the instance
+                # host and drop the migration context as we need to hold the
+                # COMPUTE_RESOURCE_SEMAPHORE to avoid the race with
+                # _update_available_resources. See bug 1896463.
+                self.rt.finish_evacuation(instance, scheduled_node, migration)
 
     def _do_rebuild_instance_with_claim(
             self, context, instance, orig_image_ref, image_meta,
@@ -3500,7 +3463,8 @@ class ComputeManager(manager.Manager):
             if provider_mapping:
                 compute_utils.\
                     update_pci_request_spec_with_allocated_interface_name(
-                        context, self.reportclient, instance, provider_mapping)
+                        context, self.reportclient,
+                        instance.pci_requests.requests, provider_mapping)
 
         claim_context = rebuild_claim(
             context, instance, scheduled_node, allocations,
@@ -3975,9 +3939,6 @@ class ComputeManager(manager.Manager):
             instance.save()
             LOG.warning("Image not found during snapshot", instance=instance)
 
-    def _post_interrupted_snapshot_cleanup(self, context, instance):
-        self.driver.post_interrupted_snapshot_cleanup(context, instance)
-
     @messaging.expected_exceptions(NotImplementedError)
     @wrap_exception()
     def volume_snapshot_create(self, context, instance, volume_id,
@@ -4236,14 +4197,6 @@ class ComputeManager(manager.Manager):
         compute_utils.notify_about_instance_action(context, instance,
             self.host, action=fields.NotificationAction.UNRESCUE,
             phase=fields.NotificationPhase.END)
-
-    @wrap_exception()
-    @wrap_instance_fault
-    def change_instance_metadata(self, context, diff, instance):
-        """Update the metadata published to the instance."""
-        LOG.debug("Changing instance metadata according to %r",
-                  diff, instance=instance)
-        self.driver.change_instance_metadata(context, instance, diff)
 
     @wrap_exception()
     @wrap_instance_event(prefix='compute')
@@ -4551,7 +4504,7 @@ class ComputeManager(manager.Manager):
             # Do not let this stop us from cleaning up since the guest
             # is already gone.
             LOG.error('Failed to delete port bindings from source host. '
-                      'Error: %s', six.text_type(e), instance=instance)
+                      'Error: %s', str(e), instance=instance)
 
     def _delete_volume_attachments(self, ctxt, bdms):
         """Deletes volume attachment records for the given bdms.
@@ -4570,7 +4523,7 @@ class ComputeManager(manager.Manager):
                     self.volume_api.attachment_delete(ctxt, bdm.attachment_id)
                 except Exception as e:
                     LOG.error('Failed to delete volume attachment with ID %s. '
-                              'Error: %s', bdm.attachment_id, six.text_type(e),
+                              'Error: %s', bdm.attachment_id, str(e),
                               instance_uuid=bdm.instance_uuid)
 
     @wrap_exception()
@@ -4664,7 +4617,7 @@ class ComputeManager(manager.Manager):
             # Do not let this stop us from cleaning up since the guest
             # is already gone.
             LOG.error('Failed to delete port bindings from target host. '
-                      'Error: %s', six.text_type(e), instance=instance)
+                      'Error: %s', str(e), instance=instance)
 
         # Delete any volume attachments remaining for this target host.
         LOG.debug('Deleting volume attachments for target host.',
@@ -4834,7 +4787,7 @@ class ComputeManager(manager.Manager):
     @wrap_instance_event(prefix='compute')
     @errors_out_migration
     @wrap_instance_fault
-    def revert_resize(self, context, instance, migration, request_spec=None):
+    def revert_resize(self, context, instance, migration, request_spec):
         """Destroys the new instance on the destination machine.
 
         Reverts the model changes, and powers on the old instance on the
@@ -4926,8 +4879,7 @@ class ComputeManager(manager.Manager):
     @wrap_instance_event(prefix='compute')
     @errors_out_migration
     @wrap_instance_fault
-    def finish_revert_resize(
-            self, context, instance, migration, request_spec=None):
+    def finish_revert_resize(self, context, instance, migration, request_spec):
         """Finishes the second half of reverting a resize on the source host.
 
         Bring the original source instance state back (active/shutoff) and
@@ -5050,6 +5002,8 @@ class ComputeManager(manager.Manager):
             provider_mappings = self._get_request_group_mapping(
                 request_spec)
         else:
+            # TODO(sbauza): Remove this conditional once we only support RPC
+            # API 6.0
             # NOTE(gibi): The compute RPC is pinned to be older than 5.2
             # and therefore request_spec is not sent. We cannot calculate
             # the provider mappings. If the instance has ports with
@@ -5142,12 +5096,13 @@ class ComputeManager(manager.Manager):
             try:
                 compute_utils.\
                     update_pci_request_spec_with_allocated_interface_name(
-                        context, self.reportclient, instance, provider_mapping)
+                        context, self.reportclient,
+                        instance.pci_requests.requests, provider_mapping)
             except (exception.AmbiguousResourceProviderForPCIRequest,
                     exception.UnexpectedResourceProviderNameForPCIRequest
                     ) as e:
                 raise exception.BuildAbortException(
-                    reason=six.text_type(e), instance_uuid=instance.uuid)
+                    reason=str(e), instance_uuid=instance.uuid)
 
         limits = filter_properties.get('limits', {})
         allocs = self.reportclient.get_allocations_for_consumer(
@@ -5196,7 +5151,7 @@ class ComputeManager(manager.Manager):
     @reverts_task_state
     @wrap_instance_event(prefix='compute')
     @wrap_instance_fault
-    def prep_resize(self, context, image, instance, instance_type,
+    def prep_resize(self, context, image, instance, flavor,
                     request_spec, filter_properties, node,
                     clean_shutdown, migration, host_list):
         """Initiates the process of moving a running instance to another host.
@@ -5222,10 +5177,10 @@ class ComputeManager(manager.Manager):
                 errors_out_migration_ctxt(migration):
             self._send_prep_resize_notifications(
                 context, instance, fields.NotificationPhase.START,
-                instance_type)
+                flavor)
             try:
                 self._prep_resize(context, image, instance,
-                                  instance_type, filter_properties,
+                                  flavor, filter_properties,
                                   node, migration, request_spec,
                                   clean_shutdown)
             except exception.BuildAbortException:
@@ -5243,12 +5198,12 @@ class ComputeManager(manager.Manager):
                 # try to re-schedule the resize elsewhere:
                 exc_info = sys.exc_info()
                 self._reschedule_resize_or_reraise(context, instance,
-                        exc_info, instance_type, request_spec,
+                        exc_info, flavor, request_spec,
                         filter_properties, host_list)
             finally:
                 self._send_prep_resize_notifications(
                     context, instance, fields.NotificationPhase.END,
-                    instance_type)
+                    flavor)
 
     def _reschedule_resize_or_reraise(self, context, instance, exc_info,
             instance_type, request_spec, filter_properties, host_list):
@@ -5324,14 +5279,12 @@ class ComputeManager(manager.Manager):
                 raise exc.with_traceback(exc_info[2])
             raise exc
 
-    # TODO(stephenfin): Remove unused request_spec parameter in API v6.0
     @messaging.expected_exceptions(exception.MigrationPreCheckError)
     @wrap_exception()
     @wrap_instance_event(prefix='compute')
     @wrap_instance_fault
     def prep_snapshot_based_resize_at_dest(
-            self, ctxt, instance, flavor, nodename, migration, limits,
-            request_spec):
+            self, ctxt, instance, flavor, nodename, migration, limits):
         """Performs pre-cross-cell resize resource claim on the dest host.
 
         This runs on the destination host in a cross-cell resize operation
@@ -5354,7 +5307,6 @@ class ComputeManager(manager.Manager):
         :param nodename: Name of the target compute node
         :param migration: nova.objects.Migration object for the operation
         :param limits: nova.objects.SchedulerLimits object of resource limits
-        :param request_spec: nova.objects.RequestSpec object for the operation
         :returns: nova.objects.MigrationContext; the migration context created
             on the destination host during the resize_claim.
         :raises: nova.exception.MigrationPreCheckError if the pre-check
@@ -5382,7 +5334,7 @@ class ComputeManager(manager.Manager):
                 ctxt, instance, flavor, nodename, migration, allocations,
                 image_meta=instance.image_meta, limits=limits)
         except Exception as ex:
-            err = six.text_type(ex)
+            err = str(ex)
             LOG.warning(
                 'Cross-cell resize pre-checks failed for this host (%s). '
                 'Cleaning up. Failure: %s', self.host, err,
@@ -5479,7 +5431,7 @@ class ComputeManager(manager.Manager):
             self._power_off_instance(instance)
         except Exception as e:
             LOG.exception('Failed to power off instance.', instance=instance)
-            raise exception.InstancePowerOffFailure(reason=six.text_type(e))
+            raise exception.InstancePowerOffFailure(reason=str(e))
         instance.power_state = self._get_power_state(instance)
 
         # If a snapshot image ID was provided, we need to snapshot the guest
@@ -5539,8 +5491,8 @@ class ComputeManager(manager.Manager):
     @wrap_instance_event(prefix='compute')
     @wrap_instance_fault
     def resize_instance(self, context, instance, image,
-                        migration, instance_type, clean_shutdown,
-                        request_spec=None):
+                        migration, flavor, clean_shutdown,
+                        request_spec):
         """Starts the migration of a running instance to another host.
 
         This is initiated from the destination host's ``prep_resize`` routine
@@ -5548,7 +5500,7 @@ class ComputeManager(manager.Manager):
         """
         try:
             self._resize_instance(context, instance, image, migration,
-                                  instance_type, clean_shutdown, request_spec)
+                                  flavor, clean_shutdown, request_spec)
         except Exception:
             with excutils.save_and_reraise_exception():
                 self._revert_allocation(context, instance, migration)
@@ -5807,7 +5759,7 @@ class ComputeManager(manager.Manager):
     @errors_out_migration
     @wrap_instance_fault
     def finish_resize(self, context, disk_info, image, instance,
-                      migration, request_spec=None):
+                      migration, request_spec):
         """Completes the migration process.
 
         Sets up the newly transferred disk and turns on the instance at its
@@ -5882,14 +5834,13 @@ class ComputeManager(manager.Manager):
             action=fields.NotificationAction.RESIZE_FINISH, phase=phase,
             bdms=bdms)
 
-    # TODO(stephenfin): Remove unused request_spec parameter in API v6.0
     @wrap_exception()
     @reverts_task_state
     @wrap_instance_event(prefix='compute')
     @errors_out_migration
     @wrap_instance_fault
     def finish_snapshot_based_resize_at_dest(
-            self, ctxt, instance, migration, snapshot_id, request_spec):
+            self, ctxt, instance, migration, snapshot_id):
         """Finishes the snapshot-based resize at the destination compute.
 
         Sets up block devices and networking on the destination compute and
@@ -5906,7 +5857,6 @@ class ComputeManager(manager.Manager):
             be "finished".
         :param snapshot_id: ID of the image snapshot created for a
             non-volume-backed instance, else None.
-        :param request_spec: nova.objects.RequestSpec object for the operation
         """
         LOG.info('Finishing snapshot based resize on destination host %s.',
                  self.host, instance=instance)
@@ -5924,7 +5874,9 @@ class ComputeManager(manager.Manager):
         other generic error handling.
         """
         # Figure out the image metadata to use when spawning the guest.
+        origin_image_ref = instance.image_ref
         if snapshot_id:
+            instance.image_ref = snapshot_id
             image_meta = objects.ImageMeta.from_image_ref(
                 ctxt, self.image_api, snapshot_id)
         else:
@@ -5962,6 +5914,7 @@ class ComputeManager(manager.Manager):
         # If we spawned from a temporary snapshot image we can delete that now,
         # similar to how unshelve works.
         if snapshot_id:
+            instance.image_ref = origin_image_ref
             compute_utils.delete_image(
                 ctxt, instance, self.image_api, snapshot_id)
 
@@ -6086,7 +6039,6 @@ class ComputeManager(manager.Manager):
                                                                  instance,
                                                                  network_id)
         self._inject_network_info(instance, network_info)
-        self.reset_network(context, instance)
 
         # NOTE(russellb) We just want to bump updated_at.  See bug 1143466.
         instance.updated_at = timeutils.utcnow()
@@ -6109,7 +6061,6 @@ class ComputeManager(manager.Manager):
                                                                       instance,
                                                                       address)
         self._inject_network_info(instance, network_info)
-        self.reset_network(context, instance)
 
         # NOTE(russellb) We just want to bump updated_at.  See bug 1143466.
         instance.updated_at = timeutils.utcnow()
@@ -6348,7 +6299,7 @@ class ComputeManager(manager.Manager):
     @wrap_instance_event(prefix='compute')
     @wrap_instance_fault
     def shelve_instance(self, context, instance, image_id,
-                        clean_shutdown):
+                        clean_shutdown, accel_uuids):
         """Shelve an instance.
 
         This should be used when you want to take a snapshot of the instance.
@@ -6359,15 +6310,17 @@ class ComputeManager(manager.Manager):
         :param instance: an Instance object
         :param image_id: an image id to snapshot to.
         :param clean_shutdown: give the GuestOS a chance to stop
+        :param accel_uuids: the accelerators uuids for the instance
         """
 
         @utils.synchronized(instance.uuid)
         def do_shelve_instance():
-            self._shelve_instance(context, instance, image_id, clean_shutdown)
+            self._shelve_instance(context, instance, image_id, clean_shutdown,
+                                  accel_uuids)
         do_shelve_instance()
 
     def _shelve_instance(self, context, instance, image_id,
-                         clean_shutdown):
+                         clean_shutdown, accel_uuids=None):
         LOG.info('Shelving', instance=instance)
         offload = CONF.shelved_offload_time == 0
         if offload:
@@ -6409,7 +6362,7 @@ class ComputeManager(manager.Manager):
         instance.system_metadata['shelved_host'] = self.host
         instance.vm_state = vm_states.SHELVED
         instance.task_state = None
-        if CONF.shelved_offload_time == 0:
+        if offload:
             instance.task_state = task_states.SHELVING_OFFLOADING
         instance.power_state = self._get_power_state(instance)
         instance.save(expected_task_state=[
@@ -6422,14 +6375,16 @@ class ComputeManager(manager.Manager):
                 phase=fields.NotificationPhase.END, bdms=bdms)
 
         if offload:
-            self._shelve_offload_instance(context, instance,
-                                          clean_shutdown=False, bdms=bdms)
+            self._shelve_offload_instance(
+                context, instance, clean_shutdown=False, bdms=bdms,
+                accel_uuids=accel_uuids)
 
     @wrap_exception()
     @reverts_task_state
     @wrap_instance_event(prefix='compute')
     @wrap_instance_fault
-    def shelve_offload_instance(self, context, instance, clean_shutdown):
+    def shelve_offload_instance(self, context, instance, clean_shutdown,
+            accel_uuids):
         """Remove a shelved instance from the hypervisor.
 
         This frees up those resources for use by other instances, but may lead
@@ -6440,15 +6395,17 @@ class ComputeManager(manager.Manager):
         :param context: request context
         :param instance: nova.objects.instance.Instance
         :param clean_shutdown: give the GuestOS a chance to stop
+        :param accel_uuids: the accelerators uuids for the instance
         """
 
         @utils.synchronized(instance.uuid)
         def do_shelve_offload_instance():
-            self._shelve_offload_instance(context, instance, clean_shutdown)
+            self._shelve_offload_instance(context, instance, clean_shutdown,
+                                          accel_uuids=accel_uuids)
         do_shelve_offload_instance()
 
     def _shelve_offload_instance(self, context, instance, clean_shutdown,
-                                 bdms=None):
+                                 bdms=None, accel_uuids=None):
         LOG.info('Shelve offloading', instance=instance)
         if bdms is None:
             bdms = objects.BlockDeviceMappingList.get_by_instance_uuid(
@@ -6472,6 +6429,12 @@ class ComputeManager(manager.Manager):
         # the instance is going to be removed from the host so we want to
         # terminate all the connections with the volume server and the host
         self._terminate_volume_connections(context, instance, bdms)
+
+        # NOTE(brinzhang): Free up the accelerator resource occupied
+        # in the cyborg service.
+        if accel_uuids:
+            cyclient = cyborg.get_client(context)
+            cyclient.delete_arqs_for_instance(instance.uuid)
 
         # Free up the resource allocations in the placement service.
         # This should happen *before* the vm_state is changed to
@@ -6513,7 +6476,7 @@ class ComputeManager(manager.Manager):
     @wrap_instance_event(prefix='compute')
     @wrap_instance_fault
     def unshelve_instance(self, context, instance, image,
-                          filter_properties, node, request_spec=None):
+                          filter_properties, node, request_spec, accel_uuids):
         """Unshelve the instance.
 
         :param context: request context
@@ -6524,6 +6487,7 @@ class ComputeManager(manager.Manager):
         :param node: target compute node
         :param request_spec: the RequestSpec object used to schedule the
             instance
+        :param accel_uuids: the accelerators uuids for the instance
         """
         if filter_properties is None:
             filter_properties = {}
@@ -6532,7 +6496,7 @@ class ComputeManager(manager.Manager):
         def do_unshelve_instance():
             self._unshelve_instance(
                 context, instance, image, filter_properties, node,
-                request_spec)
+                request_spec, accel_uuids)
         do_unshelve_instance()
 
     def _unshelve_instance_key_scrub(self, instance):
@@ -6549,7 +6513,7 @@ class ComputeManager(manager.Manager):
         instance.update(keys)
 
     def _unshelve_instance(self, context, instance, image, filter_properties,
-                           node, request_spec):
+                           node, request_spec, accel_uuids):
         LOG.info('Unshelving', instance=instance)
         bdms = objects.BlockDeviceMappingList.get_by_instance_uuid(
                 context, instance.uuid)
@@ -6589,13 +6553,28 @@ class ComputeManager(manager.Manager):
                 update = (
                     compute_utils.
                         update_pci_request_spec_with_allocated_interface_name)
-                update(context, self.reportclient, instance, provider_mappings)
+                update(
+                    context, self.reportclient, instance.pci_requests.requests,
+                    provider_mappings)
 
             self.network_api.setup_instance_network_on_host(
                 context, instance, self.host,
                 provider_mappings=provider_mappings)
             network_info = self.network_api.get_instance_nw_info(
                 context, instance)
+
+            accel_info = []
+            if accel_uuids:
+                try:
+                    accel_info = self._get_bound_arq_resources(
+                        context, instance, accel_uuids)
+                except (Exception, eventlet.timeout.Timeout) as exc:
+                    LOG.exception('Failure getting accelerator requests '
+                                  'with the exception: %s', exc,
+                                  instance=instance)
+                    self._build_resources_cleanup(instance, network_info)
+                    raise
+
             with self.rt.instance_claim(context, instance, node, allocations,
                                         limits):
                 self.driver.spawn(context, instance, image_meta,
@@ -6603,7 +6582,8 @@ class ComputeManager(manager.Manager):
                                   admin_password=None,
                                   allocations=allocations,
                                   network_info=network_info,
-                                  block_device_info=block_device_info)
+                                  block_device_info=block_device_info,
+                                  accel_info=accel_info)
         except Exception:
             with excutils.save_and_reraise_exception(logger=LOG):
                 LOG.exception('Instance failed to spawn',
@@ -6638,14 +6618,6 @@ class ComputeManager(manager.Manager):
                 self.host, action=fields.NotificationAction.UNSHELVE,
                 phase=fields.NotificationPhase.END, bdms=bdms)
 
-    # TODO(stephenfin): Remove this in RPC 6.0 since it's nova-network only
-    @messaging.expected_exceptions(NotImplementedError)
-    @wrap_instance_fault
-    def reset_network(self, context, instance):
-        """Reset networking on the given instance."""
-        LOG.debug('Reset network', instance=instance)
-        self.driver.reset_network(instance)
-
     def _inject_network_info(self, instance, network_info):
         """Inject network info for the given instance."""
         LOG.debug('Inject network info', instance=instance)
@@ -6671,8 +6643,8 @@ class ComputeManager(manager.Manager):
         LOG.info("Get console output", instance=instance)
         output = self.driver.get_console_output(context, instance)
 
-        if type(output) is six.text_type:
-            output = six.b(output)
+        if type(output) is str:
+            output = output.encode("latin-1")
 
         if tail_length is not None:
             output = self._tail_log(output, tail_length)
@@ -7322,9 +7294,33 @@ class ComputeManager(manager.Manager):
     @wrap_instance_fault
     def swap_volume(self, context, old_volume_id, new_volume_id, instance,
                     new_attachment_id):
-        """Swap volume for an instance."""
-        context = context.elevated()
+        """Replace the old volume with the new volume within the active server
 
+        :param context: User request context
+        :param old_volume_id: Original volume id
+        :param new_volume_id: New volume id being swapped to
+        :param instance: Instance with original_volume_id attached
+        :param new_attachment_id: ID of the new attachment for new_volume_id
+        """
+        @utils.synchronized(instance.uuid)
+        def _do_locked_swap_volume(context, old_volume_id, new_volume_id,
+                                   instance, new_attachment_id):
+            self._do_swap_volume(context, old_volume_id, new_volume_id,
+                                 instance, new_attachment_id)
+        _do_locked_swap_volume(context, old_volume_id, new_volume_id, instance,
+                               new_attachment_id)
+
+    def _do_swap_volume(self, context, old_volume_id, new_volume_id,
+                        instance, new_attachment_id):
+        """Replace the old volume with the new volume within the active server
+
+        :param context: User request context
+        :param old_volume_id: Original volume id
+        :param new_volume_id: New volume id being swapped to
+        :param instance: Instance with original_volume_id attached
+        :param new_attachment_id: ID of the new attachment for new_volume_id
+        """
+        context = context.elevated()
         compute_utils.notify_about_volume_swap(
             context, instance, self.host,
             fields.NotificationPhase.START,
@@ -7447,6 +7443,34 @@ class ComputeManager(manager.Manager):
             # cinder v3 api flow
             self.volume_api.attachment_delete(context, bdm.attachment_id)
 
+    def _deallocate_port_resource_for_instance(
+        self,
+        context: nova.context.RequestContext,
+        instance: 'objects.Instance',
+        port_id: str,
+        port_allocation: ty.Dict[str, ty.Dict[str, ty.Dict[str, int]]],
+    ) -> None:
+
+        if not port_allocation:
+            return
+
+        try:
+            client = self.reportclient
+            client.remove_resources_from_instance_allocation(
+                context, instance.uuid, port_allocation)
+        except Exception as ex:
+            # We always raise here as it is not a race condition where
+            # somebody has already deleted the port we want to cleanup.
+            # Here we see that the port exists, the allocation exists,
+            # but we cannot clean it up so we will actually leak
+            # allocations.
+            with excutils.save_and_reraise_exception():
+                LOG.warning(
+                    'Failed to remove resource allocation of port %(port_id)s '
+                    'for instance. Error: %(error)s',
+                    {'port_id': port_id, 'error': ex},
+                    instance=instance)
+
     def _deallocate_port_for_instance(
             self, context, instance, port_id, raise_on_failure=False,
             pci_device=None):
@@ -7466,94 +7490,144 @@ class ComputeManager(manager.Manager):
                 self.rt.unclaim_pci_devices(context, pci_device, instance)
                 instance.remove_pci_device_and_request(pci_device)
 
-            if port_allocation:
-                # Deallocate the resources in placement that were used by the
-                # detached port.
-                try:
-                    client = self.reportclient
-                    client.remove_resources_from_instance_allocation(
-                        context, instance.uuid, port_allocation)
-                except Exception as ex:
-                    # We always raise here as it is not a race condition where
-                    # somebody has already deleted the port we want to cleanup.
-                    # Here we see that the port exists, the allocation exists,
-                    # but we cannot clean it up so we will actually leak
-                    # allocations.
-                    with excutils.save_and_reraise_exception():
-                        LOG.warning('Failed to remove resource allocation '
-                                    'of port %(port_id)s for instance. Error: '
-                                    '%(error)s',
-                                    {'port_id': port_id, 'error': ex},
-                                    instance=instance)
+            # Deallocate the resources in placement that were used by the
+            # detached port.
+            self._deallocate_port_resource_for_instance(
+                context, instance, port_id, port_allocation)
 
     def _claim_pci_device_for_interface_attach(
         self,
         context: nova.context.RequestContext,
         instance: 'objects.Instance',
-        requested_networks: 'objects.NetworkRequestsList'
+        pci_reqs: 'objects.InstancePCIRequests',
     ) -> ty.Optional['objects.PciDevice']:
-        """Claim PCI device if the requested interface needs it
-
-        If a PCI device is claimed then the requested_networks is updated
-        with the pci request id and the pci_requests and pci_devices fields
-        of the instance is also updated accordingly.
+        """Claim PCI devices if there are PCI requests
 
         :param context: nova.context.RequestContext
         :param instance: the objects.Instance to where the interface is being
             attached
-        :param requested_networks: the objects.NetworkRequestList describing
-            the requested interface. The requested_networks.objects list shall
-            have a single item.
+        :param pci_reqs: A InstancePCIRequests object describing the
+            needed PCI devices
         :raises InterfaceAttachPciClaimFailed: if the PCI device claim fails
-        :raises InterfaceAttachFailed: if more than one interface is requested
         :returns: An objects.PciDevice describing the claimed PCI device for
             the interface or None if no device is requested
         """
 
-        if len(requested_networks) != 1:
-            LOG.warning(
-                "Interface attach only supports one interface per attach "
-                "request", instance=instance)
-            raise exception.InterfaceAttachFailed(instance_uuid=instance.uuid)
-
-        requested_network = requested_networks[0]
-
-        pci_numa_affinity_policy = hardware.get_pci_numa_policy_constraint(
-            instance.flavor, instance.image_meta)
-        pci_reqs = objects.InstancePCIRequests(
-            requests=[], instance_uuid=instance.uuid)
-        self.network_api.create_resource_requests(
-            context, requested_networks, pci_reqs,
-            affinity_policy=pci_numa_affinity_policy)
-
         if not pci_reqs.requests:
-            # The requested port does not require a PCI device so nothing to do
             return None
-
-        if len(pci_reqs.requests) > 1:
-            LOG.warning(
-                "Interface attach only supports one interface per attach "
-                "request", instance=instance)
-            raise exception.InterfaceAttachFailed(instance_uuid=instance.uuid)
-
-        pci_req = pci_reqs.requests[0]
 
         devices = self.rt.claim_pci_devices(
             context, pci_reqs, instance.numa_topology)
 
         if not devices:
             LOG.info('Failed to claim PCI devices during interface attach '
-                     'for PCI request %s', pci_req, instance=instance)
+                     'for PCI request %s', pci_reqs, instance=instance)
             raise exception.InterfaceAttachPciClaimFailed(
                 instance_uuid=instance.uuid)
 
+        # NOTE(gibi): We assume that maximum one PCI devices is attached per
+        # interface attach request.
         device = devices[0]
-
-        # Update the requested network with the pci request id
-        requested_network.pci_request_id = pci_req.request_id
-        instance.add_pci_device_and_request(device, pci_req)
+        instance.pci_devices.objects.append(device)
 
         return device
+
+    def _allocate_port_resource_for_instance(
+        self,
+        context: nova.context.RequestContext,
+        instance: 'objects.Instance',
+        pci_reqs: 'objects.InstancePCIRequests',
+        request_groups: ty.List['objects.RequestGroup'],
+    ) -> ty.Tuple[ty.Optional[ty.Dict[str, ty.List[str]]],
+                  ty.Optional[ty.Dict[str, ty.Dict[str, ty.Dict[str, int]]]]]:
+        """Allocate resources for the request in placement
+
+        :param context: nova.context.RequestContext
+        :param instance: the objects.Instance to where the interface is being
+            attached
+        :param pci_reqs: A list of InstancePCIRequest objects describing the
+            needed PCI devices
+        :param request_groups: A list of RequestGroup objects describing the
+            resources the port requests from placement
+        :raises InterfaceAttachResourceAllocationFailed: if we failed to
+            allocate resource in placement for the request
+        :returns: A tuple of provider mappings and allocated resources or
+            (None, None) if no resource allocation was needed for the request
+        """
+
+        if not request_groups:
+            return None, None
+
+        # NOTE(gibi): we assume a single RequestGroup here as:
+        # 1) there can only be a single port per interface attach request
+        # 2) a single port can only request resources in a single RequestGroup
+        #    as per the current neutron API.
+        # #2) might change in the future so both
+        # nova.network.neutron.API.create_resource_requests() and this function
+        # takes a list of groups
+        request_group = request_groups[0]
+
+        # restrict the resource request to the current compute node. The
+        # compute node uuid is the uuid of the root provider of the node in
+        # placement
+        compute_node_uuid = objects.ComputeNode.get_by_nodename(
+            context, instance.node).uuid
+        request_group.in_tree = compute_node_uuid
+
+        # NOTE(gibi): when support is added for attaching a cyborg based
+        # smart NIC the ResourceRequest could be extended to handle multiple
+        # request groups.
+        rr = scheduler_utils.ResourceRequest.from_request_group(request_group)
+        res = self.reportclient.get_allocation_candidates(context, rr)
+        alloc_reqs, provider_sums, version = res
+
+        if not alloc_reqs:
+            # no allocation candidates available, we run out of free resources
+            raise exception.InterfaceAttachResourceAllocationFailed(
+                instance_uuid=instance.uuid)
+
+        # select one of the candidates and update the instance
+        # allocation
+        # TODO(gibi): We could loop over all possible candidates
+        # if the first one selected here does not work due to race or due
+        # to not having free PCI devices. However the latter is only
+        # detected later in the interface attach code path.
+        alloc_req = alloc_reqs[0]
+        resources = alloc_req['allocations']
+        provider_mappings = alloc_req['mappings']
+        try:
+            self.reportclient.add_resources_to_instance_allocation(
+                context, instance.uuid, resources)
+        except exception.AllocationUpdateFailed as e:
+            # We lost a race. We could retry another candidate
+            raise exception.InterfaceAttachResourceAllocationFailed(
+                instance_uuid=instance.uuid) from e
+        except (
+            exception.ConsumerAllocationRetrievalFailed,
+            keystone_exception.ClientException,
+        ) as e:
+            # These are non-recoverable errors so we should not retry
+            raise exception.InterfaceAttachResourceAllocationFailed(
+                instance_uuid=instance.uuid) from e
+
+        try:
+            update = (
+                compute_utils.
+                    update_pci_request_spec_with_allocated_interface_name)
+            update(
+                context, self.reportclient, pci_reqs.requests,
+                provider_mappings)
+        except (
+            exception.AmbiguousResourceProviderForPCIRequest,
+            exception.UnexpectedResourceProviderNameForPCIRequest
+        ):
+            # These are programing errors. So we clean up an re-raise to let
+            # the request fail
+            with excutils.save_and_reraise_exception():
+                self.reportclient.remove_resources_from_instance_allocation(
+                    context, instance.uuid, resources)
+
+        return provider_mappings, resources
 
     # TODO(mriedem): There are likely race failures which can result in
     # NotFound and QuotaError exceptions getting traced as well.
@@ -7568,6 +7642,7 @@ class ComputeManager(manager.Manager):
         # PortNotUsableDNS
         # AttachSRIOVPortNotSupported
         # NetworksWithQoSPolicyNotSupported
+        # InterfaceAttachResourceAllocationFailed
         exception.Invalid)
     @wrap_exception()
     @wrap_instance_event(prefix='compute')
@@ -7615,14 +7690,49 @@ class ComputeManager(manager.Manager):
             ]
         )
 
-        pci_device = self._claim_pci_device_for_interface_attach(
-            context, instance, requested_networks)
+        if len(requested_networks) != 1:
+            LOG.warning(
+                "Interface attach only supports one interface per attach "
+                "request", instance=instance)
+            raise exception.InterfaceAttachFailed(instance_uuid=instance.uuid)
+
+        pci_numa_affinity_policy = hardware.get_pci_numa_policy_constraint(
+            instance.flavor, instance.image_meta)
+        pci_reqs = objects.InstancePCIRequests(
+            requests=[], instance_uuid=instance.uuid)
+        _, request_groups = self.network_api.create_resource_requests(
+            context, requested_networks, pci_reqs,
+            affinity_policy=pci_numa_affinity_policy)
+
+        # We only support one port per attach request so we at most have one
+        # pci request
+        if pci_reqs.requests:
+            pci_req = pci_reqs.requests[0]
+            requested_networks[0].pci_request_id = pci_req.request_id
+
+        result = self._allocate_port_resource_for_instance(
+            context, instance, pci_reqs, request_groups)
+        provider_mappings, resources = result
+
+        try:
+            pci_device = self._claim_pci_device_for_interface_attach(
+                context, instance, pci_reqs)
+        except exception.InterfaceAttachPciClaimFailed:
+            with excutils.save_and_reraise_exception():
+                if resources:
+                    # TODO(gibi): Instead of giving up we could try another
+                    # allocation candidate from _allocate_resources() if any
+                    self._deallocate_port_resource_for_instance(
+                        context, instance, port_id, resources)
+
+        instance.pci_requests.requests.extend(pci_reqs.requests)
 
         network_info = self.network_api.allocate_for_instance(
             context,
             instance,
             requested_networks,
             bind_host_id=bind_host_id,
+            resource_provider_mapping=provider_mappings,
         )
 
         if len(network_info) != 1:
@@ -7756,13 +7866,11 @@ class ComputeManager(manager.Manager):
         return objects.ComputeNode.get_first_node_by_host_for_old_compat(
             context, host)
 
-    # TODO(stephenfin): Remove the unused instance argument in RPC version 6.0
     @wrap_exception()
-    def check_instance_shared_storage(self, ctxt, instance, data):
+    def check_instance_shared_storage(self, ctxt, data):
         """Check if the instance files are shared
 
         :param ctxt: security context
-        :param instance: dict of instance data
         :param data: result of driver.check_instance_shared_storage_local
 
         Returns True if instance disks located on shared storage and
@@ -7786,7 +7894,7 @@ class ComputeManager(manager.Manager):
     @wrap_instance_fault
     def check_can_live_migrate_destination(self, ctxt, instance,
                                            block_migration, disk_over_commit,
-                                           migration=None, limits=None):
+                                           migration, limits):
         """Check if it is possible to execute live migration.
 
         This runs checks on the destination host, and then calls
@@ -7924,18 +8032,14 @@ class ComputeManager(manager.Manager):
         LOG.debug('source check data is %s', result)
         return result
 
-    # TODO(mriedem): Remove the block_migration argument in v6.0 of the compute
-    # RPC API.
     @wrap_exception()
     @wrap_instance_event(prefix='compute')
     @wrap_instance_fault
-    def pre_live_migration(self, context, instance, block_migration, disk,
-                           migrate_data):
+    def pre_live_migration(self, context, instance, disk, migrate_data):
         """Preparations for live migration at dest host.
 
         :param context: security context
         :param instance: dict of instance data
-        :param block_migration: if true, prepare for block migration
         :param disk: disk info of instance
         :param migrate_data: A dict or LiveMigrateData object holding data
                              required for live migration without shared
@@ -8061,8 +8165,8 @@ class ComputeManager(manager.Manager):
         # We don't generate events if CONF.vif_plugging_timeout=0
         # meaning that the operator disabled using them.
         if CONF.vif_plugging_timeout:
-            return [('network-vif-plugged', vif['id'])
-                    for vif in instance.get_network_info()]
+            return (instance.get_network_info()
+                    .get_live_migration_plug_time_events())
         else:
             return []
 
@@ -8493,12 +8597,12 @@ class ComputeManager(manager.Manager):
                         LOG.error('Connection for volume %s not terminated on '
                                   'source host %s during post_live_migration: '
                                   '%s', bdm.volume_id, self.host,
-                                  six.text_type(e), instance=instance)
+                                  str(e), instance=instance)
                     else:
                         LOG.error('Volume attachment %s not deleted on source '
                                   'host %s during post_live_migration: %s',
                                   bdm.attachment_id, self.host,
-                                  six.text_type(e), instance=instance)
+                                  str(e), instance=instance)
 
     @wrap_exception()
     @wrap_instance_fault
@@ -8757,7 +8861,7 @@ class ComputeManager(manager.Manager):
             LOG.error('Network cleanup failed for source host %s during post '
                       'live migration. You may need to manually clean up '
                       'resources in the network service. Error: %s',
-                      prev_host, six.text_type(e))
+                      prev_host, str(e))
         # NOTE(vish): this is necessary to update dhcp for nova-network
         # NOTE(mriedem): This is a no-op for neutron.
         self.network_api.setup_networks_on_host(context, instance, self.host)
@@ -8919,7 +9023,7 @@ class ComputeManager(manager.Manager):
                         'Network cleanup failed for destination host %s '
                         'during live migration rollback. You may need to '
                         'manually clean up resources in the network service. '
-                        'Error: %s', dest, six.text_type(e))
+                        'Error: %s', dest, str(e))
                 except Exception:
                     with excutils.save_and_reraise_exception():
                         LOG.exception(
@@ -9020,7 +9124,7 @@ class ComputeManager(manager.Manager):
                 'Network cleanup failed for destination host %s '
                 'during live migration rollback. You may need to '
                 'manually clean up resources in the network service. '
-                'Error: %s', self.host, six.text_type(e))
+                'Error: %s', self.host, str(e))
         except Exception:
             with excutils.save_and_reraise_exception():
                 # NOTE(tdurakov): even if teardown networks fails driver
@@ -9327,12 +9431,20 @@ class ComputeManager(manager.Manager):
             if timeutils.is_older_than(shelved_at, CONF.shelved_offload_time):
                 to_gc.append(instance)
 
+        cyclient = cyborg.get_client(context)
         for instance in to_gc:
             try:
                 instance.task_state = task_states.SHELVING_OFFLOADING
                 instance.save(expected_task_state=(None,))
-                self.shelve_offload_instance(context, instance,
-                                             clean_shutdown=False)
+                accel_uuids = []
+                if instance.flavor.extra_specs.get('accel:device_profile'):
+                    # TODO(brinzhang): After cyborg support batch query ARQs
+                    # for more than one instances, we will improve efficiency
+                    # with this implemention.
+                    accel_uuids = cyclient.get_arq_uuids_for_instance(instance)
+                self.shelve_offload_instance(
+                    context, instance, clean_shutdown=False,
+                    accel_uuids=accel_uuids)
             except Exception:
                 LOG.exception('Periodic task failed to offload instance.',
                               instance=instance)
@@ -9388,86 +9500,6 @@ class ComputeManager(manager.Manager):
             'Instance usage audit ran for host %s, %s instances in %s seconds.'
             % (self.host, num_instances, time.time() - start_time))
         task_log.end_task()
-
-    @periodic_task.periodic_task(spacing=CONF.bandwidth_poll_interval)
-    def _poll_bandwidth_usage(self, context):
-
-        if not self._bw_usage_supported:
-            return
-
-        prev_time, start_time = utils.last_completed_audit_period()
-
-        curr_time = time.time()
-        if (curr_time - self._last_bw_usage_poll >
-                CONF.bandwidth_poll_interval):
-            self._last_bw_usage_poll = curr_time
-            LOG.info("Updating bandwidth usage cache")
-
-            instances = objects.InstanceList.get_by_host(context,
-                                                              self.host,
-                                                              use_slave=True)
-            try:
-                bw_counters = self.driver.get_all_bw_counters(instances)
-            except NotImplementedError:
-                # NOTE(mdragon): Not all hypervisors have bandwidth polling
-                # implemented yet.  If they don't it doesn't break anything,
-                # they just don't get the info in the usage events.
-                # NOTE(PhilDay): Record that its not supported so we can
-                # skip fast on future calls rather than waste effort getting
-                # the list of instances.
-                LOG.info("Bandwidth usage not supported by %(driver)s.",
-                         {'driver': CONF.compute_driver})
-                self._bw_usage_supported = False
-                return
-
-            refreshed = timeutils.utcnow()
-            for bw_ctr in bw_counters:
-                # Allow switching of greenthreads between queries.
-                greenthread.sleep(0)
-                bw_in = 0
-                bw_out = 0
-                last_ctr_in = None
-                last_ctr_out = None
-                usage = objects.BandwidthUsage.get_by_instance_uuid_and_mac(
-                    context, bw_ctr['uuid'], bw_ctr['mac_address'],
-                    start_period=start_time, use_slave=True)
-                if usage:
-                    bw_in = usage.bw_in
-                    bw_out = usage.bw_out
-                    last_ctr_in = usage.last_ctr_in
-                    last_ctr_out = usage.last_ctr_out
-                else:
-                    usage = (objects.BandwidthUsage.
-                             get_by_instance_uuid_and_mac(
-                        context, bw_ctr['uuid'], bw_ctr['mac_address'],
-                        start_period=prev_time, use_slave=True))
-                    if usage:
-                        last_ctr_in = usage.last_ctr_in
-                        last_ctr_out = usage.last_ctr_out
-
-                if last_ctr_in is not None:
-                    if bw_ctr['bw_in'] < last_ctr_in:
-                        # counter rollover
-                        bw_in += bw_ctr['bw_in']
-                    else:
-                        bw_in += (bw_ctr['bw_in'] - last_ctr_in)
-
-                if last_ctr_out is not None:
-                    if bw_ctr['bw_out'] < last_ctr_out:
-                        # counter rollover
-                        bw_out += bw_ctr['bw_out']
-                    else:
-                        bw_out += (bw_ctr['bw_out'] - last_ctr_out)
-
-                objects.BandwidthUsage(context=context).create(
-                                              bw_ctr['uuid'],
-                                              bw_ctr['mac_address'],
-                                              bw_in,
-                                              bw_out,
-                                              bw_ctr['bw_in'],
-                                              bw_ctr['bw_out'],
-                                              start_period=start_time,
-                                              last_refreshed=refreshed)
 
     def _get_host_volume_bdms(self, context, use_slave=False):
         """Return all block device mappings on a compute host."""
@@ -9895,7 +9927,7 @@ class ComputeManager(manager.Manager):
                 except keystone_exception.ClientException as e:
                     LOG.error(
                         "Failed to delete compute node resource provider "
-                        "for compute node %s: %s", cn.uuid, six.text_type(e))
+                        "for compute node %s: %s", cn.uuid, str(e))
 
         for nodename in nodenames:
             self._update_available_resource_for_node(context, nodename,
@@ -9976,13 +10008,6 @@ class ComputeManager(manager.Manager):
                              "DELETED but still present on host.",
                              instance.name, instance=instance)
                     try:
-                        try:
-                            # disable starting the instance
-                            self.driver.set_bootable(instance, False)
-                        except NotImplementedError:
-                            LOG.debug("set_bootable is not implemented "
-                                      "for the current driver")
-                        # and power it off
                         self.driver.power_off(instance)
                     except Exception:
                         LOG.warning("Failed to power off instance",
@@ -10084,40 +10109,6 @@ class ComputeManager(manager.Manager):
             with excutils.save_and_reraise_exception():
                 # NOTE(mriedem): Why don't we pass clean_task_state=True here?
                 self._set_instance_obj_error_state(instance)
-
-    @wrap_exception()
-    def add_aggregate_host(self, context, aggregate, host, slave_info):
-        """Notify hypervisor of change (for hypervisor pools)."""
-        try:
-            self.driver.add_to_aggregate(context, aggregate, host,
-                                         slave_info=slave_info)
-        except NotImplementedError:
-            LOG.debug('Hypervisor driver does not support '
-                      'add_aggregate_host')
-        except exception.AggregateError:
-            with excutils.save_and_reraise_exception():
-                self.driver.undo_aggregate_operation(
-                                    context,
-                                    aggregate.delete_host,
-                                    aggregate, host)
-
-    @wrap_exception()
-    def remove_aggregate_host(self, context, host, slave_info, aggregate):
-        """Removes a host from a physical hypervisor pool."""
-        try:
-            self.driver.remove_from_aggregate(context, aggregate, host,
-                                              slave_info=slave_info)
-        except NotImplementedError:
-            LOG.debug('Hypervisor driver does not support '
-                      'remove_aggregate_host')
-        except (exception.AggregateError,
-                exception.InvalidAggregateAction) as e:
-            with excutils.save_and_reraise_exception():
-                self.driver.undo_aggregate_operation(
-                                    context,
-                                    aggregate.add_host,
-                                    aggregate, host,
-                                    isinstance(e, exception.AggregateError))
 
     def _process_instance_event(self, instance, event):
         _event = self.instance_events.pop_instance_event(instance, event)
@@ -10368,7 +10359,7 @@ class ComputeManager(manager.Manager):
                 except exception.NotFound as e:
                     LOG.info('Failed to process external instance event '
                              '%(event)s due to: %(error)s',
-                             {'event': event.key, 'error': six.text_type(e)},
+                             {'event': event.key, 'error': str(e)},
                              instance=instance)
             elif event.name == 'network-vif-deleted':
                 try:
@@ -10378,7 +10369,7 @@ class ComputeManager(manager.Manager):
                 except exception.NotFound as e:
                     LOG.info('Failed to process external instance event '
                              '%(event)s due to: %(error)s',
-                             {'event': event.key, 'error': six.text_type(e)},
+                             {'event': event.key, 'error': str(e)},
                              instance=instance)
             elif event.name == 'volume-extended':
                 self.extend_volume(context, instance, event.tag)
@@ -10621,9 +10612,15 @@ class ComputeManager(manager.Manager):
                 requests=pci_reqs,
                 instance_uuid=instance.uuid)
 
+            # if we are called during the live migration with NUMA topology
+            # support the PCI claim needs to consider the destination NUMA
+            # topology that is then stored in the migration_context
+            dest_topo = None
+            if instance.migration_context:
+                dest_topo = instance.migration_context.new_numa_topology
+
             claimed_pci_devices_objs = self.rt.claim_pci_devices(
-                ctxt,
-                vif_pci_requests)
+                ctxt, vif_pci_requests, dest_topo)
 
             # Update VIFMigrateData profile with the newly claimed PCI
             # device
@@ -10658,3 +10655,144 @@ class ComputeManager(manager.Manager):
             LOG.debug("Updating migrate VIF profile for port %(port_id)s:"
                       "%(profile)s", {'port_id': port_id,
                                       'profile': profile})
+
+
+# TODO(sbauza): Remove this proxy class in the X release once we drop the 5.x
+# support.
+# NOTE(sbauza): This proxy class will support the existing <=5.13 RPC calls
+# from any RPC client but will also make sure that the new 6.0 RPC calls will
+# be supported.
+class _ComputeV5Proxy(object):
+
+    target = messaging.Target(version='5.13')
+
+    def __init__(self, manager):
+        self.manager = manager
+
+    def __getattr__(self, name):
+        # NOTE(sbauza): Proxying all the other methods but the V5 ones.
+        return getattr(self.manager, name)
+
+    # 5.0 support for block_migration argument
+    def pre_live_migration(self, context, instance, block_migration, disk,
+                           migrate_data):
+        return self.manager.pre_live_migration(context, instance, disk,
+                                               migrate_data)
+
+    # 5.1 support for legacy request_spec argument
+    def prep_resize(self, context, image, instance, instance_type,
+                    request_spec, filter_properties, node,
+                    clean_shutdown, migration, host_list):
+        if not isinstance(request_spec, objects.RequestSpec):
+            # Prior to compute RPC API 5.1 conductor would pass a legacy dict
+            # version of the request spec to compute and since Stein compute
+            # could be sending that back to conductor on reschedule, so if we
+            # got a dict convert it to an object.
+            # TODO(mriedem): We can drop this compat code when we only support
+            # compute RPC API >=6.0.
+            request_spec = objects.RequestSpec.from_primitives(
+                context, request_spec, filter_properties)
+            # We don't have to set the new flavor on the request spec because
+            # if we got here it was due to a reschedule from the compute and
+            # the request spec would already have the new flavor in it from the
+            # else block below.
+        self.manager.prep_resize(context, image, instance, instance_type,
+                                 request_spec, filter_properties, node,
+                                 clean_shutdown, migration, host_list)
+
+    # 5.2 support for optional request_spec argument
+    def resize_instance(self, context, instance, image,
+                        migration, instance_type, clean_shutdown,
+                        request_spec=None):
+        self.manager.resize_instance(context, instance, image,
+                                    migration, instance_type, clean_shutdown,
+                                    request_spec)
+
+    # 5.2 support for optional request_spec argument
+    def finish_resize(self, context, disk_info, image, instance,
+                      migration, request_spec=None):
+        self.manager.finish_resize(context, disk_info, image, instance,
+                                   migration, request_spec)
+
+    # 5.2 support for optional request_spec argument
+    def revert_resize(self, context, instance, migration, request_spec=None):
+        self.manager.revert_resize(context, instance, migration, request_spec)
+
+    # 5.2 support for optional request_spec argument
+    def finish_revert_resize(
+            self, context, instance, migration, request_spec=None):
+        self.manager.finish_revert_resize(context, instance, migration,
+                                          request_spec)
+
+    # 5.2 support for optional request_spec argument
+    # 5.13 support for optional accel_uuids argument
+    def unshelve_instance(self, context, instance, image, filter_properties,
+                          node, request_spec=None, accel_uuids=None):
+        self.manager.unshelve_instance(context, instance, image,
+                                       filter_properties, node, request_spec,
+                                       accel_uuids or [])
+
+    # 5.3 support for optional migration and limits arguments
+    def check_can_live_migrate_destination(self, ctxt, instance,
+                                           block_migration, disk_over_commit,
+                                           migration=None, limits=None):
+        return self.manager.check_can_live_migrate_destination(
+            ctxt, instance, block_migration, disk_over_commit,
+            migration, limits)
+
+    # 5.11 support for optional accel_uuids argument
+    def build_and_run_instance(self, context, instance, image, request_spec,
+                     filter_properties, admin_password=None,
+                     injected_files=None, requested_networks=None,
+                     security_groups=None, block_device_mapping=None,
+                     node=None, limits=None, host_list=None, accel_uuids=None):
+        self.manager.build_and_run_instance(
+            context, instance, image, request_spec,
+            filter_properties, accel_uuids, admin_password,
+            injected_files, requested_networks,
+            security_groups, block_device_mapping,
+            node, limits, host_list)
+
+    # 5.12 support for optional accel_uuids argument
+    def rebuild_instance(self, context, instance, orig_image_ref, image_ref,
+                         injected_files, new_pass, orig_sys_metadata,
+                         bdms, recreate, on_shared_storage,
+                         preserve_ephemeral, migration,
+                         scheduled_node, limits, request_spec,
+                         accel_uuids=None):
+        self.manager.rebuild_instance(
+            context, instance, orig_image_ref, image_ref,
+            injected_files, new_pass, orig_sys_metadata,
+            bdms, recreate, on_shared_storage,
+            preserve_ephemeral, migration,
+            scheduled_node, limits, request_spec,
+            accel_uuids)
+
+    # 5.13 support for optional accel_uuids argument
+    def shelve_instance(self, context, instance, image_id,
+                        clean_shutdown, accel_uuids=None):
+        self.manager.shelve_instance(context, instance, image_id,
+                                     clean_shutdown, accel_uuids)
+
+    # 5.13 support for optional accel_uuids argument
+    def shelve_offload_instance(self, context, instance, clean_shutdown,
+            accel_uuids=None):
+        self.manager.shelve_offload_instance(
+            context, instance, clean_shutdown, accel_uuids)
+
+    # 6.0 drop unused request_spec argument
+    def prep_snapshot_based_resize_at_dest(
+            self, ctxt, instance, flavor, nodename, migration, limits,
+            request_spec):
+        return self.manager.prep_snapshot_based_resize_at_dest(
+            ctxt, instance, flavor, nodename, migration, limits)
+
+    # 6.0 drop unused request_spec argument
+    def finish_snapshot_based_resize_at_dest(
+            self, ctxt, instance, migration, snapshot_id, request_spec):
+        self.manager.finish_snapshot_based_resize_at_dest(
+            ctxt, instance, migration, snapshot_id)
+
+    # 6.0 drop unused instance argument
+    def check_instance_shared_storage(self, ctxt, instance, data):
+        return self.manager.check_instance_shared_storage(ctxt, data)

@@ -31,7 +31,7 @@ LOG = logging.getLogger(__name__)
 
 
 # NOTE(danms): This is the global service version counter
-SERVICE_VERSION = 53
+SERVICE_VERSION = 56
 
 
 # NOTE(danms): This is our SERVICE_VERSION history. The idea is that any
@@ -190,7 +190,23 @@ SERVICE_VERSION_HISTORY = (
     # Version 53: Compute RPC v5.12:
     # Add accel_uuids (accelerator requests) param to rebuild_instance
     {'compute_rpc': '5.12'},
+    # Version 54: Compute RPC v5.13:
+    # Add accel_uuids (accelerator requests) param to shelve_instance and
+    # shelve_offload_instance and unshelve_instance
+    {'compute_rpc': '5.13'},
+    # Version 55: Compute RPC v5.13:
+    # Add support for qos interface attach
+    {'compute_rpc': '5.13'},
+    # Version 56: Compute RPC v6.0:
+    {'compute_rpc': '6.0'},
 )
+
+# This is used to raise an error at service startup if older than N-1 computes
+# are detected. Update this at the beginning of every release cycle
+OLDEST_SUPPORTED_SERVICE_VERSION = 'Victoria'
+SERVICE_VERSION_ALIASES = {
+    'Victoria': 52,
+}
 
 
 # TODO(berrange): Remove NovaObjectDictCompat

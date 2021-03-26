@@ -115,10 +115,6 @@ Verify operation of the Compute service.
       | Result: Success                                                    |
       | Details: None                                                      |
       +--------------------------------------------------------------------+
-      | Check: Ironic Flavor Migration                                     |
-      | Result: Success                                                    |
-      | Details: None                                                      |
-      +--------------------------------------------------------------------+
       | Check: Cinder API                                                  |
       | Result: Success                                                    |
       | Details: None                                                      |
@@ -128,6 +124,10 @@ Verify operation of the Compute service.
       | Details: None                                                      |
       +--------------------------------------------------------------------+
       | Check: Policy File JSON to YAML Migration                          |
+      | Result: Success                                                    |
+      | Details: None                                                      |
+      +--------------------------------------------------------------------+
+      | Check: Older than N-1 computes                                     |
       | Result: Success                                                    |
       | Details: None                                                      |
       +--------------------------------------------------------------------+

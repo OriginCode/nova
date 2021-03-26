@@ -17,7 +17,6 @@ import os
 from eventlet import tpool
 from oslo_log import log as logging
 from oslo_utils import importutils
-import six
 
 import nova.conf
 from nova import exception
@@ -86,7 +85,7 @@ class VFSGuestFS(vfs.VFS):
             g.add_drive("/dev/null")  # sic
             g.launch()
         except Exception as e:
-            kernel_file = "/boot/vmlinuz-%s" % os.uname()[2]
+            kernel_file = "/boot/vmlinuz-%s" % os.uname().release
             if not os.access(kernel_file, os.R_OK):
                 raise exception.LibguestfsCannotReadKernel(
                     _("Please change permissions on %s to 0x644")
@@ -185,8 +184,7 @@ class VFSGuestFS(vfs.VFS):
                 guestfs.GuestFS(python_return_dict=False,
                                 close_on_exit=False))
         except TypeError as e:
-            if ('close_on_exit' in six.text_type(e) or
-                'python_return_dict' in six.text_type(e)):
+            if 'close_on_exit' in str(e) or 'python_return_dict' in str(e):
                 # NOTE(russellb) In case we're not using a version of
                 # libguestfs new enough to support parameters close_on_exit
                 # and python_return_dict which were added in libguestfs 1.20.

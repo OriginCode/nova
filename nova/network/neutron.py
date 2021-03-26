@@ -21,6 +21,7 @@ API and utilities for nova-network interactions.
 import copy
 import functools
 import time
+import typing as ty
 
 from keystoneauth1 import loading as ks_loading
 from neutronclient.common import exceptions as neutron_client_exc
@@ -30,7 +31,6 @@ from oslo_log import log as logging
 from oslo_utils import excutils
 from oslo_utils import strutils
 from oslo_utils import uuidutils
-import six
 
 from nova.compute import utils as compute_utils
 import nova.conf
@@ -197,7 +197,7 @@ class ClientWrapper(clientv20.Client):
                           "admin credential located in nova.conf")
                 raise exception.NeutronAdminCredentialConfigurationInvalid()
             except neutron_client_exc.Forbidden as e:
-                raise exception.Forbidden(six.text_type(e))
+                raise exception.Forbidden(str(e))
             return ret
         return wrapper
 
@@ -1250,6 +1250,10 @@ class API(base.Base):
         self._refresh_neutron_extensions_cache(context)
         return constants.SUBSTR_PORT_FILTERING in self.extensions
 
+    def _has_segment_extension(self, context, neutron=None):
+        self._refresh_neutron_extensions_cache(context, neutron=neutron)
+        return constants.SEGMENT in self.extensions
+
     def supports_port_binding_extension(self, context):
         """This is a simple check to see if the neutron "binding-extended"
         extension exists and is enabled.
@@ -1687,8 +1691,10 @@ class API(base.Base):
                  allocation of the port per resource provider uuid. E.g.:
                  {
                      rp_uuid: {
-                         NET_BW_EGR_KILOBIT_PER_SEC: 10000,
-                         NET_BW_IGR_KILOBIT_PER_SEC: 20000,
+                        "resources": {
+                            "NET_BW_EGR_KILOBIT_PER_SEC": 10000,
+                            "NET_BW_IGR_KILOBIT_PER_SEC": 20000,
+                        }
                      }
                  }
                  Note that right now this dict only contains a single key as a
@@ -1729,7 +1735,10 @@ class API(base.Base):
             allocated_rp = profile.get(constants.ALLOCATION)
             if resource_request and allocated_rp:
                 port_allocation = {
-                    allocated_rp: resource_request.get('resources', {})}
+                    allocated_rp: {
+                        "resources": resource_request.get("resources", {})
+                    }
+                }
         else:
             # Check the info_cache. If the port is still in the info_cache and
             # in that cache there is allocation in the profile then we suspect
@@ -2017,6 +2026,8 @@ class API(base.Base):
             # the port binding profile and we can handle it as a boolean.
             return strutils.bool_from_string(value)
 
+    # NOTE(sean-k-mooney): we might want to have this return a
+    # nova.network.model.VIF object instead in the future.
     def _get_port_vnic_info(self, context, neutron, port_id):
         """Retrieve port vNIC info
 
@@ -2024,14 +2035,17 @@ class API(base.Base):
         :param neutron: The Neutron client
         :param port_id: The id of port to be queried
 
-        :return: A tuple of vNIC type, trusted status, network ID and resource
-                 request of the port if any. Trusted status only affects SR-IOV
-                 ports and will always be None for other port types.
+        :return: A tuple of vNIC type, trusted status, network ID, resource
+            request of the port if any and port numa affintiy policy.
+            Trusted status only affects SR-IOV ports and will always be
+            None for other port types. If no port numa policy is
+            requested by a port, None will be returned.
         """
+        fields = ['binding:vnic_type', constants.BINDING_PROFILE,
+                  'network_id', constants.RESOURCE_REQUEST,
+                  constants.NUMA_POLICY]
         port = self._show_port(
-            context, port_id, neutron_client=neutron,
-            fields=['binding:vnic_type', constants.BINDING_PROFILE,
-                    'network_id', constants.RESOURCE_REQUEST])
+            context, port_id, neutron_client=neutron, fields=fields)
         network_id = port.get('network_id')
         trusted = None
         vnic_type = port.get('binding:vnic_type',
@@ -2044,7 +2058,8 @@ class API(base.Base):
         # applied to the port/network and the port-resource-request API
         # extension is enabled.
         resource_request = port.get(constants.RESOURCE_REQUEST, None)
-        return vnic_type, trusted, network_id, resource_request
+        numa_policy = port.get(constants.NUMA_POLICY, None)
+        return vnic_type, trusted, network_id, resource_request, numa_policy
 
     def create_resource_requests(
             self, context, requested_networks, pci_requests=None,
@@ -2082,11 +2097,12 @@ class API(base.Base):
             vnic_type = network_model.VNIC_TYPE_NORMAL
             pci_request_id = None
             requester_id = None
+            port_numa_policy = None
 
             if request_net.port_id:
-                result = self._get_port_vnic_info(
-                    context, neutron, request_net.port_id)
-                vnic_type, trusted, network_id, resource_request = result
+                (vnic_type, trusted, network_id, resource_request,
+                 port_numa_policy) = self._get_port_vnic_info(
+                     context, neutron, request_net.port_id)
                 physnet, tunneled_ = self._get_physnet_tunneled_info(
                     context, neutron, network_id)
 
@@ -2140,8 +2156,11 @@ class API(base.Base):
                     spec=[spec],
                     request_id=uuidutils.generate_uuid(),
                     requester_id=requester_id)
-                if affinity_policy:
-                    request.numa_policy = affinity_policy
+                # NOTE(sean-k-mooney): port NUMA policies take precedence
+                # over image and flavor policies.
+                numa_policy = port_numa_policy or affinity_policy
+                if numa_policy:
+                    request.numa_policy = numa_policy
                 pci_requests.requests.append(request)
                 pci_request_id = request.request_id
 
@@ -2168,7 +2187,7 @@ class API(base.Base):
             return True
         except neutron_client_exc.Conflict as ex:
             LOG.debug('Unable to auto-allocate networks. %s',
-                      six.text_type(ex))
+                      str(ex))
             return False
 
     def _auto_allocate_network(self, instance, neutron):
@@ -2420,7 +2439,7 @@ class API(base.Base):
         try:
             client.update_floatingip(fip['id'], {'floatingip': param})
         except neutron_client_exc.Conflict as e:
-            raise exception.FloatingIpAssociateFailed(six.text_type(e))
+            raise exception.FloatingIpAssociateFailed(str(e))
 
         # If the floating IP was associated with another server, try to refresh
         # the cache for that instance to avoid a window of time where multiple
@@ -2694,11 +2713,11 @@ class API(base.Base):
             fip = client.create_floatingip(param)
         except (neutron_client_exc.IpAddressGenerationFailureClient,
                 neutron_client_exc.ExternalIpAddressExhaustedClient) as e:
-            raise exception.NoMoreFloatingIps(six.text_type(e))
+            raise exception.NoMoreFloatingIps(str(e))
         except neutron_client_exc.OverQuotaClient as e:
-            raise exception.FloatingIpLimitExceeded(six.text_type(e))
+            raise exception.FloatingIpLimitExceeded(str(e))
         except neutron_client_exc.BadRequest as e:
-            raise exception.FloatingIpBadRequest(six.text_type(e))
+            raise exception.FloatingIpBadRequest(str(e))
 
         return fip['floatingip']['floating_ip_address']
 
@@ -3040,7 +3059,8 @@ class API(base.Base):
             ovs_interfaceid=ovs_interfaceid,
             devname=devname,
             active=vif_active,
-            preserve_on_delete=preserve_on_delete)
+            preserve_on_delete=preserve_on_delete
+        )
 
     def _build_network_info_model(self, context, instance, networks=None,
                                   port_ids=None, admin_client=None,
@@ -3479,6 +3499,60 @@ class API(base.Base):
                     LOG.exception('Unable to update instance VNIC index '
                                   'for port %s.',
                                   vif['id'], instance=instance)
+
+    def get_segment_ids_for_network(
+        self,
+        context: nova.context.RequestContext,
+        network_id: str,
+    ) -> ty.List[str]:
+        """Query the segmentation ids for the given network.
+
+        :param context: The request context.
+        :param network_id: The UUID of the network to be queried.
+        :returns: The list of segment UUIDs of the network or an empty list if
+            either Segment extension isn't enabled in Neutron or if the network
+            isn't configured for routing.
+        """
+        if not self._has_segment_extension(context):
+            return []
+
+        client = get_client(context)
+        try:
+            # NOTE(sbauza): We can't use list_segments() directly because the
+            # API is borked and returns both segments but also segmentation IDs
+            # of a provider network if any.
+            subnets = client.list_subnets(network_id=network_id,
+                                          fields='segment_id')['subnets']
+        except neutron_client_exc.NeutronClientException as e:
+            raise exception.InvalidRoutedNetworkConfiguration(
+                'Failed to get segment IDs for network %s' % network_id) from e
+        # The segment field of an unconfigured subnet could be None
+        return [subnet['segment_id'] for subnet in subnets
+                                     if subnet['segment_id'] is not None]
+
+    def get_segment_id_for_subnet(
+        self,
+        context: nova.context.RequestContext,
+        subnet_id: str,
+    ) -> ty.Optional[str]:
+        """Query the segmentation id for the given subnet.
+
+        :param context: The request context.
+        :param subnet_id: The UUID of the subnet to be queried.
+        :returns: The segment UUID of the subnet or None if either Segment
+            extension isn't enabled in Neutron or the provided subnet doesn't
+            have segments (if the related network isn't configured for routing)
+        """
+        if not self._has_segment_extension(context):
+            return None
+
+        client = get_client(context)
+        try:
+            subnet = client.show_subnet(subnet_id)['subnet']
+        except neutron_client_exc.NeutronClientException as e:
+            raise exception.InvalidRoutedNetworkConfiguration(
+                'Subnet %s not found' % subnet_id) from e
+        return subnet.get('segment_id')
 
 
 def _ensure_requested_network_ordering(accessor, unordered, preferred):

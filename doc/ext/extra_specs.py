@@ -213,7 +213,7 @@ class NovaDomain(domains.Domain):
         self, env, fromdocname, builder, typ, target, node, contnode,
     ):
         """Resolve cross-references"""
-        if typ == 'option':
+        if typ == 'extra-spec':
             return sphinx_nodes.make_refnode(
                 builder,
                 fromdocname,
@@ -224,7 +224,16 @@ class NovaDomain(domains.Domain):
             )
         return None
 
+    def merge_domaindata(self, docnames, otherdata):
+        for target, docname in otherdata['extra_specs'].items():
+            if docname in docnames:
+                self.data['extra_specs'][target] = docname
+
 
 def setup(app):
     app.add_domain(NovaDomain)
     app.add_directive('extra-specs', ExtraSpecGroupDirective)
+    return {
+        'parallel_read_safe': True,
+        'parallel_write_safe': True,
+    }

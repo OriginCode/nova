@@ -17,13 +17,10 @@
 
 import os.path
 
-import fixtures
 import mock
-from oslo_config import cfg
 from oslo_policy import policy as oslo_policy
 from oslo_serialization import jsonutils
 import requests_mock
-import yaml
 
 from nova import context
 from nova import exception
@@ -326,7 +323,6 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:servers:show:host_status:unknown-only",
 "os_compute_api:servers:migrations:force_complete",
 "os_compute_api:servers:migrations:delete",
-"os_compute_api:os-admin-actions:reset_network",
 "os_compute_api:os-admin-actions:inject_network_info",
 "os_compute_api:os-admin-actions:reset_state",
 "os_compute_api:os-aggregates:index",
@@ -337,9 +333,6 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-aggregates:add_host",
 "os_compute_api:os-aggregates:remove_host",
 "os_compute_api:os-aggregates:set_metadata",
-"os_compute_api:os-agents:create",
-"os_compute_api:os-agents:update",
-"os_compute_api:os-agents:delete",
 "os_compute_api:os-evacuate",
 "os_compute_api:os-extended-server-attributes",
 "os_compute_api:os-flavor-access:remove_tenant_access",
@@ -484,7 +477,6 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-instance-actions:events:details",
 "os_compute_api:os-instance-usage-audit-log:list",
 "os_compute_api:os-instance-usage-audit-log:show",
-"os_compute_api:os-agents:list",
 "os_compute_api:os-hosts:list",
 "os_compute_api:os-hosts:show",
 "os_compute_api:os-hypervisors:list",
@@ -575,70 +567,3 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
             self.system_reader_or_owner_rules +
             self.allow_nobody_rules + special_rules)
         self.assertEqual(set([]), result)
-
-
-class PickPolicyFileTestCase(test.NoDBTestCase):
-
-    def setUp(self):
-        super(PickPolicyFileTestCase, self).setUp()
-        self.data = {
-            'rule_admin': 'True',
-            'rule_admin2': 'is_admin:True'
-        }
-        policy.CONF.clear_override('policy_file', group='oslo_policy')
-        self.tmpdir = self.useFixture(fixtures.TempDir())
-        original_search_dirs = cfg._search_dirs
-
-        def fake_search_dirs(dirs, name):
-            dirs.append(self.tmpdir.path)
-            return original_search_dirs(dirs, name)
-
-        self.stub_out('oslo_config.cfg._search_dirs', fake_search_dirs)
-
-    def test_non_config_policy_file(self):
-        tmpfilename = 'nova-policy.yaml'
-        self.flags(policy_file=tmpfilename, group='oslo_policy')
-        selected_policy_file = policy.pick_policy_file(
-            policy_file='non-config-file')
-        self.assertEqual(policy.CONF.oslo_policy.policy_file, tmpfilename)
-        self.assertEqual(selected_policy_file, 'non-config-file')
-
-    def test_overridden_policy_file(self):
-        tmpfilename = 'nova-policy.yaml'
-        self.flags(policy_file=tmpfilename, group='oslo_policy')
-        selected_policy_file = policy.pick_policy_file(policy_file=None)
-        self.assertEqual(policy.CONF.oslo_policy.policy_file, tmpfilename)
-        self.assertEqual(selected_policy_file, tmpfilename)
-
-    def test_only_new_default_policy_file_exist(self):
-        tmpfilename = os.path.join(self.tmpdir.path, 'policy.yaml')
-        with open(tmpfilename, 'w') as fh:
-            yaml.dump(self.data, fh)
-
-        selected_policy_file = policy.pick_policy_file(policy_file=None)
-        self.assertEqual(policy.CONF.oslo_policy.policy_file, 'policy.yaml')
-        self.assertEqual(selected_policy_file, 'policy.yaml')
-
-    @mock.patch.object(policy.CONF, 'get_location')
-    def test_only_old_default_policy_file_exist(self, mock_get):
-        mock_get.return_value = cfg.LocationInfo(cfg.Locations.set_default,
-                                                 'None')
-        tmpfilename = os.path.join(self.tmpdir.path, 'policy.json')
-        with open(tmpfilename, 'w') as fh:
-            jsonutils.dump(self.data, fh)
-
-        selected_policy_file = policy.pick_policy_file(policy_file=None)
-        self.assertEqual(policy.CONF.oslo_policy.policy_file, 'policy.yaml')
-        self.assertEqual(selected_policy_file, 'policy.json')
-
-    def test_both_default_policy_file_exist(self):
-        tmpfilename1 = os.path.join(self.tmpdir.path, 'policy.json')
-        with open(tmpfilename1, 'w') as fh:
-            jsonutils.dump(self.data, fh)
-        tmpfilename2 = os.path.join(self.tmpdir.path, 'policy.yaml')
-        with open(tmpfilename2, 'w') as fh:
-            yaml.dump(self.data, fh)
-
-        selected_policy_file = policy.pick_policy_file(policy_file=None)
-        self.assertEqual(policy.CONF.oslo_policy.policy_file, 'policy.yaml')
-        self.assertEqual(selected_policy_file, 'policy.yaml')

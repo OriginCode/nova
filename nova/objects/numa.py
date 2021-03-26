@@ -28,7 +28,8 @@ class NUMACell(base.NovaObject):
     # Version 1.2: Added mempages field
     # Version 1.3: Add network_metadata field
     # Version 1.4: Add pcpuset
-    VERSION = '1.4'
+    # Version 1.5: Add socket
+    VERSION = '1.5'
 
     fields = {
         'id': obj_fields.IntegerField(read_only=True),
@@ -41,11 +42,14 @@ class NUMACell(base.NovaObject):
         'siblings': obj_fields.ListOfSetsOfIntegersField(),
         'mempages': obj_fields.ListOfObjectsField('NUMAPagesTopology'),
         'network_metadata': obj_fields.ObjectField('NetworkMetadata'),
+        'socket': obj_fields.IntegerField(nullable=True),
     }
 
     def obj_make_compatible(self, primitive, target_version):
         super(NUMACell, self).obj_make_compatible(primitive, target_version)
         target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 5):
+            primitive.pop('socket', None)
         if target_version < (1, 4):
             primitive.pop('pcpuset', None)
         if target_version < (1, 3):
@@ -106,16 +110,34 @@ class NUMACell(base.NovaObject):
         self.pinned_cpus -= cpus
 
     def pin_cpus_with_siblings(self, cpus):
+        """Pin (consume) both thread siblings if one of them is requested to
+        be pinned.
+
+        :param cpus: set of CPUs to pin
+        """
         pin_siblings = set()
         for sib in self.siblings:
             if cpus & sib:
+                # NOTE(artom) If the intersection between cpus and sib is not
+                # empty - IOW, the CPU we want to pin has sibligns - pin the
+                # sibling as well. This is because we normally got here because
+                # the `isolate` CPU thread policy is set, so we don't want to
+                # place guest CPUs on host thread siblings.
                 pin_siblings.update(sib)
         self.pin_cpus(pin_siblings)
 
     def unpin_cpus_with_siblings(self, cpus):
+        """Unpin (free up) both thread siblings if one of them is requested to
+        be freed.
+
+        :param cpus: set of CPUs to unpin.
+        """
         pin_siblings = set()
         for sib in self.siblings:
             if cpus & sib:
+                # NOTE(artom) This is the inverse operation of
+                # pin_cpus_with_siblings() - see the NOTE there. If the CPU
+                # we're unpinning has siblings, unpin the sibling as well.
                 pin_siblings.update(sib)
         self.unpin_cpus(pin_siblings)
 

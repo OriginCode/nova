@@ -14,7 +14,6 @@ import mock
 import oslo_messaging as messaging
 from oslo_serialization import jsonutils
 from oslo_utils.fixture import uuidsentinel as uuids
-import six
 
 from nova.compute import power_state
 from nova.compute import rpcapi as compute_rpcapi
@@ -72,8 +71,8 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
         self.heal_reqspec_is_bfv_mock = _p.start()
         self.addCleanup(_p.stop)
 
-        _p = mock.patch('nova.objects.RequestSpec.ensure_network_metadata')
-        self.ensure_network_metadata_mock = _p.start()
+        _p = mock.patch('nova.objects.RequestSpec.ensure_network_information')
+        self.ensure_network_information_mock = _p.start()
         self.addCleanup(_p.stop)
 
         _p = mock.patch(
@@ -155,7 +154,7 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
         # When the task is executed with a destination it means the host is
         # being forced and we don't call the scheduler, so we don't need to
         # modify the request spec
-        self.ensure_network_metadata_mock.assert_not_called()
+        self.ensure_network_information_mock.assert_not_called()
 
     @mock.patch('nova.availability_zones.get_host_availability_zone',
                 return_value='nova')
@@ -393,7 +392,7 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
             mock.patch.object(self.task, '_check_can_migrate_pci')):
             ex = self.assertRaises(exception.MigrationPreCheckError,
                                    self.task._check_requested_destination)
-        self.assertIn('across cells', six.text_type(ex))
+        self.assertIn('across cells', str(ex))
 
     @mock.patch.object(live_migrate.LiveMigrationTask,
                        '_call_livem_checks_on_host')
@@ -416,7 +415,7 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
 
         mock_setup.assert_called_once_with(self.context, self.fake_spec)
         mock_reset.assert_called_once_with()
-        self.ensure_network_metadata_mock.assert_called_once_with(
+        self.ensure_network_information_mock.assert_called_once_with(
             self.instance)
         self.heal_reqspec_is_bfv_mock.assert_called_once_with(
             self.context, self.fake_spec, self.instance)
@@ -684,6 +683,7 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
             mock_fill_provider_mapping, mock_update_pci_req):
         resource_req = [objects.RequestGroup(requester_id=uuids.port_id)]
         self.mock_get_res_req.return_value = resource_req
+        self.instance.pci_requests = objects.InstancePCIRequests(requests=[])
 
         self.assertEqual(("host1", "node1", fake_limits1),
                          self.task._find_destination())
@@ -699,7 +699,7 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
 
         mock_setup.assert_called_once_with(self.context, self.fake_spec)
         mock_reset.assert_called_once_with()
-        self.ensure_network_metadata_mock.assert_called_once_with(
+        self.ensure_network_information_mock.assert_called_once_with(
             self.instance)
         self.heal_reqspec_is_bfv_mock.assert_called_once_with(
             self.context, self.fake_spec, self.instance)
@@ -710,8 +710,7 @@ class LiveMigrationTaskTestCase(test.NoDBTestCase):
         mock_fill_provider_mapping.assert_called_once_with(
             self.task.request_spec, fake_selection1)
         mock_update_pci_req.assert_called_once_with(
-            self.context, self.task.report_client, self.instance,
-            {uuids.port_id: []})
+            self.context, self.task.report_client, [], {uuids.port_id: []})
 
     @mock.patch.object(objects.InstanceMapping, 'get_by_instance_uuid',
                        side_effect=exception.InstanceMappingNotFound(

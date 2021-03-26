@@ -16,7 +16,6 @@
 
 import mock
 import os
-import six
 import tempfile
 
 from nova import exception
@@ -33,24 +32,9 @@ class FileTestCase(test.NoDBTestCase):
         self.useFixture(fixtures.PrivsepFixture())
 
     @mock.patch('os.path.exists', return_value=True)
-    def test_readfile(self, mock_exists):
-        mock_open = mock.mock_open(read_data='hello world')
-        with mock.patch.object(six.moves.builtins, 'open',
-                               new=mock_open):
-            self.assertEqual('hello world',
-                             nova.privsep.path.readfile('/fake/path'))
-
-    @mock.patch('os.path.exists', return_value=False)
-    def test_readfile_file_not_found(self, mock_exists):
-        self.assertRaises(exception.FileNotFound,
-                          nova.privsep.path.readfile,
-                          '/fake/path')
-
-    @mock.patch('os.path.exists', return_value=True)
     def test_write(self, mock_exists):
         mock_open = mock.mock_open()
-        with mock.patch.object(six.moves.builtins, 'open',
-                               new=mock_open):
+        with mock.patch('builtins.open', new=mock_open):
             nova.privsep.path.writefile('/fake/path/file', 'w', 'foo')
 
         handle = mock_open()
@@ -64,19 +48,6 @@ class FileTestCase(test.NoDBTestCase):
         self.assertRaises(exception.FileNotFound,
                           nova.privsep.path.writefile,
                           '/fake/path', 'w', 'foo')
-
-    @mock.patch('os.path.exists', return_value=True)
-    @mock.patch('os.readlink')
-    def test_readlink(self, mock_readlink, mock_exists):
-        nova.privsep.path.readlink('/fake/path')
-        mock_exists.assert_called_with('/fake/path')
-        mock_readlink.assert_called_with('/fake/path')
-
-    @mock.patch('os.path.exists', return_value=False)
-    def test_readlink_file_not_found(self, mock_exists):
-        self.assertRaises(exception.FileNotFound,
-                          nova.privsep.path.readlink,
-                          '/fake/path')
 
     @mock.patch('os.path.exists', return_value=True)
     @mock.patch('os.chown')
@@ -164,11 +135,6 @@ class FileTestCase(test.NoDBTestCase):
         self.assertRaises(exception.FileNotFound,
                           nova.privsep.path.rmdir,
                           '/fake/path')
-
-    @mock.patch('os.path.exists', return_value=True)
-    def test_exists(self, mock_exists):
-        nova.privsep.path.path.exists('/fake/path')
-        mock_exists.assert_called_with('/fake/path')
 
 
 class LastBytesTestCase(test.NoDBTestCase):

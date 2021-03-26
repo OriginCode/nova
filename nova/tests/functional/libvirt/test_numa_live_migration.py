@@ -19,6 +19,7 @@ from oslo_config import cfg
 from oslo_log import log as logging
 
 from nova.compute import manager as compute_manager
+from nova.compute import resource_tracker as rt
 from nova import context
 from nova import objects
 from nova import test
@@ -117,13 +118,11 @@ class NUMALiveMigrationPositiveBase(NUMALiveMigrationBase):
         self.start_compute(
             hostname='host_a',
             host_info=fakelibvirt.HostInfo(
-                cpu_nodes=1, cpu_sockets=4, cpu_cores=1, cpu_threads=1,
-                kB_mem=10740000))
+                cpu_nodes=1, cpu_sockets=1, cpu_cores=4, cpu_threads=1))
         self.start_compute(
             hostname='host_b',
             host_info=fakelibvirt.HostInfo(
-                cpu_nodes=1, cpu_sockets=4, cpu_cores=1, cpu_threads=1,
-                kB_mem=10740000))
+                cpu_nodes=1, cpu_sockets=1, cpu_cores=4, cpu_threads=1))
 
         # Create a 2-CPU flavor
         extra_spec = {'hw:cpu_policy': 'dedicated'}
@@ -207,7 +206,7 @@ class NUMALiveMigrationPositiveTests(NUMALiveMigrationPositiveBase):
         dom.complete_job()
         self.migrate_stub_ran = True
 
-    def _test(self, pin_dest=False):
+    def _test(self, pin_dest):
         """Live migrate the server on host_a to host_b.
         """
         # Make sure instances initially land on "overlapping" CPUs on both
@@ -254,7 +253,7 @@ class NUMALiveMigrationPositiveTests(NUMALiveMigrationPositiveBase):
         # direction here.
 
     def test_numa_live_migration(self):
-        self._test()
+        self._test(pin_dest=False)
 
     def test_numa_live_migration_dest_pinned(self):
         self._test(pin_dest=True)
@@ -298,7 +297,7 @@ class NUMALiveMigrationPositiveTests(NUMALiveMigrationPositiveBase):
         self.useFixture(fixtures.MonkeyPatch(
             'nova.compute.manager.ComputeManager.live_migration',
             live_migration))
-        self._test()
+        self._test(pin_dest=False)
         self.assertTrue(self.live_migration_ran)
 
 
@@ -358,6 +357,9 @@ class NUMALiveMigrationRollbackTests(NUMALiveMigrationPositiveBase):
         self.assertEqual('host_a', self.get_host(self.server_a['id']))
         self.assertIsNone(self._get_migration_context(self.server_a['id']))
 
+    def _test_rollback(self, pin_dest=False):
+        self._test(pin_dest)
+
         # Check consumed and pinned CPUs. Things should be as they were before
         # the live migration, with CPUs 0,1 consumed on both hosts by the 2
         # servers.
@@ -367,10 +369,77 @@ class NUMALiveMigrationRollbackTests(NUMALiveMigrationPositiveBase):
                                           [0, 1], [0, 1])
 
     def test_rollback(self):
-        self._test()
+        self._test_rollback()
 
     def test_rollback_pinned_dest(self):
-        self._test(pin_dest=True)
+        self._test_rollback(pin_dest=True)
+
+    def _test_bug_1894095(self, pre_drop_race=False, post_drop_race=False):
+        """Reproducer for bug #1894095 under live migration.
+
+        Demonstrate the possibility of races caused by running the resource
+        tracker's periodic task between marking a migration as failed and
+        dropping the claim for that migration on the destination host.
+        """
+
+        orig_drop_move_claim = rt.ResourceTracker.drop_move_claim
+
+        def drop_move_claim(*args, **kwargs):
+            """Run periodics after marking the migration confirmed, simulating
+            a race between the doing this and actually dropping the claim.
+            """
+
+            # check the usage, which should show usage on both hosts: server_a
+            # on host_a, and server_b plus server_a's migration on host_b
+            self._assert_host_consumed_cpus('host_a', [0, 1])
+            self._assert_host_consumed_cpus('host_b', [0, 1, 2, 3])
+
+            if pre_drop_race:
+                self._run_periodics()
+                # FIXME(stephenfin): This is picking up server_a's "destination
+                # CPUs", intended for host_b, on host_a
+                self._assert_host_consumed_cpus('host_a', [2, 3])
+                self._assert_host_consumed_cpus('host_b', [0, 1, 2, 3])
+                # self._assert_host_consumed_cpus('host_a', [0, 1])
+                # self._assert_host_consumed_cpus('host_b', [0, 1, 2, 3])
+
+            result = orig_drop_move_claim(*args, **kwargs)
+
+            if pre_drop_race:
+                # FIXME(stephenfin): host_a's pinning information is still
+                # incorrect, which is expected since dropping the move claim
+                # makes no changes to the source host
+                self._assert_host_consumed_cpus('host_a', [2, 3])
+            else:
+                self._assert_host_consumed_cpus('host_a', [0, 1])
+            self._assert_host_consumed_cpus('host_b', [0, 1])
+
+            if post_drop_race:
+                self._run_periodics()
+                # FIXME(stephenfin): host_a is using the wrong pinned CPUs and
+                # host_b has regained its previously dropped allocation
+                self._assert_host_consumed_cpus('host_a', [2, 3])
+                self._assert_host_consumed_cpus('host_b', [0, 1, 2, 3])
+                # self._assert_host_consumed_cpus('host_a', [0, 1])
+                # self._assert_host_consumed_cpus('host_b', [0, 1])
+
+            return result
+
+        self.useFixture(fixtures.MonkeyPatch(
+            'nova.compute.resource_tracker.ResourceTracker.drop_move_claim',
+            drop_move_claim))
+
+        self._test()
+
+        self._run_periodics()
+        self._assert_host_consumed_cpus('host_a', [0, 1])
+        self._assert_host_consumed_cpus('host_b', [0, 1])
+
+    def test_bug_1894095_pre_drop(self):
+        self._test_bug_1894095(pre_drop_race=True)
+
+    def test_bug_1894095_post_drop(self):
+        self._test_bug_1894095(post_drop_race=True)
 
 
 class NUMALiveMigrationLegacyBase(NUMALiveMigrationPositiveBase):
@@ -399,14 +468,10 @@ class NUMALiveMigrationLegacyBase(NUMALiveMigrationPositiveBase):
     def _test(self, pin_source, pin_cond, expect_success=True):
         self.start_compute(
             hostname='source',
-            host_info=fakelibvirt.HostInfo(
-                cpu_nodes=1, cpu_sockets=2, cpu_cores=1, cpu_threads=1,
-                kB_mem=10740000))
+            host_info=fakelibvirt.HostInfo())
         self.start_compute(
             hostname='dest',
-            host_info=fakelibvirt.HostInfo(
-                cpu_nodes=1, cpu_sockets=2, cpu_cores=1, cpu_threads=1,
-                kB_mem=10740000))
+            host_info=fakelibvirt.HostInfo())
 
         ctxt = context.get_admin_context()
         src_mgr = self.computes['source'].manager
@@ -414,9 +479,21 @@ class NUMALiveMigrationLegacyBase(NUMALiveMigrationPositiveBase):
         if pin_source:
             src_mgr.compute_rpcapi = integrated_helpers.StubComputeRPCAPI(
                 '5.2')
+        else:
+            # Since we upgraded the RPC API to 6.0, we somehow need to pin the
+            # compute service here to 5.max to verify the legacy behaviours.
+            # TODO(sbauza): Remove this cruft
+            src_mgr.compute_rpcapi = integrated_helpers.StubComputeRPCAPI(
+                '5.13')
         if pin_cond:
             cond_mgr.compute_rpcapi = integrated_helpers.StubComputeRPCAPI(
                 '5.2')
+        else:
+            # Since we upgraded the RPC API to 6.0, we somehow need to pin the
+            # compute service here to 5.max to verify the legacy behaviours.
+            # TODO(sbauza): Remove this cruft
+            cond_mgr.compute_rpcapi = integrated_helpers.StubComputeRPCAPI(
+                '5.13')
 
         self.assertEqual(
             not pin_source,
@@ -526,13 +603,11 @@ class NUMALiveMigrationNegativeTests(NUMALiveMigrationBase):
         self.start_compute(
             hostname='host_a',
             host_info=fakelibvirt.HostInfo(
-                cpu_nodes=1, cpu_sockets=3, cpu_cores=1, cpu_threads=1,
-                kB_mem=10740000))
+                cpu_nodes=1, cpu_sockets=1, cpu_cores=3, cpu_threads=1))
         self.start_compute(
             hostname='host_b',
             host_info=fakelibvirt.HostInfo(
-                cpu_nodes=2, cpu_sockets=2, cpu_cores=1, cpu_threads=1,
-                kB_mem=10740000))
+                cpu_nodes=2, cpu_sockets=1, cpu_cores=2, cpu_threads=1))
 
         extra_spec = {'hw:numa_nodes': 1,
                       'hw:cpu_policy': 'dedicated'}
@@ -567,14 +642,12 @@ class NUMALiveMigrationNegativeTests(NUMALiveMigrationBase):
         self.start_compute(
             hostname='host_a',
             host_info=fakelibvirt.HostInfo(
-                cpu_nodes=1, cpu_sockets=2, cpu_cores=1, cpu_threads=1,
                 kB_mem=1024000, mempages={
                     0: fakelibvirt.create_mempages([(4, 256000), (1024, 1000)])
                 }))
         self.start_compute(
             hostname='host_b',
             host_info=fakelibvirt.HostInfo(
-                cpu_nodes=1, cpu_sockets=2, cpu_cores=1, cpu_threads=1,
                 kB_mem=1024000, mempages={
                     0: fakelibvirt.create_mempages([(4, 256000), (2048, 500)]),
                 }))

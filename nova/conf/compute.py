@@ -296,8 +296,8 @@ Generic property to specify the pointer type.
 Input devices allow interaction with a graphical framebuffer. For
 example to provide a graphic tablet for absolute cursor movement.
 
-If set, the 'hw_pointer_model' image property takes precedence over
-this configuration option.
+If set, either the ``hw_input_bus`` or ``hw_pointer_model`` image metadata
+properties will take precedence over this configuration option.
 
 Related options:
 
@@ -962,10 +962,16 @@ on compute host B.
 The configured maximum is not enforced on shelved offloaded servers, as they
 have no compute host.
 
+.. warning:: If this option is set to 0, the ``nova-compute`` service will fail
+             to start, as 0 disk devices is an invalid configuration that would
+             prevent instances from being able to boot.
+
 Possible values:
 
 * -1 means unlimited
-* Any integer >= 0 represents the maximum allowed
+* Any integer >= 1 represents the maximum allowed. A value of 0 will cause the
+  ``nova-compute`` service to fail to start, as 0 disk devices is an invalid
+  configuration that would prevent instances from being able to boot.
 """),
     cfg.StrOpt('provider_config_location',
         default='/etc/nova/provider_config/',
@@ -980,23 +986,30 @@ Additional documentation is available here:
   https://docs.openstack.org/nova/latest/admin/managing-resource-providers.html
 
 """),
-]
+    cfg.ListOpt('image_type_exclude_list',
+                default=[],
+                help="""
+A list of image formats that should not be advertised as supported by this
+compute node.
 
-interval_opts = [
-    cfg.IntOpt('bandwidth_poll_interval',
-        default=600,
-        help="""
-Interval to pull network bandwidth usage info.
-
-Not supported on all hypervisors. If a hypervisor doesn't support bandwidth
-usage, it will not get the info in the usage events.
+In some situations, it may be desirable to have a compute node
+refuse to support an expensive or complex image format. This factors into
+the decisions made by the scheduler about which compute node to select when
+booted with a given image.
 
 Possible values:
 
-* 0: Will run at the default periodic interval.
-* Any value < 0: Disables the option.
-* Any positive integer in seconds.
+* Any glance image ``disk_format`` name (i.e. ``raw``, ``qcow2``, etc)
+
+Related options:
+
+* ``[scheduler]query_placement_for_image_type_support`` - enables
+  filtering computes based on supported image types, which is required
+  to be enabled for this to take effect.
 """),
+]
+
+interval_opts = [
     cfg.IntOpt('sync_power_state_interval',
         default=600,
         help="""

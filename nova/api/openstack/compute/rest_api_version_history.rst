@@ -748,7 +748,7 @@ The embedded flavor description will not be included in server representations.
 ----
 
 Updates the POST request body for the ``migrate`` action to include the
-the optional ``host`` string field defaulted to ``null``. If ``host`` is
+optional ``host`` string field defaulted to ``null``. If ``host`` is
 set the migrate action verifies the provided host with the nova scheduler
 and uses it as the destination for the migration.
 
@@ -1135,8 +1135,45 @@ Validation is only used for recognized extra spec namespaces, currently:
 ``hw_rng``, ``hw_video``, ``os``, ``pci_passthrough``, ``powervm``, ``quota``,
 ``resources``, ``trait``, and ``vmware``.
 
+.. _2.87-microversion:
+
 2.87 (Maximum in Ussuri and Victoria)
 -------------------------------------
 
 Adds support for rescuing boot from volume instances when the compute host
 reports the ``COMPUTE_BFV_RESCUE`` capability trait.
+
+.. _microversion 2.88:
+
+2.88 (Maximum in Wallaby)
+-------------------------
+
+The following fields are no longer included in responses for the
+``GET /os-hypervisors/detail`` and ``GET /os-hypervisors/{hypervisor_id}``
+APIs:
+
+- ``current_workload``
+- ``cpu_info``
+- ``vcpus``
+- ``vcpus_used``
+- ``free_disk_gb``
+- ``local_gb``
+- ``local_gb_used``
+- ``disk_available_least``
+- ``free_ram_mb``
+- ``memory_mb``
+- ``memory_mb_used``
+- ``running_vms``
+
+These fields were removed as the information they provided were frequently
+misleading or outright wrong, and many can be better queried from placement.
+
+In addition, the ``GET /os-hypervisors/statistics`` API, which provided a
+summary view with just the fields listed above, has been removed entirely and
+will now raise a HTTP 404 with microversion 2.88 or greater.
+
+Finally, the ``GET /os-hypervisors/{hypervisor}/uptime`` API, which provided a
+similar response to the ``GET /os-hypervisors/detail`` and ``GET
+/os-hypervisors/{hypervisor_id}`` APIs but with an additional ``uptime`` field,
+has been removed in favour of including this field in the primary ``GET
+/os-hypervisors/detail`` and ``GET /os-hypervisors/{hypervisor_id}`` APIs.

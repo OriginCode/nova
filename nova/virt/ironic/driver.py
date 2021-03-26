@@ -25,6 +25,7 @@ import gzip
 import shutil
 import tempfile
 import time
+from urllib import parse as urlparse
 
 from openstack import exceptions as sdk_exc
 from oslo_log import log as logging
@@ -32,8 +33,6 @@ from oslo_serialization import jsonutils
 from oslo_service import loopingcall
 from oslo_utils import excutils
 from oslo_utils import importutils
-import six
-import six.moves.urllib.parse as urlparse
 from tooz import hashring as hash_ring
 
 from nova.api.metadata import base as instance_metadata
@@ -201,11 +200,6 @@ class IronicDriver(virt_driver.ComputeDriver):
 
         self.ironicclient = client_wrapper.IronicClientWrapper()
         self._ironic_connection = None
-
-        # This is needed for the instance flavor migration in Pike, and should
-        # be removed in Queens. Since this will run several times in the life
-        # of the driver, track the instances that have already been migrated.
-        self._migrated_instance_uuids = set()
 
     @property
     def ironic_connection(self):
@@ -453,7 +447,7 @@ class IronicDriver(virt_driver.ComputeDriver):
                         "%(node)s when unprovisioning the instance "
                         "%(instance)s: %(reason)s",
                         {'node': node.uuid, 'instance': instance.uuid,
-                         'reason': six.text_type(e)})
+                         'reason': str(e)})
 
     def _add_volume_target_info(self, context, instance, block_device_info):
         bdms = virt_driver.block_device_info_get_mapping(block_device_info)
@@ -567,55 +561,6 @@ class IronicDriver(virt_driver.ComputeDriver):
         """
         self._refresh_hash_ring(nova_context.get_admin_context())
 
-    @staticmethod
-    def _pike_flavor_migration_for_node(ctx, node_rc, instance_uuid):
-        normalized_rc = utils.normalize_rc_name(node_rc)
-        instance = objects.Instance.get_by_uuid(ctx, instance_uuid,
-                                                expected_attrs=["flavor"])
-        specs = instance.flavor.extra_specs
-        resource_key = "resources:%s" % normalized_rc
-        if resource_key in specs:
-            # The compute must have been restarted, and the instance.flavor
-            # has already been migrated
-            return False
-        specs[resource_key] = "1"
-        instance.save()
-        return True
-
-    def _pike_flavor_migration(self, node_uuids):
-        """This code is needed in Pike to prevent problems where an operator
-        has already adjusted their flavors to add the custom resource class to
-        extra_specs. Since existing ironic instances will not have this in
-        their extra_specs, they will only have allocations against
-        VCPU/RAM/disk. By adding just the custom RC to the existing flavor
-        extra_specs, the periodic call to update_available_resource() will add
-        an allocation against the custom resource class, and prevent placement
-        from thinking that node is available. This code can be removed in
-        Queens, and will need to be updated to also alter extra_specs to
-        zero-out the old-style standard resource classes of VCPU, MEMORY_MB,
-        and DISK_GB.
-        """
-        ctx = nova_context.get_admin_context()
-
-        for node_uuid in node_uuids:
-            node = self._node_from_cache(node_uuid)
-            if not node:
-                continue
-            node_rc = node.resource_class
-            if not node_rc:
-                LOG.warning("Node %(node)s does not have its resource_class "
-                        "set.", {"node": node.uuid})
-                continue
-            if node.instance_uuid in self._migrated_instance_uuids:
-                continue
-            self._pike_flavor_migration_for_node(ctx, node_rc,
-                                                 node.instance_uuid)
-            self._migrated_instance_uuids.add(node.instance_uuid)
-            LOG.debug("The flavor extra_specs for Ironic instance %(inst)s "
-                      "have been updated for custom resource class '%(rc)s'.",
-                      {"inst": node.instance_uuid, "rc": node_rc})
-        return
-
     def _get_hypervisor_type(self):
         """Get hypervisor type."""
         return 'ironic'
@@ -657,12 +602,12 @@ class IronicDriver(virt_driver.ComputeDriver):
             node_generator = self.ironic_connection.nodes(**kwargs)
         except sdk_exc.InvalidResourceQuery as e:
             LOG.error("Invalid parameters in the provided search query."
-                      "Error: %s", six.text_type(e))
+                      "Error: %s", str(e))
             raise exception.VirtDriverNotReady()
         except Exception as e:
             LOG.error("An unknown error has occurred when trying to get the "
                       "list of nodes from the Ironic inventory. Error: %s",
-                      six.text_type(e))
+                      str(e))
             raise exception.VirtDriverNotReady()
         if return_generator:
             return node_generator
@@ -833,16 +778,6 @@ class IronicDriver(virt_driver.ComputeDriver):
 
         self.node_cache = node_cache
         self.node_cache_time = time.time()
-        # For Pike, we need to ensure that all instances have their flavor
-        # migrated to include the resource_class. Since there could be many,
-        # many instances controlled by this host, spawn this asynchronously so
-        # as not to block this service.
-        node_uuids = [node.uuid for node in self.node_cache.values()
-                      if node.instance_uuid and
-                      node.instance_uuid not in self._migrated_instance_uuids]
-        if node_uuids:
-            # No need to run unless something has changed
-            utils.spawn_n(self._pike_flavor_migration, node_uuids)
 
     def get_available_nodes(self, refresh=False):
         """Returns the UUIDs of Ironic nodes managed by this compute service.
@@ -1124,8 +1059,7 @@ class IronicDriver(virt_driver.ComputeDriver):
 
         i_meta = instance_metadata.InstanceMetadata(instance,
             content=files, extra_md=extra_md, network_info=network_info,
-            network_metadata=self._get_network_metadata(node, network_info),
-            request_context=context)
+            network_metadata=self._get_network_metadata(node, network_info))
 
         with tempfile.NamedTemporaryFile() as uncompressed:
             with configdrive.ConfigDriveBuilder(instance_md=i_meta) as cdb:
@@ -1226,8 +1160,7 @@ class IronicDriver(virt_driver.ComputeDriver):
                     files=injected_files)
             except Exception as e:
                 with excutils.save_and_reraise_exception():
-                    msg = ("Failed to build configdrive: %s" %
-                           six.text_type(e))
+                    msg = "Failed to build configdrive: %s" % str(e)
                     LOG.error(msg, instance=instance)
                     self._cleanup_deploy(node, instance, network_info)
 
@@ -1245,7 +1178,7 @@ class IronicDriver(virt_driver.ComputeDriver):
                 LOG.error("Failed to request Ironic to provision instance "
                           "%(inst)s: %(reason)s",
                           {'inst': instance.uuid,
-                           'reason': six.text_type(e)})
+                           'reason': str(e)})
                 self._cleanup_deploy(node, instance, network_info)
 
         timer = loopingcall.FixedIntervalLoopingCall(self._wait_for_active,
@@ -1555,8 +1488,7 @@ class IronicDriver(virt_driver.ComputeDriver):
                 # which will cause ironicclient to automatically retry for us.
                 # We can remove this workaround once we are confident that we
                 # are only running against ironic containing this fix.
-                if ('No conductor' in six.text_type(e) and
-                        attempt < last_attempt):
+                if 'No conductor' in str(e) and attempt < last_attempt:
                     LOG.warning('No ironic conductor is running; '
                                 'waiting...')
                     time.sleep(10)
@@ -1584,7 +1516,7 @@ class IronicDriver(virt_driver.ComputeDriver):
                   {'uuid': instance.uuid,
                    'network_info': network_info_str})
         for vif in network_info:
-            port_id = six.text_type(vif['id'])
+            port_id = str(vif['id'])
             self._plug_vif(node, port_id)
 
     def _unplug_vifs(self, node, instance, network_info):
@@ -1598,7 +1530,7 @@ class IronicDriver(virt_driver.ComputeDriver):
         if not network_info:
             return
         for vif in network_info:
-            port_id = six.text_type(vif['id'])
+            port_id = str(vif['id'])
             try:
                 self.ironicclient.call("node.vif_detach", node.uuid,
                                        port_id)
@@ -1736,8 +1668,7 @@ class IronicDriver(virt_driver.ComputeDriver):
                     files=injected_files)
             except Exception as e:
                 with excutils.save_and_reraise_exception():
-                    msg = ("Failed to build configdrive: %s" %
-                           six.text_type(e))
+                    msg = "Failed to build configdrive: %s" % str(e)
                     LOG.error(msg, instance=instance)
                     raise exception.InstanceDeployFailure(msg)
 
@@ -1755,7 +1686,7 @@ class IronicDriver(virt_driver.ComputeDriver):
                 ironic.exc.BadRequest) as e:     # Maintenance
             msg = (_("Failed to request Ironic to rebuild instance "
                      "%(inst)s: %(reason)s") % {'inst': instance.uuid,
-                                                'reason': six.text_type(e)})
+                                                'reason': str(e)})
             raise exception.InstanceDeployFailure(msg)
 
         # Although the target provision state is REBUILD, it will actually go
@@ -1984,7 +1915,7 @@ class IronicDriver(virt_driver.ComputeDriver):
             LOG.warning('Error detaching VIF from node %(node)s '
                         'after deploy failed; %(reason)s',
                         {'node': instance.node,
-                         'reason': six.text_type(e)},
+                         'reason': str(e)},
                         instance=instance)
 
     def get_volume_connector(self, instance):
@@ -2146,7 +2077,7 @@ class IronicDriver(virt_driver.ComputeDriver):
             try:
                 node = self._validate_instance_and_node(instance)
             except exception.InstanceNotFound as e:
-                raise exception.InstanceRescueFailure(reason=six.text_type(e))
+                raise exception.InstanceRescueFailure(reason=str(e))
 
             if node.provision_state == ironic_states.RESCUE:
                 raise loopingcall.LoopingCallDone()
@@ -2160,7 +2091,7 @@ class IronicDriver(virt_driver.ComputeDriver):
                                    node_uuid, ironic_states.RESCUE,
                                    rescue_password=rescue_password)
         except Exception as e:
-            raise exception.InstanceRescueFailure(reason=six.text_type(e))
+            raise exception.InstanceRescueFailure(reason=str(e))
 
         timer = loopingcall.FixedIntervalLoopingCall(_wait_for_rescue)
         timer.start(interval=CONF.ironic.api_retry_interval).wait()
@@ -2185,8 +2116,7 @@ class IronicDriver(virt_driver.ComputeDriver):
             try:
                 node = self._validate_instance_and_node(instance)
             except exception.InstanceNotFound as e:
-                raise exception.InstanceUnRescueFailure(
-                          reason=six.text_type(e))
+                raise exception.InstanceUnRescueFailure(reason=str(e))
 
             if node.provision_state == ironic_states.ACTIVE:
                 raise loopingcall.LoopingCallDone()
@@ -2199,7 +2129,7 @@ class IronicDriver(virt_driver.ComputeDriver):
             self.ironicclient.call("node.set_provision_state",
                                    node_uuid, ironic_states.UNRESCUE)
         except Exception as e:
-            raise exception.InstanceUnRescueFailure(reason=six.text_type(e))
+            raise exception.InstanceUnRescueFailure(reason=str(e))
 
         timer = loopingcall.FixedIntervalLoopingCall(_wait_for_unrescue)
         timer.start(interval=CONF.ironic.api_retry_interval).wait()

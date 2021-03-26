@@ -21,7 +21,6 @@ from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import encodeutils
 from oslo_utils import strutils
-import six
 import webob
 
 from nova.api.openstack import api_version_request as api_version
@@ -30,6 +29,7 @@ from nova.api import wsgi
 from nova import exception
 from nova import i18n
 from nova.i18n import _
+from nova import version
 
 
 LOG = logging.getLogger(__name__)
@@ -220,7 +220,7 @@ class JSONDictSerializer(ActionDispatcher):
         return self.dispatch(data, action=action)
 
     def default(self, data):
-        return six.text_type(jsonutils.dumps(data))
+        return str(jsonutils.dumps(data))
 
 
 def response(code):
@@ -293,8 +293,8 @@ class ResponseObject(object):
             response.headers[hdr] = encodeutils.safe_decode(
                     encodeutils.safe_encode(val))
         # Deal with content_type
-        if not isinstance(content_type, six.text_type):
-            content_type = six.text_type(content_type)
+        if not isinstance(content_type, str):
+            content_type = str(content_type)
         # In Py3.X Headers must be a str.
         response.headers['Content-Type'] = encodeutils.safe_decode(
                 encodeutils.safe_encode(content_type))
@@ -506,7 +506,7 @@ class Resource(wsgi.Application):
         if body:
             msg = _("Action: '%(action)s', calling method: %(meth)s, body: "
                     "%(body)s") % {'action': action,
-                                   'body': six.text_type(body, 'utf-8'),
+                                   'body': str(body, 'utf-8'),
                                    'meth': str(meth)}
             LOG.debug(strutils.mask_password(msg))
         else:
@@ -562,8 +562,8 @@ class Resource(wsgi.Application):
 
         if hasattr(response, 'headers'):
             for hdr, val in list(response.headers.items()):
-                if not isinstance(val, six.text_type):
-                    val = six.text_type(val)
+                if not isinstance(val, str):
+                    val = str(val)
                 # In Py3.X Headers must be a string
                 response.headers[hdr] = encodeutils.safe_decode(
                         encodeutils.safe_encode(val))
@@ -684,9 +684,10 @@ def expected_errors(errors):
                     raise
 
                 LOG.exception("Unexpected exception in API method")
-                msg = _('Unexpected API Error. Please report this at '
-                    'http://bugs.launchpad.net/nova/ and attach the Nova '
-                    'API log if possible.\n%s') % type(exc)
+                msg = _("Unexpected API Error. "
+                        "%(support)s\n%(exc)s" % {
+                            'support': version.support_string(),
+                            'exc': type(exc)})
                 raise webob.exc.HTTPInternalServerError(explanation=msg)
 
         return wrapped

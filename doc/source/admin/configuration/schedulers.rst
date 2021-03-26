@@ -478,8 +478,7 @@ The image properties that the filter checks for are:
 ``hw_vm_mode``
   describes the hypervisor application binary interface (ABI) required by the
   image. Examples are ``xen`` for Xen 3.0 paravirtual ABI, ``hvm`` for native
-  ABI, ``uml`` for User Mode Linux paravirtual ABI, ``exe`` for container virt
-  executable ABI.
+  ABI, and ``exe`` for container virt executable ABI.
 
   .. versionchanged:: 12.0.0 (Liberty)
 
@@ -945,7 +944,7 @@ here.
 
    .. code-block:: console
 
-     $ openstack resource provider inventory set --resource VCPU:allocation_ratio=1.0 815a5634-86fb-4e1e-8824-8a631fee3e06
+     $ openstack resource provider inventory set --resource VCPU:allocation_ratio=1.0 --amend 815a5634-86fb-4e1e-8824-8a631fee3e06
 
 3. When the deployer wants to **always** use the placement API to set
    allocation ratios, then the deployer should ensure that

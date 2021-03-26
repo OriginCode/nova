@@ -86,12 +86,18 @@ class StubComputeRPCAPI(compute_rpcapi.ComputeAPI):
     @property
     def router(self):
         with lockutils.lock('compute-rpcapi-router'):
-            target = messaging.Target(topic='compute', version='5.0')
+            target = messaging.Target(topic='compute', version='6.0')
             version_cap = self.version
             serializer = objects_base.NovaObjectSerializer()
             rpc.get_client(target, version_cap, serializer)
             default_client = self.get_client(target, version_cap, serializer)
             return rpc.ClientRouter(default_client)
+
+
+# placeholder used as a default parameter value to distinguish between the case
+# when the parameter is specified by the caller with None from the case when it
+# was not specified
+NOT_SPECIFIED = object()
 
 
 class InstanceHelperMixin:
@@ -407,6 +413,24 @@ class InstanceHelperMixin:
         fake_notifier.wait_for_versioned_notifications('instance.reboot.end')
         return self._wait_for_state_change(server, expected_state)
 
+    def _attach_interface(self, server, port_uuid):
+        """attach a neutron port to a server."""
+        body = {
+            "interfaceAttachment": {
+                "port_id": port_uuid
+            }
+        }
+        attachment = self.api.attach_interface(server['id'], body)
+        fake_notifier.wait_for_versioned_notifications(
+            'instance.interface_attach.end')
+        return attachment
+
+    def _detach_interface(self, server, port_uuid):
+        """detach a neutron port form a server."""
+        self.api.detach_interface(server['id'], port_uuid)
+        fake_notifier.wait_for_versioned_notifications(
+            'instance.interface_detach.end')
+
     def _rebuild_server(self, server, image_uuid, expected_state='ACTIVE'):
         """Rebuild a server."""
         self.api.post_server_action(
@@ -480,17 +504,53 @@ class InstanceHelperMixin:
         self.api.post_server_action(server['id'], {'shelve': {}})
         return self._wait_for_state_change(server, expected_state)
 
+    def _shelve_offload_server(self, server):
+        """Shelve offload a server."""
+        self.api.post_server_action(server['id'], {'shelveOffload': {}})
+        self._wait_for_server_parameter(server,
+                                        {'status': 'SHELVED_OFFLOADED',
+                                         'OS-EXT-SRV-ATTR:host': None,
+                                         'OS-EXT-AZ:availability_zone': ''})
+
     def _unshelve_server(self, server, expected_state='ACTIVE'):
         """Unshelve a server."""
-        self.api.post_server_action(server['id'], {'unshelve': {}})
+        self.api.post_server_action(server['id'], {'unshelve': None})
         return self._wait_for_state_change(server, expected_state)
 
-    def _evacuate_server(self, server, host, expected_state='ACTIVE'):
+    def _evacuate_server(
+            self, server, extra_post_args=None, expected_host=None,
+            expected_state='ACTIVE', expected_task_state=NOT_SPECIFIED,
+            expected_migration_status='done'):
         """Evacuate a server."""
-        self.api.post_server_action(server['id'], {'evacuate': {}})
-        self._wait_for_server_parameter(
-            self.server, {'OS-EXT-SRV-ATTR:host': host,
-                          'status': expected_state})
+        api = getattr(self, 'admin_api', self.api)
+
+        post = {'evacuate': {}}
+        if extra_post_args:
+            post['evacuate'].update(extra_post_args)
+
+        expected_result = {'status': expected_state}
+        if expected_host:
+            expected_result['OS-EXT-SRV-ATTR:host'] = expected_host
+        if expected_task_state is not NOT_SPECIFIED:
+            expected_result['OS-EXT-STS:task_state'] = expected_task_state
+
+        api.post_server_action(server['id'], post)
+
+        # NOTE(gibi): The order of waiting for the migration and returning
+        # a fresh server from _wait_for_server_parameter is important as
+        # the compute manager sets status of the instance before sets the
+        # host and finally sets the migration status. So waiting for the
+        # migration first makes the returned server object more consistent.
+        self._wait_for_migration_status(server, [expected_migration_status])
+        return self._wait_for_server_parameter(server, expected_result)
+
+    def _start_server(self, server):
+        self.api.post_server_action(server['id'], {'os-start': None})
+        return self._wait_for_state_change(server, 'ACTIVE')
+
+    def _stop_server(self, server):
+        self.api.post_server_action(server['id'], {'os-stop': None})
+        return self._wait_for_state_change(server, 'SHUTOFF')
 
 
 class PlacementHelperMixin:
@@ -1088,13 +1148,13 @@ class _IntegratedTestBase(test.TestCase, PlacementInstanceHelperMixin):
                 use_project_id_in_urls=self.USE_PROJECT_ID,
                 stub_keystone=self.STUB_KEYSTONE))
 
+        self.admin_api = self.api_fixture.admin_api
         # if the class needs to run as admin, make the api endpoint
         # the admin, otherwise it's safer to run as non admin user.
         if self.ADMIN_API:
             self.api = self.api_fixture.admin_api
         else:
             self.api = self.api_fixture.api
-            self.admin_api = self.api_fixture.admin_api
 
         if self.microversion:
             self.api.microversion = self.microversion

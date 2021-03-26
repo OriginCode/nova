@@ -90,6 +90,7 @@ class TestLogging(testtools.TestCase):
 class TestOSAPIFixture(testtools.TestCase):
     @mock.patch('nova.objects.Service.get_by_host_and_binary')
     @mock.patch('nova.objects.Service.create')
+    @mock.patch('nova.utils.raise_if_old_compute', new=mock.Mock())
     def test_responds_to_version(self, mock_service_create, mock_get):
         """Ensure the OSAPI server responds to calls sensibly."""
         self.useFixture(output.CaptureOutput())
@@ -215,31 +216,6 @@ class TestDatabaseFixture(testtools.TestCase):
         conn = engine.connect()
         schema = "".join(line for line in conn.connection.iterdump())
         self.assertEqual("BEGIN TRANSACTION;COMMIT;", schema)
-
-    def test_fixture_schema_version(self):
-        self.useFixture(conf_fixture.ConfFixture())
-
-        # In/after 317 aggregates did have uuid
-        self.useFixture(fixtures.Database(version=318))
-        engine = session.get_engine()
-        engine.connect()
-        meta = sqlalchemy.MetaData(engine)
-        aggregate = sqlalchemy.Table('aggregates', meta, autoload=True)
-        self.assertTrue(hasattr(aggregate.c, 'uuid'))
-
-        # Before 317, aggregates had no uuid
-        self.useFixture(fixtures.Database(version=316))
-        engine = session.get_engine()
-        engine.connect()
-        meta = sqlalchemy.MetaData(engine)
-        aggregate = sqlalchemy.Table('aggregates', meta, autoload=True)
-        self.assertFalse(hasattr(aggregate.c, 'uuid'))
-        engine.dispose()
-
-    def test_fixture_after_database_fixture(self):
-        self.useFixture(conf_fixture.ConfFixture())
-        self.useFixture(fixtures.Database())
-        self.useFixture(fixtures.Database(version=318))
 
 
 class TestDefaultFlavorsFixture(testtools.TestCase):

@@ -120,22 +120,6 @@ class EvacuateController(wsgi.Controller):
             msg = _("The target host can't be the same one.")
             raise exc.HTTPBadRequest(explanation=msg)
 
-        # We could potentially move this check to conductor and avoid the
-        # extra API call to neutron when we support move operations with ports
-        # having resource requests.
-        if (common.instance_has_port_with_resource_request(
-                instance.uuid, self.network_api) and not
-                common.supports_port_resource_request_during_move()):
-            LOG.warning("The evacuate action on a server with ports "
-                        "having resource requests, like a port with a QoS "
-                        "minimum bandwidth policy, is not supported until "
-                        "every nova-compute is upgraded to Ussuri")
-            msg = _("The evacuate action on a server with ports having "
-                    "resource requests, like a port with a QoS minimum "
-                    "bandwidth policy, is not supported by this cluster right "
-                    "now")
-            raise exc.HTTPBadRequest(explanation=msg)
-
         try:
             self.compute_api.evacuate(context, instance, host,
                                       on_shared_storage, password, force)
@@ -146,7 +130,10 @@ class EvacuateController(wsgi.Controller):
             raise exc.HTTPBadRequest(explanation=e.format_message())
         except exception.ForbiddenWithAccelerators as e:
             raise exc.HTTPForbidden(explanation=e.format_message())
-        except exception.OperationNotSupportedForVTPM as e:
+        except (
+            exception.OperationNotSupportedForVTPM,
+            exception.OperationNotSupportedForVDPAInterface,
+        ) as e:
             raise exc.HTTPConflict(explanation=e.format_message())
 
         if (not api_version_request.is_supported(req, min_version='2.14') and

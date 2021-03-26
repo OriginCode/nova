@@ -815,70 +815,6 @@ class TestUpdateAvailableResources(BaseTestCase):
                                                  actual_resources))
         update_mock.assert_called_once()
 
-    @mock.patch('nova.objects.InstancePCIRequests.get_by_instance',
-                return_value=objects.InstancePCIRequests(requests=[]))
-    @mock.patch('nova.objects.PciDeviceList.get_by_compute_node',
-                return_value=objects.PciDeviceList())
-    @mock.patch('nova.objects.ComputeNode.get_by_host_and_nodename')
-    @mock.patch('nova.objects.MigrationList.get_in_progress_and_error')
-    @mock.patch('nova.objects.InstanceList.get_by_host_and_node')
-    def test_orphaned_instances_no_migrations(self, get_mock, migr_mock,
-                                              get_cn_mock, pci_mock,
-                                              instance_pci_mock):
-        # Setup virt resources to match used resources to number
-        # of defined instances on the hypervisor
-        virt_resources = copy.deepcopy(_VIRT_DRIVER_AVAIL_RESOURCES)
-        virt_resources.update(memory_mb_used=64)
-        self._setup_rt(virt_resources=virt_resources)
-
-        get_mock.return_value = []
-        migr_mock.return_value = []
-        get_cn_mock.return_value = _COMPUTE_NODE_FIXTURES[0]
-
-        # Orphaned instances are those that the virt driver has on
-        # record as consuming resources on the compute node, but the
-        # Nova database has no record of the instance being active
-        # on the host. For some reason, the resource tracker only
-        # considers orphaned instance's memory usage in its calculations
-        # of free resources...
-        orphaned_usages = {
-            '71ed7ef6-9d2e-4c65-9f4e-90bb6b76261d': {
-                # Yes, the return result format of get_per_instance_usage
-                # is indeed this stupid and redundant. Also note that the
-                # libvirt driver just returns an empty dict always for this
-                # method and so who the heck knows whether this stuff
-                # actually works.
-                'uuid': '71ed7ef6-9d2e-4c65-9f4e-90bb6b76261d',
-                'memory_mb': 64
-            }
-        }
-        vd = self.driver_mock
-        vd.get_per_instance_usage.return_value = orphaned_usages
-
-        update_mock = self._update_available_resources()
-
-        get_cn_mock.assert_called_once_with(mock.ANY, _HOSTNAME, _NODENAME)
-        expected_resources = copy.deepcopy(_COMPUTE_NODE_FIXTURES[0])
-        vals = {
-            'free_disk_gb': 6,
-            'local_gb': 6,
-            'free_ram_mb': 448,  # 512 - 64 orphaned usage
-            'memory_mb_used': 64,
-            'vcpus_used': 0,
-            'local_gb_used': 0,
-            'memory_mb': 512,
-            'current_workload': 0,
-            'vcpus': 4,
-            # Yep, for some reason, orphaned instances are not counted
-            # as running VMs...
-            'running_vms': 0
-        }
-        _update_compute_node(expected_resources, **vals)
-        actual_resources = update_mock.call_args[0][1]
-        self.assertTrue(obj_base.obj_equal_prims(expected_resources,
-                                                 actual_resources))
-        update_mock.assert_called_once()
-
     @mock.patch('nova.compute.utils.is_volume_backed_instance',
                 return_value=False)
     @mock.patch('nova.objects.InstancePCIRequests.get_by_instance',
@@ -2177,7 +2113,12 @@ class TestInstanceClaim(BaseTestCase):
 
         # TODO(jaypipes): Remove once the PCI tracker is always created
         # upon the resource tracker being initialized...
-        self.rt.pci_tracker = pci_manager.PciDevTracker(mock.sentinel.ctx)
+        with mock.patch.object(
+            objects.PciDeviceList, 'get_by_compute_node',
+            return_value=objects.PciDeviceList()
+        ):
+            self.rt.pci_tracker = pci_manager.PciDevTracker(
+                mock.sentinel.ctx, _COMPUTE_NODE_FIXTURES[0])
 
         pci_dev = pci_device.PciDevice.create(
             None, fake_pci_device.dev_dict)
@@ -2542,7 +2483,6 @@ class TestResize(BaseTestCase):
                                     pci_get_by_instance_mock,
                                     is_bfv_mock,
                                     revert=False):
-
         self.flags(reserved_host_disk_mb=0,
                    reserved_host_memory_mb=0)
         virt_resources = copy.deepcopy(_VIRT_DRIVER_AVAIL_RESOURCES)
@@ -2716,7 +2656,8 @@ class TestResize(BaseTestCase):
 
         # TODO(jaypipes): Remove once the PCI tracker is always created
         # upon the resource tracker being initialized...
-        self.rt.pci_tracker = pci_manager.PciDevTracker(mock.sentinel.ctx)
+        self.rt.pci_tracker = pci_manager.PciDevTracker(
+            mock.sentinel.ctx, _COMPUTE_NODE_FIXTURES[0])
 
         pci_dev = pci_device.PciDevice.create(
             None, fake_pci_device.dev_dict)
@@ -2807,7 +2748,12 @@ class TestResize(BaseTestCase):
 
         # TODO(jaypipes): Remove once the PCI tracker is always created
         # upon the resource tracker being initialized...
-        self.rt.pci_tracker = pci_manager.PciDevTracker(mock.sentinel.ctx)
+        with mock.patch.object(
+            objects.PciDeviceList, 'get_by_compute_node',
+            return_value=objects.PciDeviceList()
+        ):
+            self.rt.pci_tracker = pci_manager.PciDevTracker(
+                mock.sentinel.ctx, cn)
 
         pci_dev = pci_device.PciDevice.create(
             None, fake_pci_device.dev_dict)
@@ -3094,7 +3040,12 @@ class TestLiveMigration(BaseTestCase):
         migration = objects.Migration(id=42, migration_type='live-migration',
                                       status='accepted')
         image_meta = objects.ImageMeta(properties=objects.ImageMetaProps())
-        self.rt.pci_tracker = pci_manager.PciDevTracker(mock.sentinel.ctx)
+        with mock.patch.object(
+            objects.PciDeviceList, 'get_by_compute_node',
+            return_value=objects.PciDeviceList()
+        ):
+            self.rt.pci_tracker = pci_manager.PciDevTracker(
+                mock.sentinel.ctx, _COMPUTE_NODE_FIXTURES[0])
         with test.nested(
             mock.patch.object(objects.ImageMeta, 'from_instance',
                               return_value=image_meta),

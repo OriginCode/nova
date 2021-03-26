@@ -12,6 +12,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import collections
+import os
 import sys
 import textwrap
 import time
@@ -19,6 +21,7 @@ import typing as ty
 
 import fixtures
 from lxml import etree
+import mock
 from oslo_log import log as logging
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import versionutils
@@ -61,6 +64,10 @@ VIR_DOMAIN_XML_INACTIVE = 2
 VIR_DOMAIN_XML_UPDATE_CPU = 4
 VIR_DOMAIN_XML_MIGRATABLE = 8
 
+VIR_DOMAIN_BLOCK_COPY_SHALLOW = 1
+VIR_DOMAIN_BLOCK_COPY_REUSE_EXT = 2
+VIR_DOMAIN_BLOCK_COPY_TRANSIENT_JOB = 4
+
 VIR_DOMAIN_BLOCK_REBASE_SHALLOW = 1
 VIR_DOMAIN_BLOCK_REBASE_REUSE_EXT = 2
 VIR_DOMAIN_BLOCK_REBASE_COPY = 8
@@ -83,6 +90,9 @@ VIR_DOMAIN_EVENT_RESUMED = 4
 VIR_DOMAIN_EVENT_STOPPED = 5
 VIR_DOMAIN_EVENT_SHUTDOWN = 6
 VIR_DOMAIN_EVENT_PMSUSPENDED = 7
+
+VIR_DOMAIN_EVENT_ID_DEVICE_REMOVED = 15
+VIR_DOMAIN_EVENT_ID_DEVICE_REMOVAL_FAILED = 22
 
 VIR_DOMAIN_EVENT_SUSPENDED_MIGRATED = 1
 VIR_DOMAIN_EVENT_SUSPENDED_POSTCOPY = 7
@@ -175,13 +185,19 @@ VIR_CONNECT_LIST_DOMAINS_INACTIVE = 2
 
 # virConnectListAllNodeDevices flags
 VIR_CONNECT_LIST_NODE_DEVICES_CAP_PCI_DEV = 2
-VIR_CONNECT_LIST_NODE_DEVICES_CAP_NET = 16
+VIR_CONNECT_LIST_NODE_DEVICES_CAP_NET = 1 << 4
+VIR_CONNECT_LIST_NODE_DEVICES_CAP_VDPA = 1 << 17
 
 # secret type
 VIR_SECRET_USAGE_TYPE_NONE = 0
 VIR_SECRET_USAGE_TYPE_VOLUME = 1
 VIR_SECRET_USAGE_TYPE_CEPH = 2
 VIR_SECRET_USAGE_TYPE_ISCSI = 3
+
+# metadata types
+VIR_DOMAIN_METADATA_DESCRIPTION = 0
+VIR_DOMAIN_METADATA_TITLE = 1
+VIR_DOMAIN_METADATA_ELEMENT = 2
 
 # Libvirt version to match MIN_LIBVIRT_VERSION in driver.py
 FAKE_LIBVIRT_VERSION = versionutils.convert_version_to_int(
@@ -220,6 +236,15 @@ PGPU1_PCI_ADDR = 'pci_0000_81_00_0'
 PGPU2_PCI_ADDR = 'pci_0000_81_01_0'
 PGPU3_PCI_ADDR = 'pci_0000_81_02_0'
 
+os_uname = collections.namedtuple(
+    'uname_result', ['sysname', 'nodename', 'release', 'version', 'machine'],
+)
+
+
+def _get_libvirt_nodedev_name(bus, slot, function):
+    """Convert an address to a libvirt device name string."""
+    return f'pci_0000_{bus:02x}_{slot:02x}_{function:d}'
+
 
 class FakePCIDevice(object):
     """Generate a fake PCI device.
@@ -235,22 +260,22 @@ class FakePCIDevice(object):
     pci_default_parent = "pci_0000_80_01_0"
     pci_device_template = textwrap.dedent("""
         <device>
-          <name>pci_0000_81_%(slot)02x_%(function)d</name>
-          <path>/sys/devices/pci0000:80/0000:80:01.0/0000:81:%(slot)02x.%(function)d</path>
+          <name>pci_0000_%(bus)02x_%(slot)02x_%(function)d</name>
+          <path>/sys/devices/pci0000:80/0000:80:01.0/0000:%(bus)02x:%(slot)02x.%(function)d</path>
           <parent>%(parent)s</parent>
           <driver>
             <name>%(driver)s</name>
           </driver>
           <capability type='pci'>
             <domain>0</domain>
-            <bus>129</bus>
+            <bus>%(bus)d</bus>
             <slot>%(slot)d</slot>
             <function>%(function)d</function>
             <product id='0x%(prod_id)s'>%(prod_name)s</product>
             <vendor id='0x%(vend_id)s'>%(vend_name)s</vendor>
         %(capability)s
             <iommuGroup number='%(iommu_group)d'>
-              <address domain='0x0000' bus='0x81' slot='%(slot)#02x' function='0x%(function)d'/>
+              <address domain='0x0000' bus='%(bus)#02x' slot='%(slot)#02x' function='0x%(function)d'/>
             </iommuGroup>
             <numa node='%(numa_node)s'/>
             <pci-express>
@@ -260,7 +285,7 @@ class FakePCIDevice(object):
           </capability>
         </device>""".strip())  # noqa
     cap_templ = "<capability type='%(cap_type)s'>%(addresses)s</capability>"
-    addr_templ = "<address domain='0x0000' bus='0x81' slot='%(slot)#02x' function='%(function)#02x'/>"  # noqa
+    addr_templ = "<address domain='0x0000' bus='%(bus)#02x' slot='%(slot)#02x' function='%(function)#02x'/>"  # noqa
     mdevtypes_templ = textwrap.dedent("""
         <type id='%(type_id)s'>
         <name>GRID M60-0B</name><deviceAPI>vfio-pci</deviceAPI>
@@ -269,22 +294,35 @@ class FakePCIDevice(object):
 
     is_capable_of_mdevs = False
 
-    def __init__(self, dev_type, slot, function, iommu_group, numa_node,
-                 vf_ratio=None, multiple_gpu_types=False, parent=None):
+    def __init__(
+        self, dev_type, bus, slot, function, iommu_group, numa_node, *,
+        vf_ratio=None, multiple_gpu_types=False, parent=None,
+        vend_id=None, vend_name=None, prod_id=None, prod_name=None,
+        driver_name=None,
+    ):
         """Populate pci devices
 
-        :param dev_type: (string) Indicates the type of the device (PCI, PF,
-            VF).
+        :param dev_type: (str) Indicates the type of the device (PCI, PF, VF,
+            MDEV_TYPES).
+        :param bus: (int) Bus number of the device.
         :param slot: (int) Slot number of the device.
         :param function: (int) Function number of the device.
         :param iommu_group: (int) IOMMU group ID.
         :param numa_node: (int) NUMA node of the device.
         :param vf_ratio: (int) Ratio of Virtual Functions on Physical. Only
             applicable if ``dev_type`` is one of: ``PF``, ``VF``.
-        :param multiple_gpu_types: (bool) Supports different vGPU types
+        :param multiple_gpu_types: (bool) Supports different vGPU types.
+        :param parent: (int, int, int) A tuple of bus, slot and function
+            corresponding to the parent.
+        :param vend_id: (str) The vendor ID.
+        :param vend_name: (str) The vendor name.
+        :param prod_id: (str) The product ID.
+        :param prod_name: (str) The product name.
+        :param driver_name: (str) The driver name.
         """
 
         self.dev_type = dev_type
+        self.bus = bus
         self.slot = slot
         self.function = function
         self.iommu_group = iommu_group
@@ -292,28 +330,49 @@ class FakePCIDevice(object):
         self.vf_ratio = vf_ratio
         self.multiple_gpu_types = multiple_gpu_types
         self.parent = parent
+
+        self.vend_id = vend_id
+        self.vend_name = vend_name
+        self.prod_id = prod_id
+        self.prod_name = prod_name
+        self.driver_name = driver_name
+
         self.generate_xml()
 
     def generate_xml(self, skip_capability=False):
-        vend_id = PCI_VEND_ID
-        vend_name = PCI_VEND_NAME
+
+        # initial validation
+        assert self.dev_type in ('PCI', 'VF', 'PF', 'MDEV_TYPES'), (
+            f'got invalid dev_type {self.dev_type}')
+
+        if self.dev_type == 'PCI':
+            assert not self.vf_ratio, 'vf_ratio does not apply for PCI devices'
+
+        if self.dev_type in ('PF', 'VF'):
+            assert self.vf_ratio, 'require vf_ratio for PFs and VFs'
+
+        if self.dev_type == 'VF':
+            assert self.parent, 'require parent for VFs'
+            assert isinstance(self.parent, tuple), 'parent must be an address'
+            assert len(self.parent) == 3, 'parent must be an address'
+
+        vend_id = self.vend_id or PCI_VEND_ID
+        vend_name = self.vend_name or PCI_VEND_NAME
         capability = ''
         if self.dev_type == 'PCI':
-            if self.vf_ratio:
-                raise ValueError('vf_ratio does not apply for PCI devices')
-
-            prod_id = PCI_PROD_ID
-            prod_name = PCI_PROD_NAME
-            driver = PCI_DRIVER_NAME
+            prod_id = self.prod_id or PCI_PROD_ID
+            prod_name = self.prod_name or PCI_PROD_NAME
+            driver = self.driver_name or PCI_DRIVER_NAME
         elif self.dev_type == 'PF':
-            prod_id = PF_PROD_ID
-            prod_name = PF_PROD_NAME
-            driver = PF_DRIVER_NAME
+            prod_id = self.prod_id or PF_PROD_ID
+            prod_name = self.prod_name or PF_PROD_NAME
+            driver = self.driver_name or PF_DRIVER_NAME
             if not skip_capability:
                 capability = self.cap_templ % {
                     'cap_type': PF_CAP_TYPE,
                     'addresses': '\n'.join([
                         self.addr_templ % {
+                            'bus': self.bus,
                             # these are the slot, function values of the child
                             # VFs, we can only assign 8 functions to a slot
                             # (0-7) so bump the slot each time we exceed this
@@ -324,13 +383,14 @@ class FakePCIDevice(object):
                         } for x in range(1, self.vf_ratio + 1)])
                 }
         elif self.dev_type == 'VF':
-            prod_id = VF_PROD_ID
-            prod_name = VF_PROD_NAME
-            driver = VF_DRIVER_NAME
+            prod_id = self.prod_id or VF_PROD_ID
+            prod_name = self.prod_name or VF_PROD_NAME
+            driver = self.driver_name or VF_DRIVER_NAME
             if not skip_capability:
                 capability = self.cap_templ % {
                     'cap_type': VF_CAP_TYPE,
                     'addresses': self.addr_templ % {
+                        'bus': self.bus,
                         # this is the slot, function value of the parent PF
                         # if we're e.g. device 8, we'll have a different slot
                         # to our parent so reverse this
@@ -340,11 +400,11 @@ class FakePCIDevice(object):
                     }
                 }
         elif self.dev_type == 'MDEV_TYPES':
-            prod_id = MDEV_CAPABLE_PROD_ID
-            prod_name = MDEV_CAPABLE_PROD_NAME
-            driver = MDEV_CAPABLE_DRIVER_NAME
-            vend_id = MDEV_CAPABLE_VEND_ID
-            vend_name = MDEV_CAPABLE_VEND_NAME
+            prod_id = self.prod_id or MDEV_CAPABLE_PROD_ID
+            prod_name = self.prod_name or MDEV_CAPABLE_PROD_NAME
+            driver = self.driver_name or MDEV_CAPABLE_DRIVER_NAME
+            vend_id = self.vend_id or MDEV_CAPABLE_VEND_ID
+            vend_name = self.vend_name or MDEV_CAPABLE_VEND_NAME
             types = [self.mdevtypes_templ % {
                 'type_id': NVIDIA_11_VGPU_TYPE,
                 'instances': 16,
@@ -360,10 +420,13 @@ class FakePCIDevice(object):
                     'addresses': '\n'.join(types)
                 }
             self.is_capable_of_mdevs = True
-        else:
-            raise ValueError('Expected one of: PCI, VF, PCI')
+
+        parent = self.pci_default_parent
+        if self.parent:
+            parent = _get_libvirt_nodedev_name(*self.parent)
 
         self.pci_device = self.pci_device_template % {
+            'bus': self.bus,
             'slot': self.slot,
             'function': self.function,
             'vend_id': vend_id,
@@ -374,7 +437,7 @@ class FakePCIDevice(object):
             'capability': capability,
             'iommu_group': self.iommu_group,
             'numa_node': self.numa_node,
-            'parent': self.parent or self.pci_default_parent
+            'parent': parent,
         }
         # -1 is the sentinel set in /sys/bus/pci/devices/*/numa_node
         # for no NUMA affinity. When the numa_node is set to -1 on a device
@@ -386,11 +449,12 @@ class FakePCIDevice(object):
         return self.pci_device
 
 
+# TODO(stephenfin): Remove all of these HostFooDevicesInfo objects in favour of
+# a unified devices object
 class HostPCIDevicesInfo(object):
     """Represent a pool of host PCI devices."""
 
     TOTAL_NUMA_NODES = 2
-    pci_devname_template = 'pci_0000_81_%(slot)02x_%(function)d'
 
     def __init__(self, num_pci=0, num_pfs=2, num_vfs=8, num_mdevcap=0,
                  numa_node=None, multiple_gpu_types=False):
@@ -402,7 +466,6 @@ class HostPCIDevicesInfo(object):
         :param num_vfs: (int) The number of PCI SR-IOV Virtual Functions.
         :param num_mdevcap: (int) The number of PCI devices capable of creating
             mediated devices.
-        :param iommu_group: (int) Initial IOMMU group ID.
         :param numa_node: (int) NUMA node of the device; if set all of the
             devices will be assigned to the specified node else they will be
             split between ``$TOTAL_NUMA_NODES`` nodes.
@@ -419,19 +482,16 @@ class HostPCIDevicesInfo(object):
         if num_pfs and num_vfs % num_pfs:
             raise ValueError('num_vfs must be a factor of num_pfs')
 
-        slot = 0
+        bus = 0x81
+        slot = 0x0
         function = 0
         iommu_group = 40  # totally arbitrary number
 
         # Generate PCI devs
         for dev in range(num_pci):
-            pci_dev_name = self.pci_devname_template % {
-                'slot': slot, 'function': function}
-
-            LOG.info('Generating PCI device %r', pci_dev_name)
-
-            self.devices[pci_dev_name] = FakePCIDevice(
+            self.add_device(
                 dev_type='PCI',
+                bus=bus,
                 slot=slot,
                 function=function,
                 iommu_group=iommu_group,
@@ -442,13 +502,9 @@ class HostPCIDevicesInfo(object):
 
         # Generate MDEV capable devs
         for dev in range(num_mdevcap):
-            pci_dev_name = self.pci_devname_template % {
-                'slot': slot, 'function': function}
-
-            LOG.info('Generating MDEV capable device %r', pci_dev_name)
-
-            self.devices[pci_dev_name] = FakePCIDevice(
+            self.add_device(
                 dev_type='MDEV_TYPES',
+                bus=bus,
                 slot=slot,
                 function=function,
                 iommu_group=iommu_group,
@@ -465,19 +521,16 @@ class HostPCIDevicesInfo(object):
             function = 0
             numa_node_pf = self._calc_numa_node(dev, numa_node)
 
-            pci_dev_name = self.pci_devname_template % {
-                'slot': slot, 'function': function}
-
-            LOG.info('Generating PF device %r', pci_dev_name)
-
-            self.devices[pci_dev_name] = FakePCIDevice(
+            self.add_device(
                 dev_type='PF',
+                bus=bus,
                 slot=slot,
                 function=function,
                 iommu_group=iommu_group,
                 numa_node=numa_node_pf,
                 vf_ratio=vf_ratio)
-            pf_dev_name = pci_dev_name
+
+            parent = (bus, slot, function)
             # Generate VFs
             for _ in range(vf_ratio):
                 function += 1
@@ -488,21 +541,45 @@ class HostPCIDevicesInfo(object):
                     slot += 1
                     function = 0
 
-                pci_dev_name = self.pci_devname_template % {
-                    'slot': slot, 'function': function}
-
-                LOG.info('Generating VF device %r', pci_dev_name)
-
-                self.devices[pci_dev_name] = FakePCIDevice(
+                self.add_device(
                     dev_type='VF',
+                    bus=bus,
                     slot=slot,
                     function=function,
                     iommu_group=iommu_group,
                     numa_node=numa_node_pf,
                     vf_ratio=vf_ratio,
-                    parent=pf_dev_name)
+                    parent=parent)
 
             slot += 1
+
+    def add_device(
+        self, dev_type, bus, slot, function, iommu_group, numa_node,
+        vf_ratio=None, multiple_gpu_types=False, parent=None,
+        vend_id=None, vend_name=None, prod_id=None, prod_name=None,
+        driver_name=None,
+    ):
+        pci_dev_name = _get_libvirt_nodedev_name(bus, slot, function)
+
+        LOG.info('Generating %s device %r', dev_type, pci_dev_name)
+
+        dev = FakePCIDevice(
+            dev_type=dev_type,
+            bus=bus,
+            slot=slot,
+            function=function,
+            iommu_group=iommu_group,
+            numa_node=numa_node,
+            vf_ratio=vf_ratio,
+            multiple_gpu_types=multiple_gpu_types,
+            parent=parent,
+            vend_id=vend_id,
+            vend_name=vend_name,
+            prod_id=prod_id,
+            prod_name=prod_name,
+            driver_name=driver_name)
+        self.devices[pci_dev_name] = dev
+        return dev
 
     @classmethod
     def _calc_numa_node(cls, dev, numa_node):
@@ -561,10 +638,72 @@ class HostMdevDevicesInfo(object):
         return dev
 
 
+class FakeVDPADevice:
+
+    template = textwrap.dedent("""
+        <device>
+          <name>%(name)s</name>
+          <path>%(path)s</path>
+          <parent>%(parent)s</parent>
+          <driver>
+            <name>vhost_vdpa</name>
+          </driver>
+          <capability type='vdpa'>
+            <chardev>/dev/vhost-vdpa-%(idx)d</chardev>
+          </capability>
+        </device>""".strip())
+
+    def __init__(self, name, idx, parent):
+        assert isinstance(parent, FakePCIDevice)
+        assert parent.dev_type == 'VF'
+
+        self.name = name
+        self.idx = idx
+        self.parent = parent
+        self.generate_xml()
+
+    def generate_xml(self):
+        pf_pci = self.parent.parent
+        vf_pci = (self.parent.bus, self.parent.slot, self.parent.function)
+        pf_addr = '0000:%02x:%02x.%d' % pf_pci
+        vf_addr = '0000:%02x:%02x.%d' % vf_pci
+        parent = _get_libvirt_nodedev_name(*vf_pci)
+        path = f'/sys/devices/pci0000:00/{pf_addr}/{vf_addr}/vdpa{self.idx}'
+        self.xml = self.template % {
+            'name': self.name,
+            'idx': self.idx,
+            'path': path,
+            'parent': parent,
+        }
+
+    def XMLDesc(self, flags):
+        return self.xml
+
+
+class HostVDPADevicesInfo:
+
+    def __init__(self):
+        self.devices = {}
+
+    def get_all_devices(self):
+        return self.devices.keys()
+
+    def get_device_by_name(self, device_name):
+        dev = self.devices[device_name]
+        return dev
+
+    def add_device(self, name, idx, parent):
+        LOG.info('Generating vDPA device %r', name)
+
+        dev = FakeVDPADevice(name=name, idx=idx, parent=parent)
+        self.devices[name] = dev
+        return dev
+
+
 class HostInfo(object):
 
     def __init__(self, cpu_nodes=1, cpu_sockets=1, cpu_cores=2, cpu_threads=1,
-                 kB_mem=4096, mempages=None):
+                 kB_mem=16780000, mempages=None):
         """Create a new Host Info object
 
         :param cpu_nodes: (int) the number of NUMA cell, 1 for unusual
@@ -604,15 +743,16 @@ class NUMATopology(vconfig.LibvirtConfigCapsNUMATopology):
         super(NUMATopology, self).__init__(**kwargs)
 
         cpu_count = 0
-        for cell_count in range(cpu_nodes):
-            cell = vconfig.LibvirtConfigCapsNUMACell()
-            cell.id = cell_count
-            cell.memory = kb_mem // cpu_nodes
-            for socket_count in range(cpu_sockets):
+        cell_count = 0
+        for socket_count in range(cpu_sockets):
+            for cell_num in range(cpu_nodes):
+                cell = vconfig.LibvirtConfigCapsNUMACell()
+                cell.id = cell_count
+                cell.memory = kb_mem // (cpu_nodes * cpu_sockets)
                 for cpu_num in range(cpu_cores * cpu_threads):
                     cpu = vconfig.LibvirtConfigCapsNUMACPU()
                     cpu.id = cpu_count
-                    cpu.socket_id = cell_count
+                    cpu.socket_id = socket_count
                     cpu.core_id = cpu_num // cpu_threads
                     cpu.siblings = set([cpu_threads *
                                        (cpu_count // cpu_threads) + thread
@@ -621,13 +761,15 @@ class NUMATopology(vconfig.LibvirtConfigCapsNUMATopology):
 
                     cpu_count += 1
 
-            # If no mempages are provided, use only the default 4K pages
-            if mempages:
-                cell.mempages = mempages[cell_count]
-            else:
-                cell.mempages = create_mempages([(4, cell.memory // 4)])
+                # If no mempages are provided, use only the default 4K pages
+                if mempages:
+                    cell.mempages = mempages[cell_count]
+                else:
+                    cell.mempages = create_mempages([(4, cell.memory // 4)])
 
-            self.cells.append(cell)
+                self.cells.append(cell)
+
+                cell_count += 1
 
 
 def create_mempages(mappings):
@@ -971,6 +1113,8 @@ class Domain(object):
                                                          pci_bus, pci_slot,
                                                          pci_function)
                         nic_info['source'] = pci_device
+                    elif nic_info['type'] == 'vdpa':
+                        nic_info['source'] = source.get('dev')
 
                 nics_info += [nic_info]
 
@@ -1161,23 +1305,31 @@ class Domain(object):
 
         nics = ''
         for nic in self._def['devices']['nics']:
-            if 'source' in nic and nic['type'] != 'hostdev':
-                nics += '''<interface type='%(type)s'>
-          <mac address='%(mac)s'/>
-          <source %(type)s='%(source)s'/>
-          <target dev='tap274487d1-60'/>
-          <address type='pci' domain='0x0000' bus='0x00' slot='0x03'
-                   function='0x0'/>
-        </interface>''' % nic
-            # this covers for direct nic type
-            else:
-                nics += '''<interface type='%(type)s'>
-          <mac address='%(mac)s'/>
-          <source>
-              <address type='pci' domain='0x0000' bus='0x81' slot='0x00'
-                   function='0x01'/>
-          </source>
-        </interface>''' % nic
+            if 'source' in nic:
+                if nic['type'] == 'hostdev':
+                    nics += '''<interface type='%(type)s'>
+                      <mac address='%(mac)s'/>
+                      <source>
+                        <address type='pci' domain='0x0000' bus='0x81' slot='0x00' function='0x01'/>
+                      </source>
+                      <address type='pci' domain='0x0000' bus='0x00' slot='0x03' function='0x0'/>
+                    </interface>''' % nic  # noqa: E501
+                elif nic['type'] == 'vdpa':
+                    # TODO(stephenfin): In real life, this would actually have
+                    # an '<address>' element, but that requires information
+                    # about the host that we're not passing through yet
+                    nics += '''<interface type='%(type)s'>
+                      <mac address='%(mac)s'/>
+                      <source dev='%(source)s'/>
+                      <model type='virtio'/>
+                    </interface>'''
+                else:
+                    nics += '''<interface type='%(type)s'>
+                      <mac address='%(mac)s'/>
+                      <source %(type)s='%(source)s'/>
+                      <target dev='tap274487d1-60'/>
+                      <address type='pci' domain='0x0000' bus='0x00' slot='0x03' function='0x0'/>
+                    </interface>''' % nic  # noqa: E501
 
         hostdevs = ''
         for hostdev in self._def['devices']['hostdevs']:
@@ -1346,6 +1498,9 @@ class Domain(object):
                     error_domain=VIR_FROM_QEMU)
         return 0
 
+    def blockCopy(self, disk, base, flags=0):
+        return 0
+
     def blockCommit(self, disk, base, top, flags):
         return 0
 
@@ -1377,6 +1532,9 @@ class Domain(object):
         pass
 
     def fsThaw(self):
+        pass
+
+    def setMetadata(self, metadata_type, metadata, key, uri, flags=0):
         pass
 
 
@@ -1428,9 +1586,11 @@ class Secret(object):
 
 
 class Connection(object):
-    def __init__(self, uri=None, readonly=False, version=FAKE_LIBVIRT_VERSION,
-                 hv_version=FAKE_QEMU_VERSION, host_info=None, pci_info=None,
-                 mdev_info=None, hostname=None):
+    def __init__(
+        self, uri=None, readonly=False, version=FAKE_LIBVIRT_VERSION,
+        hv_version=FAKE_QEMU_VERSION, hostname=None,
+        host_info=None, pci_info=None, mdev_info=None, vdpa_info=None,
+    ):
         if not uri or uri == '':
             if allow_default_uri_connection:
                 uri = 'qemu:///session'
@@ -1438,13 +1598,13 @@ class Connection(object):
                 raise ValueError("URI was None, but fake libvirt is "
                                  "configured to not accept this.")
 
-        uri_whitelist = ['qemu:///system',
-                         'qemu:///session',
-                         'lxc:///',     # from LibvirtDriver._uri()
-                         'xen:///',     # from LibvirtDriver._uri()
-                         'uml:///system',
-                         'test:///default',
-                         'parallels:///system']
+        uri_whitelist = [
+            'qemu:///system',
+            'qemu:///session',
+            'lxc:///',     # from LibvirtDriver._uri()
+            'test:///default',
+            'parallels:///system',
+        ]
 
         if uri not in uri_whitelist:
             raise make_libvirtError(
@@ -1468,6 +1628,7 @@ class Connection(object):
                                                        num_pfs=0,
                                                        num_vfs=0)
         self.mdev_info = mdev_info or HostMdevDevicesInfo(devices={})
+        self.vdpa_info = vdpa_info or HostVDPADevicesInfo()
         self.hostname = hostname or 'compute1'
 
     def _add_nodedev(self, nodedev):
@@ -1583,11 +1744,22 @@ class Connection(object):
         cpu_map = [True for cpu_num in range(total_cpus)]
         return (total_cpus, cpu_map, total_cpus)
 
-    def getDomainCapabilities(self, emulatorbin, arch, machine_type,
-                              virt_type, flags):
+    def getDomainCapabilities(
+        self, emulatorbin, arch, machine_type, virt_type, flags,
+    ):
         """Return spoofed domain capabilities."""
         if arch in fake_libvirt_data.STATIC_DOMCAPABILITIES:
-            return fake_libvirt_data.STATIC_DOMCAPABILITIES[arch]
+            xml = fake_libvirt_data.STATIC_DOMCAPABILITIES[arch]
+            if machine_type:
+                # if we request a specific machine type, we should get
+                # information on that and not something else
+                tree = etree.fromstring(xml)
+                if machine_type not in tree.find('./machine').text:
+                    raise Exception(
+                        'Expected machine type of ~%s but got %s' % (
+                            machine_type, tree.find('./machine').text,
+                        ))
+            return xml
 
         if arch == 'x86_64':
             aliases = {'pc': 'pc-i440fx-2.11', 'q35': 'pc-q35-2.11'}
@@ -1682,11 +1854,21 @@ class Connection(object):
         if isinstance(numa_topology, vconfig.LibvirtConfigCapsNUMATopology):
             numa_topology = numa_topology.to_xml()
 
-        return (fake_libvirt_data.CAPABILITIES_TEMPLATE
-                % {'sockets': self.host_info.cpu_sockets,
-                   'cores': self.host_info.cpu_cores,
-                   'threads': self.host_info.cpu_threads,
-                   'topology': numa_topology})
+        # we rely on os.uname() having been mocked already to ensure we have
+        # the correct "host" architecture
+        _capabilities = [
+            '<capabilities>\n',
+            fake_libvirt_data.CAPABILITIES_HOST_TEMPLATES[os.uname().machine],
+        ] + list(fake_libvirt_data.CAPABILITIES_GUEST.values()) + [
+            '</capabilities>',
+        ]
+
+        return ''.join(_capabilities) % {
+            'sockets': self.host_info.cpu_sockets,
+            'cores': self.host_info.cpu_cores,
+            'threads': self.host_info.cpu_threads,
+            'topology': numa_topology,
+        }
 
     def compareCPU(self, xml, flags):
         tree = etree.fromstring(xml)
@@ -1740,6 +1922,9 @@ class Connection(object):
         if name.startswith('mdev'):
             return self.mdev_info.get_device_by_name(name)
 
+        if name.startswith('vdpa'):
+            return self.vdpa_info.get_device_by_name(name)
+
         pci_dev = self.pci_info.get_device_by_name(name)
         if pci_dev:
             return pci_dev
@@ -1759,6 +1944,8 @@ class Connection(object):
             return self.mdev_info.get_all_devices()
         if cap == 'mdev_types':
             return self.pci_info.get_all_mdev_capable_devices()
+        if cap == 'vdpa':
+            return self.vdpa_info.get_all_devices()
         else:
             raise ValueError('Capability "%s" is not supported' % cap)
 
@@ -1792,11 +1979,22 @@ class Connection(object):
         return secret
 
     def listAllDevices(self, flags):
-        # Note this is incomplete as we do not filter
-        # based on the flags however it is enough for our
-        # current testing.
-        return [NodeDevice(self, xml=dev.XMLDesc(0))
-                for dev in self.pci_info.devices.values()]
+        devices = []
+        if flags & VIR_CONNECT_LIST_NODE_DEVICES_CAP_PCI_DEV:
+            devices.extend(
+                NodeDevice(self, xml=dev.XMLDesc(0))
+                for dev in self.pci_info.devices.values()
+            )
+        if flags & VIR_CONNECT_LIST_NODE_DEVICES_CAP_NET:
+            # TODO(stephenfin): Implement fake netdevs so we can test the
+            # capability reporting
+            pass
+        if flags & VIR_CONNECT_LIST_NODE_DEVICES_CAP_VDPA:
+            devices.extend(
+                NodeDevice(self, xml=dev.XMLDesc(0))
+                for dev in self.vdpa_info.devices.values()
+            )
+        return devices
 
 
 def openAuth(uri, auth, flags=0):
@@ -1910,6 +2108,97 @@ class FakeLibvirtFixture(fixtures.Fixture):
         # and we don't want that to blow up the subunit parser in test runs.
         self.useFixture(fixtures.MockPatch(
             'nova.virt.libvirt.host.Host._log_host_capabilities'))
+
+        # Ensure tests perform the same on all host architectures
+        fake_uname = os_uname(
+            'Linux', '', '5.4.0-0-generic', '', obj_fields.Architecture.X86_64)
+        self.useFixture(
+            fixtures.MockPatch('os.uname', return_value=fake_uname))
+
+        # ...and on all machine types
+        fake_loaders = [
+            {
+                'description': 'UEFI firmware for x86_64',
+                'interface-types': ['uefi'],
+                'mapping': {
+                    'device': 'flash',
+                    'executable': {
+                        'filename': '/usr/share/OVMF/OVMF_CODE.fd',
+                        'format': 'raw',
+                    },
+                    'nvram-template': {
+                        'filename': '/usr/share/OVMF/OVMF_VARS.fd',
+                        'format': 'raw',
+                    },
+                },
+                'targets': [
+                    {
+                        'architecture': 'x86_64',
+                        'machines': ['pc-i440fx-*', 'pc-q35-*'],
+                    },
+                ],
+                'features': ['acpi-s3', 'amd-sev', 'verbose-dynamic'],
+                'tags': [],
+            },
+            {
+                'description': 'UEFI firmware for x86_64, with SB+SMM',
+                'interface-types': ['uefi'],
+                'mapping': {
+                    'device': 'flash',
+                    'executable': {
+                        'filename': '/usr/share/OVMF/OVMF_CODE.secboot.fd',
+                        'format': 'raw',
+                    },
+                    'nvram-template': {
+                        'filename': '/usr/share/OVMF/OVMF_VARS.secboot.fd',
+                        'format': 'raw',
+                    },
+                },
+                'targets': [
+                    {
+                        'architecture': 'x86_64',
+                        'machines': ['pc-q35-*'],
+                    },
+                ],
+                'features': [
+                    'acpi-s3',
+                    'amd-sev',
+                    'enrolled-keys',
+                    'requires-smm',
+                    'secure-boot',
+                    'verbose-dynamic',
+                ],
+                'tags': [],
+            },
+            {
+                'description': 'UEFI firmware for aarch64',
+                'interface-types': ['uefi'],
+                'mapping': {
+                    'device': 'flash',
+                    'executable': {
+                        'filename': '/usr/share/AAVMF/AAVMF_CODE.fd',
+                        'format': 'raw',
+                    },
+                    'nvram-template': {
+                        'filename': '/usr/share/AAVMF/AAVMF_VARS.fd',
+                        'format': 'raw',
+                    }
+                },
+                'targets': [
+                    {
+                        'architecture': 'aarch64',
+                        'machines': ['virt-*'],
+                    }
+                ],
+                'features': ['verbose-static'],
+                "tags": [],
+            },
+        ]
+        self.useFixture(
+            fixtures.MockPatch(
+                'nova.virt.libvirt.host.Host.loaders',
+                new_callable=mock.PropertyMock,
+                return_value=fake_loaders))
 
         disable_event_thread(self)
 

@@ -22,7 +22,6 @@ from os_vif.objects import fields as osv_fields
 from oslo_concurrency import processutils
 from oslo_config import cfg
 from oslo_utils.fixture import uuidsentinel as uuids
-import six
 
 from nova import exception
 from nova.network import model as network_model
@@ -498,10 +497,19 @@ class LibvirtVifTestCase(test.NoDBTestCase):
 
     def setUp(self):
         super(LibvirtVifTestCase, self).setUp()
+
         self.useFixture(fakelibvirt.FakeLibvirtFixture(stub_os_vif=False))
+
         # os_vif.initialize is typically done in nova-compute startup
         os_vif.initialize()
         self.setup_os_vif_objects()
+
+        # multiqueue configuration is host OS specific
+        _a = mock.patch('os.uname')
+        self.mock_uname = _a.start()
+        self.mock_uname.return_value = fakelibvirt.os_uname(
+            'Linux', '', '5.10.13-200-generic', '', 'x86_64')
+        self.addCleanup(_a.stop)
 
     def _get_node(self, xml):
         doc = etree.fromstring(xml)
@@ -563,7 +571,7 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         self.assertEqual(tx_queue_size, tx_want)
 
     def _assertXmlEqual(self, expectedXmlstr, actualXmlstr):
-        if not isinstance(actualXmlstr, six.string_types):
+        if not isinstance(actualXmlstr, str):
             actualXmlstr = etree.tostring(actualXmlstr, encoding='unicode',
                                           pretty_print=True)
         self.assertXmlEqual(expectedXmlstr, actualXmlstr)
@@ -637,30 +645,36 @@ class LibvirtVifTestCase(test.NoDBTestCase):
     def test_virtio_multiqueue(self):
         self._test_virtio_multiqueue(4, '4')
 
-    @mock.patch('os.uname', return_value=('Linux', '', '2.6.32-21-generic'))
-    def test_virtio_multiqueue_in_kernel_2(self, mock_uname):
+    def test_virtio_multiqueue_in_kernel_2(self):
+        self.mock_uname.return_value = fakelibvirt.os_uname(
+            'Linux', '', '2.6.32-21-generic', '', '')
         self._test_virtio_multiqueue(10, '1')
 
-    @mock.patch('os.uname', return_value=('Linux', '', '3.19.0-47-generic'))
-    def test_virtio_multiqueue_in_kernel_3(self, mock_uname):
+    def test_virtio_multiqueue_in_kernel_3(self):
+        self.mock_uname.return_value = fakelibvirt.os_uname(
+            'Linux', '', '3.19.0-47-generic', '', '')
         self._test_virtio_multiqueue(10, '8')
 
-    @mock.patch('os.uname', return_value=('Linux', '', '4.2.0-35-generic'))
-    def test_virtio_multiqueue_in_kernel_4(self, mock_uname):
+    def test_virtio_multiqueue_in_kernel_4(self):
+        self.mock_uname.return_value = fakelibvirt.os_uname(
+            'Linux', '', '4.2.0-35-generic', '', '')
         self._test_virtio_multiqueue(10, '10')
 
-    @mock.patch('os.uname', return_value=('Linux', '', '2.6.32-21-generic'))
-    def test_virtio_multiqueue_in_kernel_2_max_queues(self, mock_uname):
+    def test_virtio_multiqueue_in_kernel_2_max_queues(self):
+        self.mock_uname.return_value = fakelibvirt.os_uname(
+            'Linux', '', '2.6.32-21-generic', '', '')
         self.flags(max_queues=2, group='libvirt')
         self._test_virtio_multiqueue(10, '2')
 
-    @mock.patch('os.uname', return_value=('Linux', '', '3.19.0-47-generic'))
-    def test_virtio_multiqueue_in_kernel_3_max_queues(self, mock_uname):
+    def test_virtio_multiqueue_in_kernel_3_max_queues(self):
+        self.mock_uname.return_value = fakelibvirt.os_uname(
+            'Linux', '', '3.19.0-47-generic', '', '')
         self.flags(max_queues=2, group='libvirt')
         self._test_virtio_multiqueue(10, '2')
 
-    @mock.patch('os.uname', return_value=('Linux', '', '4.2.0-35-generic'))
-    def test_virtio_multiqueue_in_kernel_4_max_queues(self, mock_uname):
+    def test_virtio_multiqueue_in_kernel_4_max_queues(self):
+        self.mock_uname.return_value = fakelibvirt.os_uname(
+            'Linux', '', '4.2.0-35-generic', '', '')
         self.flags(max_queues=2, group='libvirt')
         self._test_virtio_multiqueue(10, '2')
 
@@ -907,15 +921,6 @@ class LibvirtVifTestCase(test.NoDBTestCase):
 
             self._assertModel(xml, network_model.VIF_MODEL_VIRTIO, "qemu")
 
-    def test_model_xen(self):
-        self.flags(use_virtio_for_bridges=True,
-                   virt_type='xen',
-                   group='libvirt')
-
-        d = vif.LibvirtGenericVIFDriver()
-        xml = self._get_instance_xml(d, self.vif_bridge)
-        self._assertModel(xml)
-
     def test_generic_driver_none(self):
         d = vif.LibvirtGenericVIFDriver()
         self.assertRaises(exception.NovaException,
@@ -1095,7 +1100,7 @@ class LibvirtVifTestCase(test.NoDBTestCase):
             self, mock_create_tap_dev, mock_set_mtu, mock_device_exists):
 
         self.flags(use_virtio_for_bridges=True,
-                   virt_type='xen',
+                   virt_type='lxc',
                    group='libvirt')
 
         d1 = vif.LibvirtGenericVIFDriver()
@@ -1215,9 +1220,9 @@ class LibvirtVifTestCase(test.NoDBTestCase):
                           self._get_instance_xml,
                           d,
                           self.vif_macvtap_exception)
-        self.assertIn('macvtap_source', six.text_type(e))
-        self.assertIn('macvtap_mode', six.text_type(e))
-        self.assertIn('physical_interface', six.text_type(e))
+        self.assertIn('macvtap_source', str(e))
+        self.assertIn('macvtap_mode', str(e))
+        self.assertIn('physical_interface', str(e))
 
     @mock.patch('nova.virt.libvirt.vif.ensure_vlan')
     def test_macvtap_plug_vlan(self, ensure_vlan_mock):

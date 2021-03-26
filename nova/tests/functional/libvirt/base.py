@@ -18,10 +18,8 @@ import io
 
 import fixtures
 import mock
-from oslo_utils import units
 
 from nova import conf
-from nova.objects import fields as obj_fields
 from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional import integrated_helpers
 from nova.tests.unit.virt.libvirt import fake_imagebackend
@@ -44,17 +42,7 @@ class ServersTestBase(integrated_helpers._IntegratedTestBase):
 
         super(ServersTestBase, self).setUp()
 
-        # Replace libvirt with fakelibvirt
         self.useFixture(fake_imagebackend.ImageBackendFixture())
-        self.useFixture(fixtures.MonkeyPatch(
-            'nova.virt.libvirt.driver.libvirt',
-            fakelibvirt))
-        self.useFixture(fixtures.MonkeyPatch(
-            'nova.virt.libvirt.host.libvirt',
-            fakelibvirt))
-        self.useFixture(fixtures.MonkeyPatch(
-            'nova.virt.libvirt.guest.libvirt',
-            fakelibvirt))
         self.useFixture(fakelibvirt.FakeLibvirtFixture())
 
         self.useFixture(fixtures.MockPatch(
@@ -82,13 +70,6 @@ class ServersTestBase(integrated_helpers._IntegratedTestBase):
         self.mock_conn = _p.start()
         self.addCleanup(_p.stop)
 
-        # Mock the 'get_arch' function as we may need to provide different host
-        # architectures during some tests. We default to x86_64
-        _a = mock.patch('nova.virt.libvirt.utils.get_arch')
-        self.mock_arch = _a.start()
-        self.mock_arch.return_value = obj_fields.Architecture.X86_64
-        self.addCleanup(_a.stop)
-
     def _setup_compute_service(self):
         # NOTE(stephenfin): We don't start the compute service here as we wish
         # to configure the host capabilities first. We instead start the
@@ -99,20 +80,17 @@ class ServersTestBase(integrated_helpers._IntegratedTestBase):
         enabled_filters = CONF.filter_scheduler.enabled_filters
         enabled_filters += self.ADDITIONAL_FILTERS
 
-        self.flags(driver='filter_scheduler', group='scheduler')
         self.flags(enabled_filters=enabled_filters, group='filter_scheduler')
 
         return self.start_service('scheduler')
 
     def _get_connection(
-        self, host_info=None, pci_info=None, mdev_info=None,
+        self, host_info=None, pci_info=None, mdev_info=None, vdpa_info=None,
         libvirt_version=None, qemu_version=None, hostname=None,
     ):
         if not host_info:
             host_info = fakelibvirt.HostInfo(
-                cpu_nodes=2, cpu_sockets=1, cpu_cores=2, cpu_threads=2,
-                kB_mem=(16 * units.Gi) // units.Ki,
-            )
+                cpu_nodes=2, cpu_sockets=1, cpu_cores=2, cpu_threads=2)
 
         # sanity check
         self.assertGreater(16, host_info.cpus,
@@ -129,12 +107,14 @@ class ServersTestBase(integrated_helpers._IntegratedTestBase):
             host_info=host_info,
             pci_info=pci_info,
             mdev_info=mdev_info,
+            vdpa_info=vdpa_info,
             hostname=hostname)
         return fake_connection
 
     def start_compute(
         self, hostname='compute1', host_info=None, pci_info=None,
-        mdev_info=None, libvirt_version=None, qemu_version=None,
+        mdev_info=None, vdpa_info=None, libvirt_version=None,
+        qemu_version=None,
     ):
         """Start a compute service.
 
@@ -151,8 +131,8 @@ class ServersTestBase(integrated_helpers._IntegratedTestBase):
 
         def _start_compute(hostname, host_info):
             fake_connection = self._get_connection(
-                host_info, pci_info, mdev_info, libvirt_version, qemu_version,
-                hostname,
+                host_info, pci_info, mdev_info, vdpa_info, libvirt_version,
+                qemu_version, hostname,
             )
             # This is fun. Firstly we need to do a global'ish mock so we can
             # actually start the service.
@@ -321,8 +301,8 @@ class LibvirtNeutronFixture(nova_fixtures.NeutronFixture):
                 'subnet_id': subnet_4['id']
             }
         ],
-        'binding:vif_type': 'hw_veb',
         'binding:vif_details': {'vlan': 42},
+        'binding:vif_type': 'hw_veb',
         'binding:vnic_type': 'direct',
     }
 

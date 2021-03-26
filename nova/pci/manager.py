@@ -51,25 +51,28 @@ class PciDevTracker(object):
     are saved.
     """
 
-    def __init__(self, context, node_id=None):
+    def __init__(self, context, compute_node):
         """Create a pci device tracker.
 
-        If a node_id is passed in, it will fetch pci devices information
-        from database, otherwise, it will create an empty devices list
-        and the resource tracker will update the node_id information later.
+        :param context: The request context.
+        :param compute_node: The object.ComputeNode whose PCI devices we're
+                             tracking.
         """
 
         super(PciDevTracker, self).__init__()
         self.stale = {}
-        self.node_id = node_id
+        self.node_id = compute_node.id
         self.dev_filter = whitelist.Whitelist(CONF.pci.passthrough_whitelist)
-        self.stats = stats.PciDeviceStats(dev_filter=self.dev_filter)
+        numa_topology = compute_node.numa_topology
+        if numa_topology:
+            # For legacy reasons, the NUMATopology is stored as a JSON blob.
+            # Deserialize it into a real object.
+            numa_topology = objects.NUMATopology.obj_from_db_obj(numa_topology)
+        self.stats = stats.PciDeviceStats(
+            numa_topology, dev_filter=self.dev_filter)
         self._context = context
-        if node_id:
-            self.pci_devs = objects.PciDeviceList.get_by_compute_node(
-                    context, node_id)
-        else:
-            self.pci_devs = objects.PciDeviceList(objects=[])
+        self.pci_devs = objects.PciDeviceList.get_by_compute_node(
+            context, self.node_id)
         self._build_device_tree(self.pci_devs)
         self._initial_instance_usage()
 
@@ -117,8 +120,42 @@ class PciDevTracker(object):
 
         devices = []
         for dev in jsonutils.loads(devices_json):
-            if self.dev_filter.device_assignable(dev):
-                devices.append(dev)
+            try:
+                if self.dev_filter.device_assignable(dev):
+                    devices.append(dev)
+            except exception.PciConfigInvalidWhitelist as e:
+                # The raised exception is misleading as the problem is not with
+                # the whitelist config but with the host PCI device reported by
+                # libvirt. The code that matches the host PCI device to the
+                # withelist spec reuses the WhitelistPciAddress object to parse
+                # the host PCI device address. That parsing can fail if the
+                # PCI address has a 32 bit domain. But this should not prevent
+                # processing the rest of the devices. So we simply skip this
+                # device and continue.
+                # Please note that this except block does not ignore the
+                # invalid whitelist configuration. The whitelist config has
+                # already been parsed or rejected in case it was invalid. At
+                # this point the self.dev_filter representes the parsed and
+                # validated whitelist config.
+                LOG.debug(
+                    'Skipping PCI device %s reported by the hypervisor: %s',
+                    {k: v for k, v in dev.items()
+                     if k in ['address', 'parent_addr']},
+                    # NOTE(gibi): this is ugly but the device_assignable() call
+                    # uses the PhysicalPciAddress class to parse the PCI
+                    # addresses and that class reuses the code from
+                    # PciAddressSpec that was originally designed to parse
+                    # whitelist spec. Hence the raised exception talks about
+                    # whitelist config. This is misleading as in our case the
+                    # PCI address that we failed to parse came from the
+                    # hypervisor.
+                    # TODO(gibi): refactor the false abstraction to make the
+                    # code reuse clean from the false assumption that we only
+                    # parse whitelist config with
+                    # devspec.PciAddressSpec._set_pci_dev_info()
+                    str(e).replace(
+                        'Invalid PCI devices Whitelist config:', 'The'))
+
         self._set_hvdevs(devices)
 
     @staticmethod
@@ -152,7 +189,9 @@ class PciDevTracker(object):
             if dev.dev_type == fields.PciDeviceType.SRIOV_PF:
                 dev.child_devices = []
                 parents[dev.address] = dev
-            elif dev.dev_type == fields.PciDeviceType.SRIOV_VF:
+            elif dev.dev_type in (
+                fields.PciDeviceType.SRIOV_VF, fields.PciDeviceType.VDPA
+            ):
                 dev.parent_device = parents.get(dev.parent_addr)
                 if dev.parent_device:
                     parents[dev.parent_addr].child_devices.append(dev)
@@ -364,14 +403,13 @@ class PciDevTracker(object):
         if sign == 1:
             self.allocate_instance(instance)
 
-    def clean_usage(self, instances, migrations, orphans):
+    def clean_usage(self, instances, migrations):
         """Remove all usages for instances not passed in the parameter.
 
         The caller should hold the COMPUTE_RESOURCE_SEMAPHORE lock
         """
         existed = set(inst['uuid'] for inst in instances)
         existed |= set(mig['instance_uuid'] for mig in migrations)
-        existed |= set(inst['uuid'] for inst in orphans)
 
         # need to copy keys, because the dict is modified in the loop body
         for uuid in list(self.claims):

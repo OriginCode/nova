@@ -14,7 +14,6 @@
 
 import collections
 import datetime
-import six
 
 import mock
 import netaddr
@@ -1210,7 +1209,7 @@ class _TestInstanceObject(object):
         inst.host = None
         ex = self.assertRaises(exception.ObjectActionError,
                                inst.destroy, hard_delete=True)
-        self.assertIn('host changed', six.text_type(ex))
+        self.assertIn('host changed', str(ex))
 
     def test_name_does_not_trigger_lazy_loads(self):
         values = {'user_id': self.context.user_id,
@@ -1630,27 +1629,6 @@ class TestInstanceObject(test_objects._LocalTest,
     def test_save_objectfield_reraises_if_not_instance_related(self):
         self._test_save_objectfield_fk_constraint_fails(
                 'other_foreign_key', db_exc.DBReferenceError)
-
-    def test_remove_pci_device_and_request(self):
-        instance = fake_instance.fake_instance_obj(self.context)
-        pci_device = objects.PciDevice(request_id=uuids.req)
-        pci_request = objects.InstancePCIRequest(request_id=uuids.req)
-        other_device = objects.PciDevice(request_id=uuids.other_req)
-        other_request = objects.InstancePCIRequest(request_id=uuids.other_req)
-        instance.add_pci_device_and_request(pci_device, pci_request)
-        instance.add_pci_device_and_request(other_device, other_request)
-
-        self.assertIn(pci_device, instance.pci_devices)
-        self.assertIn(pci_request, instance.pci_requests.requests)
-        self.assertIn(other_device, instance.pci_devices)
-        self.assertIn(other_request, instance.pci_requests.requests)
-
-        instance.remove_pci_device_and_request(pci_device)
-
-        self.assertNotIn(pci_device, instance.pci_devices)
-        self.assertNotIn(pci_request, instance.pci_requests.requests)
-        self.assertIn(other_device, instance.pci_devices)
-        self.assertIn(other_request, instance.pci_requests.requests)
 
 
 class TestRemoteInstanceObject(test_objects._RemoteTest,

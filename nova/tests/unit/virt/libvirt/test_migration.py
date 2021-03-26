@@ -20,7 +20,6 @@ from lxml import etree
 import mock
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import units
-import six
 
 from nova.compute import power_state
 from nova import exception
@@ -656,6 +655,7 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
     <source type="file"/>
     <access mode="shared"/>
     <allocation mode="immediate"/>
+    <discard />
   </memoryBacking>
 </domain>"""
         doc = etree.fromstring(xml)
@@ -679,84 +679,13 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
     <source type="file"/>
     <access mode="shared"/>
     <allocation mode="immediate"/>
+    <discard />
   </memoryBacking>
 </domain>""")
 
     def test_update_memory_backing_xml_keep(self):
         data = objects.LibvirtLiveMigrateData(
             dst_wants_file_backed_memory=True)
-
-        xml = """<domain>
-  <memoryBacking>
-    <source type="file"/>
-    <access mode="shared"/>
-    <allocation mode="immediate"/>
-  </memoryBacking>
-</domain>"""
-        doc = etree.fromstring(xml)
-        res = etree.tostring(migration._update_memory_backing_xml(doc, data),
-                             encoding='unicode')
-
-        self.assertXmlEqual(res, """<domain>
-  <memoryBacking>
-    <source type="file"/>
-    <access mode="shared"/>
-    <allocation mode="immediate"/>
-  </memoryBacking>
-</domain>""")
-
-    def test_update_memory_backing_discard_add(self):
-        data = objects.LibvirtLiveMigrateData(
-            dst_wants_file_backed_memory=True, file_backed_memory_discard=True)
-
-        xml = """<domain>
-  <memoryBacking>
-    <source type="file"/>
-    <access mode="shared"/>
-    <allocation mode="immediate"/>
-  </memoryBacking>
-</domain>"""
-        doc = etree.fromstring(xml)
-        res = etree.tostring(migration._update_memory_backing_xml(doc, data),
-                             encoding='unicode')
-
-        self.assertXmlEqual(res, """<domain>
-  <memoryBacking>
-    <source type="file"/>
-    <access mode="shared"/>
-    <allocation mode="immediate"/>
-    <discard />
-  </memoryBacking>
-</domain>""")
-
-    def test_update_memory_backing_discard_remove(self):
-        data = objects.LibvirtLiveMigrateData(
-            dst_wants_file_backed_memory=True,
-            file_backed_memory_discard=False)
-
-        xml = """<domain>
-  <memoryBacking>
-    <source type="file"/>
-    <access mode="shared"/>
-    <allocation mode="immediate"/>
-    <discard />
-  </memoryBacking>
-</domain>"""
-        doc = etree.fromstring(xml)
-        res = etree.tostring(migration._update_memory_backing_xml(doc, data),
-                             encoding='unicode')
-
-        self.assertXmlEqual(res, """<domain>
-  <memoryBacking>
-    <source type="file"/>
-    <access mode="shared"/>
-    <allocation mode="immediate"/>
-  </memoryBacking>
-</domain>""")
-
-    def test_update_memory_backing_discard_keep(self):
-        data = objects.LibvirtLiveMigrateData(
-            dst_wants_file_backed_memory=True, file_backed_memory_discard=True)
 
         xml = """<domain>
   <memoryBacking>
@@ -966,8 +895,7 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
         ex = self.assertRaises(exception.NovaException,
                                migration._update_vif_xml,
                                doc, data, get_vif_config)
-        self.assertIn('Unable to find MAC address in interface XML',
-                      six.text_type(ex))
+        self.assertIn('Unable to find MAC address in interface XML', str(ex))
 
     def test_update_vif_xml_no_matching_vif(self):
         """Tests that the vif in the migrate data is not found in the existing
@@ -991,7 +919,7 @@ class UtilityMigrationTestCase(test.NoDBTestCase):
         doc = etree.fromstring(original_xml)
         ex = self.assertRaises(KeyError, migration._update_vif_xml,
                                doc, data, get_vif_config)
-        self.assertIn("CA:FE:DE:AD:BE:EF", six.text_type(ex))
+        self.assertIn("CA:FE:DE:AD:BE:EF", str(ex))
 
 
 class MigrationMonitorTestCase(test.NoDBTestCase):

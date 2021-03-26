@@ -23,7 +23,6 @@ SHOULD include dedicated exception logging.
 """
 
 from oslo_log import log as logging
-import six
 
 import webob.exc
 from webob import util as woutil
@@ -82,7 +81,7 @@ class NovaException(Exception):
             if not message:
                 message = self.msg_fmt % kwargs
             else:
-                message = six.text_type(message)
+                message = str(message)
         except Exception:
             # NOTE(melwitt): This is done in a separate method so it can be
             # monkey-patched during testing to make it a hard failure.
@@ -156,9 +155,8 @@ class Forbidden(NovaException):
     code = 403
 
 
-class ForbiddenWithAccelerators(NovaException):
+class ForbiddenWithAccelerators(Forbidden):
     msg_fmt = _("Forbidden with instances that have accelerators.")
-    code = 403
 
 
 class AdminRequired(Forbidden):
@@ -539,6 +537,14 @@ class OperationNotSupportedForVTPM(NovaException):
     code = 409
 
 
+class OperationNotSupportedForVDPAInterface(NovaException):
+    msg_fmt = _(
+        "Operation '%(operation)s' not supported for instance with "
+        "vDPA ports ((instance_uuid)s)."
+    )
+    code = 409
+
+
 class InvalidHypervisorType(Invalid):
     msg_fmt = _("The supplied hypervisor type of is invalid.")
 
@@ -557,6 +563,14 @@ class ServiceTooOld(Invalid):
     msg_fmt = _("This service is older (v%(thisver)i) than the minimum "
                 "(v%(minver)i) version of the rest of the deployment. "
                 "Unable to continue.")
+
+
+class TooOldComputeService(Invalid):
+    msg_fmt = _("Current Nova version does not support computes older than "
+                "%(oldest_supported_version)s but the minimum compute service "
+                "level in your %(scope)s is %(min_service_level)d and the "
+                "oldest supported service level is "
+                "%(oldest_supported_service)d.")
 
 
 class DestinationDiskExists(Invalid):
@@ -633,15 +647,6 @@ class NotFound(NovaException):
     code = 404
 
 
-class AgentBuildNotFound(NotFound):
-    msg_fmt = _("No agent-build associated with id %(id)s.")
-
-
-class AgentBuildExists(NovaException):
-    msg_fmt = _("Agent-build with hypervisor %(hypervisor)s os %(os)s "
-                "architecture %(architecture)s exists.")
-
-
 class VolumeAttachmentNotFound(NotFound):
     msg_fmt = _("Volume attachment %(attachment_id)s could not be found.")
 
@@ -694,6 +699,11 @@ class DiskNotFound(NotFound):
 
 class VolumeDriverNotFound(NotFound):
     msg_fmt = _("Could not find a handler for %(driver_type)s volume.")
+
+
+class VolumeDriverNotSupported(VolumeDriverNotFound):
+    msg_fmt = _("The %(volume_driver)s volume driver is not supported on this "
+                "platform.")
 
 
 class InvalidImageRef(Invalid):
@@ -1193,6 +1203,11 @@ class RequestFilterFailed(NovaException):
     msg_fmt = _("Scheduling failed: %(reason)s")
 
 
+class InvalidRoutedNetworkConfiguration(NovaException):
+    msg_fmt = _("Neutron routed networks configuration is invalid: "
+                "%(reason)s.")
+
+
 class MaxRetriesExceeded(NoValidHost):
     msg_fmt = _("Exceeded maximum number of retries. %(reason)s")
 
@@ -1241,12 +1256,6 @@ class SecurityGroupLimitExceeded(QuotaError):
 
 class PortLimitExceeded(QuotaError):
     msg_fmt = _("Maximum number of ports exceeded")
-
-
-# TODO(stephenfin): Remove this XenAPI relic
-class AggregateError(NovaException):
-    msg_fmt = _("Aggregate %(aggregate_id)s: action '%(action)s' "
-                "caused an error: %(reason)s.")
 
 
 class AggregateNotFound(NotFound):
@@ -1345,6 +1354,11 @@ class InterfaceAttachFailedNoNetwork(Invalid):
 class InterfaceAttachPciClaimFailed(Invalid):
     msg_fmt = _("Failed to claim PCI device for %(instance_uuid)s during "
                 "interface attach")
+
+
+class InterfaceAttachResourceAllocationFailed(Invalid):
+    msg_fmt = _("Failed to allocate additional resources to %(instance_uuid)s "
+                "during interface attach")
 
 
 class InterfaceDetachFailed(Invalid):
@@ -1541,11 +1555,6 @@ class InternalError(NovaException):
     Consider subclassing this to provide more specific exceptions.
     """
     msg_fmt = "%(err)s"
-
-
-class PciDevicePrepareFailed(NovaException):
-    msg_fmt = _("Failed to prepare PCI device %(id)s for instance "
-                "%(instance_uuid)s: %(reason)s")
 
 
 class PciDeviceDetachFailed(NovaException):
@@ -1750,6 +1759,15 @@ class InvalidMachineType(Invalid):
                 "%(image_name)s (%(image_id)s): %(reason)s")
 
 
+class InvalidMachineTypeUpdate(Invalid):
+    msg_fmt = _("Cannot update machine type %(existing_machine_type)s to "
+                "%(machine_type)s.")
+
+
+class UnsupportedMachineType(Invalid):
+    msg_fmt = _("Machine type %(machine_type)s is not supported.")
+
+
 class InvalidVirtualMachineMode(Invalid):
     msg_fmt = _("Virtual machine mode '%(vmmode)s' is not recognised")
 
@@ -1879,6 +1897,10 @@ class RequestSpecNotFound(NotFound):
 
 class UEFINotSupported(Invalid):
     msg_fmt = _("UEFI is not supported")
+
+
+class SecureBootNotSupported(Invalid):
+    msg_fmt = _("Secure Boot is not supported by host")
 
 
 class TriggerCrashDumpNotSupported(Invalid):
@@ -2014,11 +2036,6 @@ class InventoryInUse(InvalidInventory):
 class UsagesRetrievalFailed(NovaException):
     msg_fmt = _("Failed to retrieve usages for project '%(project_id)s' and "
                 "user '%(user_id)s'.")
-
-
-class UnsupportedPointerModelRequested(Invalid):
-    msg_fmt = _("Pointer model '%(model)s' requested is not supported by "
-                "host.")
 
 
 class NotSupportedWithOption(Invalid):
@@ -2279,6 +2296,10 @@ class AssignedResourceNotFound(NovaException):
 class PMEMNamespaceConfigInvalid(NovaException):
     msg_fmt = _("The pmem_namespaces configuration is invalid: %(reason)s, "
                 "please check your conf file. ")
+
+
+class GetPMEMNamespacesFailed(NovaException):
+    msg_fmt = _("Get PMEM namespaces on host failed: %(reason)s.")
 
 
 class VPMEMCleanupFailed(NovaException):

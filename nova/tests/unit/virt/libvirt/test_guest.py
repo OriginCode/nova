@@ -19,7 +19,6 @@ import sys
 import mock
 from oslo_service import fixture as service_fixture
 from oslo_utils import encodeutils
-import six
 
 from nova import context
 from nova import exception
@@ -80,7 +79,7 @@ class GuestTestCase(test.NoDBTestCase):
         self.domain.createWithFlags.assert_called_once_with(
             fakelibvirt.VIR_DOMAIN_START_PAUSED)
 
-    @mock.patch.object(libvirt_guest.LOG, 'error')
+    @mock.patch.object(libvirt_guest.LOG, 'exception')
     @mock.patch.object(encodeutils, 'safe_decode')
     def test_launch_exception(self, mock_safe_decode, mock_log):
         fake_xml = '<test>this is a test</test>'
@@ -280,7 +279,7 @@ class GuestTestCase(test.NoDBTestCase):
         ex = self.assertRaises(
             exception.DeviceNotFound, self.guest.detach_device_with_retry,
             get_config, "/dev/vdb", live=True)
-        self.assertIn("/dev/vdb", six.text_type(ex))
+        self.assertIn("/dev/vdb", str(ex))
 
     def test_detach_device_with_retry_device_not_found_alt_name(self):
         """Tests to make sure we use the alternative name in errors."""
@@ -290,7 +289,7 @@ class GuestTestCase(test.NoDBTestCase):
             exception.DeviceNotFound, self.guest.detach_device_with_retry,
             get_config, mock.sentinel.device, live=True,
             alternative_device_name='foo')
-        self.assertIn('foo', six.text_type(ex))
+        self.assertIn('foo', str(ex))
 
     @mock.patch.object(libvirt_guest.Guest, "detach_device")
     def _test_detach_device_with_retry_second_detach_failure(
@@ -312,8 +311,7 @@ class GuestTestCase(test.NoDBTestCase):
         mock_detach.side_effect = [None, fake_exc]
         retry_detach = self.guest.detach_device_with_retry(
             get_config, fake_device, live=True,
-            inc_sleep_time=.01, max_retry_count=3,
-            supports_device_missing_error_code=supports_device_missing)
+            inc_sleep_time=.01, max_retry_count=3)
         # Some time later, we can do the wait/retry to ensure detach
         self.assertRaises(exception.DeviceNotFound, retry_detach)
         # Check that the save_and_reraise_exception context manager didn't log
@@ -321,20 +319,6 @@ class GuestTestCase(test.NoDBTestCase):
         # raised.
         self.assertNotIn('Original exception being dropped',
                          self.stdlog.logger.output)
-
-    # TODO(lyarwood): Remove this test once MIN_LIBVIRT_VERSION is >= 4.1.0
-    def test_detach_device_with_retry_second_detach_operation_failed(self):
-        self._test_detach_device_with_retry_second_detach_failure(
-            error_code=fakelibvirt.VIR_ERR_OPERATION_FAILED,
-            error_message="operation failed: disk vdb not found",
-            supports_device_missing=False)
-
-    # TODO(lyarwood): Remove this test once MIN_LIBVIRT_VERSION is >= 4.1.0
-    def test_detach_device_with_retry_second_detach_internal_error(self):
-        self._test_detach_device_with_retry_second_detach_failure(
-            error_code=fakelibvirt.VIR_ERR_INTERNAL_ERROR,
-            error_message="operation failed: disk vdb not found",
-            supports_device_missing=False)
 
     def test_detach_device_with_retry_second_detach_device_missing(self):
         self._test_detach_device_with_retry_second_detach_failure(
@@ -375,8 +359,7 @@ class GuestTestCase(test.NoDBTestCase):
         # succeeds afterward
         self.domain.detachDeviceFlags.side_effect = [fake_exc, None]
         retry_detach = self.guest.detach_device_with_retry(get_config,
-            fake_device, live=True, inc_sleep_time=.01, max_retry_count=3,
-            supports_device_missing_error_code=supports_device_missing)
+            fake_device, live=True, inc_sleep_time=.01, max_retry_count=3)
         # We should have tried to detach from the persistent domain
         self.domain.detachDeviceFlags.assert_called_once_with(
             "</xml>", flags=(fakelibvirt.VIR_DOMAIN_AFFECT_CONFIG |
@@ -387,27 +370,6 @@ class GuestTestCase(test.NoDBTestCase):
         # We should have tried to detach from the live domain
         self.domain.detachDeviceFlags.assert_called_once_with(
             "</xml>", flags=fakelibvirt.VIR_DOMAIN_AFFECT_LIVE)
-
-    # TODO(lyarwood): Remove this test once MIN_LIBVIRT_VERSION is >= 4.1.0
-    def test_detach_device_with_retry_first_detach_operation_failed(self):
-        self._test_detach_device_with_retry_first_detach_failure(
-            error_code=fakelibvirt.VIR_ERR_OPERATION_FAILED,
-            error_message="operation failed: disk vdb not found",
-            supports_device_missing=False)
-
-    # TODO(lyarwood): Remove this test once MIN_LIBVIRT_VERSION is >= 4.1.0
-    def test_detach_device_with_retry_first_detach_internal_error(self):
-        self._test_detach_device_with_retry_first_detach_failure(
-            error_code=fakelibvirt.VIR_ERR_INTERNAL_ERROR,
-            error_message="operation failed: disk vdb not found",
-            supports_device_missing=False)
-
-    # TODO(lyarwood): Remove this test once MIN_LIBVIRT_VERSION is >= 4.1.0
-    def test_detach_device_with_retry_first_detach_invalid_arg(self):
-        self._test_detach_device_with_retry_first_detach_failure(
-            error_code=fakelibvirt.VIR_ERR_INVALID_ARG,
-            error_message="invalid argument: no target device vdb",
-            supports_device_missing=False)
 
     def test_detach_device_with_retry_first_detach_device_missing(self):
         self._test_detach_device_with_retry_first_detach_failure(
@@ -578,6 +540,49 @@ class GuestTestCase(test.NoDBTestCase):
         self.assertIsNotNone(
             self.guest.get_interface_by_cfg(cfg))
         self.assertIsNone(self.guest.get_interface_by_cfg(None))
+        self.domain.XMLDesc.assert_has_calls([mock.call(0)] * 6)
+
+        # now check if the persistent config can be queried too
+        self.domain.XMLDesc.reset_mock()
+        devs = self.guest.get_all_devices(
+            devtype=None, from_persistent_config=True)
+        self.domain.XMLDesc.assert_called_once_with(
+            fakelibvirt.VIR_DOMAIN_XML_INACTIVE)
+
+    def test_get_interface_by_cfg_persistent_domain(self):
+        self.domain.XMLDesc.return_value = """<domain>
+  <devices>
+    <interface type="bridge">
+      <mac address="fa:16:3e:f9:af:ae"/>
+      <model type="virtio"/>
+      <driver name="qemu"/>
+      <source bridge="qbr84008d03-11"/>
+      <target dev="tap84008d03-11"/>
+    </interface>
+  </devices>
+</domain>"""
+        cfg = vconfig.LibvirtConfigGuestInterface()
+        cfg.parse_str("""
+            <interface type="bridge">
+              <mac address="fa:16:3e:f9:af:ae"/>
+              <model type="virtio"/>
+              <driver name="qemu"/>
+              <source bridge="qbr84008d03-11"/>
+              <target dev="tap84008d03-11"/>
+              </interface>""")
+        self.assertIsNotNone(
+            self.guest.get_interface_by_cfg(
+                cfg, from_persistent_config=True))
+        self.assertIsNone(
+            self.guest.get_interface_by_cfg(
+                vconfig.LibvirtConfigGuestInterface(),
+                from_persistent_config=True))
+        self.domain.XMLDesc.assert_has_calls(
+            [
+                mock.call(fakelibvirt.VIR_DOMAIN_XML_INACTIVE),
+                mock.call(fakelibvirt.VIR_DOMAIN_XML_INACTIVE),
+            ]
+        )
 
     def test_get_interface_by_cfg_vhostuser(self):
         self.domain.XMLDesc.return_value = """<domain>
@@ -750,6 +755,39 @@ class GuestTestCase(test.NoDBTestCase):
     def test_migrate_configure_max_downtime(self):
         self.guest.migrate_configure_max_downtime(1000)
         self.domain.migrateSetMaxDowntime.assert_called_once_with(1000)
+
+    def test_set_metadata(self):
+        meta = mock.Mock(spec=vconfig.LibvirtConfigGuestMetaNovaInstance)
+        meta.to_xml.return_value = "</xml>"
+        self.guest.set_metadata(meta)
+        self.domain.setMetadata.assert_called_once_with(
+            fakelibvirt.VIR_DOMAIN_METADATA_ELEMENT, "</xml>", "instance",
+            vconfig.NOVA_NS, flags=0)
+
+    def test_set_metadata_persistent(self):
+        meta = mock.Mock(spec=vconfig.LibvirtConfigGuestMetaNovaInstance)
+        meta.to_xml.return_value = "</xml>"
+        self.guest.set_metadata(meta, persistent=True)
+        self.domain.setMetadata.assert_called_once_with(
+            fakelibvirt.VIR_DOMAIN_METADATA_ELEMENT, "</xml>", "instance",
+            vconfig.NOVA_NS, flags=fakelibvirt.VIR_DOMAIN_AFFECT_CONFIG)
+
+    def test_set_metadata_device_live(self):
+        meta = mock.Mock(spec=vconfig.LibvirtConfigGuestMetaNovaInstance)
+        meta.to_xml.return_value = "</xml>"
+        self.guest.set_metadata(meta, live=True)
+        self.domain.setMetadata.assert_called_once_with(
+            fakelibvirt.VIR_DOMAIN_METADATA_ELEMENT, "</xml>", "instance",
+            vconfig.NOVA_NS, flags=fakelibvirt.VIR_DOMAIN_AFFECT_LIVE)
+
+    def test_set_metadata_persistent_live(self):
+        meta = mock.Mock(spec=vconfig.LibvirtConfigGuestMetaNovaInstance)
+        meta.to_xml.return_value = "</xml>"
+        self.guest.set_metadata(meta, persistent=True, live=True)
+        self.domain.setMetadata.assert_called_once_with(
+            fakelibvirt.VIR_DOMAIN_METADATA_ELEMENT, "</xml>", "instance",
+            vconfig.NOVA_NS, flags=fakelibvirt.VIR_DOMAIN_AFFECT_LIVE |
+                                   fakelibvirt.VIR_DOMAIN_AFFECT_CONFIG)
 
 
 class GuestBlockTestCase(test.NoDBTestCase):

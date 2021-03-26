@@ -18,7 +18,6 @@ import re
 from cursive import signature_utils
 from oslo_serialization import jsonutils
 from oslo_versionedobjects import fields
-import six
 
 from nova import exception
 from nova.i18n import _
@@ -98,7 +97,7 @@ class ResourceClass(fields.StringPattern):
 
     @staticmethod
     def coerce(obj, attr, value):
-        if isinstance(value, six.string_types):
+        if isinstance(value, str):
             uppered = value.upper()
             if ResourceClass._REGEX.match(uppered):
                 return uppered
@@ -178,7 +177,7 @@ class Architecture(BaseNovaEnum):
         :returns: the canonicalized host architecture
         """
 
-        return cls.canonicalize(os.uname()[4])
+        return cls.canonicalize(os.uname().machine)
 
     @classmethod
     def is_valid(cls, name):
@@ -466,6 +465,14 @@ class ImageSignatureKeyType(BaseNovaEnum):
     )
 
 
+class InputBus(BaseNovaEnum):
+
+    USB = 'usb'
+    VIRTIO = 'virtio'
+
+    ALL = (USB, VIRTIO)
+
+
 class MigrationType(BaseNovaEnum):
 
     MIGRATION = 'migration'  # cold migration
@@ -750,8 +757,12 @@ class PciDeviceType(BaseNovaEnum):
     STANDARD = "type-PCI"
     SRIOV_PF = "type-PF"
     SRIOV_VF = "type-VF"
+    # NOTE(sean-k-mooney): The DB field is Column(String(8), nullable=False)
+    # type-vdpa is 9 long...and as Jay notes above the prefix is silly so
+    # for the new vdpa value we drop the prefix to avoid a DB migration
+    VDPA = "vdpa"
 
-    ALL = (STANDARD, SRIOV_PF, SRIOV_VF)
+    ALL = (STANDARD, SRIOV_PF, SRIOV_VF, VDPA)
 
 
 class PCINUMAAffinityPolicy(BaseNovaEnum):
@@ -759,8 +770,9 @@ class PCINUMAAffinityPolicy(BaseNovaEnum):
     REQUIRED = "required"
     LEGACY = "legacy"
     PREFERRED = "preferred"
+    SOCKET = "socket"
 
-    ALL = (REQUIRED, LEGACY, PREFERRED)
+    ALL = (REQUIRED, LEGACY, PREFERRED, SOCKET)
 
 
 class DiskFormat(BaseNovaEnum):
@@ -793,7 +805,7 @@ class PointerModelType(BaseNovaEnum):
 
     USBTABLET = "usbtablet"
 
-    ALL = (USBTABLET)
+    ALL = (USBTABLET,)
 
 
 class NotificationPriority(BaseNovaEnum):
@@ -1060,7 +1072,7 @@ class NetworkModel(FieldType):
     def coerce(obj, attr, value):
         if isinstance(value, network_model.NetworkInfo):
             return value
-        elif isinstance(value, six.string_types):
+        elif isinstance(value, str):
             # Hmm, do we need this?
             return network_model.NetworkInfo.hydrate(value)
         else:
@@ -1090,7 +1102,7 @@ class NetworkVIFModel(FieldType):
     def coerce(obj, attr, value):
         if isinstance(value, network_model.VIF):
             return value
-        elif isinstance(value, six.string_types):
+        elif isinstance(value, str):
             return NetworkVIFModel.from_primitive(obj, attr, value)
         else:
             raise ValueError(_('A nova.network.model.VIF object is required '
@@ -1234,6 +1246,10 @@ class ImageSignatureHashTypeField(BaseEnumField):
 
 class ImageSignatureKeyTypeField(BaseEnumField):
     AUTO_TYPE = ImageSignatureKeyType()
+
+
+class InputBusField(BaseEnumField):
+    AUTO_TYPE = InputBus()
 
 
 class MigrationTypeField(BaseEnumField):

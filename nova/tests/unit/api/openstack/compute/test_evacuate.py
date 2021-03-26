@@ -15,7 +15,6 @@
 import fixtures
 import mock
 from oslo_utils.fixture import uuidsentinel as uuids
-import six
 import testtools
 import webob
 
@@ -116,6 +115,15 @@ class EvacuateTestV21(test.NoDBTestCase):
     def test_evacuate__with_vtpm(self, mock_evacuate):
         mock_evacuate.side_effect = exception.OperationNotSupportedForVTPM(
             instance_uuid=uuids.instance, operation='foo')
+        self._check_evacuate_failure(
+            webob.exc.HTTPConflict,
+            {'host': 'foo', 'onSharedStorage': 'False', 'adminPass': 'bar'})
+
+    @mock.patch('nova.compute.api.API.evacuate')
+    def test_evacuate__with_vdpa_interface(self, mock_evacuate):
+        mock_evacuate.side_effect = \
+            exception.OperationNotSupportedForVDPAInterface(
+                instance_uuid=uuids.instance, operation='foo')
         self._check_evacuate_failure(
             webob.exc.HTTPConflict,
             {'host': 'foo', 'onSharedStorage': 'False', 'adminPass': 'bar'})
@@ -390,7 +398,7 @@ class EvacuateTestV268(EvacuateTestV229):
         ex = self._check_evacuate_failure(self.validation_error,
                                           {'host': 'my-host',
                                            'force': 'true'})
-        self.assertIn('force', six.text_type(ex))
+        self.assertIn('force', str(ex))
 
     def test_forced_evacuate_with_no_host_provided(self):
         # not applicable for v2.68, which removed the 'force' parameter

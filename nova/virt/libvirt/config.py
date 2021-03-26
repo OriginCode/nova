@@ -29,7 +29,6 @@ from collections import OrderedDict
 from lxml import etree
 from oslo_utils import strutils
 from oslo_utils import units
-import six
 
 from nova import exception
 from nova.i18n import _
@@ -38,7 +37,7 @@ from nova.virt import hardware
 
 
 # Namespace to use for Nova specific metadata items in XML
-NOVA_NS = "http://openstack.org/xmlns/libvirt/nova/1.0"
+NOVA_NS = "http://openstack.org/xmlns/libvirt/nova/1.1"
 
 
 class LibvirtConfigObject(object):
@@ -60,8 +59,12 @@ class LibvirtConfigObject(object):
 
     def _text_node(self, node_name, value, **kwargs):
         child = self._new_node(node_name, **kwargs)
-        child.text = six.text_type(value)
+        if value is not None:
+            child.text = str(value)
         return child
+
+    def get_yes_no_str(self, value):
+        return 'yes' if value else 'no'
 
     def format_dom(self):
         return self._new_node(self.root_name)
@@ -80,6 +83,9 @@ class LibvirtConfigObject(object):
         xml_str = etree.tostring(root, encoding='unicode',
                                  pretty_print=pretty_print)
         return xml_str
+
+    def __repr__(self):
+        return self.to_xml(pretty_print=False)
 
 
 class LibvirtConfigCaps(LibvirtConfigObject):
@@ -123,6 +129,7 @@ class LibvirtConfigDomainCaps(LibvirtConfigObject):
         self._machine = None
         self._alias = None
         self._devices = None
+        self._os = None
 
     def parse_dom(self, xmldoc):
         super(LibvirtConfigDomainCaps, self).parse_dom(xmldoc)
@@ -138,6 +145,10 @@ class LibvirtConfigDomainCaps(LibvirtConfigObject):
                 devices = LibvirtConfigDomainCapsDevices()
                 devices.parse_dom(c)
                 self._devices = devices
+            elif c.tag == "os":
+                os = LibvirtConfigDomainCapsOS()
+                os.parse_dom(c)
+                self._os = os
 
     @property
     def features(self):
@@ -166,6 +177,10 @@ class LibvirtConfigDomainCaps(LibvirtConfigObject):
         if self._devices is None:
             return []
         return self._devices
+
+    @property
+    def os(self):
+        return self._os
 
 
 class LibvirtConfigDomainCapsVideoModels(LibvirtConfigObject):
@@ -286,6 +301,50 @@ class LibvirtConfigDomainCapsFeatureSev(LibvirtConfigObject):
                 self.reduced_phys_bits = int(c.text)
             elif c.tag == 'cbitpos':
                 self.cbitpos = int(c.text)
+
+
+class LibvirtConfigDomainCapsOS(LibvirtConfigObject):
+
+    def __init__(self, **kwargs):
+        super().__init__(root_name='os', **kwargs)
+
+        self.supported = False
+        self.loader_supported = None
+        self.uefi_autoconfig_supported = None
+        self.loader_paths = []
+        self.uefi_supported = None
+        self.secure_boot_supported = None
+
+    def parse_dom(self, xmldoc):
+        super().parse_dom(xmldoc)
+
+        self.supported = xmldoc.get('supported')
+
+        for c in xmldoc:
+            self.loader_supported = c.get('supported')
+
+            if c.tag == 'enum':
+                if c.get('name') == 'firmware':
+                    # theoretically we can also do autoconfiguration of BIOS
+                    # but it's unlikely that anything supports this yet
+                    self.uefi_autoconfig_supported = 'efi' in [
+                        child.text for child in c if child.tag == 'value'
+                    ]
+            elif c.tag == 'loader':
+                for c2 in c:
+                    if c2.tag == 'value':
+                        self.loader_paths.append(c2.text)
+                    elif c2.tag == 'enum':
+                        if c2.get('name') == 'type':
+                            self.uefi_supported = 'pflash' in [
+                                val.text for val in c2 if val.tag == 'value'
+                            ]
+                        elif c2.get('name') == 'secure':
+                            # we might want to ensure 'no' is also supported,
+                            # but a platform that only supports SB sounds odd
+                            self.secure_boot_supported = 'yes' in [
+                                val.text for val in c2 if val.tag == 'value'
+                            ]
 
 
 class LibvirtConfigCapsNUMATopology(LibvirtConfigObject):
@@ -630,10 +689,7 @@ class LibvirtConfigGuestTimer(LibvirtConfigObject):
         if self.tickpolicy is not None:
             tm.set("tickpolicy", self.tickpolicy)
         if self.present is not None:
-            if self.present:
-                tm.set("present", "yes")
-            else:
-                tm.set("present", "no")
+            tm.set("present", self.get_yes_no_str(self.present))
 
         return tm
 
@@ -767,10 +823,10 @@ class LibvirtConfigCPU(LibvirtConfigObject):
 
 class LibvirtConfigGuestCPUFeature(LibvirtConfigCPUFeature):
 
-    def __init__(self, name=None, **kwargs):
+    def __init__(self, name=None, policy="require", **kwargs):
         super(LibvirtConfigGuestCPUFeature, self).__init__(name, **kwargs)
 
-        self.policy = "require"
+        self.policy = policy
 
     def format_dom(self):
         ft = super(LibvirtConfigGuestCPUFeature, self).format_dom()
@@ -1038,6 +1094,7 @@ class LibvirtConfigGuestDisk(LibvirtConfigGuestDevice):
         self.boot_order = None
         self.mirror = None
         self.encryption = None
+        self.alias = None
 
     def _format_iotune(self, dev):
         iotune = etree.Element("iotune")
@@ -1247,6 +1304,8 @@ class LibvirtConfigGuestDisk(LibvirtConfigGuestDevice):
                 e = LibvirtConfigGuestDiskEncryption()
                 e.parse_dom(c)
                 self.encryption = e
+            elif c.tag == 'alias':
+                self.alias = c.get('name')
 
 
 class LibvirtConfigGuestDiskBackingStore(LibvirtConfigObject):
@@ -1689,6 +1748,7 @@ class LibvirtConfigGuestInterface(LibvirtConfigGuestDevice):
         self.vlan = None
         self.device_addr = None
         self.mtu = None
+        self.alias = None
 
     def __eq__(self, other):
         if not isinstance(other, LibvirtConfigGuestInterface):
@@ -1758,6 +1818,8 @@ class LibvirtConfigGuestInterface(LibvirtConfigGuestDevice):
         elif self.net_type == "direct":
             dev.append(etree.Element("source", dev=self.source_dev,
                                      mode=self.source_mode))
+        elif self.net_type == "vdpa":
+            dev.append(etree.Element("source", dev=self.source_dev))
         elif self.net_type == "hostdev":
             source_elem = etree.Element("source")
             domain, bus, slot, func = \
@@ -1915,6 +1977,8 @@ class LibvirtConfigGuestInterface(LibvirtConfigGuestDevice):
                 self.device_addr = obj
             elif c.tag == 'mtu':
                 self.mtu = int(c.get('size'))
+            elif c.tag == 'alias':
+                self.alias = c.get('name')
 
     def add_filter_param(self, key, value):
         self.filterparams.append({'key': key, 'value': value})
@@ -1959,10 +2023,7 @@ class LibvirtConfigGuestGraphics(LibvirtConfigGuestDevice):
         dev = super(LibvirtConfigGuestGraphics, self).format_dom()
 
         dev.set("type", self.type)
-        if self.autoport:
-            dev.set("autoport", "yes")
-        else:
-            dev.set("autoport", "no")
+        dev.set("autoport", self.get_yes_no_str(self.autoport))
         if self.keymap:
             dev.set("keymap", self.keymap)
         if self.listen:
@@ -2609,13 +2670,6 @@ class LibvirtConfigGuestFeatureAPIC(LibvirtConfigGuestFeature):
                                                             **kwargs)
 
 
-class LibvirtConfigGuestFeaturePAE(LibvirtConfigGuestFeature):
-
-    def __init__(self, **kwargs):
-        super(LibvirtConfigGuestFeaturePAE, self).__init__("pae",
-                                                           **kwargs)
-
-
 class LibvirtConfigGuestFeatureKvmHidden(LibvirtConfigGuestFeature):
 
     def __init__(self, **kwargs):
@@ -2733,7 +2787,11 @@ class LibvirtConfigGuest(LibvirtConfigObject):
         self.sysinfo = None
         self.os_type = None
         self.os_loader = None
+        self.os_firmware = None
         self.os_loader_type = None
+        self.os_loader_secure = None
+        self.os_nvram = None
+        self.os_nvram_template = None
         self.os_kernel = None
         self.os_initrd = None
         self.os_cmdline = None
@@ -2779,21 +2837,40 @@ class LibvirtConfigGuest(LibvirtConfigObject):
 
     def _format_os(self, root):
         os = etree.Element("os")
+
+        if self.os_firmware is not None:
+            os.set("firmware", self.os_firmware)
+
         type_node = self._text_node("type", self.os_type)
         if self.os_mach_type is not None:
             type_node.set("machine", self.os_mach_type)
         os.append(type_node)
+
         if self.os_kernel is not None:
             os.append(self._text_node("kernel", self.os_kernel))
-        if self.os_loader is not None:
-            # Generate XML nodes for UEFI boot.
-            if self.os_loader_type == "pflash":
-                loader = self._text_node("loader", self.os_loader)
-                loader.set("type", "pflash")
+
+        if (
+            self.os_loader is not None or
+            self.os_loader_type is not None or
+            self.os_loader_secure is not None
+        ):
+            loader = self._text_node("loader", self.os_loader)
+            if self.os_loader_type is not None:
+                loader.set("type", self.os_loader_type)
                 loader.set("readonly", "yes")
-                os.append(loader)
-            else:
-                os.append(self._text_node("loader", self.os_loader))
+            if self.os_loader_secure is not None:
+                loader.set(
+                    "secure", self.get_yes_no_str(self.os_loader_secure))
+            os.append(loader)
+
+        if (
+            self.os_nvram is not None or
+            self.os_nvram_template is not None
+        ):
+            nvram = self._text_node("nvram", self.os_nvram)
+            nvram.set("template", self.os_nvram_template)
+            os.append(nvram)
+
         if self.os_initrd is not None:
             os.append(self._text_node("initrd", self.os_initrd))
         if self.os_cmdline is not None:
@@ -2900,6 +2977,9 @@ class LibvirtConfigGuest(LibvirtConfigObject):
                 self.cpuset = hardware.parse_cpu_spec(xmldoc.get('cpuset'))
 
     def _parse_os(self, xmldoc):
+        if xmldoc.get('firmware'):
+            self.os_firmware = xmldoc.get('firmware')
+
         # smbios is skipped just because LibvirtConfigGuestSMBIOS
         # does not implement parse_dom method
         for c in xmldoc:
@@ -3039,6 +3119,7 @@ class LibvirtConfigNodeDevice(LibvirtConfigObject):
         self.parent = None
         self.pci_capability = None
         self.mdev_information = None
+        self.vdpa_capability = None
 
     def parse_dom(self, xmldoc):
         super(LibvirtConfigNodeDevice, self).parse_dom(xmldoc)
@@ -3056,6 +3137,23 @@ class LibvirtConfigNodeDevice(LibvirtConfigObject):
                 mdev_info = LibvirtConfigNodeDeviceMdevInformation()
                 mdev_info.parse_dom(c)
                 self.mdev_information = mdev_info
+            elif c.tag == "capability" and c.get("type") in ['vdpa']:
+                vdpa_caps = LibvirtConfigNodeDeviceVDPACap()
+                vdpa_caps.parse_dom(c)
+                self.vdpa_capability = vdpa_caps
+
+
+class LibvirtConfigNodeDeviceVDPACap(LibvirtConfigObject):
+    def __init__(self, **kwargs):
+        super().__init__(
+            root_name="capability", **kwargs)
+        self.dev_path = None
+
+    def parse_dom(self, xmldoc):
+        super().parse_dom(xmldoc)
+        for c in xmldoc:
+            if c.tag == "chardev":
+                self.dev_path = c.text
 
 
 class LibvirtConfigNodeDevicePciCap(LibvirtConfigObject):
@@ -3117,6 +3215,10 @@ class LibvirtConfigNodeDevicePciCap(LibvirtConfigObject):
                 mdevcap = LibvirtConfigNodeDeviceMdevCapableSubFunctionCap()
                 mdevcap.parse_dom(c)
                 self.mdev_capability.append(mdevcap)
+
+    def pci_address(self):
+        return "%04x:%02x:%02x.%01x" % (
+            self.domain, self.bus, self.slot, self.function)
 
 
 class LibvirtConfigNodeDevicePciSubFunctionCap(LibvirtConfigObject):
@@ -3230,6 +3332,7 @@ class LibvirtConfigGuestMetaNovaInstance(LibvirtConfigObject):
         self.owner = None
         self.roottype = None
         self.rootid = None
+        self.ports = None
 
     def format_dom(self):
         meta = super(LibvirtConfigGuestMetaNovaInstance, self).format_dom()
@@ -3253,6 +3356,8 @@ class LibvirtConfigGuestMetaNovaInstance(LibvirtConfigObject):
             root.set("type", self.roottype)
             root.set("uuid", str(self.rootid))
             meta.append(root)
+        if self.ports is not None:
+            meta.append(self.ports.format_dom())
 
         return meta
 
@@ -3325,11 +3430,6 @@ class LibvirtConfigSecret(LibvirtConfigObject):
         self.uuid = None
         self.usage_type = None
         self.usage_id = None
-
-    def get_yes_no_str(self, value):
-        if value:
-            return 'yes'
-        return 'no'
 
     def format_dom(self):
         root = super(LibvirtConfigSecret, self).format_dom()
@@ -3406,3 +3506,53 @@ class LibvirtConfigGuestVPMEM(LibvirtConfigGuestDevice):
                 for sub in list(c):
                     if sub.tag == "size":
                         self.target_size = sub.text
+
+
+class LibvirtConfigGuestMetaNovaPorts(LibvirtConfigObject):
+
+    def __init__(self, ports=None):
+        super(LibvirtConfigGuestMetaNovaPorts, self).__init__(
+            root_name="ports", ns_prefix="nova", ns_uri=NOVA_NS)
+
+        self.ports = ports
+
+    def format_dom(self):
+        meta = self._new_node("ports")
+        for port in self.ports or []:
+            meta.append(port.format_dom())
+        return meta
+
+
+class LibvirtConfigGuestMetaNovaPort(LibvirtConfigObject):
+
+    def __init__(self, uuid, ips=None):
+        super(LibvirtConfigGuestMetaNovaPort, self).__init__(
+            root_name="port", ns_prefix="nova", ns_uri=NOVA_NS)
+
+        self.uuid = uuid
+        self.ips = ips
+
+    def format_dom(self):
+        meta = self._new_node("port")
+        meta.set("uuid", str(self.uuid))
+        for ip in self.ips or []:
+            meta.append(ip.format_dom())
+        return meta
+
+
+class LibvirtConfigGuestMetaNovaIp(LibvirtConfigObject):
+
+    def __init__(self, ip_type, address, ip_version):
+        super(LibvirtConfigGuestMetaNovaIp, self).__init__(
+            root_name="ip", ns_prefix="nova", ns_uri=NOVA_NS)
+
+        self.ip_type = ip_type
+        self.address = address
+        self.ip_version = ip_version
+
+    def format_dom(self):
+        meta = self._new_node("ip")
+        meta.set("type", str(self.ip_type))
+        meta.set("address", str(self.address))
+        meta.set("ipVersion", str(self.ip_version))
+        return meta

@@ -25,7 +25,6 @@ from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import importutils
 from oslo_utils import timeutils
-import six
 
 from nova.compute import manager
 from nova import conf
@@ -249,12 +248,6 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
         instance_ref, network_info = self._get_running_instance()
         self.connection.snapshot(self.ctxt, instance_ref, img_ref['id'],
                                  lambda *args, **kwargs: None)
-
-    @catch_notimplementederror
-    def test_post_interrupted_snapshot_cleanup(self):
-        instance_ref, network_info = self._get_running_instance()
-        self.connection.post_interrupted_snapshot_cleanup(self.ctxt,
-                instance_ref)
 
     @catch_notimplementederror
     def test_reboot(self):
@@ -538,7 +531,7 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
         instance_ref, network_info = self._get_running_instance()
         console_output = self.connection.get_console_output(self.ctxt,
             instance_ref)
-        self.assertIsInstance(console_output, six.string_types)
+        self.assertIsInstance(console_output, str)
 
     @catch_notimplementederror
     def test_get_vnc_console(self):
@@ -573,14 +566,6 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
         mks_console = self.connection.get_mks_console(self.ctxt,
                                                       instance_ref)
         self.assertIsInstance(mks_console, ctype.ConsoleMKS)
-
-    @catch_notimplementederror
-    def test_get_console_pool_info(self):
-        instance_ref, network_info = self._get_running_instance()
-        console_pool = self.connection.get_console_pool_info(instance_ref)
-        self.assertIn('address', console_pool)
-        self.assertIn('username', console_pool)
-        self.assertIn('password', console_pool)
 
     @mock.patch(
         'nova.tests.unit.virt.libvirt.fakelibvirt.Domain.jobStats',
@@ -662,14 +647,6 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
     def test_host_power_action_startup(self):
         self.connection.host_power_action('startup')
 
-    @catch_notimplementederror
-    def test_add_to_aggregate(self):
-        self.connection.add_to_aggregate(self.ctxt, 'aggregate', 'host')
-
-    @catch_notimplementederror
-    def test_remove_from_aggregate(self):
-        self.connection.remove_from_aggregate(self.ctxt, 'aggregate', 'host')
-
     def test_events(self):
         got_events = []
 
@@ -747,10 +724,6 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
                                return_value=u'\xF0\x9F\x92\xA9'):
             self.connection.emit_event(started_event)
         callback.assert_called_once_with(started_event)
-
-    def test_set_bootable(self):
-        self.assertRaises(NotImplementedError, self.connection.set_bootable,
-                          'instance', True)
 
     @catch_notimplementederror
     def test_get_instance_disk_info(self):

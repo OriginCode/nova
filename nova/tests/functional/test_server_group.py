@@ -15,7 +15,6 @@
 
 import mock
 from oslo_config import cfg
-import six
 
 from nova.compute import instance_actions
 from nova import context
@@ -446,10 +445,9 @@ class ServerGroupTestV21(ServerGroupTestBase):
         # Start additional host to test evacuation
         self.start_service('compute', host='host3')
 
-        post = {'evacuate': {'onSharedStorage': False}}
-        self.admin_api.post_server_action(servers[1]['id'], post)
-        self._wait_for_migration_status(servers[1], ['done'])
-        evacuated_server = self._wait_for_state_change(servers[1], 'ACTIVE')
+        evacuated_server = self._evacuate_server(
+            servers[1], {'onSharedStorage': 'False'},
+            expected_migration_status='done')
 
         # check that the server is evacuated to another host
         self.assertNotEqual(evacuated_server['OS-EXT-SRV-ATTR:host'],
@@ -467,11 +465,9 @@ class ServerGroupTestV21(ServerGroupTestBase):
         # Set forced_down on the host to ensure nova considers the host down.
         self._set_forced_down(host, True)
 
-        post = {'evacuate': {'onSharedStorage': False}}
-        self.admin_api.post_server_action(servers[1]['id'], post)
-        self._wait_for_migration_status(servers[1], ['error'])
-        server_after_failed_evac = self._wait_for_state_change(
-            servers[1], 'ERROR')
+        server_after_failed_evac = self._evacuate_server(
+            servers[1], {'onSharedStorage': 'False'}, expected_state='ERROR',
+            expected_migration_status='error')
 
         # assert that after a failed evac the server active on the same host
         # as before
@@ -487,11 +483,9 @@ class ServerGroupTestV21(ServerGroupTestBase):
         # Set forced_down on the host to ensure nova considers the host down.
         self._set_forced_down(host, True)
 
-        post = {'evacuate': {'onSharedStorage': False}}
-        self.admin_api.post_server_action(servers[1]['id'], post)
-        self._wait_for_migration_status(servers[1], ['error'])
-        server_after_failed_evac = self._wait_for_state_change(
-            servers[1], 'ERROR')
+        server_after_failed_evac = self._evacuate_server(
+            servers[1], {'onSharedStorage': 'False'}, expected_state='ERROR',
+            expected_migration_status='error')
 
         # assert that after a failed evac the server active on the same host
         # as before
@@ -629,10 +623,8 @@ class ServerGroupTestV215(ServerGroupTestV21):
         # Start additional host to test evacuation
         compute3 = self.start_service('compute', host='host3')
 
-        post = {'evacuate': {}}
-        self.admin_api.post_server_action(servers[1]['id'], post)
-        self._wait_for_migration_status(servers[1], ['done'])
-        evacuated_server = self._wait_for_state_change(servers[1], 'ACTIVE')
+        evacuated_server = self._evacuate_server(
+            servers[1], expected_migration_status='done')
 
         # check that the server is evacuated
         self.assertNotEqual(evacuated_server['OS-EXT-SRV-ATTR:host'],
@@ -652,11 +644,9 @@ class ServerGroupTestV215(ServerGroupTestV21):
         # Set forced_down on the host to ensure nova considers the host down.
         self._set_forced_down(host, True)
 
-        post = {'evacuate': {}}
-        self.admin_api.post_server_action(servers[1]['id'], post)
-        self._wait_for_migration_status(servers[1], ['error'])
-        server_after_failed_evac = self._wait_for_state_change(
-            servers[1], 'ERROR')
+        server_after_failed_evac = self._evacuate_server(
+            servers[1], expected_state='ERROR',
+            expected_migration_status='error')
 
         # assert that after a failed evac the server active on the same host
         # as before
@@ -672,11 +662,9 @@ class ServerGroupTestV215(ServerGroupTestV21):
         # Set forced_down on the host to ensure nova considers the host down.
         self._set_forced_down(host, True)
 
-        post = {'evacuate': {}}
-        self.admin_api.post_server_action(servers[1]['id'], post)
-        self._wait_for_migration_status(servers[1], ['error'])
-        server_after_failed_evac = self._wait_for_state_change(
-            servers[1], 'ERROR')
+        server_after_failed_evac = self._evacuate_server(
+            servers[1], expected_state='ERROR',
+            expected_migration_status='error')
 
         # assert that after a failed evac the server active on the same host
         # as before
@@ -814,10 +802,8 @@ class ServerGroupTestV215(ServerGroupTestV21):
         # Set forced_down on the host to ensure nova considers the host down.
         self._set_forced_down(host, True)
 
-        post = {'evacuate': {}}
-        self.admin_api.post_server_action(servers[1]['id'], post)
-        self._wait_for_migration_status(servers[1], ['done'])
-        evacuated_server = self._wait_for_state_change(servers[1], 'ACTIVE')
+        evacuated_server = self._evacuate_server(
+            servers[1], expected_migration_status='done')
 
         # Note(gibi): need to get the server again as the state of the instance
         # goes to ACTIVE first then the host of the instance changes to the
@@ -1033,7 +1019,7 @@ class TestAntiAffinityLiveMigration(test.TestCase,
                                self.admin_api.post_server_action,
                                server['id'], body)
         self.assertEqual(400, ex.response.status_code)
-        self.assertIn('No valid host', six.text_type(ex))
+        self.assertIn('No valid host', str(ex))
 
         # Now start up a 3rd compute service and retry the live migration which
         # should work this time.

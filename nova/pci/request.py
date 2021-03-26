@@ -41,7 +41,6 @@
 import jsonschema
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
-import six
 
 import nova.conf
 from nova import exception
@@ -57,12 +56,12 @@ PCI_TRUSTED_TAG = 'trusted'
 PCI_DEVICE_TYPE_TAG = 'dev_type'
 
 DEVICE_TYPE_FOR_VNIC_TYPE = {
-    network_model.VNIC_TYPE_DIRECT_PHYSICAL: obj_fields.PciDeviceType.SRIOV_PF
+    network_model.VNIC_TYPE_DIRECT_PHYSICAL: obj_fields.PciDeviceType.SRIOV_PF,
+    network_model.VNIC_TYPE_VDPA: obj_fields.PciDeviceType.VDPA,
 }
 
 CONF = nova.conf.CONF
 
-_ALIAS_CAP_TYPE = ['pci']
 _ALIAS_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -76,7 +75,7 @@ _ALIAS_SCHEMA = {
         # should probably be removed.
         "capability_type": {
             "type": "string",
-            "enum": _ALIAS_CAP_TYPE,
+            "enum": ['pci'],
         },
         "product_id": {
             "type": "string",
@@ -88,7 +87,13 @@ _ALIAS_SCHEMA = {
         },
         "device_type": {
             "type": "string",
-            "enum": list(obj_fields.PciDeviceType.ALL),
+            # NOTE(sean-k-mooney): vDPA devices cannot currently be used with
+            # alias-based PCI passthrough so we exclude it here
+            "enum": [
+                obj_fields.PciDeviceType.STANDARD,
+                obj_fields.PciDeviceType.SRIOV_PF,
+                obj_fields.PciDeviceType.SRIOV_VF,
+            ],
         },
         "numa_policy": {
             "type": "string",
@@ -143,7 +148,7 @@ def _get_alias_from_config():
     except jsonschema.exceptions.ValidationError as exc:
         raise exception.PciInvalidAlias(reason=exc.message)
     except Exception as exc:
-        raise exception.PciInvalidAlias(reason=six.text_type(exc))
+        raise exception.PciInvalidAlias(reason=str(exc))
 
     return aliases
 

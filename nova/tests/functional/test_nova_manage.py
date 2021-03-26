@@ -10,13 +10,13 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 import collections
+from io import StringIO
 import mock
 
 import fixtures
 from neutronclient.common import exceptions as neutron_client_exc
 import os_resource_classes as orc
 from oslo_utils.fixture import uuidsentinel
-from six.moves import StringIO
 
 from nova.cmd import manage
 from nova import config
@@ -163,125 +163,6 @@ class NovaManageDBIronicTest(test.TestCase):
                              if i.node != self.cn4.hypervisor_hostname]
         self.virt_insts = [i for i in self.insts
                            if i.node == self.cn4.hypervisor_hostname]
-
-    def test_ironic_flavor_migration_by_host_and_node(self):
-        ret = self.commands.ironic_flavor_migration('test', 'fake-host1',
-                                                    'fake-node2', False, False)
-        self.assertEqual(0, ret)
-        k = 'resources:CUSTOM_TEST'
-
-        for inst in self.ironic_insts:
-            inst.refresh()
-            if inst.node == 'fake-node2':
-                self.assertIn(k, inst.flavor.extra_specs)
-                self.assertEqual('1', inst.flavor.extra_specs[k])
-            else:
-                self.assertNotIn(k, inst.flavor.extra_specs)
-
-        for inst in self.virt_insts:
-            inst.refresh()
-            self.assertNotIn(k, inst.flavor.extra_specs)
-
-    def test_ironic_flavor_migration_by_host(self):
-        ret = self.commands.ironic_flavor_migration('test', 'fake-host1', None,
-                                                    False, False)
-        self.assertEqual(0, ret)
-        k = 'resources:CUSTOM_TEST'
-
-        for inst in self.ironic_insts:
-            inst.refresh()
-            if inst.node in ('fake-node1', 'fake-node2'):
-                self.assertIn(k, inst.flavor.extra_specs)
-                self.assertEqual('1', inst.flavor.extra_specs[k])
-            else:
-                self.assertNotIn(k, inst.flavor.extra_specs)
-
-        for inst in self.virt_insts:
-            inst.refresh()
-            self.assertNotIn(k, inst.flavor.extra_specs)
-
-    def test_ironic_flavor_migration_by_host_not_ironic(self):
-        ret = self.commands.ironic_flavor_migration('test', 'fake-host3', None,
-                                                    False, False)
-        self.assertEqual(1, ret)
-        k = 'resources:CUSTOM_TEST'
-
-        for inst in self.ironic_insts:
-            inst.refresh()
-            self.assertNotIn(k, inst.flavor.extra_specs)
-
-        for inst in self.virt_insts:
-            inst.refresh()
-            self.assertNotIn(k, inst.flavor.extra_specs)
-
-    def test_ironic_flavor_migration_all_hosts(self):
-        ret = self.commands.ironic_flavor_migration('test', None, None,
-                                                    True, False)
-        self.assertEqual(0, ret)
-        k = 'resources:CUSTOM_TEST'
-
-        for inst in self.ironic_insts:
-            inst.refresh()
-            self.assertIn(k, inst.flavor.extra_specs)
-            self.assertEqual('1', inst.flavor.extra_specs[k])
-
-        for inst in self.virt_insts:
-            inst.refresh()
-            self.assertNotIn(k, inst.flavor.extra_specs)
-
-    def test_ironic_flavor_migration_invalid(self):
-        # No host or node and not "all"
-        ret = self.commands.ironic_flavor_migration('test', None, None,
-                                                    False, False)
-        self.assertEqual(3, ret)
-
-        # No host, only node
-        ret = self.commands.ironic_flavor_migration('test', None, 'fake-node',
-                                                    False, False)
-        self.assertEqual(3, ret)
-
-        # Asked for all but provided a node
-        ret = self.commands.ironic_flavor_migration('test', None, 'fake-node',
-                                                    True, False)
-        self.assertEqual(3, ret)
-
-        # Asked for all but provided a host
-        ret = self.commands.ironic_flavor_migration('test', 'fake-host', None,
-                                                    True, False)
-        self.assertEqual(3, ret)
-
-        # Asked for all but provided a host and node
-        ret = self.commands.ironic_flavor_migration('test', 'fake-host',
-                                                    'fake-node', True, False)
-        self.assertEqual(3, ret)
-
-        # Did not provide a resource_class
-        ret = self.commands.ironic_flavor_migration(None, 'fake-host',
-                                                    'fake-node', False, False)
-        self.assertEqual(3, ret)
-
-    def test_ironic_flavor_migration_no_match(self):
-        ret = self.commands.ironic_flavor_migration('test', 'fake-nonexist',
-                                                    None, False, False)
-        self.assertEqual(1, ret)
-
-        ret = self.commands.ironic_flavor_migration('test', 'fake-nonexist',
-                                                    'fake-node', False, False)
-        self.assertEqual(1, ret)
-
-    def test_ironic_two_instances(self):
-        # NOTE(danms): This shouldn't be possible, but simulate it like
-        # someone hacked the database, which should also cover any other
-        # way this could happen.
-
-        # Since we created two instances on cn4 in setUp() we can convert that
-        # to an ironic host and cause the two-instances-on-one-ironic paradox
-        # to happen.
-        self.cn4.hypervisor_type = 'ironic'
-        self.cn4.save()
-        ret = self.commands.ironic_flavor_migration('test', 'fake-host3',
-                                                    'fake-node4', False, False)
-        self.assertEqual(2, ret)
 
 
 class NovaManageCellV2Test(test.TestCase):
@@ -1713,11 +1594,8 @@ class TestNovaManagePlacementAudit(
         self.admin_api.put_service(source_service_id, {'forced_down': 'true'})
 
         # evacuate the instance to the target
-        post = {'evacuate': {"host": dest_hostname}}
-        self.admin_api.post_server_action(server['id'], post)
-        self._wait_for_server_parameter(server,
-                                        {'OS-EXT-SRV-ATTR:host': dest_hostname,
-                                         'status': 'ACTIVE'})
+        self._evacuate_server(
+            server, {'host': dest_hostname}, expected_host=dest_hostname)
 
         # Now the instance is gone, we can delete the compute service
         self.admin_api.api_delete('/os-services/%s' % source_service_id)
@@ -1767,6 +1645,7 @@ class TestDBArchiveDeletedRows(integrated_helpers._IntegratedTestBase):
 
     def setUp(self):
         super(TestDBArchiveDeletedRows, self).setUp()
+        self.enforce_fk_constraints()
         self.cli = manage.DbCommands()
         self.output = StringIO()
         self.useFixture(fixtures.MonkeyPatch('sys.stdout', self.output))
@@ -1812,6 +1691,7 @@ class TestDBArchiveDeletedRowsMultiCell(integrated_helpers.InstanceHelperMixin,
 
     def setUp(self):
         super(TestDBArchiveDeletedRowsMultiCell, self).setUp()
+        self.enforce_fk_constraints()
         self.useFixture(nova_fixtures.NeutronFixture(self))
         self.useFixture(nova_fixtures.GlanceFixture(self))
         self.useFixture(func_fixtures.PlacementFixture())

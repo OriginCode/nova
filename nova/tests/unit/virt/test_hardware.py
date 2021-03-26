@@ -2831,7 +2831,7 @@ class VirtNUMAHostTopologyTestCase(test.NoDBTestCase):
         pci_request = objects.InstancePCIRequest(count=1,
             spec=[{'vendor_id': '8086'}])
         pci_reqs = [pci_request]
-        pci_stats = stats.PciDeviceStats()
+        pci_stats = stats.PciDeviceStats(objects.NUMATopology())
         with mock.patch.object(stats.PciDeviceStats,
                 'support_requests', return_value= True):
             fitted_instance1 = hw.numa_fit_instance_to_host(self.host,
@@ -2845,7 +2845,7 @@ class VirtNUMAHostTopologyTestCase(test.NoDBTestCase):
         pci_request = objects.InstancePCIRequest(count=1,
             spec=[{'vendor_id': '8086'}])
         pci_reqs = [pci_request]
-        pci_stats = stats.PciDeviceStats()
+        pci_stats = stats.PciDeviceStats(objects.NUMATopology())
         with mock.patch.object(stats.PciDeviceStats,
                 'support_requests', return_value= False):
             fitted_instance1 = hw.numa_fit_instance_to_host(
@@ -2861,6 +2861,7 @@ class VirtNUMAHostTopologyTestCase(test.NoDBTestCase):
             test_dict = copy.copy(fake_pci.fake_pool_dict)
             test_dict['numa_node'] = node
             return stats.PciDeviceStats(
+                objects.NUMATopology(),
                 [objects.PciDevicePool.from_dict(test_dict)])
 
         # the PCI device is found on host cell 1
@@ -3925,6 +3926,29 @@ class CPUPinningCellTestCase(test.NoDBTestCase, _CPUPinningTestCaseBase):
             'Host supports hyperthreads, but instance requested no',
             mock_log.warning.call_args[0][0],
         )
+
+    def test_get_pinning_mixed_policy_bug_1898272(self):
+        """A host cell must have sufficient dedicated *and* shared CPUs when
+        using the mixed policy.
+        """
+        host_pin = objects.NUMACell(
+            id=0,
+            cpuset=set(),
+            pcpuset=set(range(4)),
+            memory=4096,
+            memory_usage=0,
+            pinned_cpus=set(),
+            siblings=[{0, 2}, {1, 3}],
+            mempages=[],
+        )
+        inst_pin = objects.InstanceNUMACell(
+            cpuset={0},
+            pcpuset={1, 2, 3},
+            memory=2048,
+            cpu_policy=fields.CPUAllocationPolicy.MIXED,
+        )
+        inst_topo = hw._numa_fit_instance_cell(host_pin, inst_pin)
+        self.assertIsNone(inst_topo)
 
 
 class CPUPinningTestCase(test.NoDBTestCase, _CPUPinningTestCaseBase):
@@ -5625,6 +5649,52 @@ class VTPMConfigTest(test.NoDBTestCase):
         else:
             self.assertEqual(
                 expected, hw.get_vtpm_constraint(flavor, image_meta),
+            )
+
+
+@ddt.ddt
+class SecureBootPolicyTest(test.NoDBTestCase):
+
+    @ddt.unpack
+    @ddt.data(
+        # pass: no configuration
+        (None, None, None),
+        # pass: flavor-only configuration
+        ('required', None, 'required'),
+        # pass: image-only configuration
+        (None, 'optional', 'optional'),
+        # pass: identical image and flavor configuration
+        ('required', 'required', 'required'),
+        # fail: mismatched image and flavor configuration
+        ('required', 'disabled', exception.FlavorImageConflict),
+        # fail: invalid value
+        ('foobar', None, exception.Invalid),
+    )
+    def test_get_secure_boot_constraint(
+        self, flavor_policy, image_policy, expected,
+    ):
+        extra_specs = {}
+
+        if flavor_policy:
+            extra_specs['os:secure_boot'] = flavor_policy
+
+        image_meta_props = {}
+
+        if image_policy:
+            image_meta_props['os_secure_boot'] = image_policy
+
+        flavor = objects.Flavor(
+            name='foo', vcpus=1, memory_mb=1024, extra_specs=extra_specs)
+        image_meta = objects.ImageMeta.from_dict(
+            {'name': 'bar', 'properties': image_meta_props})
+
+        if isinstance(expected, type) and issubclass(expected, Exception):
+            self.assertRaises(
+                expected, hw.get_secure_boot_constraint, flavor, image_meta,
+            )
+        else:
+            self.assertEqual(
+                expected, hw.get_secure_boot_constraint(flavor, image_meta),
             )
 
 

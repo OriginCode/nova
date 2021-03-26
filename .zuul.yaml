@@ -56,21 +56,30 @@
       bindep_profile: test py38
     timeout: 3600
 
-# TODO(lyarwood): Remove once the new zuulv3 nova-multinode jobs are voting
 - job:
-    name: nova-live-migration
-    parent: nova-dsvm-multinode-base
+    name: nova-tox-functional-py39
+    parent: openstack-tox-functional-py39
     description: |
-      Run tempest live migration tests against both local storage and shared
-      storage using ceph (the environment is reconfigured for ceph after the
-      local storage tests are run). Also runs simple evacuate tests.
-      Config drive is forced on all instances. Runs with python 3.
-    run: playbooks/legacy/nova-live-migration/run.yaml
-    post-run: playbooks/legacy/nova-live-migration/post.yaml
-    irrelevant-files: *dsvm-irrelevant-files
+      Run tox-based functional tests for the OpenStack Nova project
+      under cPython version 3.9 with Nova specific irrelevant-files list.
+      Uses tox with the ``functional-py39`` environment.
+
+      This job also provides a parent for other projects to run the nova
+      functional tests on their own changes.
+    required-projects:
+      # including nova here makes this job reusable by other projects
+      - openstack/nova
+      - openstack/placement
+    irrelevant-files: *functional-irrelevant-files
+    vars:
+      # explicitly stating the work dir makes this job reusable by other
+      # projects
+      zuul_work_dir: src/opendev.org/openstack/nova
+      bindep_profile: test py39
+    timeout: 3600
 
 - job:
-    name: nova-multinode-live-migration
+    name: nova-live-migration
     parent: tempest-multinode-full-py3
     description: |
       Run tempest live migration tests against local qcow2 ephemeral storage
@@ -79,6 +88,8 @@
     vars:
       tox_envlist: all
       tempest_test_regex: (^tempest\.api\.compute\.admin\.(test_live_migration|test_migration))
+      devstack_services:
+        neutron-trunk: true
       devstack_local_conf:
         test-config:
           $TEMPEST_CONFIG:
@@ -86,6 +97,7 @@
               volume_backed_live_migration: true
               block_migration_for_live_migration: true
               block_migrate_cinder_iscsi: true
+    post-run: playbooks/nova-live-migration/post-run.yaml
 
 # TODO(lyarwood): The following jobs need to be written as part of the
 # migration to zuulv3 before nova-live-migration can be removed:
@@ -95,13 +107,6 @@
 #    description: |
 #      Run tempest live migration tests against ceph ephemeral storage and
 #      cinder volumes.
-#
-#- job:
-#    name: nova-multinode-evacuate
-#    description: |
-#       Verifiy the evacuation of instances with local qcow2 ephemeral disks
-#       from down compute hosts.
-#
 #- job:
 #    name: nova-multinode-evacuate-ceph
 #    description: |
@@ -131,9 +136,6 @@
       - ^setup.cfg$
       - ^tools/.*$
       - ^tox.ini$
-    # TODO(mriedem): Make this voting and gating once bug 1771700 is fixed
-    # and we've had enough runs to feel comfortable with this setup.
-    voting: false
     vars:
       # We use the "all" environment for tempest_test_regex and
       # tempest_black_regex.
@@ -156,6 +158,10 @@
         LVM_VOLUME_CLEAR: none
         # Disable SSH validation in tests to save time.
         TEMPEST_RUN_VALIDATION: false
+        # Increase the size of the swift loopback device to accommodate RAW
+        # snapshots from the LV based instance disks.
+        # See bug #1913451 for more details.
+        SWIFT_LOOPBACK_DISK_SIZE: 24G
       devstack_services:
         # Disable non-essential services that we don't need for this job.
         c-bak: false
@@ -175,6 +181,7 @@
       volume multi-attach testing.
       Starting in Train, the job enabled counting quota usage from placement.
       Starting in Ussuri, the job was changed to multinode.
+      Starting in Wallaby, the job defaults to the q35 machine type.
       Runs all tempest compute API and most scenario tests concurrently.
     irrelevant-files: *dsvm-irrelevant-files
     # Run post-tempest tests like for nova-manage commands.
@@ -194,6 +201,11 @@
       devstack_local_conf:
         post-config:
           $NOVA_CPU_CONF:
+            libvirt:
+              # Increase the number of PCIe ports per instance given the q35
+              # machine type attaches more devices by default than pc
+              num_pcie_ports: 24
+              hw_machine_type: "x86_64=q35"
             compute:
               # Switch off the provider association refresh, which should
               # reduce the number of placement calls in steady state. Added in
@@ -215,6 +227,9 @@
           $TEMPEST_CONFIG:
             network-feature-enabled:
               qos_placement_physnet: public
+            compute-feature-enabled:
+              # The q35 machine type doesn't support an IDE bus
+              ide_bus: False
       devstack_localrc:
         # Added in Pike.
         NOVA_USE_SERVICE_TOKEN: True
@@ -330,6 +345,7 @@
         # We only have two computes and we don't yet support cross-cell live
         # migration.
         LIVE_MIGRATION_AVAILABLE: false
+        DEVSTACK_PARALLEL: True
     group-vars:
       peers:
         devstack_localrc:
@@ -376,10 +392,10 @@
       # NOTE(danms): These tests create an empty non-raw image, which nova
       # will refuse because we set never_download_image_if_on_rbd in this job.
       # Just skip these tests for this case.
-      tempest_black_regex: .*encrypted_cinder_volumes.*
       devstack_localrc:
         GLANCE_STANDALONE: True
         GLANCE_USE_IMPORT_WORKFLOW: True
+        DEVSTACK_PARALLEL: True
       devstack_local_conf:
         post-config:
           $NOVA_CONF:
@@ -418,7 +434,8 @@
       - integrated-gate-compute
       - openstack-cover-jobs
       - openstack-lower-constraints-jobs
-      - openstack-python3-victoria-jobs
+      - openstack-python3-wallaby-jobs
+      - openstack-python3-wallaby-jobs-arm64
       - periodic-stable-jobs
       - publish-openstack-docs-pti
       - release-notes-jobs-python3
@@ -439,12 +456,12 @@
               - ^(?!nova/network/.*)(?!nova/virt/libvirt/vif.py).*$
         - nova-grenade-multinode
         - nova-live-migration
-        - nova-multinode-live-migration:
-            voting: false
         - nova-lvm
         - nova-multi-cell
         - nova-next
         - nova-tox-functional-py38
+        - nova-tox-functional-py39:
+            voting: false
         - tempest-integrated-compute:
             # NOTE(gmann): Policies changes do not need to run all the
             # integration test jobs. Running only tempest and grenade
@@ -525,4 +542,6 @@
         - devstack-platform-fedora-latest:
             irrelevant-files: *dsvm-irrelevant-files
         - devstack-platform-fedora-latest-virt-preview:
+            irrelevant-files: *dsvm-irrelevant-files
+        - devstack-plugin-ceph-compute-local-ephemeral:
             irrelevant-files: *dsvm-irrelevant-files

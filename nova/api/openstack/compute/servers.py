@@ -21,7 +21,6 @@ import oslo_messaging as messaging
 from oslo_utils import strutils
 from oslo_utils import timeutils
 from oslo_utils import uuidutils
-import six
 import webob
 from webob import exc
 
@@ -91,8 +90,6 @@ INVALID_FLAVOR_IMAGE_EXCEPTIONS = (
     exception.RequiredMixedOrRealtimeCPUMask,
     exception.InvalidMixedInstanceDedicatedMask,
 )
-
-MIN_COMPUTE_MOVE_BANDWIDTH = 39
 
 
 class ServersController(wsgi.Controller):
@@ -407,7 +404,7 @@ class ServersController(wsgi.Controller):
         # Starting in the 2.37 microversion, requested_networks is either a
         # list or a string enum with value 'auto' or 'none'. The auto/none
         # values are verified via jsonschema so we don't check them again here.
-        if isinstance(requested_networks, six.string_types):
+        if isinstance(requested_networks, str):
             return objects.NetworkRequestList(
                 objects=[objects.NetworkRequest(
                     network_id=requested_networks)])
@@ -664,7 +661,7 @@ class ServersController(wsgi.Controller):
             availability_zone, host, node = parse_az(context,
                                                      availability_zone)
         except exception.InvalidInput as err:
-            raise exc.HTTPBadRequest(explanation=six.text_type(err))
+            raise exc.HTTPBadRequest(explanation=str(err))
         if host or node:
             context.can(server_policies.SERVERS % 'create:forced_host',
                         target=target)
@@ -946,18 +943,6 @@ class ServersController(wsgi.Controller):
                     target={'user_id': instance.user_id,
                             'project_id': instance.project_id})
 
-        if common.instance_has_port_with_resource_request(
-                instance_id, self.network_api):
-            # TODO(gibi): Remove when nova only supports compute newer than
-            # Train
-            source_service = objects.Service.get_by_host_and_binary(
-                context, instance.host, 'nova-compute')
-            if source_service.version < MIN_COMPUTE_MOVE_BANDWIDTH:
-                msg = _("The resize action on a server with ports having "
-                        "resource requests, like a port with a QoS "
-                        "minimum bandwidth policy, is not yet supported.")
-                raise exc.HTTPConflict(explanation=msg)
-
         try:
             self.compute_api.resize(context, instance, flavor_id,
                                     auto_disk_config=auto_disk_config)
@@ -966,6 +951,7 @@ class ServersController(wsgi.Controller):
             raise exc.HTTPForbidden(
                 explanation=error.format_message())
         except (
+            exception.OperationNotSupportedForVDPAInterface,
             exception.InstanceIsLocked,
             exception.InstanceNotReady,
             exception.MixedInstanceNotSupportByComputeService,
@@ -1121,6 +1107,7 @@ class ServersController(wsgi.Controller):
         except (
             exception.InstanceIsLocked,
             exception.OperationNotSupportedForVTPM,
+            exception.OperationNotSupportedForVDPAInterface,
         ) as e:
             raise exc.HTTPConflict(explanation=e.format_message())
         except exception.InstanceInvalidState as state_error:

@@ -10,6 +10,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import eventlet
 import mock
 from oslo_utils import fixture as utils_fixture
 from oslo_utils.fixture import uuidsentinel as uuids
@@ -63,7 +64,8 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
                          mock_notify_instance_usage, mock_get_power_state,
                          mock_snapshot, mock_power_off, mock_terminate,
                          mock_get_bdms, clean_shutdown=True,
-                         guest_power_state=power_state.RUNNING):
+                         guest_power_state=power_state.RUNNING,
+                         accel_uuids=None):
         mock_get_power_state.return_value = 123
 
         CONF.set_override('shelved_offload_time', shelved_offload_time)
@@ -127,7 +129,8 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
             mock_save.side_effect = check_save
             self.compute.shelve_instance(self.context, instance,
                                          image_id=image_id,
-                                         clean_shutdown=clean_shutdown)
+                                         clean_shutdown=clean_shutdown,
+                                         accel_uuids=accel_uuids)
             mock_notify.assert_has_calls([
                 mock.call(self.context, instance, 'fake-mini',
                           action='shelve', phase='start', bdms=fake_bdms),
@@ -181,6 +184,18 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
     def test_shelve_paused_instance(self):
         self._shelve_instance(-1, guest_power_state=power_state.PAUSED)
 
+    @mock.patch('nova.accelerator.cyborg._CyborgClient.'
+                'delete_arqs_for_instance')
+    def test_shelve_and_offload_with_accel_uuids(self, mock_del_arqs):
+        self._shelve_instance(0, accel_uuids=[uuids.fake])
+        mock_del_arqs.assert_called_once()
+
+    @mock.patch('nova.accelerator.cyborg._CyborgClient.'
+                'delete_arqs_for_instance')
+    def test_shelve_and_with_accel_uuids(self, mock_del_arqs):
+        self._shelve_instance(-1, accel_uuids=[uuids.fake])
+        mock_del_arqs.assert_not_called()
+
     @mock.patch.object(nova.virt.fake.SmallFakeDriver, 'power_off')
     def test_shelve_offload(self, mock_power_off):
         instance = self._shelve_offload()
@@ -227,7 +242,8 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
 
         self.stub_out('nova.objects.Instance.save', stub_instance_save)
         self.compute.shelve_offload_instance(self.context, instance,
-                                             clean_shutdown=clean_shutdown)
+                                             clean_shutdown=clean_shutdown,
+                                             accel_uuids=[])
         mock_notify.assert_has_calls([
             mock.call(self.context, instance, 'fake-mini',
                       action='shelve_offload', phase='start',
@@ -279,10 +295,12 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
                       mock_get_power_state, mock_spawn,
                       mock_prep_block_device, mock_notify_instance_usage,
                       mock_notify_instance_action,
-                      mock_get_bdms):
+                      mock_get_bdms,
+                      accel_uuids=None,
+                      instance=None):
         mock_bdms = mock.Mock()
         mock_get_bdms.return_value = mock_bdms
-        instance = self._create_fake_instance_obj()
+        instance = instance or self._create_fake_instance_obj()
         instance.task_state = task_states.UNSHELVING
         instance.save()
         image = {'id': uuids.image_id}
@@ -340,7 +358,8 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
             self.compute.unshelve_instance(
                 self.context, instance, image=image,
                 filter_properties=filter_properties,
-                node=node, request_spec=objects.RequestSpec())
+                node=node, request_spec=objects.RequestSpec(),
+                accel_uuids=accel_uuids)
 
         mock_notify_instance_action.assert_has_calls([
             mock.call(self.context, instance, 'fake-mini',
@@ -362,7 +381,7 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
         mock_spawn.assert_called_once_with(self.context, instance,
                 test.MatchType(objects.ImageMeta), injected_files=[],
                 admin_password=None, allocations={}, network_info=[],
-                block_device_info='fake_bdm')
+                block_device_info='fake_bdm', accel_info=mock.ANY)
         self.mock_get_allocations.assert_called_once_with(self.context,
                                                           instance.uuid)
         mock_get_power_state.assert_called_once_with(instance)
@@ -379,6 +398,57 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
         self.assertIsNone(instance.key_data)
         self.assertEqual(self.compute.host, instance.host)
         self.assertFalse(instance.auto_disk_config)
+
+    @mock.patch.object(nova.compute.manager.ComputeManager,
+                       '_get_bound_arq_resources')
+    def test_unshelve_with_arqs(self, mock_get_arqs):
+        self.test_unshelve(accel_uuids=[uuids.fake])
+        mock_get_arqs.assert_called_once()
+
+    @mock.patch.object(nova.compute.manager.ComputeManager,
+                       '_nil_out_instance_obj_host_and_node')
+    @mock.patch.object(nova.compute.manager.ComputeManager,
+                       '_terminate_volume_connections')
+    @mock.patch.object(nova.compute.manager.ComputeManager,
+                       '_build_resources_cleanup')
+    @mock.patch.object(nova.compute.manager.ComputeManager,
+                       '_get_bound_arq_resources')
+    def test_unshelve_with_arqs_failes_cleanup_resources(
+            self, mock_get_arqs, mock_cleanup_resources,
+            mock_bdms, mock_nil):
+        instance = self._create_fake_instance_obj()
+
+        mock_get_arqs.side_effect = exception.AcceleratorRequestOpFailed(
+                instance_uuid=instance.uuid, op='get',
+                msg='Failure getting accelerator requests.')
+
+        exc = self.assertRaises(exception.AcceleratorRequestOpFailed,
+                                self.test_unshelve,
+                                accel_uuids=[uuids.fake],
+                                instance=instance)
+        self.assertIn('Failure getting accelerator requests.', str(exc))
+        mock_cleanup_resources.assert_called_once()
+
+    @mock.patch.object(nova.compute.manager.ComputeManager,
+                       '_nil_out_instance_obj_host_and_node')
+    @mock.patch.object(nova.compute.manager.ComputeManager,
+                       '_terminate_volume_connections')
+    @mock.patch.object(nova.compute.manager.ComputeManager,
+                       '_build_resources_cleanup')
+    @mock.patch.object(nova.compute.manager.ComputeManager,
+                       '_get_bound_arq_resources')
+    def test_unshelve_with_arqs_failes_cleanup_resources_timeout(
+            self, mock_get_arqs, mock_cleanup_resources,
+            mock_bdms, mock_nil):
+        instance = self._create_fake_instance_obj()
+
+        mock_get_arqs.side_effect = eventlet.timeout.Timeout()
+
+        self.assertRaises(eventlet.timeout.Timeout,
+                          self.test_unshelve,
+                          accel_uuids=[uuids.fake],
+                          instance=instance)
+        mock_cleanup_resources.assert_called_once()
 
     @mock.patch('nova.objects.BlockDeviceMappingList.get_by_instance_uuid')
     @mock.patch('nova.compute.utils.notify_about_instance_action')
@@ -440,7 +510,7 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
             mock_save.side_effect = check_save
             self.compute.unshelve_instance(self.context, instance, image=None,
                     filter_properties=filter_properties, node=node,
-                    request_spec=objects.RequestSpec())
+                    request_spec=objects.RequestSpec(), accel_uuids=[])
 
         mock_notify_instance_action.assert_has_calls([
             mock.call(self.context, instance, 'fake-mini',
@@ -464,7 +534,7 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
                                                     {}, limits)
         mock_spawn.assert_called_once_with(self.context, instance,
                 test.MatchType(objects.ImageMeta),
-                injected_files=[], admin_password=None,
+                injected_files=[], admin_password=None, accel_info=[],
                 allocations={}, network_info=[], block_device_info='fake_bdm')
         self.mock_get_allocations.assert_called_once_with(self.context,
                                                           instance.uuid)
@@ -535,7 +605,8 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
                               self.compute.unshelve_instance,
                               self.context, instance, image=None,
                               filter_properties=filter_properties, node=node,
-                              request_spec=objects.RequestSpec())
+                              request_spec=objects.RequestSpec(),
+                              accel_uuids=[])
 
         mock_notify_instance_action.assert_called_once_with(
             self.context, instance, 'fake-mini', action='unshelve',
@@ -551,7 +622,7 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
                                                     {}, limits)
         mock_spawn.assert_called_once_with(
             self.context, instance, test.MatchType(objects.ImageMeta),
-            injected_files=[], admin_password=None,
+            injected_files=[], admin_password=None, accel_info=[],
             allocations={}, network_info=[], block_device_info='fake_bdm')
         mock_terminate_volume_connections.assert_called_once_with(
             self.context, instance, mock_bdms)
@@ -569,10 +640,11 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
 
         self.compute.unshelve_instance(
             self.context, instance, image=None,
-            filter_properties={}, node='fake-node', request_spec=request_spec)
+            filter_properties={}, node='fake-node', request_spec=request_spec,
+            accel_uuids=[])
 
         mock_update_pci.assert_called_once_with(
-            self.context, self.compute.reportclient, instance,
+            self.context, self.compute.reportclient, [],
             {uuids.port_1: [uuids.rp1]})
         mock_setup_network.assert_called_once_with(
             self.context, instance, self.compute.host,
@@ -598,10 +670,11 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
         self.assertRaises(
             exception.UnexpectedResourceProviderNameForPCIRequest,
             self.compute.unshelve_instance, self.context, instance, image=None,
-            filter_properties={}, node='fake-node', request_spec=request_spec)
+            filter_properties={}, node='fake-node', request_spec=request_spec,
+            accel_uuids=[])
 
         mock_update_pci.assert_called_once_with(
-            self.context, self.compute.reportclient, instance,
+            self.context, self.compute.reportclient, [],
             {uuids.port_1: [uuids.rp1]})
 
     @mock.patch.object(objects.InstanceList, 'get_by_filters')
@@ -655,7 +728,7 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
 
         data = []
 
-        def fake_soi(context, instance, **kwargs):
+        def fake_soi(context, instance, accel_uuids, **kwargs):
             data.append(instance.uuid)
 
         with mock.patch.object(self.compute, 'shelve_offload_instance') as soi:
@@ -684,7 +757,7 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
 
         data = []
 
-        def fake_soi(context, instance, **kwargs):
+        def fake_soi(context, instance, accel_uuids, **kwargs):
             data.append(instance.uuid)
 
         with mock.patch.object(self.compute, 'shelve_offload_instance') as soi:
@@ -692,6 +765,34 @@ class ShelveComputeManagerTestCase(test_compute.BaseTestCase):
             self.compute._poll_shelved_instances(self.context)
             self.assertTrue(soi.called)
             self.assertEqual([instance2.uuid], data)
+
+    @mock.patch('nova.accelerator.cyborg._CyborgClient.'
+                'get_arq_uuids_for_instance')
+    @mock.patch('oslo_utils.timeutils.is_older_than')
+    @mock.patch('oslo_utils.timeutils.parse_strtime')
+    def test_shelved_poll_with_accel_uuids(self, mock_parse, mock_older,
+                                           mock_get_arq_uuids):
+        self.flags(shelved_offload_time=1)
+        mock_older.return_value = True
+        instance = self._create_fake_instance_obj()
+        instance.task_state = None
+        instance.vm_state = vm_states.SHELVED
+        instance.host = self.compute.host
+        instance.system_metadata = {'shelved_at': ''}
+        instance.flavor.extra_specs['accel:device_profile'] = 'dp_test'
+        mock_get_arq_uuids.return_value = [uuids.fake]
+        instance.save()
+
+        data = []
+
+        def fake_soi(context, instance, **kwargs):
+            data.append(instance.uuid)
+
+        with mock.patch.object(self.compute, 'shelve_offload_instance') as soi:
+            soi.side_effect = fake_soi
+            self.compute._poll_shelved_instances(self.context)
+            self.assertTrue(soi.called)
+            self.assertEqual([instance.uuid], data)
 
     @mock.patch('oslo_utils.timeutils.is_older_than')
     @mock.patch('oslo_utils.timeutils.parse_strtime')
@@ -767,11 +868,11 @@ class ShelveComputeAPITestCase(test_compute.BaseTestCase):
             if boot_from_volume:
                 rpcapi_shelve_offload_instance.assert_called_once_with(
                     self.context, instance=instance,
-                    clean_shutdown=clean_shutdown)
+                    clean_shutdown=clean_shutdown, accel_uuids=[])
             else:
                 rpcapi_shelve_instance.assert_called_once_with(
                     self.context, instance=instance, image_id='fake-image-id',
-                    clean_shutdown=clean_shutdown)
+                    clean_shutdown=clean_shutdown, accel_uuids=[])
 
             db.instance_destroy(self.context, instance['uuid'])
 
@@ -831,7 +932,7 @@ class ShelveComputeAPITestCase(test_compute.BaseTestCase):
             instance_save.assert_called_once_with(expected_task_state=[None])
             rpcapi_shelve_offload_instance.assert_called_once_with(
                     self.context, instance=fake_instance,
-                    clean_shutdown=clean_shutdown)
+                    clean_shutdown=clean_shutdown, accel_uuids=[])
             record.assert_called_once_with(self.context, fake_instance,
                                            instance_actions.SHELVE_OFFLOAD)
 

@@ -17,7 +17,6 @@ import mock
 import ddt
 from oslo_serialization import jsonutils
 from oslo_utils.fixture import uuidsentinel as uuids
-import six
 import webob
 
 from nova.api.openstack import api_version_request
@@ -43,6 +42,8 @@ class ShelveControllerTest(test.NoDBTestCase):
         exception.InstanceIsLocked(instance_uuid=uuids.instance),
         exception.OperationNotSupportedForVTPM(
             instance_uuid=uuids.instance, operation='foo'),
+        exception.OperationNotSupportedForVDPAInterface(
+            instance_uuid=uuids.instance, operation='foo'),
         exception.UnexpectedTaskStateError(
             instance_uuid=uuids.instance, expected=None,
             actual=task_states.SHELVING),
@@ -58,6 +59,19 @@ class ShelveControllerTest(test.NoDBTestCase):
 
         self.assertRaises(
             webob.exc.HTTPConflict, self.controller._shelve,
+            self.req, uuids.fake, {})
+
+    @mock.patch('nova.compute.api.API.shelve')
+    @mock.patch('nova.api.openstack.common.get_instance')
+    def test_shelve_raise_http_forbidden(
+        self, mock_get_instance, mock_shelve,
+    ):
+        mock_get_instance.return_value = (
+            fake_instance.fake_instance_obj(self.req.environ['nova.context']))
+        mock_shelve.side_effect = exception.ForbiddenWithAccelerators
+
+        self.assertRaises(
+            webob.exc.HTTPForbidden, self.controller._shelve,
             self.req, uuids.fake, {})
 
     @mock.patch('nova.api.openstack.common.get_instance')
@@ -94,10 +108,6 @@ class UnshelveServerControllerTestV277(test.NoDBTestCase):
         self.req = fakes.HTTPRequest.blank(
                 '/%s/servers/a/action' % fakes.FAKE_PROJECT_ID,
                 use_admin_context=True, version=self.wsgi_api_version)
-        # These tests don't care about ports with QoS bandwidth resources.
-        self.stub_out('nova.api.openstack.common.'
-                      'instance_has_port_with_resource_request',
-                      lambda *a, **kw: False)
 
     def fake_get_instance(self):
         ctxt = self.req.environ['nova.context']
@@ -155,8 +165,7 @@ class UnshelveServerControllerTestV277(test.NoDBTestCase):
                                 self.controller._unshelve,
                                 self.req, fakes.FAKE_UUID,
                                 body=body)
-        self.assertIn("\'availability_zone\' is a required property",
-                      six.text_type(exc))
+        self.assertIn("\'availability_zone\' is a required property", str(exc))
 
     def test_invalid_az_name_with_int(self):
         body = {
@@ -191,5 +200,4 @@ class UnshelveServerControllerTestV277(test.NoDBTestCase):
             exception.ValidationError,
             self.controller._unshelve, self.req,
             fakes.FAKE_UUID, body=body)
-        self.assertIn("Additional properties are not allowed",
-                      six.text_type(exc))
+        self.assertIn("Additional properties are not allowed", str(exc))

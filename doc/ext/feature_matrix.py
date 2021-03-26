@@ -20,10 +20,9 @@ It is used via a single directive in the .rst file
 
 """
 
+import configparser
 import re
 import sys
-
-from six.moves import configparser
 
 from docutils import nodes
 from docutils.parsers import rst
@@ -577,3 +576,7 @@ class FeatureMatrixDirective(rst.Directive):
 def setup(app):
     app.add_directive('feature_matrix', FeatureMatrixDirective)
     app.add_stylesheet('feature-matrix.css')
+    return {
+        'parallel_read_safe': True,
+        'parallel_write_safe': True,
+    }

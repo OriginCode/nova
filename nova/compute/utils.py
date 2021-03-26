@@ -25,7 +25,6 @@ import netifaces
 from oslo_log import log
 from oslo_serialization import jsonutils
 from oslo_utils import excutils
-import six
 
 from nova.accelerator import cyborg
 from nova import block_device
@@ -68,6 +67,13 @@ NON_INHERITABLE_IMAGE_PROPERTIES = frozenset([
     'img_signature_hash_method',
     'img_signature_key_type',
     'img_signature_certificate_uuid'])
+
+# Properties starting with these namespaces are reserved for internal
+# use by other services. It does not make sense (and may cause a request
+# fail) if we include them in a snapshot.
+NON_INHERITABLE_IMAGE_NAMESPACES = frozenset([
+    'os_glance',
+])
 
 
 def exception_to_dict(fault, message=None):
@@ -131,7 +137,7 @@ def _get_fault_details(exc_info, error_code):
         # exceptions (see exception_to_dict).
         details = ''.join(traceback.format_exception(
             exc_info[0], exc_info[1], exc_info[2]))
-    return six.text_type(details)
+    return str(details)
 
 
 def add_instance_fault_from_exc(context, instance, fault, exc_info=None,
@@ -356,9 +362,6 @@ def notify_usage_exists(notifier, context, instance_ref, host,
 
     audit_start, audit_end = notifications.audit_period_bounds(current_period)
 
-    bw = notifications.bandwidth_usage(context, instance_ref, audit_start,
-            ignore_missing_network_data)
-
     if system_metadata is None:
         system_metadata = utils.instance_sys_meta(instance_ref)
 
@@ -367,7 +370,7 @@ def notify_usage_exists(notifier, context, instance_ref, host,
 
     extra_info = dict(audit_period_beginning=str(audit_start),
                       audit_period_ending=str(audit_end),
-                      bandwidth=bw, image_meta=image_meta)
+                      bandwidth={}, image_meta=image_meta)
 
     if extra_usage_info:
         extra_info.update(extra_usage_info)
@@ -379,17 +382,11 @@ def notify_usage_exists(notifier, context, instance_ref, host,
             audit_period_beginning=audit_start,
             audit_period_ending=audit_end)
 
-    bandwidth = [instance_notification.BandwidthPayload(
-                    network_name=label,
-                    in_bytes=b['bw_in'],
-                    out_bytes=b['bw_out'])
-                 for label, b in bw.items()]
-
     payload = instance_notification.InstanceExistsPayload(
         context=context,
         instance=instance_ref,
         audit_period=audit_period,
-        bandwidth=bandwidth)
+        bandwidth=[])
 
     notification = instance_notification.InstanceExistsNotification(
         context=context,
@@ -1278,6 +1275,9 @@ def initialize_instance_snapshot_metadata(context, instance, name,
     properties = image_meta['properties']
     keys_to_pop = set(CONF.non_inheritable_image_properties).union(
         NON_INHERITABLE_IMAGE_PROPERTIES)
+    for ns in NON_INHERITABLE_IMAGE_NAMESPACES:
+        keys_to_pop |= {key for key in properties
+                        if key.startswith(ns)}
     for key in keys_to_pop:
         properties.pop(key, None)
 
@@ -1487,13 +1487,13 @@ def notify_about_instance_delete(notifier, context, instance,
 
 
 def update_pci_request_spec_with_allocated_interface_name(
-        context, report_client, instance, provider_mapping):
+        context, report_client, pci_requests, provider_mapping):
     """Update the instance's PCI request based on the request group -
     resource provider mapping and the device RP name from placement.
 
     :param context: the request context
     :param report_client: a SchedulerReportClient instance
-    :param instance: an Instance object to be updated
+    :param pci_requests: A list of InstancePCIRequest objects to be updated
     :param provider_mapping: the request group - resource provider mapping
         in the form returned by the RequestSpec.get_request_group_mapping()
         call.
@@ -1504,14 +1504,14 @@ def update_pci_request_spec_with_allocated_interface_name(
         have a well formatted name so we cannot parse the parent interface
         name out of it.
     """
-    if not instance.pci_requests:
+    if not pci_requests:
         return
 
     def needs_update(pci_request, mapping):
         return (pci_request.requester_id and
                 pci_request.requester_id in mapping)
 
-    for pci_request in instance.pci_requests.requests:
+    for pci_request in pci_requests:
         if needs_update(pci_request, provider_mapping):
 
             provider_uuids = provider_mapping[pci_request.requester_id]

@@ -13,7 +13,6 @@
 from oslo_log import log as logging
 import oslo_messaging as messaging
 from oslo_utils import excutils
-import six
 
 from nova import availability_zones
 from nova.compute import power_state
@@ -503,7 +502,7 @@ class LiveMigrationTask(base.TaskBase):
                 cell=cell_mapping)
 
         request_spec.ensure_project_and_user_id(self.instance)
-        request_spec.ensure_network_metadata(self.instance)
+        request_spec.ensure_network_information(self.instance)
         compute_utils.heal_reqspec_is_bfv(
             self.context, request_spec, self.instance)
 
@@ -533,8 +532,7 @@ class LiveMigrationTask(base.TaskBase):
                 # Note(ShaoHe Feng) There are types of RemoteError, such as
                 # NoSuchMethod, UnsupportedVersion, we can distinguish it by
                 # ex.exc_type.
-                raise exception.MigrationSchedulerRPCError(
-                    reason=six.text_type(ex))
+                raise exception.MigrationSchedulerRPCError(reason=str(ex))
 
             scheduler_utils.fill_provider_mapping(request_spec, selection)
 
@@ -547,8 +545,8 @@ class LiveMigrationTask(base.TaskBase):
                 # runs.
                 compute_utils.\
                     update_pci_request_spec_with_allocated_interface_name(
-                        self.context, self.report_client, self.instance,
-                        provider_mapping)
+                        self.context, self.report_client,
+                        self.instance.pci_requests.requests, provider_mapping)
             try:
                 self._check_compatible_with_source_hypervisor(host)
                 self._call_livem_checks_on_host(host, provider_mapping)

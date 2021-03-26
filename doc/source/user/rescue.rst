@@ -42,7 +42,7 @@ hosts.
 
    This mode is only supported when using the Libvirt virt driver.
 
-   This mode is not supported when using LXC or Xen hypervisors as enabled by
+   This mode is not supported when using the LXC hypervisor as enabled by
    the :oslo.config:option:`libvirt.virt_type` configurable on the computes.
 
 Usage
@@ -78,6 +78,13 @@ command:
    by means of ``os_shutdown_timeout`` that is an image metadata
    setting allowing different types of operating systems to specify
    how much time they need to shut down cleanly.
+
+To rescue an instance that boots from a volume you need to use the
+:ref:`2.87 microversion or later <2.87-microversion>`.
+
+.. code-block:: console
+
+   $ openstack --os-compute-api-version 2.87 server rescue SERVER
 
 If you want to rescue an instance with a specific image, rather than the
 default one, use the ``--image`` parameter:

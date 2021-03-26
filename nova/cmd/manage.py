@@ -26,6 +26,7 @@ import functools
 import re
 import sys
 import traceback
+from urllib import parse as urlparse
 
 from dateutil import parser as dateutil_parser
 from keystoneauth1 import exceptions as ks_exc
@@ -39,8 +40,6 @@ from oslo_serialization import jsonutils
 from oslo_utils import encodeutils
 from oslo_utils import uuidutils
 import prettytable
-import six
-import six.moves.urllib.parse as urlparse
 from sqlalchemy.engine import url as sqla_url
 
 from nova.cmd import common as cmd_common
@@ -61,13 +60,14 @@ from nova.objects import compute_node as compute_node_obj
 from nova.objects import host_mapping as host_mapping_obj
 from nova.objects import instance as instance_obj
 from nova.objects import instance_mapping as instance_mapping_obj
+from nova.objects import pci_device as pci_device_obj
 from nova.objects import quotas as quotas_obj
 from nova.objects import virtual_interface as virtual_interface_obj
 from nova import rpc
 from nova.scheduler.client import report
 from nova.scheduler import utils as scheduler_utils
 from nova import version
-from nova.virt import ironic
+from nova.virt.libvirt import machine_type_utils
 
 CONF = nova.conf.CONF
 LOG = logging.getLogger(__name__)
@@ -136,10 +136,9 @@ class DbCommands(object):
         virtual_interface_obj.fill_virtual_interface_list,
         # Added in Stein
         instance_mapping_obj.populate_user_id,
+        # Added in Victoria
+        pci_device_obj.PciDevice.populate_dev_uuids,
     )
-
-    def __init__(self):
-        pass
 
     @staticmethod
     def _print_dict(dct, dict_property="Property", dict_value='Value',
@@ -157,10 +156,10 @@ class DbCommands(object):
         for k, v in sorted(dct.items(), key=sort_key):
             # convert dict to str to check length
             if isinstance(v, dict):
-                v = six.text_type(v)
+                v = str(v)
             # if value has a newline, add in multiple rows
             # e.g. fault with stacktrace
-            if v and isinstance(v, six.string_types) and r'\n' in v:
+            if v and isinstance(v, str) and r'\n' in v:
                 lines = v.strip().split(r'\n')
                 col1 = k
                 for line in lines:
@@ -197,7 +196,7 @@ Has "nova-manage api_db sync" been run?
 Has "nova-manage cell_v2 map_cell0" been run?
 Is [api_database]/connection set in nova.conf?
 Is the cell0 database connection URL correct?
-Error: %s""") % six.text_type(e))
+Error: %s""") % str(e))
                 return 1
         return migration.db_sync(version)
 
@@ -461,35 +460,6 @@ Error: %s""") % six.text_type(e))
         else:
             return 3
 
-    @args('--delete', action='store_true', dest='delete',
-          help='If specified, automatically delete any records found where '
-               'instance_uuid is NULL.')
-    def null_instance_uuid_scan(self, delete=False):
-        """Lists and optionally deletes database records where
-        instance_uuid is NULL.
-        """
-        hits = migration.db_null_instance_uuid_scan(delete)
-        records_found = False
-        for table_name, records in hits.items():
-            # Don't print anything for 0 hits
-            if records:
-                records_found = True
-                if delete:
-                    print(_("Deleted %(records)d records "
-                            "from table '%(table_name)s'.") %
-                          {'records': records, 'table_name': table_name})
-                else:
-                    print(_("There are %(records)d records in the "
-                            "'%(table_name)s' table where the uuid or "
-                            "instance_uuid column is NULL. Run this "
-                            "command again with the --delete option after you "
-                            "have backed up any necessary data.") %
-                          {'records': records, 'table_name': table_name})
-        # check to see if we didn't find anything
-        if not records_found:
-            print(_('There were no records found where '
-                    'instance_uuid was NULL.'))
-
     def _run_migration(self, ctxt, max_count):
         ran = 0
         exceptions = False
@@ -583,102 +553,6 @@ Error: %s""") % six.text_type(e))
         # "there are more migrations, but not completable right now"
         return ran and 1 or 0
 
-    @args('--resource_class', metavar='<class>', required=True,
-          help='Ironic node class to set on instances')
-    @args('--host', metavar='<host>', required=False,
-          help='Compute service name to migrate nodes on')
-    @args('--node', metavar='<node>', required=False,
-          help='Ironic node UUID to migrate (all on the host if omitted)')
-    @args('--all', action='store_true', default=False, dest='all_hosts',
-          help='Run migrations for all ironic hosts and nodes')
-    @args('--verbose', action='store_true', default=False,
-          help='Print information about migrations being performed')
-    def ironic_flavor_migration(self, resource_class, host=None, node=None,
-                                all_hosts=False, verbose=False):
-        """Migrate flavor information for ironic instances.
-
-        This will manually push the instance flavor migration required
-        for ironic-hosted instances in Pike. The best way to accomplish
-        this migration is to run your ironic computes normally in Pike.
-        However, if you need to push the migration manually, then use
-        this.
-
-        This is idempotent, but not trivial to start/stop/resume. It is
-        recommended that you do this with care and not from a script
-        assuming it is trivial.
-
-        Running with --all may generate a large amount of DB traffic
-        all at once. Running at least one host at a time is recommended
-        for batching.
-
-        Return values:
-
-        0: All work is completed (or none is needed)
-        1: Specified host and/or node is not found, or no ironic nodes present
-        2: Internal accounting error shows more than one instance per node
-        3: Invalid combination of required arguments
-        """
-        if not resource_class:
-            # Note that if --resource_class is not specified on the command
-            # line it will actually result in a return code of 2, but we
-            # leave 3 here for testing purposes.
-            print(_('A resource_class is required for all modes of operation'))
-            return 3
-
-        ctx = context.get_admin_context()
-
-        if all_hosts:
-            if host or node:
-                print(_('--all with --host and/or --node does not make sense'))
-                return 3
-            cns = objects.ComputeNodeList.get_by_hypervisor_type(ctx, 'ironic')
-        elif host and node:
-            try:
-                cn = objects.ComputeNode.get_by_host_and_nodename(ctx, host,
-                                                                  node)
-                cns = [cn]
-            except exception.ComputeHostNotFound:
-                cns = []
-        elif host:
-            try:
-                cns = objects.ComputeNodeList.get_all_by_host(ctx, host)
-            except exception.ComputeHostNotFound:
-                cns = []
-        else:
-            print(_('Either --all, --host, or --host and --node are required'))
-            return 3
-
-        if len(cns) == 0:
-            print(_('No ironic compute nodes found that match criteria'))
-            return 1
-
-        # Check that we at least got one ironic compute and we can pretty
-        # safely assume the rest are
-        if cns[0].hypervisor_type != 'ironic':
-            print(_('Compute node(s) specified is not of type ironic'))
-            return 1
-
-        for cn in cns:
-            # NOTE(danms): The instance.node is the
-            # ComputeNode.hypervisor_hostname, which in the case of ironic is
-            # the node uuid. Since only one instance can be on a node in
-            # ironic, do another sanity check here to make sure we look legit.
-            inst = objects.InstanceList.get_by_filters(
-                ctx, {'node': cn.hypervisor_hostname,
-                      'deleted': False})
-            if len(inst) > 1:
-                print(_('Ironic node %s has multiple instances? '
-                        'Something is wrong.') % cn.hypervisor_hostname)
-                return 2
-            elif len(inst) == 1:
-                result = ironic.IronicDriver._pike_flavor_migration_for_node(
-                    ctx, resource_class, inst[0].uuid)
-                if result and verbose:
-                    print(_('Migrated instance %(uuid)s on node %(node)s') % {
-                        'uuid': inst[0].uuid,
-                        'node': cn.hypervisor_hostname})
-        return 0
-
 
 class ApiDbCommands(object):
     """Class for managing the api database."""
@@ -718,7 +592,7 @@ class CellV2Commands(object):
                                          url=objects.CellMapping.format_mq_url(
                                              transport_url))
         except (messaging.InvalidTransportURL, ValueError) as e:
-            print(_('Invalid transport URL: %s') % six.text_type(e))
+            print(_('Invalid transport URL: %s') % str(e))
             return None
 
         return transport_url
@@ -1527,7 +1401,7 @@ class PlacementCommands(object):
             )['ports']
         except neutron_client_exc.NeutronClientException as e:
             raise exception.UnableToQueryPorts(
-                instance_uuid=instance.uuid, error=six.text_type(e))
+                instance_uuid=instance.uuid, error=str(e))
 
     @staticmethod
     def _has_request_but_no_allocation(port):
@@ -1752,13 +1626,13 @@ class PlacementCommands(object):
         except neutron_client_exc.NeutronClientException as e:
             output(
                 _('Updating port %(port_uuid)s failed: %(error)s') %
-                {'port_uuid': port['id'], 'error': six.text_type(e)})
+                {'port_uuid': port['id'], 'error': str(e)})
             # one of the port updates failed. We need to roll back the updates
             # that succeeded before
             self._rollback_port_updates(neutron, succeeded, output)
             # we failed to heal so we need to stop but we successfully rolled
             # back the partial updates so the admin can retry the healing.
-            raise exception.UnableToUpdatePorts(error=six.text_type(e))
+            raise exception.UnableToUpdatePorts(error=str(e))
 
     @staticmethod
     def _rollback_port_updates(neutron, ports_to_rollback, output):
@@ -1782,7 +1656,7 @@ class PlacementCommands(object):
                 output(
                     _('Rolling back update for port %(port_uuid)s failed: '
                       '%(error)s') % {'port_uuid': port['id'],
-                                      'error': six.text_type(e)})
+                                      'error': str(e)})
                 # TODO(gibi): We could implement a retry mechanism with
                 # back off.
                 manual_rollback_needed.append(port['id'])
@@ -1793,7 +1667,7 @@ class PlacementCommands(object):
             # back. There are partial updates in neutron. Human intervention
             # needed.
             raise exception.UnableToRollbackPortUpdates(
-                error=six.text_type(last_exc),
+                error=str(last_exc),
                 port_uuids=manual_rollback_needed)
 
     def _heal_missing_alloc(self, ctxt, instance, node_cache):
@@ -2584,8 +2458,7 @@ class PlacementCommands(object):
             raise
 
         # Verify every allocations for each consumer UUID
-        for consumer_uuid, consumer_resources in six.iteritems(
-                pallocs.allocations):
+        for consumer_uuid, consumer_resources in pallocs.allocations.items():
             consumer_allocs = consumer_resources['resources']
             if any(rc in NOVA_RCS
                    for rc in consumer_allocs):
@@ -2748,11 +2621,141 @@ class PlacementCommands(object):
         return 0
 
 
+class LibvirtCommands(object):
+    """Commands for managing libvirt instances"""
+
+    @action_description(
+        _("Fetch the stored machine type of the instance from the database."))
+    @args('instance_uuid', metavar='<instance_uuid>',
+          help='UUID of instance to fetch the machine type for')
+    def get_machine_type(self, instance_uuid=None):
+        """Fetch the stored machine type of the instance from the database.
+
+        Return codes:
+
+        * 0: Command completed successfully.
+        * 1: An unexpected error happened.
+        * 2: Unable to find instance or instance mapping.
+        * 3: No machine type found for the instance.
+
+        """
+        try:
+            ctxt = context.get_admin_context()
+            mtype = machine_type_utils.get_machine_type(ctxt, instance_uuid)
+            if mtype:
+                print(mtype)
+                return 0
+            else:
+                print(_('No machine type registered for instance %s' %
+                        instance_uuid))
+                return 3
+        except (exception.InstanceNotFound,
+                exception.InstanceMappingNotFound) as e:
+            print(str(e))
+            return 2
+        except Exception:
+            LOG.exception('Unexpected error')
+            return 1
+
+    @action_description(
+        _("Set or update the stored machine type of the instance in the "
+          "database. This is only allowed for instances with a STOPPED, "
+          "SHELVED or SHELVED_OFFLOADED vm_state."))
+    @args('instance_uuid', metavar='<instance_uuid>',
+          help='UUID of instance to update')
+    @args('machine_type', metavar='<machine_type>',
+          help='Machine type to set')
+    @args('--force', action='store_true', default=False, dest='force',
+          help='Force the update of the stored machine type')
+    def update_machine_type(
+        self,
+        instance_uuid=None,
+        machine_type=None,
+        force=False
+    ):
+        """Set or update the machine type of a given instance.
+
+        Return codes:
+
+        * 0: Command completed successfully.
+        * 1: An unexpected error happened.
+        * 2: Unable to find the instance or instance cell mapping.
+        * 3: Invalid instance vm_state.
+        * 4: Unable to move between underlying machine types (pc to q35 etc)
+             or to older versions.
+        * 5: Unsupported machine type.
+        """
+        ctxt = context.get_admin_context()
+        if force:
+            print(_("Forcing update of machine type."))
+
+        try:
+            rtype, ptype = machine_type_utils.update_machine_type(
+                ctxt, instance_uuid, machine_type, force=force)
+        except exception.UnsupportedMachineType as e:
+            print(str(e))
+            return 5
+        except exception.InvalidMachineTypeUpdate as e:
+            print(str(e))
+            return 4
+        except exception.InstanceInvalidState as e:
+            print(str(e))
+            return 3
+        except (
+            exception.InstanceNotFound,
+            exception.InstanceMappingNotFound,
+        ) as e:
+            print(str(e))
+            return 2
+        except Exception:
+            LOG.exception('Unexpected error')
+            return 1
+
+        print(_("Updated instance %(instance_uuid)s machine type to "
+                "%(machine_type)s (previously %(previous_type)s)") %
+                {'instance_uuid': instance_uuid,
+                 'machine_type': rtype,
+                 'previous_type': ptype})
+        return 0
+
+    @action_description(
+        _("List the UUIDs of instances that do not have hw_machine_type set "
+          "in their image metadata"))
+    @args('--cell-uuid', metavar='<cell_uuid>', dest='cell_uuid',
+          required=False, help='UUID of cell from which to list instances')
+    def list_unset_machine_type(self, cell_uuid=None):
+        """List the UUIDs of instances without image_hw_machine_type set
+
+        Return codes:
+        * 0: Command completed successfully, no instances found.
+        * 1: An unexpected error happened.
+        * 2: Unable to find cell mapping.
+        * 3: Instances found without hw_machine_type set.
+        """
+        try:
+            instance_list = machine_type_utils.get_instances_without_type(
+                context.get_admin_context(), cell_uuid)
+        except exception.CellMappingNotFound as e:
+            print(str(e))
+            return 2
+        except Exception:
+            LOG.exception('Unexpected error')
+            return 1
+
+        if instance_list:
+            print('\n'.join(i.uuid for i in instance_list))
+            return 3
+        else:
+            print(_("No instances found without hw_machine_type set."))
+            return 0
+
+
 CATEGORIES = {
     'api_db': ApiDbCommands,
     'cell_v2': CellV2Commands,
     'db': DbCommands,
-    'placement': PlacementCommands
+    'placement': PlacementCommands,
+    'libvirt': LibvirtCommands,
 }
 
 

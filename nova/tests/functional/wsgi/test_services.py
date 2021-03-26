@@ -12,7 +12,6 @@
 
 import os_resource_classes as orc
 import os_traits
-import six
 
 from nova import context as nova_context
 from nova import exception
@@ -83,7 +82,7 @@ class TestServicesAPI(integrated_helpers.ProviderUsageBaseTestCase):
                                self.admin_api.api_delete,
                                '/os-services/%s' % service['id'])
         self.assertIn('Unable to delete compute service that is hosting '
-                      'instances.', six.text_type(ex))
+                      'instances.', str(ex))
         self.assertEqual(409, ex.response.status_code)
 
         # Now delete the instance and wait for it to be gone.
@@ -143,12 +142,9 @@ class TestServicesAPI(integrated_helpers.ProviderUsageBaseTestCase):
         host1.stop()
         # Start another host and trigger the server evacuate to that host.
         self._start_compute('host2')
-        self.admin_api.post_server_action(server['id'], {'evacuate': {}})
         # The host does not change until after the status is changed to ACTIVE
         # so wait for both parameters.
-        self._wait_for_server_parameter(server, {
-            'status': 'ACTIVE',
-            'OS-EXT-SRV-ATTR:host': 'host2'})
+        self._evacuate_server(server, expected_host='host2')
         # Delete the compute service for host1 and check the related
         # placement resources for that host.
         self.admin_api.api_delete('/os-services/%s' % service['id'])
@@ -201,7 +197,7 @@ class TestServicesAPI(integrated_helpers.ProviderUsageBaseTestCase):
                                '/os-services/%s' % service['id'])
         self.assertEqual(409, ex.response.status_code)
         self.assertIn('Unable to delete compute service that has in-progress '
-                      'migrations', six.text_type(ex))
+                      'migrations', str(ex))
         self.assertIn('There are 1 in-progress migrations involving the host',
                       self.stdlog.logger.output)
         # The provider is still around because we did not delete the service.
@@ -246,7 +242,7 @@ class TestServicesAPI(integrated_helpers.ProviderUsageBaseTestCase):
                                '/os-services/%s' % service['id'])
         self.assertEqual(409, ex.response.status_code)
         self.assertIn('Unable to delete compute service that has in-progress '
-                      'migrations', six.text_type(ex))
+                      'migrations', str(ex))
         self.assertIn('There are 1 in-progress migrations involving the host',
                       self.stdlog.logger.output)
         # The provider is still around because we did not delete the service.

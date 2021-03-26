@@ -17,12 +17,13 @@
 import collections
 import re
 import sys
+import typing as ty
+from urllib import parse
 
 import os_resource_classes as orc
 import os_traits
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
-from six.moves.urllib import parse
 
 from nova.compute import flavors
 from nova.compute import utils as compute_utils
@@ -56,7 +57,30 @@ class ResourceRequest(object):
     XS_KEYPAT = re.compile(r"^(%s)([a-zA-Z0-9_-]{1,64})?:(.*)$" %
                            '|'.join((XS_RES_PREFIX, XS_TRAIT_PREFIX)))
 
-    def __init__(self, request_spec, enable_pinning_translate=True):
+    def __init__(self):
+        """Create an empty ResourceRequest
+
+        Do not call this directly, use the existing static factory methods
+        from_*()
+        """
+        self._rg_by_id: ty.Dict[str, objects.RequestGroup] = {}
+        self._group_policy: ty.Optional[str] = None
+        # Default to the configured limit but _limit can be
+        # set to None to indicate "no limit".
+        self._limit = CONF.scheduler.max_placement_results
+        self._root_required: ty.Set[str] = set()
+        self._root_forbidden: ty.Set[str] = set()
+        self.suffixed_groups_from_flavor = 0
+        # TODO(stephenfin): Remove this parameter once we drop support for
+        # 'vcpu_pin_set'
+        self.cpu_pinning_requested = False
+
+    @classmethod
+    def from_request_spec(
+        cls,
+        request_spec: 'objects.RequestSpec',
+        enable_pinning_translate: bool = True
+    ) -> 'ResourceRequest':
         """Create a new instance of ResourceRequest from a RequestSpec.
 
         Examines the flavor, flavor extra specs, (optional) image metadata,
@@ -101,17 +125,13 @@ class ResourceRequest(object):
         :param request_spec: An instance of ``objects.RequestSpec``.
         :param enable_pinning_translate: True if the CPU policy extra specs
             should be translated to placement resources and traits.
+        :return: a ResourceRequest instance
         """
-        # { ident: RequestGroup }
-        self._rg_by_id = {}
-        self._group_policy = None
+        res_req = cls()
         # root_required+=these
-        self._root_required = request_spec.root_required
+        res_req._root_required = request_spec.root_required
         # root_required+=!these
-        self._root_forbidden = request_spec.root_forbidden
-        # Default to the configured limit but _limit can be
-        # set to None to indicate "no limit".
-        self._limit = CONF.scheduler.max_placement_results
+        res_req._root_forbidden = request_spec.root_forbidden
 
         # TODO(efried): Handle member_of[$S], which will need to be reconciled
         # with destination.aggregates handling in resources_from_request_spec
@@ -123,36 +143,35 @@ class ResourceRequest(object):
             image = objects.ImageMeta(properties=objects.ImageMetaProps())
 
         # Parse the flavor extra specs
-        self._process_extra_specs(request_spec.flavor)
+        res_req._process_extra_specs(request_spec.flavor)
 
-        self.suffixed_groups_from_flavor = self.get_num_of_suffixed_groups()
+        # NOTE(gibi): this assumes that _process_extra_specs() was already
+        # called but _process_requested_resources() hasn't called it yet.
+        res_req.suffixed_groups_from_flavor = (
+            res_req.get_num_of_suffixed_groups())
 
         # Now parse the (optional) image metadata
-        self._process_image_meta(image)
-
-        # TODO(stephenfin): Remove this parameter once we drop support for
-        # 'vcpu_pin_set'
-        self.cpu_pinning_requested = False
+        res_req._process_image_meta(image)
 
         if enable_pinning_translate:
             # Next up, let's handle those pesky CPU pinning policies
-            self._translate_pinning_policies(request_spec.flavor, image)
+            res_req._translate_pinning_policies(request_spec.flavor, image)
 
         # Add on any request groups that came from outside of the flavor/image,
         # e.g. from ports or device profiles.
-        self._process_requested_resources(request_spec)
+        res_req._process_requested_resources(request_spec)
 
         # Parse the flavor itself, though we'll only use these fields if they
         # don't conflict with something already provided by the flavor extra
         # specs. These are all added to the unsuffixed request group.
-        merged_resources = self.merged_resources()
+        merged_resources = res_req.merged_resources()
 
         if (orc.VCPU not in merged_resources and
                 orc.PCPU not in merged_resources):
-            self._add_resource(orc.VCPU, request_spec.vcpus)
+            res_req._add_resource(orc.VCPU, request_spec.vcpus)
 
         if orc.MEMORY_MB not in merged_resources:
-            self._add_resource(orc.MEMORY_MB, request_spec.memory_mb)
+            res_req._add_resource(orc.MEMORY_MB, request_spec.memory_mb)
 
         if orc.DISK_GB not in merged_resources:
             disk = request_spec.ephemeral_gb
@@ -161,15 +180,32 @@ class ResourceRequest(object):
                 disk += request_spec.root_gb
 
             if disk:
-                self._add_resource(orc.DISK_GB, disk)
+                res_req._add_resource(orc.DISK_GB, disk)
 
-        self._translate_memory_encryption(request_spec.flavor, image)
+        res_req._translate_memory_encryption(request_spec.flavor, image)
 
-        self._translate_vpmems_request(request_spec.flavor)
+        res_req._translate_vpmems_request(request_spec.flavor)
 
-        self._translate_vtpm_request(request_spec.flavor, image)
+        res_req._translate_vtpm_request(request_spec.flavor, image)
 
-        self.strip_zeros()
+        res_req._translate_pci_numa_affinity_policy(request_spec.flavor, image)
+
+        res_req._translate_secure_boot_request(request_spec.flavor, image)
+
+        res_req.strip_zeros()
+
+        return res_req
+
+    @classmethod
+    def from_request_group(
+        cls,
+        request_group: 'objects.RequestGroup',
+    ) -> 'ResourceRequest':
+        """Create a new instance of ResourceRequest from a RequestGroup."""
+        res_req = cls()
+        res_req._add_request_group(request_group)
+        res_req.strip_zeros()
+        return res_req
 
     def _process_requested_resources(self, request_spec):
         requested_resources = (request_spec.requested_resources
@@ -215,6 +251,15 @@ class ResourceRequest(object):
             # supported in image traits
             self._add_trait(trait, 'required')
 
+    def _translate_secure_boot_request(self, flavor, image):
+        sb_policy = hardware.get_secure_boot_constraint(flavor, image)
+        if sb_policy != obj_fields.SecureBoot.REQUIRED:
+            return
+
+        trait = os_traits.COMPUTE_SECURITY_UEFI_SECURE_BOOT
+        self._add_trait(trait, 'required')
+        LOG.debug("Requiring secure boot support via trait %s.", trait)
+
     def _translate_vtpm_request(self, flavor, image):
         vtpm_config = hardware.get_vtpm_constraint(flavor, image)
         if not vtpm_config:
@@ -254,7 +299,7 @@ class ResourceRequest(object):
         if not vpmem_labels:
             # No vpmems required
             return
-        amount_by_rc = collections.defaultdict(int)
+        amount_by_rc: ty.DefaultDict[str, int] = collections.defaultdict(int)
         for vpmem_label in vpmem_labels:
             resource_class = orc.normalize_name(
                 "PMEM_NAMESPACE_" + vpmem_label)
@@ -302,7 +347,7 @@ class ResourceRequest(object):
             dedicated_cpus = hardware.get_dedicated_cpu_constraint(flavor)
             realtime_cpus = hardware.get_realtime_cpu_constraint(flavor, image)
 
-            pcpus = len(dedicated_cpus or realtime_cpus)
+            pcpus = len(dedicated_cpus or realtime_cpus or [])
             vcpus = flavor.vcpus - pcpus
 
             # apply for the VCPU resource of a 'mixed' instance
@@ -329,6 +374,16 @@ class ResourceRequest(object):
                       {'trait': os_traits.HW_CPU_HYPERTHREADING,
                        'value': trait})
             self._add_trait(os_traits.HW_CPU_HYPERTHREADING, trait)
+
+    def _translate_pci_numa_affinity_policy(self, flavor, image):
+        policy = hardware.get_pci_numa_policy_constraint(flavor, image)
+        # only the socket policy supports a trait
+        if policy == objects.fields.PCINUMAAffinityPolicy.SOCKET:
+            trait = os_traits.COMPUTE_SOCKET_PCI_NUMA_AFFINITY
+            self._add_trait(trait, 'required')
+            LOG.debug(
+                "Requiring 'socket' PCI NUMA affinity support via trait %s.",
+                trait)
 
     @property
     def group_policy(self):
@@ -428,7 +483,7 @@ class ResourceRequest(object):
 
         :return: A dict of the form {resource_class: amount}
         """
-        ret = collections.defaultdict(lambda: 0)
+        ret: ty.DefaultDict[str, int] = collections.defaultdict(lambda: 0)
         for rg in self._rg_by_id.values():
             for resource_class, amount in rg.resources.items():
                 ret[resource_class] += amount
@@ -447,48 +502,6 @@ class ResourceRequest(object):
         """Produce a querystring of the form expected by
         GET /allocation_candidates.
         """
-        # TODO(gibi): We have a RequestGroup OVO so we can move this to that
-        # class as a member function.
-        # NOTE(efried): The sorting herein is not necessary for the API; it is
-        # to make testing easier and logging/debugging predictable.
-        def to_queryparams(request_group, suffix):
-            res = request_group.resources
-            required_traits = request_group.required_traits
-            forbidden_traits = request_group.forbidden_traits
-            aggregates = request_group.aggregates
-            in_tree = request_group.in_tree
-            forbidden_aggregates = request_group.forbidden_aggregates
-
-            resource_query = ",".join(
-                sorted("%s:%s" % (rc, amount)
-                       for (rc, amount) in res.items()))
-            qs_params = [('resources%s' % suffix, resource_query)]
-
-            # Assemble required and forbidden traits, allowing for either/both
-            # to be empty.
-            required_val = ','.join(
-                sorted(required_traits) +
-                ['!%s' % ft for ft in sorted(forbidden_traits)])
-            if required_val:
-                qs_params.append(('required%s' % suffix, required_val))
-            if aggregates:
-                aggs = []
-                # member_of$S is a list of lists.  We need a tuple of
-                # ('member_of$S', 'in:uuid,uuid,...') for each inner list.
-                for agglist in aggregates:
-                    aggs.append(('member_of%s' % suffix,
-                                 'in:' + ','.join(sorted(agglist))))
-                qs_params.extend(sorted(aggs))
-            if in_tree:
-                qs_params.append(('in_tree%s' % suffix, in_tree))
-            if forbidden_aggregates:
-                # member_of$S is a list of aggregate uuids. We need a
-                # tuple of ('member_of$S, '!in:uuid,uuid,...').
-                forbidden_aggs = '!in:' + ','.join(
-                    sorted(forbidden_aggregates))
-                qs_params.append(('member_of%s' % suffix, forbidden_aggs))
-            return qs_params
-
         if self._limit is not None:
             qparams = [('limit', self._limit)]
         else:
@@ -500,18 +513,18 @@ class ResourceRequest(object):
                                                   sorted(self._root_forbidden)]
             qparams.append(('root_required', ','.join(vals)))
 
-        for ident, rg in self._rg_by_id.items():
+        for rg in self._rg_by_id.values():
             # [('resources[$S]', 'rclass:amount,rclass:amount,...'),
             #  ('required[$S]', 'trait_name,!trait_name,...'),
             #  ('member_of[$S]', 'in:uuid,uuid,...'),
             #  ('member_of[$S]', 'in:uuid,uuid,...')]
-            qparams.extend(to_queryparams(rg, ident or ''))
+            qparams.extend(rg.to_queryparams())
 
         return parse.urlencode(sorted(qparams))
 
     @property
     def all_required_traits(self):
-        traits = set()
+        traits: ty.Set[str] = set()
         for rr in self._rg_by_id.values():
             traits = traits.union(rr.required_traits)
         return traits
@@ -595,7 +608,7 @@ def resources_from_flavor(instance, flavor):
     # just merge together all the resources specified in the flavor and pass
     # them along.  This will need to be adjusted when nested and/or shared RPs
     # are in play.
-    res_req = ResourceRequest(req_spec)
+    res_req = ResourceRequest.from_request_spec(req_spec)
 
     return res_req.merged_resources()
 
@@ -614,7 +627,8 @@ def resources_from_request_spec(ctxt, spec_obj, host_manager,
     :return: A ResourceRequest object.
     :raises NoValidHost: If the specified host/node is not found in the DB.
     """
-    res_req = ResourceRequest(spec_obj, enable_pinning_translate)
+    res_req = ResourceRequest.from_request_spec(
+        spec_obj, enable_pinning_translate)
 
     # values to get the destination target compute uuid
     target_host = None
@@ -1348,3 +1362,82 @@ def fill_provider_mapping_based_on_allocation(
     # allocation_request_version key of the Selection object.
     request_spec.map_requested_resources_to_providers(
         allocation, provider_traits)
+
+
+# FIXME(sbauza) : Move this method closer to the prefilter once split.
+def get_aggregates_for_routed_network(
+        context, network_api, report_client, network_uuid):
+    """Collects the aggregate UUIDs describing the segmentation of a routed
+    network from Nova perspective.
+
+    A routed network consists of multiple network segments. Each segment is
+    available on a given set of compute hosts. Such segmentation is modelled as
+    host aggregates from Nova perspective.
+
+    :param context: The security context
+    :param network_api: nova.network.neutron.API instance to be used to
+       communicate with Neutron
+    :param report_client: SchedulerReportClient instance to be used to
+        communicate with Placement
+    :param network_uuid: The UUID of the Neutron network to be translated to
+        aggregates
+    :returns: A list of aggregate UUIDs
+    :raises InvalidRoutedNetworkConfiguration: if something goes wrong when
+        try to find related aggregates
+    """
+    aggregates = []
+
+    segment_ids = network_api.get_segment_ids_for_network(
+        context, network_uuid)
+    # Each segment is a resource provider in placement and is in an
+    # aggregate for the routed network, so we have to get the
+    # aggregates for each segment provider - and those aggregates are
+    # mirrored as nova host aggregates.
+    # NOTE(sbauza): In case of a network with non-configured routed segments,
+    # we will get an empty list of segment UUIDs, so we won't enter the loop.
+    for segment_id in segment_ids:
+        # TODO(sbauza): Don't use a private method.
+        agg_info = report_client._get_provider_aggregates(context, segment_id)
+        # @safe_connect can return None but we also want to hard-stop here if
+        # we can't find the aggregate that Neutron created for the segment.
+        if agg_info is None or not agg_info.aggregates:
+            raise exception.InvalidRoutedNetworkConfiguration(
+                'Failed to find aggregate related to segment %s' % segment_id)
+        aggregates.extend(agg_info.aggregates)
+    return aggregates
+
+
+# FIXME(sbauza) : Move this method closer to the prefilter once split.
+def get_aggregates_for_routed_subnet(
+        context, network_api, report_client, subnet_id):
+    """Collects the aggregate UUIDs matching the segment that relates to a
+    particular subnet from a routed network.
+
+    A routed network consists of multiple network segments. Each segment is
+    available on a given set of compute hosts. Such segmentation is modelled as
+    host aggregates from Nova perspective.
+
+    :param context: The security context
+    :param network_api: nova.network.neutron.API instance to be used to
+       communicate with Neutron
+    :param report_client: SchedulerReportClient instance to be used to
+        communicate with Placement
+    :param subnet_id: The UUID of the Neutron subnet to be translated to
+        aggregate
+    :returns: A list of aggregate UUIDs
+    :raises InvalidRoutedNetworkConfiguration: if something goes wrong when
+        try to find related aggregates
+    """
+
+    segment_id = network_api.get_segment_id_for_subnet(
+        context, subnet_id)
+    if segment_id:
+        # TODO(sbauza): Don't use a private method.
+        agg_info = report_client._get_provider_aggregates(context, segment_id)
+        # @safe_connect can return None but we also want to hard-stop here if
+        # we can't find the aggregate that Neutron created for the segment.
+        if agg_info is None or not agg_info.aggregates:
+            raise exception.InvalidRoutedNetworkConfiguration(
+                'Failed to find aggregate related to segment %s' % segment_id)
+        return agg_info.aggregates
+    return []

@@ -17,7 +17,6 @@ import re
 
 from dateutil import parser as dateutil_parser
 from oslo_utils import timeutils
-from sqlalchemy.dialects import sqlite
 from sqlalchemy import func
 from sqlalchemy import MetaData
 from sqlalchemy import select
@@ -33,22 +32,7 @@ class TestDatabaseArchive(integrated_helpers._IntegratedTestBase):
 
     def setUp(self):
         super(TestDatabaseArchive, self).setUp()
-        # TODO(mriedem): pull this out so we can re-use it in
-        # test_archive_deleted_rows_fk_constraint
-        # SQLite doesn't enforce foreign key constraints without a pragma.
-        engine = sqlalchemy_api.get_engine()
-        dialect = engine.url.get_dialect()
-        if dialect == sqlite.dialect:
-            # We're seeing issues with foreign key support in SQLite 3.6.20
-            # SQLAlchemy doesn't support it at all with < SQLite 3.6.19
-            # It works fine in SQLite 3.7.
-            # So return early to skip this test if running SQLite < 3.7
-            import sqlite3
-            tup = sqlite3.sqlite_version_info
-            if tup[0] < 3 or (tup[0] == 3 and tup[1] < 7):
-                self.skipTest(
-                    'sqlite version too old for reliable SQLA foreign_keys')
-            engine.connect().execute("PRAGMA foreign_keys = ON")
+        self.enforce_fk_constraints()
 
     def test_archive_deleted_rows(self):
         # Boots a server, deletes it, and then tries to archive it.
@@ -114,6 +98,19 @@ class TestDatabaseArchive(integrated_helpers._IntegratedTestBase):
         # Verify we have some system_metadata since we'll check that later.
         self.assertTrue(len(instance.system_metadata),
                         'No system_metadata for instance: %s' % server_id)
+        # Create a pci_devices record to simulate an instance that had a PCI
+        # device allocated at the time it was deleted. There is a window of
+        # time between deletion of the instance record and freeing of the PCI
+        # device in nova-compute's _complete_deletion method during RT update.
+        db.pci_device_update(admin_context, 1, 'fake-address',
+                             {'compute_node_id': 1,
+                              'address': 'fake-address',
+                              'vendor_id': 'fake',
+                              'product_id': 'fake',
+                              'dev_type': 'fake',
+                              'label': 'fake',
+                              'status': 'allocated',
+                              'instance_uuid': instance.uuid})
         # Now try and archive the soft deleted records.
         results, deleted_instance_uuids, archived = \
             db.archive_deleted_rows(max_rows=100)
@@ -128,6 +125,49 @@ class TestDatabaseArchive(integrated_helpers._IntegratedTestBase):
         self.assertIn('instance_actions', results)
         self.assertIn('instance_actions_events', results)
         self.assertEqual(sum(results.values()), archived)
+        # Verify that the pci_devices record has not been dropped
+        self.assertNotIn('pci_devices', results)
+
+    def test_archive_deleted_rows_incomplete(self):
+        """This tests a scenario where archive_deleted_rows is run with
+        --max_rows and does not run to completion.
+
+        That is, the archive is stopped before all archivable records have been
+        archived. Specifically, the problematic state is when a single instance
+        becomes partially archived (example: 'instance_extra' record for one
+        instance has been archived while its 'instances' record remains). Any
+        access of the instance (example: listing deleted instances) that
+        triggers the retrieval of a dependent record that has been archived
+        away, results in undefined behavior that may raise an error.
+
+        We will force the system into a state where a single deleted instance
+        is partially archived. We want to verify that we can, for example,
+        successfully do a GET /servers/detail at any point between partial
+        archive_deleted_rows runs without errors.
+        """
+        # Boots a server, deletes it, and then tries to archive it.
+        server = self._create_server()
+        server_id = server['id']
+        # Assert that there are instance_actions. instance_actions are
+        # interesting since we don't soft delete them but they have a foreign
+        # key back to the instances table.
+        actions = self.api.get_instance_actions(server_id)
+        self.assertTrue(len(actions),
+                        'No instance actions for server: %s' % server_id)
+        self._delete_server(server)
+        # Archive deleted records iteratively, 1 row at a time, and try to do a
+        # GET /servers/detail between each run. All should succeed.
+        exceptions = []
+        while True:
+            _, _, archived = db.archive_deleted_rows(max_rows=1)
+            try:
+                # Need to use the admin API to list deleted servers.
+                self.admin_api.get_servers(search_opts={'deleted': True})
+            except Exception as ex:
+                exceptions.append(ex)
+            if archived == 0:
+                break
+        self.assertFalse(exceptions)
 
     def _get_table_counts(self):
         engine = sqlalchemy_api.get_engine()

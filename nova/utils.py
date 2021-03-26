@@ -43,10 +43,9 @@ import oslo_messaging as messaging
 from oslo_utils import encodeutils
 from oslo_utils import excutils
 from oslo_utils import importutils
+from oslo_utils.secretutils import md5
 from oslo_utils import strutils
 from oslo_utils import timeutils
-import six
-from six.moves import range
 
 import nova.conf
 from nova import exception
@@ -256,11 +255,11 @@ def utf8(value):
     http://github.com/facebook/tornado/blob/master/tornado/escape.py
 
     """
-    if value is None or isinstance(value, six.binary_type):
+    if value is None or isinstance(value, bytes):
         return value
 
-    if not isinstance(value, six.text_type):
-        value = six.text_type(value)
+    if not isinstance(value, str):
+        value = str(value)
 
     return value.encode('utf-8')
 
@@ -373,7 +372,7 @@ def sanitize_hostname(hostname, default_name=None):
         hostname = hostname.encode('latin-1', 'ignore').decode('latin-1')
 
     hostname = truncate_hostname(hostname)
-    hostname = re.sub('[ _]', '-', hostname)
+    hostname = re.sub(r'[ _\.]', '-', hostname)
     hostname = re.sub(r'[^\w.-]+', '', hostname)
     hostname = hostname.lower()
     hostname = hostname.strip('.-')
@@ -618,7 +617,7 @@ def validate_integer(value, name, min_value=None, max_value=None):
     try:
         return strutils.validate_integer(value, name, min_value, max_value)
     except ValueError as e:
-        raise exception.InvalidInput(reason=six.text_type(e))
+        raise exception.InvalidInput(reason=str(e))
 
 
 def _serialize_profile_info():
@@ -697,7 +696,7 @@ def tpool_execute(func, *args, **kwargs):
 def is_none_string(val):
     """Check if a string represents a None value.
     """
-    if not isinstance(val, six.string_types):
+    if not isinstance(val, str):
         return False
 
     return val.lower() == 'none'
@@ -730,7 +729,7 @@ def get_system_metadata_from_image(image_meta, flavor=None):
         if key in SM_SKIP_KEYS:
             continue
 
-        new_value = safe_truncate(six.text_type(value), 255)
+        new_value = safe_truncate(str(value), 255)
         system_meta[prefix_format % key] = new_value
 
     for key in SM_INHERITABLE_KEYS:
@@ -784,9 +783,9 @@ def get_hash_str(base_str):
 
     If base_str is a Unicode string, encode it to UTF-8.
     """
-    if isinstance(base_str, six.text_type):
+    if isinstance(base_str, str):
         base_str = base_str.encode('utf-8')
-    return hashlib.md5(base_str).hexdigest()
+    return md5(base_str, usedforsecurity=False).hexdigest()
 
 
 def get_sha256_str(base_str):
@@ -797,7 +796,7 @@ def get_sha256_str(base_str):
     or anything else that needs to be retained for a long period a salted
     hash is better.
     """
-    if isinstance(base_str, six.text_type):
+    if isinstance(base_str, str):
         base_str = base_str.encode('utf-8')
     return hashlib.sha256(base_str).hexdigest()
 
@@ -986,7 +985,7 @@ def get_sdk_adapter(service_type, check_service=False):
     except sdk_exc.ServiceDiscoveryException as e:
         raise exception.ServiceUnavailable(
             _("The %(service_type)s service is unavailable: %(error)s") %
-            {'service_type': service_type, 'error': six.text_type(e)})
+            {'service_type': service_type, 'error': str(e)})
     return getattr(conn, service_type)
 
 
@@ -1053,3 +1052,99 @@ def normalize_rc_name(rc_name):
     norm_name = norm_name.upper()
     norm_name = orc.CUSTOM_NAMESPACE + norm_name
     return norm_name
+
+
+def raise_if_old_compute():
+    # to avoid circular imports
+    from nova import context as nova_context
+    from nova.objects import service
+
+    ctxt = nova_context.get_admin_context()
+
+    if CONF.api_database.connection is not None:
+        scope = 'system'
+        try:
+            current_service_version = service.get_minimum_version_all_cells(
+                ctxt, ['nova-compute'])
+        except exception.DBNotAllowed:
+            # This most likely means we are in a nova-compute service
+            # configured which is configured with a connection to the API
+            # database. We should not be attempting to "get out" of our cell to
+            # look at the minimum versions of nova-compute services in other
+            # cells, so DBNotAllowed was raised. Leave a warning message
+            # and fall back to only querying computes in our cell.
+            LOG.warning(
+                'This service is configured for access to the API database '
+                'but is not allowed to directly access the database. You '
+                'should run this service without the '
+                '[api_database]/connection config option. The service version '
+                'check will only query the local cell.')
+            scope = 'cell'
+            current_service_version = service.Service.get_minimum_version(
+                ctxt, 'nova-compute')
+    else:
+        scope = 'cell'
+        # We in a cell so target our query to the current cell only
+        current_service_version = service.Service.get_minimum_version(
+            ctxt, 'nova-compute')
+
+    if current_service_version == 0:
+        # 0 means no compute in the system,
+        # probably a fresh install before the computes are registered
+        return
+
+    oldest_supported_service_level = service.SERVICE_VERSION_ALIASES[
+            service.OLDEST_SUPPORTED_SERVICE_VERSION]
+
+    if current_service_version < oldest_supported_service_level:
+        raise exception.TooOldComputeService(
+            oldest_supported_version=service.OLDEST_SUPPORTED_SERVICE_VERSION,
+            scope=scope,
+            min_service_level=current_service_version,
+            oldest_supported_service=oldest_supported_service_level)
+
+
+def run_once(message, logger, cleanup=None):
+    """This is a utility function decorator to ensure a function
+    is run once and only once in an interpreter instance.
+
+    Note: this is copied from the placement repo (placement/util.py)
+
+    The decorated function object can be reset by calling its
+    reset function. All exceptions raised by the wrapped function,
+    logger and cleanup function will be propagated to the caller.
+    """
+    def outer_wrapper(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            if not wrapper.called:
+                # Note(sean-k-mooney): the called state is always
+                # updated even if the wrapped function completes
+                # by raising an exception. If the caller catches
+                # the exception it is their responsibility to call
+                # reset if they want to re-execute the wrapped function.
+                try:
+                    return func(*args, **kwargs)
+                finally:
+                    wrapper.called = True
+            else:
+                logger(message)
+
+        wrapper.called = False
+
+        def reset(wrapper, *args, **kwargs):
+            # Note(sean-k-mooney): we conditionally call the
+            # cleanup function if one is provided only when the
+            # wrapped function has been called previously. We catch
+            # and reraise any exception that may be raised and update
+            # the called state in a finally block to ensure its
+            # always updated if reset is called.
+            try:
+                if cleanup and wrapper.called:
+                    return cleanup(*args, **kwargs)
+            finally:
+                wrapper.called = False
+
+        wrapper.reset = functools.partial(reset, wrapper)
+        return wrapper
+    return outer_wrapper

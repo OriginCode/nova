@@ -897,7 +897,7 @@ class HackingTestCase(test.NoDBTestCase):
             expected_errors=errors, filename="nova/tests/unit/test_context.py")
         # Check no errors in other than 'nova/tests' directory.
         self._assert_has_no_errors(
-            code, checks.nonexistent_assertion_methods_and_attributes,
+            code, checks.useless_assertion,
             filename="nova/compute/api.py")
         code = """
                    self.assertIsNone(None_test_var, "Fails")
@@ -908,4 +908,28 @@ class HackingTestCase(test.NoDBTestCase):
                """
         self._assert_has_no_errors(
             code, checks.useless_assertion,
+            filename="nova/tests/unit/test_context.py")
+
+    def test_check_assert_has_calls(self):
+        code = """
+                   mock_method.assert_has_calls = [mock.call(1)]
+                   mock_method2.assert_has_calls = [
+                       mock.call(1), mock.call(2)]
+               """
+        errors = [(x + 1, 0, 'N366') for x in range(2)]
+        # Check errors in 'nova/tests' directory.
+        self._assert_has_errors(
+            code, checks.check_assert_has_calls,
+            expected_errors=errors, filename="nova/tests/unit/test_context.py")
+        # Check no errors in other than 'nova/tests' directory.
+        self._assert_has_no_errors(
+            code, checks.check_assert_has_calls,
+            filename="nova/compute/api.py")
+        code = """
+                   mock_method.assert_has_calls([mock.call(1)])
+                   mock_method2.assert_has_calls([
+                       mock.call(1), mock.call(2)])
+               """
+        self._assert_has_no_errors(
+            code, checks.check_assert_has_calls,
             filename="nova/tests/unit/test_context.py")

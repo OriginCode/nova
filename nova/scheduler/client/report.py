@@ -29,7 +29,6 @@ from oslo_middleware import request_id
 from oslo_utils import excutils
 from oslo_utils import versionutils
 import retrying
-import six
 
 from nova.compute import provider_tree
 import nova.conf
@@ -1502,26 +1501,6 @@ class SchedulerReportClient(object):
 
         return resp.json()
 
-    def get_allocations_for_consumer_by_provider(self, context, rp_uuid,
-                                                 consumer):
-        """Return allocations for a consumer and a resource provider.
-
-        :param context: The nova.context.RequestContext auth context
-        :param rp_uuid: UUID of the resource provider
-        :param consumer: UUID of the consumer
-        :return: the resources dict of the consumer's allocation keyed by
-                 resource classes
-        """
-        # NOTE(cdent): This trims to just the allocations being
-        # used on this resource provider. In the future when there
-        # are shared resources there might be other providers.
-        allocations = self.get_allocations_for_consumer(context, consumer)
-        if allocations is None:
-            # safe_connect can return None on 404
-            allocations = {}
-        return allocations.get(
-            rp_uuid, {}).get('resources', {})
-
     # NOTE(jaypipes): Currently, this method is ONLY used in three places:
     # 1. By the scheduler to allocate resources on the selected destination
     #    hosts.
@@ -1643,31 +1622,131 @@ class SchedulerReportClient(object):
                 raise Retry('claim_resources', reason)
         return r.status_code == 204
 
+    def add_resources_to_instance_allocation(
+        self,
+        context: nova_context.RequestContext,
+        consumer_uuid: str,
+        resources: ty.Dict[str, ty.Dict[str, ty.Dict[str, int]]],
+    ) -> None:
+        """Adds certain resources to the current allocation of the
+        consumer.
+
+        :param context: the request context
+        :param consumer_uuid: the uuid of the consumer to update
+        :param resources: a dict of resources in the format of allocation
+            request. E.g.:
+            {
+                <rp_uuid>: {
+                    'resources': {
+                        <resource class>: amount,
+                        <other resource class>: amount
+                    }
+                }
+                <other_ rp_uuid>: {
+                    'resources': {
+                        <other resource class>: amount
+                    }
+                }
+            }
+        :raises AllocationUpdateFailed: if there was multiple generation
+            conflict and we run out of retires.
+        :raises ConsumerAllocationRetrievalFailed: If the current allocation
+            cannot be read from placement.
+        :raises: keystoneauth1.exceptions.base.ClientException on failure to
+            communicate with the placement API
+        """
+        if not resources:
+            # nothing to do
+            return
+
+        # This either raises on error, or returns fails if we run out of
+        # retries due to conflict. Convert that return value to an exception
+        # too.
+        if not self._add_resources_to_instance_allocation(
+            context, consumer_uuid, resources):
+
+            error_reason = _(
+                "Cannot add resources %s to the allocation due to multiple "
+                "successive generation conflicts in placement.")
+            raise exception.AllocationUpdateFailed(
+                consumer_uuid=consumer_uuid,
+                error=error_reason % resources)
+
+    @retries
+    def _add_resources_to_instance_allocation(
+        self,
+        context: nova_context.RequestContext,
+        consumer_uuid: str,
+        resources: ty.Dict[str, ty.Dict[str, ty.Dict[str, int]]],
+    ) -> bool:
+
+        current_allocs = self.get_allocs_for_consumer(context, consumer_uuid)
+
+        for rp_uuid in resources:
+            if rp_uuid not in current_allocs['allocations']:
+                current_allocs['allocations'][rp_uuid] = {'resources': {}}
+
+            alloc_on_rp = current_allocs['allocations'][rp_uuid]['resources']
+            for rc, amount in resources[rp_uuid]['resources'].items():
+                if rc in alloc_on_rp:
+                    alloc_on_rp[rc] += amount
+                else:
+                    alloc_on_rp[rc] = amount
+
+        r = self._put_allocations(context, consumer_uuid, current_allocs)
+
+        if r.status_code != 204:
+            err = r.json()['errors'][0]
+            if err['code'] == 'placement.concurrent_update':
+                reason = (
+                    "another process changed the resource providers or the "
+                    "consumer involved in our attempt to update allocations "
+                    "for consumer %s so we cannot add resources %s to the "
+                    "current allocation %s" %
+                    (consumer_uuid, resources, current_allocs))
+
+                raise Retry(
+                    '_add_resources_to_instance_allocation', reason)
+
+            raise exception.AllocationUpdateFailed(
+                consumer_uuid=consumer_uuid, error=err['detail'])
+
+        return True
+
     def remove_resources_from_instance_allocation(
-            self, context, consumer_uuid, resources):
+        self,
+        context: nova_context.RequestContext,
+        consumer_uuid: str,
+        resources: ty.Dict[str, ty.Dict[str, ty.Dict[str, int]]]
+    ) -> None:
         """Removes certain resources from the current allocation of the
         consumer.
 
         :param context: the request context
         :param consumer_uuid: the uuid of the consumer to update
-        :param resources: a dict of resources. E.g.:
-                              {
-                                  <rp_uuid>: {
-                                      <resource class>: amount
-                                      <other resource class>: amount
-                                  }
-                                  <other_ rp_uuid>: {
-                                      <other resource class>: amount
-                                  }
-                              }
+        :param resources: a dict of resources in allocation request format
+             E.g.:
+            {
+                <rp_uuid>: {
+                    'resources': {
+                        <resource class>: amount,
+                        <other resource class>: amount
+                    }
+                }
+                <other_ rp_uuid>: {
+                    'resources': {
+                        <other resource class>: amount
+                    }
+                }
+            }
         :raises AllocationUpdateFailed: if the requested resource cannot be
-                removed from the current allocation (e.g. rp is missing from
-                the allocation) or there was multiple generation conflict and
-                we run out of retires.
+            removed from the current allocation (e.g. rp is missing from
+            the allocation) or there was multiple generation conflict and
+            we run out of retires.
         :raises ConsumerAllocationRetrievalFailed: If the current allocation
-                cannot be read from placement.
+            cannot be read from placement.
         :raises: keystoneauth1.exceptions.base.ClientException on failure to
-                 communicate with the placement API
+            communicate with the placement API
         """
 
         # NOTE(gibi): It is just a small wrapper to raise instead of return
@@ -1676,14 +1755,20 @@ class SchedulerReportClient(object):
                 context, consumer_uuid, resources):
             error_reason = _("Cannot remove resources %s from the allocation "
                              "due to multiple successive generation conflicts "
-                             "in placement.")
+                             "in placement. To clean up the leaked resource "
+                             "allocation you can use nova-manage placement "
+                             "audit.")
             raise exception.AllocationUpdateFailed(
                 consumer_uuid=consumer_uuid,
                 error=error_reason % resources)
 
     @retries
     def _remove_resources_from_instance_allocation(
-            self, context, consumer_uuid, resources):
+        self,
+        context: nova_context.RequestContext,
+        consumer_uuid: str,
+        resources: ty.Dict[str, ty.Dict[str, ty.Dict[str, int]]]
+    ) -> bool:
         if not resources:
             # Nothing to remove so do not query or update allocation in
             # placement.
@@ -1706,7 +1791,7 @@ class SchedulerReportClient(object):
         try:
             for rp_uuid, resources_to_remove in resources.items():
                 allocation_on_rp = current_allocs['allocations'][rp_uuid]
-                for rc, value in resources_to_remove.items():
+                for rc, value in resources_to_remove['resources'].items():
                     allocation_on_rp['resources'][rc] -= value
 
                     if allocation_on_rp['resources'][rc] < 0:
@@ -2199,7 +2284,7 @@ class SchedulerReportClient(object):
                             global_request_id=context.global_id)
         except ks_exc.ClientException as ex:
             LOG.error('Failed to get resource provider by name: %s. Error: %s',
-                      name, six.text_type(ex))
+                      name, str(ex))
             raise exception.PlacementAPIConnectFailure()
 
         if resp.status_code == 200:

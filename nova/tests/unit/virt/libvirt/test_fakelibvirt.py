@@ -13,8 +13,8 @@
 #    under the License.
 
 from lxml import etree
+import mock
 from oslo_utils import uuidutils
-import six
 
 from nova.objects import fields as obj_fields
 from nova import test
@@ -102,7 +102,7 @@ class FakeLibvirtTests(test.NoDBTestCase):
                                obj_fields.Architecture.X86_64))
 
         self.assertLessEqual(1024, res[1], "Memory unusually high.")
-        self.assertGreaterEqual(16384, res[1], "Memory unusually low.")
+        self.assertGreaterEqual(17000000, res[1], "Memory unusually low.")
         self.assertLessEqual(1, res[2], "Active CPU count unusually high.")
         self.assertGreaterEqual(32, res[2], "Active CPU count unusually low.")
         self.assertLessEqual(800, res[3], "CPU speed unusually high.")
@@ -147,7 +147,7 @@ class FakeLibvirtTests(test.NoDBTestCase):
         blockstats = dom.blockStats('vda')
         self.assertEqual(len(blockstats), 5)
         for x in blockstats:
-            self.assertIn(type(x), six.integer_types)
+            self.assertIs(type(x), int)
 
     def test_attach_detach(self):
         uuid = uuidutils.generate_uuid()
@@ -172,7 +172,7 @@ class FakeLibvirtTests(test.NoDBTestCase):
         self.assertEqual(info[1], 128000)
         self.assertLessEqual(info[2], 128000)
         self.assertEqual(info[3], 1)
-        self.assertIn(type(info[4]), six.integer_types)
+        self.assertIs(type(info[4]), int)
 
     def test_createXML_runs_domain(self):
         uuid = uuidutils.generate_uuid()
@@ -275,7 +275,10 @@ class FakeLibvirtTests(test.NoDBTestCase):
 
     def test_getCapabilities(self):
         conn = self.get_openAuth_curry_func()('qemu:///system')
-        etree.fromstring(conn.getCapabilities())
+        with mock.patch('os.uname') as mock_uname:
+            mock_uname.return_value = libvirt.os_uname(
+                'Linux', '', '5.10.13-200-generic', '', 'x86_64')
+            etree.fromstring(conn.getCapabilities())
 
     def test_getDomainCapabilities(self):
         conn = self.get_openAuth_curry_func()('qemu:///system')
@@ -391,10 +394,9 @@ class FakeLibvirtTests(test.NoDBTestCase):
 </topology>
 """
         host_topology = libvirt.NUMATopology(
-            cpu_nodes=2, cpu_sockets=1, cpu_cores=2, cpu_threads=2,
+            cpu_nodes=1, cpu_sockets=2, cpu_cores=2, cpu_threads=2,
             kb_mem=15740000)
-        self.assertEqual(host_topology.to_xml(),
-                         topology)
+        self.assertEqual(topology, host_topology.to_xml())
 
     def test_pci_devices_generation(self):
         def _cmp_pci_dev_addr(dev_xml, cmp_addr):

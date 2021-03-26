@@ -24,6 +24,7 @@ inline callbacks.
 import nova.monkey_patch  # noqa
 
 import abc
+import builtins
 import collections
 import contextlib
 import copy
@@ -49,12 +50,13 @@ from oslo_utils import timeutils
 from oslo_versionedobjects import fixture as ovo_fixture
 from oslotest import base
 from oslotest import mock_fixture
-import six
-from six.moves import builtins
+from sqlalchemy.dialects import sqlite
 import testtools
 
+from nova.api.openstack import wsgi_app
 from nova.compute import rpcapi as compute_rpcapi
 from nova import context
+from nova.db.sqlalchemy import api as sqlalchemy_api
 from nova import exception
 from nova import objects
 from nova.objects import base as objects_base
@@ -283,6 +285,10 @@ class TestCase(base.BaseTestCase):
 
         self.useFixture(nova_fixtures.GenericPoisonFixture())
 
+        # make sure that the wsgi app is fully initialized for all testcase
+        # instead of only once initialized for test worker
+        wsgi_app.init_global_data.reset()
+
     def _setup_cells(self):
         """Setup a normal cellsv2 environment.
 
@@ -375,6 +381,22 @@ class TestCase(base.BaseTestCase):
         group = kw.pop('group', None)
         for k, v in kw.items():
             CONF.set_override(k, v, group)
+
+    def enforce_fk_constraints(self, engine=None):
+        if engine is None:
+            engine = sqlalchemy_api.get_engine()
+        dialect = engine.url.get_dialect()
+        if dialect == sqlite.dialect:
+            # We're seeing issues with foreign key support in SQLite 3.6.20
+            # SQLAlchemy doesn't support it at all with < SQLite 3.6.19
+            # It works fine in SQLite 3.7.
+            # So return early to skip this test if running SQLite < 3.7
+            import sqlite3
+            tup = sqlite3.sqlite_version_info
+            if tup[0] < 3 or (tup[0] == 3 and tup[1] < 7):
+                self.skipTest(
+                    'sqlite version too old for reliable SQLA foreign_keys')
+            engine.connect().execute("PRAGMA foreign_keys = ON")
 
     def start_service(self, name, host=None, cell_name=None, **kwargs):
         # Disallow starting multiple scheduler services
@@ -517,9 +539,9 @@ class TestCase(base.BaseTestCase):
         matcher.
 
         """
-        if isinstance(expected, six.string_types):
+        if isinstance(expected, str):
             expected = jsonutils.loads(expected)
-        if isinstance(observed, six.string_types):
+        if isinstance(observed, str):
             observed = jsonutils.loads(observed)
 
         def sort_key(x):
@@ -549,7 +571,7 @@ class TestCase(base.BaseTestCase):
                 self.assertEqual(
                     expected_keys, observed_keys,
                     'path: %s. Dict keys are not equal' % path)
-                for key in list(six.iterkeys(expected)):
+                for key in expected:
                     inner(expected[key], observed[key], path + '.%s' % key)
             elif (isinstance(expected, (list, tuple, set)) and
                       isinstance(observed, (list, tuple, set))):
@@ -903,7 +925,7 @@ def patch_open(patched_path, read_data):
     selective patching based on the path.  In this case something like
     like this may be more appropriate:
 
-        @mock.patch(six.moves.builtins, 'open')
+        @mock.patch('builtins.open')
         def test_my_code(self, mock_open):
             ...
             mock_open.assert_called_once_with(path)
@@ -916,6 +938,6 @@ def patch_open(patched_path, read_data):
             return m(patched_path)
         return real_open(path, *args, **kwargs)
 
-    with mock.patch.object(builtins, 'open') as mock_open:
+    with mock.patch('builtins.open') as mock_open:
         mock_open.side_effect = selective_fake_open
         yield m

@@ -63,14 +63,11 @@ availability zones. Compute supports the following hypervisors:
 
 - `Quick Emulator (QEMU) <https://wiki.qemu.org/Manual>`__
 
-- `User Mode Linux (UML) <http://user-mode-linux.sourceforge.net>`__
-
 - `Virtuozzo <https://www.virtuozzo.com/products/vz7.html>`__
 
 - `VMware vSphere
   <https://www.vmware.com/support/vsphere-hypervisor.html>`__
 
-- `Xen (using libvirt) <https://www.xenproject.org>`__
 
 - `zVM <https://www.ibm.com/it-infrastructure/z/zvm>`__
 

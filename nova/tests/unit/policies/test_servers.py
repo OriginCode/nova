@@ -21,6 +21,7 @@ from nova.api.openstack.compute import servers
 from nova.compute import api as compute
 from nova.compute import vm_states
 from nova import exception
+from nova.network import model
 from nova.network import neutron
 from nova import objects
 from nova.objects import fields
@@ -79,6 +80,10 @@ class ServersPolicyTest(base.BasePolicyTest):
         self.mock_get_instance = self.useFixture(fixtures.MockPatchObject(
             self.controller, '_get_instance')).mock
         self.mock_get_instance.return_value = self.instance
+
+        self.mock_get_network_info = self.useFixture(
+            fixtures.MockPatch('nova.objects.Instance.get_network_info')).mock
+        self.mock_get_network_info.return_value = model.NetworkInfo()
 
         self.servers = [fakes.stub_instance_obj(
             1, vm_state=vm_states.ACTIVE, uuid=uuids.fake,
@@ -603,12 +608,9 @@ class ServersPolicyTest(base.BasePolicyTest):
                                  self.req, self.instance.uuid,
                                  body={'reboot': {'type': 'soft'}})
 
-    @mock.patch('nova.api.openstack.common.'
-            'instance_has_port_with_resource_request')
     @mock.patch('nova.compute.api.API.resize')
-    def test_resize_server_policy(self, mock_resize, mock_port):
+    def test_resize_server_policy(self, mock_resize):
         rule_name = policies.SERVERS % 'resize'
-        mock_port.return_value = False
         self.common_policy_check(self.admin_or_owner_authorized_contexts,
                                  self.admin_or_owner_unauthorized_contexts,
                                  rule_name,
@@ -631,13 +633,10 @@ class ServersPolicyTest(base.BasePolicyTest):
             "Policy doesn't allow %s to be performed." % rule_name,
             exc.format_message())
 
-    @mock.patch('nova.api.openstack.common.'
-            'instance_has_port_with_resource_request')
     @mock.patch('nova.compute.api.API.resize')
     def test_resize_server_overridden_policy_pass_with_same_user(
-        self, mock_resize, mock_port):
+            self, mock_resize):
         rule_name = policies.SERVERS % 'resize'
-        mock_port.return_value = False
         self.policy.set_rules({rule_name: "user_id:%(user_id)s"},
             overwrite=False)
         body = {'resize': {'flavorRef': 'f1'}}
@@ -1226,12 +1225,10 @@ class ServersPolicyTest(base.BasePolicyTest):
     @mock.patch('nova.objects.RequestSpec.get_by_instance_uuid')
     @mock.patch('nova.objects.Instance.save')
     @mock.patch('nova.api.openstack.common.get_instance')
-    @mock.patch('nova.api.openstack.common.'
-        'instance_has_port_with_resource_request')
     @mock.patch('nova.conductor.ComputeTaskAPI.resize_instance')
-    def test_cross_cell_resize_server_policy(self,
-        mock_resize, mock_port, mock_get, mock_save, mock_rs,
-        mock_allow, m_net):
+    def test_cross_cell_resize_server_policy(
+            self, mock_resize, mock_get, mock_save, mock_rs, mock_allow,
+            m_net):
         self.stub_out('nova.compute.api.API.get_instance_host_status',
             lambda x, y: "UP")
 
@@ -1241,7 +1238,6 @@ class ServersPolicyTest(base.BasePolicyTest):
         rule = 'os_compute_api:os-migrate-server:migrate'
         self.policy.set_rules({rule: "@"}, overwrite=False)
         rule_name = policies.CROSS_CELL_RESIZE
-        mock_port.return_value = False
         req = fakes.HTTPRequest.blank('', version='2.56')
 
         def fake_get(*args, **kwargs):
@@ -1249,6 +1245,7 @@ class ServersPolicyTest(base.BasePolicyTest):
                 self.project_member_context,
                 id=1, uuid=uuids.fake_id, project_id=self.project_id,
                 user_id='fake-user', vm_state=vm_states.ACTIVE,
+                expected_attrs=['system_metadata'],
                 launched_at=timeutils.utcnow())
 
         mock_get.side_effect = fake_get
