@@ -1,3 +1,9 @@
+nova (2:23.0.0~rc1-2) UNRELEASED; urgency=medium
+
+  * Do not set [glance]/api_servers http://localhost:9292 as default.
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 31 Mar 2021 22:26:24 +0200
+
 nova (2:23.0.0~rc1-1) experimental; urgency=medium
 
   * Tune nova-api-{,metadata-}uwsgi.ini for performance.

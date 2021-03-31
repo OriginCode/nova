@@ -138,9 +138,6 @@ endif
 	pkgos-fix-config-default $(NOVA_CONF) spice server_proxyclient_address \$$my_ip
 	pkgos-fix-config-default $(NOVA_CONF) spice enabled true
 
-	# Set glance on localhost by default, to allow PoC to work
-	pkgos-fix-config-default $(NOVA_CONF) glance api_servers http://localhost:9292
-
 	# Works by default
 	pkgos-fix-config-default $(NOVA_CONF) keystone_authtoken auth_protocol http
 
