@@ -2,6 +2,7 @@ nova (2:23.0.0-1) experimental; urgency=medium
 
   * Do not set [glance]/api_servers http://localhost:9292 as default.
   * New upstream release.
+  * Fixed (build-)depends for this release.
 
  -- Thomas Goirand <zigo@debian.org>  Wed, 14 Apr 2021 14:27:02 +0200
 
