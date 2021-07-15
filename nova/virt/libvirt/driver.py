@@ -504,6 +504,10 @@ class LibvirtDriver(driver.ComputeDriver):
         self.pgpu_type_mapping = collections.defaultdict(str)
         self.supported_vgpu_types = self._get_supported_vgpu_types()
 
+        # Handles ongoing device manipultion in libvirt where we wait for the
+        # events about success or failure.
+        self._device_event_handler = AsyncDeviceEventsHandler()
+
     def _discover_vpmems(self, vpmem_conf=None):
         """Discover vpmems on host and configuration.
 
@@ -1400,6 +1404,9 @@ class LibvirtDriver(driver.ComputeDriver):
     def destroy(self, context, instance, network_info, block_device_info=None,
                 destroy_disks=True):
         self._destroy(instance)
+        # NOTE(gibi): if there was device detach in progress then we need to
+        # unblock the waiting threads and clean up.
+        self._device_event_handler.cleanup_waiters(instance.uuid)
         self.cleanup(context, instance, network_info, block_device_info,
                      destroy_disks)
 
@@ -1870,9 +1877,13 @@ class LibvirtDriver(driver.ComputeDriver):
             provider = encryptors.LEGACY_PROVIDER_CLASS_TO_FORMAT_MAP[provider]
         return provider == encryptors.LUKS
 
-    def _get_volume_config(self, connection_info, disk_info):
+    def _get_volume_config(self, instance, connection_info, disk_info):
         vol_driver = self._get_volume_driver(connection_info)
         conf = vol_driver.get_config(connection_info, disk_info)
+
+        if self._sev_enabled(instance.flavor, instance.image_meta):
+            designer.set_driver_iommu_for_device(conf)
+
         self._set_cache_mode(conf)
         return conf
 
@@ -2030,7 +2041,7 @@ class LibvirtDriver(driver.ComputeDriver):
         if disk_info['bus'] == 'scsi':
             disk_info['unit'] = self._get_scsi_controller_next_unit(guest)
 
-        conf = self._get_volume_config(connection_info, disk_info)
+        conf = self._get_volume_config(instance, connection_info, disk_info)
 
         self._check_discard_for_attach_volume(conf, instance)
 
@@ -2152,7 +2163,8 @@ class LibvirtDriver(driver.ComputeDriver):
         # this to the BDM here as the upper compute swap_volume method will
         # eventually do this for us.
         self._connect_volume(context, new_connection_info, instance)
-        conf = self._get_volume_config(new_connection_info, disk_info)
+        conf = self._get_volume_config(
+            instance, new_connection_info, disk_info)
         hw_firmware_type = instance.image_meta.properties.get(
             'hw_firmware_type')
 
@@ -2189,8 +2201,20 @@ class LibvirtDriver(driver.ComputeDriver):
             # These are libvirt specific events handled here on the driver
             # level instead of propagating them to the compute manager level
             if isinstance(event, libvirtevent.DeviceEvent):
-                # TODO(gibi): handle it
-                pass
+                had_clients = self._device_event_handler.notify_waiters(event)
+
+                if had_clients:
+                    LOG.debug(
+                        "Received event %s from libvirt while the driver is "
+                        "waiting for it; dispatched.",
+                        event,
+                    )
+                else:
+                    LOG.warning(
+                        "Received event %s from libvirt but the driver is not "
+                        "waiting for it; ignored.",
+                        event,
+                    )
             else:
                 LOG.debug(
                     "Received event %s from libvirt but no handler is "
@@ -2201,22 +2225,341 @@ class LibvirtDriver(driver.ComputeDriver):
             # manager
             super().emit_event(event)
 
+    def _detach_with_retry(
+        self,
+        guest: libvirt_guest.Guest,
+        instance_uuid: str,
+        # to properly typehint this param we would need typing.Protocol but
+        # that is only available since python 3.8
+        get_device_conf_func: ty.Callable,
+        device_name: str,
+    ) -> None:
+        """Detaches a device from the guest
+
+        If the guest is a running state then the detach is performed on both
+        the persistent and live domains.
+
+        In case of live detach this call will wait for the libvirt event
+        signalling the end of the detach process.
+
+        If the live detach times out then it will retry the detach. Detach from
+        the persistent config is not retried as it is:
+
+        * synchronous and no event is sent from libvirt
+        * it is always expected to succeed if the device is in the domain
+          config
+
+        :param guest: the guest we are detach the device from
+        :param instance_uuid: the UUID of the instance we are detaching the
+            device from
+        :param get_device_conf_func: function which returns the configuration
+            for device from the domain, having one optional boolean parameter
+            `from_persistent_config` to select which domain config to query
+        :param device_name: This is the name of the device used solely for
+            error messages. Note that it is not the same as the device alias
+            used by libvirt to identify the device.
+        :raises exception.DeviceNotFound: if the device does not exist in the
+            domain even before we try to detach or if libvirt reported that the
+            device is missing from the domain synchronously.
+        :raises exception.DeviceDetachFailed: if libvirt reported error during
+            detaching from the live domain or we timed out waiting for libvirt
+            events and run out of retries
+        :raises libvirt.libvirtError: for any other errors reported by libvirt
+            synchronously.
+        """
+        state = guest.get_power_state(self._host)
+        live = state in (power_state.RUNNING, power_state.PAUSED)
+
+        persistent = guest.has_persistent_configuration()
+
+        if not persistent and not live:
+            # nothing to do
+            return
+
+        persistent_dev = None
+        if persistent:
+            persistent_dev = get_device_conf_func(from_persistent_config=True)
+
+        live_dev = None
+        if live:
+            live_dev = get_device_conf_func()
+
+        # didn't find the device in either domain
+        if persistent_dev is None and live_dev is None:
+            raise exception.DeviceNotFound(device=device_name)
+
+        if persistent_dev:
+            try:
+                self._detach_from_persistent(
+                    guest, instance_uuid, persistent_dev, get_device_conf_func,
+                    device_name)
+            except exception.DeviceNotFound:
+                if live_dev:
+                    # ignore the error so that we can do the live detach
+                    LOG.warning(
+                        'Libvirt reported sync error while detaching '
+                        'device %s from instance %s from the persistent '
+                        'domain config. Ignoring the error to proceed with '
+                        'live detach as the device exists in the live domain.',
+                        device_name, instance_uuid)
+                else:
+                    # if only persistent detach was requested then give up
+                    raise
+
+        if live_dev:
+            self._detach_from_live_with_retry(
+                guest, instance_uuid, live_dev, get_device_conf_func,
+                device_name)
+
+    def _detach_from_persistent(
+        self,
+        guest: libvirt_guest.Guest,
+        instance_uuid: str,
+        persistent_dev: ty.Union[
+            vconfig.LibvirtConfigGuestDisk,
+            vconfig.LibvirtConfigGuestInterface],
+        get_device_conf_func,
+        device_name: str,
+    ):
+        LOG.debug(
+            'Attempting to detach device %s from instance %s from '
+            'the persistent domain config.', device_name, instance_uuid)
+
+        self._detach_sync(
+            persistent_dev, guest, instance_uuid, device_name,
+            persistent=True, live=False)
+
+        # make sure the dev is really gone
+        persistent_dev = get_device_conf_func(
+            from_persistent_config=True)
+        if not persistent_dev:
+            LOG.info(
+                'Successfully detached device %s from instance %s '
+                'from the persistent domain config.',
+                device_name, instance_uuid)
+        else:
+            # Based on the libvirt devs this should never happen
+            LOG.warning(
+                'Failed to detach device %s from instance %s '
+                'from the persistent domain config. Libvirt did not '
+                'report any error but the device is still in the '
+                'config.', device_name, instance_uuid)
+
+    def _detach_from_live_with_retry(
+        self,
+        guest: libvirt_guest.Guest,
+        instance_uuid: str,
+        live_dev: ty.Union[
+            vconfig.LibvirtConfigGuestDisk,
+            vconfig.LibvirtConfigGuestInterface],
+        get_device_conf_func,
+        device_name: str,
+    ):
+        max_attempts = CONF.libvirt.device_detach_attempts
+        for attempt in range(max_attempts):
+            LOG.debug(
+                '(%s/%s): Attempting to detach device %s with device '
+                'alias %s from instance %s from the live domain config.',
+                attempt + 1, max_attempts, device_name, live_dev.alias,
+                instance_uuid)
+
+            self._detach_from_live_and_wait_for_event(
+                live_dev, guest, instance_uuid, device_name)
+
+            # make sure the dev is really gone
+            live_dev = get_device_conf_func()
+            if not live_dev:
+                LOG.info(
+                    'Successfully detached device %s from instance %s '
+                    'from the live domain config.', device_name, instance_uuid)
+                # we are done
+                return
+
+            LOG.debug(
+                'Failed to detach device %s with device alias %s from '
+                'instance %s from the live domain config. Libvirt did not '
+                'report any error but the device is still in the config.',
+                device_name, live_dev.alias, instance_uuid)
+
+        msg = (
+            'Run out of retry while detaching device %s with device '
+            'alias %s from instance %s from the live domain config. '
+            'Device is still attached to the guest.')
+        LOG.error(msg, device_name, live_dev.alias, instance_uuid)
+        raise exception.DeviceDetachFailed(
+            device=device_name,
+            reason=msg % (device_name, live_dev.alias, instance_uuid))
+
+    def _detach_from_live_and_wait_for_event(
+        self,
+        dev: ty.Union[
+            vconfig.LibvirtConfigGuestDisk,
+            vconfig.LibvirtConfigGuestInterface],
+        guest: libvirt_guest.Guest,
+        instance_uuid: str,
+        device_name: str,
+    ) -> None:
+        """Detaches a device from the live config of the guest and waits for
+        the libvirt event singling the finish of the detach.
+
+        :param dev: the device configuration to be detached
+        :param guest: the guest we are detach the device from
+        :param instance_uuid: the UUID of the instance we are detaching the
+            device from
+        :param device_name: This is the name of the device used solely for
+            error messages.
+        :raises exception.DeviceNotFound: if libvirt reported that the device
+            is missing from the domain synchronously.
+        :raises libvirt.libvirtError: for any other errors reported by libvirt
+            synchronously.
+        :raises DeviceDetachFailed: if libvirt sent DeviceRemovalFailedEvent
+        """
+        # So we will issue an detach to libvirt and we will wait for an
+        # event from libvirt about the result. We need to set up the event
+        # handling before the detach to avoid missing the event if libvirt
+        # is really fast
+        # NOTE(gibi): we need to use the alias name of the device as that
+        # is what libvirt will send back to us in the event
+        waiter = self._device_event_handler.create_waiter(
+            instance_uuid, dev.alias,
+            {libvirtevent.DeviceRemovedEvent,
+             libvirtevent.DeviceRemovalFailedEvent})
+        try:
+            self._detach_sync(
+                dev, guest, instance_uuid, device_name, persistent=False,
+                live=True)
+        except Exception:
+            # clean up the libvirt event handler as we failed synchronously
+            self._device_event_handler.delete_waiter(waiter)
+            raise
+
+        LOG.debug(
+            'Start waiting for the detach event from libvirt for '
+            'device %s with device alias %s for instance %s',
+            device_name, dev.alias, instance_uuid)
+        # We issued the detach without any exception so we can wait for
+        # a libvirt event to arrive to notify us about the result
+        # NOTE(gibi): we expect that this call will be unblocked by an
+        # incoming libvirt DeviceRemovedEvent or DeviceRemovalFailedEvent
+        event = self._device_event_handler.wait(
+            waiter, timeout=CONF.libvirt.device_detach_timeout)
+
+        if not event:
+            # This should not happen based on information from the libvirt
+            # developers. But it does at least during the cleanup of the
+            # tempest test case
+            # ServerRescueNegativeTestJSON.test_rescued_vm_detach_volume
+            # Log a warning and let the upper layer detect that the device is
+            # still attached and retry
+            LOG.error(
+                'Waiting for libvirt event about the detach of '
+                'device %s with device alias %s from instance %s is timed '
+                'out.', device_name, dev.alias, instance_uuid)
+
+        if isinstance(event, libvirtevent.DeviceRemovalFailedEvent):
+            # Based on the libvirt developers this signals a permanent failure
+            LOG.error(
+                'Received DeviceRemovalFailedEvent from libvirt for the '
+                'detach of device %s with device alias %s from instance %s ',
+                device_name, dev.alias, instance_uuid)
+            raise exception.DeviceDetachFailed(
+                device=device_name,
+                reason="DeviceRemovalFailedEvent received from libvirt")
+
+    @staticmethod
+    def _detach_sync(
+        dev: ty.Union[
+            vconfig.LibvirtConfigGuestDisk,
+            vconfig.LibvirtConfigGuestInterface],
+        guest: libvirt_guest.Guest,
+        instance_uuid: str,
+        device_name: str,
+        persistent: bool,
+        live: bool,
+    ):
+        """Detaches a device from the guest without waiting for libvirt events
+
+        It only handles synchronous errors (i.e. exceptions) but does not wait
+        for any event from libvirt.
+
+        :param dev: the device configuration to be detached
+        :param guest: the guest we are detach the device from
+        :param instance_uuid: the UUID of the instance we are detaching the
+            device from
+        :param device_name: This is the name of the device used solely for
+            error messages.
+        :param live: detach the device from the live domain config only
+        :param persistent: detach the device from the persistent domain config
+            only
+        :raises exception.DeviceNotFound: if libvirt reported that the device
+            is missing from the domain synchronously.
+        :raises libvirt.libvirtError: for any other errors reported by libvirt
+            synchronously.
+        """
+        try:
+            guest.detach_device(dev, persistent=persistent, live=live)
+        except libvirt.libvirtError as ex:
+            code = ex.get_error_code()
+            msg = ex.get_error_message()
+            if code == libvirt.VIR_ERR_DEVICE_MISSING:
+                LOG.debug(
+                    'Libvirt failed to detach device %s from instance %s '
+                    'synchronously (persistent=%s, live=%s) with error: %s.',
+                    device_name, instance_uuid, persistent, live, str(ex))
+                raise exception.DeviceNotFound(device=device_name) from ex
+
+            # NOTE(lyarwood): https://bugzilla.redhat.com/1878659
+            # Ignore this known QEMU bug for the time being allowing
+            # our retry logic to handle it.
+            # NOTE(gibi): This can only happen in case of detaching from the
+            # live domain as we never retry a detach from the persistent
+            # domain so we cannot hit an already running detach there.
+            # In case of detaching from the live domain this error can happen
+            # if the caller timed out during the first detach attempt then saw
+            # that the device is still attached and therefore looped over and
+            # and retried the detach. In this case the previous attempt stopped
+            # waiting for the libvirt event. Also libvirt reports that there is
+            # a detach ongoing, so the current attempt expects that a
+            # libvirt event will be still emitted. Therefore we simply return
+            # from here. Then the caller will wait for such event.
+            if (code == libvirt.VIR_ERR_INTERNAL_ERROR and msg and
+                    'already in the process of unplug' in msg
+            ):
+                LOG.debug(
+                    'Ignoring QEMU rejecting our request to detach device %s '
+                    'from instance %s as it is caused by a previous request '
+                    'still being in progress.', device_name, instance_uuid)
+                return
+
+            if code == libvirt.VIR_ERR_NO_DOMAIN:
+                LOG.warning(
+                    "During device detach, instance disappeared.",
+                    instance_uuid=instance_uuid)
+                # if the domain has disappeared then we have nothing to detach
+                return
+
+            LOG.warning(
+                'Unexpected libvirt error while detaching device %s from '
+                'instance %s: %s', device_name, instance_uuid, str(ex))
+            raise
+
     def detach_volume(self, context, connection_info, instance, mountpoint,
                       encryption=None):
         disk_dev = mountpoint.rpartition("/")[2]
         try:
             guest = self._host.get_guest(instance)
 
-            state = guest.get_power_state(self._host)
-            live = state in (power_state.RUNNING, power_state.PAUSED)
             # NOTE(lyarwood): The volume must be detached from the VM before
             # detaching any attached encryptors or disconnecting the underlying
             # volume in _disconnect_volume. Otherwise, the encryptor or volume
             # driver may report that the volume is still in use.
-            wait_for_detach = guest.detach_device_with_retry(
-                guest.get_disk, disk_dev, live=live)
-            wait_for_detach()
-
+            get_dev = functools.partial(guest.get_disk, disk_dev)
+            self._detach_with_retry(
+                guest,
+                instance.uuid,
+                get_dev,
+                device_name=disk_dev,
+            )
         except exception.InstanceNotFound:
             # NOTE(zhaoqin): If the instance does not exist, _lookup_by_name()
             #                will throw InstanceNotFound exception. Need to
@@ -2229,17 +2572,6 @@ class LibvirtDriver(driver.ComputeDriver):
             # call.
             LOG.info("Device %s not found in instance.",
                      disk_dev, instance=instance)
-        except libvirt.libvirtError as ex:
-            # NOTE(vish): This is called to cleanup volumes after live
-            #             migration, so we should still disconnect even if
-            #             the instance doesn't exist here anymore.
-            error_code = ex.get_error_code()
-            if error_code == libvirt.VIR_ERR_NO_DOMAIN:
-                # NOTE(vish):
-                LOG.warning("During detach_volume, instance disappeared.",
-                            instance=instance)
-            else:
-                raise
 
         self._disconnect_volume(context, connection_info, instance,
                                 encryption=encryption)
@@ -2359,6 +2691,10 @@ class LibvirtDriver(driver.ComputeDriver):
         cfg = self.vif_driver.get_config(instance, vif, image_meta,
                                          instance.flavor,
                                          CONF.libvirt.virt_type)
+
+        if self._sev_enabled(instance.flavor, image_meta):
+            designer.set_driver_iommu_for_device(cfg)
+
         try:
             state = guest.get_power_state(self._host)
             live = state in (power_state.RUNNING, power_state.PAUSED)
@@ -2406,84 +2742,19 @@ class LibvirtDriver(driver.ComputeDriver):
                                          instance.image_meta,
                                          instance.flavor,
                                          CONF.libvirt.virt_type)
-        interface = guest.get_interface_by_cfg(cfg)
         try:
-            # NOTE(mriedem): When deleting an instance and using Neutron,
-            # we can be racing against Neutron deleting the port and
-            # sending the vif-deleted event which then triggers a call to
-            # detach the interface, so if the interface is not found then
-            # we can just log it as a warning.
-            if not interface:
-                mac = vif.get('address')
-                # The interface is gone so just log it as a warning.
-                LOG.warning('Detaching interface %(mac)s failed because '
-                            'the device is no longer found on the guest.',
-                            {'mac': mac}, instance=instance)
-                return
-
-            state = guest.get_power_state(self._host)
-            live = state in (power_state.RUNNING, power_state.PAUSED)
-            # Now we are going to loop until the interface is detached or we
-            # timeout.
-            wait_for_detach = guest.detach_device_with_retry(
-                guest.get_interface_by_cfg, cfg, live=live,
-                alternative_device_name=self.vif_driver.get_vif_devname(vif))
-            wait_for_detach()
-        except exception.DeviceDetachFailed:
-            # We failed to detach the device even with the retry loop, so let's
-            # dump some debug information to the logs before raising back up.
-            with excutils.save_and_reraise_exception():
-                devname = self.vif_driver.get_vif_devname(vif)
-                interface = guest.get_interface_by_cfg(cfg)
-                if interface:
-                    LOG.warning(
-                        'Failed to detach interface %(devname)s after '
-                        'repeated attempts. Final interface xml:\n'
-                        '%(interface_xml)s\nFinal guest xml:\n%(guest_xml)s',
-                        {'devname': devname,
-                         'interface_xml': interface.to_xml(),
-                         'guest_xml': guest.get_xml_desc()},
-                        instance=instance)
+            get_dev = functools.partial(guest.get_interface_by_cfg, cfg)
+            self._detach_with_retry(
+                guest,
+                instance.uuid,
+                get_dev,
+                device_name=self.vif_driver.get_vif_devname(vif),
+            )
         except exception.DeviceNotFound:
             # The interface is gone so just log it as a warning.
             LOG.warning('Detaching interface %(mac)s failed because '
                         'the device is no longer found on the guest.',
                         {'mac': vif.get('address')}, instance=instance)
-        except libvirt.libvirtError as ex:
-            error_code = ex.get_error_code()
-            if error_code == libvirt.VIR_ERR_NO_DOMAIN:
-                LOG.warning("During detach_interface, instance disappeared.",
-                            instance=instance)
-            else:
-                # NOTE(mriedem): When deleting an instance and using Neutron,
-                # we can be racing against Neutron deleting the port and
-                # sending the vif-deleted event which then triggers a call to
-                # detach the interface, so we might have failed because the
-                # network device no longer exists. Libvirt will fail with
-                # "operation failed: no matching network device was found"
-                # which unfortunately does not have a unique error code so we
-                # need to look up the interface by config and if it's not found
-                # then we can just log it as a warning rather than tracing an
-                # error.
-                mac = vif.get('address')
-                # Get a fresh instance of the guest in case it is gone.
-                try:
-                    guest = self._host.get_guest(instance)
-                except exception.InstanceNotFound:
-                    LOG.info("Instance disappeared while detaching interface "
-                             "%s", vif['id'], instance=instance)
-                    return
-                interface = guest.get_interface_by_cfg(cfg)
-                if interface:
-                    LOG.error('detaching network adapter failed.',
-                              instance=instance, exc_info=True)
-                    raise exception.InterfaceDetachFailed(
-                            instance_uuid=instance.uuid)
-
-                # The interface is gone so just log it as a warning.
-                LOG.warning('Detaching interface %(mac)s failed because '
-                            'the device is no longer found on the guest.',
-                            {'mac': mac}, instance=instance)
         finally:
             # NOTE(gibi): we need to unplug the vif _after_ the detach is done
             # on the libvirt side as otherwise libvirt will still manage the
@@ -4995,7 +5266,7 @@ class LibvirtDriver(driver.ComputeDriver):
                 else:
                     info['unit'] = disk_mapping['unit']
                     disk_mapping['unit'] += 1
-            cfg = self._get_volume_config(connection_info, info)
+            cfg = self._get_volume_config(instance, connection_info, info)
             devices.append(cfg)
             vol['connection_info'] = connection_info
             vol.save()
@@ -5692,7 +5963,7 @@ class LibvirtDriver(driver.ComputeDriver):
 
     def _add_vtpm_device(
         self,
-        guest: libvirt_guest.Guest,
+        guest: vconfig.LibvirtConfigGuest,
         flavor: 'objects.Flavor',
         instance: 'objects.Instance',
         image_meta: 'objects.ImageMeta',
@@ -5885,7 +6156,7 @@ class LibvirtDriver(driver.ComputeDriver):
 
     def _configure_guest_by_virt_type(
         self,
-        guest: libvirt_guest.Guest,
+        guest: vconfig.LibvirtConfigGuest,
         instance: 'objects.Instance',
         image_meta: 'objects.ImageMeta',
         flavor: 'objects.Flavor',
@@ -5987,7 +6258,7 @@ class LibvirtDriver(driver.ComputeDriver):
 
     def _conf_non_lxc(
         self,
-        guest: libvirt_guest.Guest,
+        guest: vconfig.LibvirtConfigGuest,
         root_device_name: str,
         rescue: bool,
         instance: 'objects.Instance',
@@ -6492,7 +6763,7 @@ class LibvirtDriver(driver.ComputeDriver):
             raise exception.MissingDomainCapabilityFeatureException(
                 feature='sev')
 
-        designer.set_driver_iommu_for_sev(guest)
+        designer.set_driver_iommu_for_all_devices(guest)
         self._guest_add_launch_security(guest, sev)
 
     def _guest_add_launch_security(self, guest, sev):
@@ -6884,27 +7155,20 @@ class LibvirtDriver(driver.ComputeDriver):
         return [('network-vif-plugged', vif['id'])
                 for vif in network_info if vif.get('active', True) is False]
 
-    def _cleanup_failed_start(self, context, instance, network_info,
-                              block_device_info, guest,
-                              cleanup_instance_dir=False,
-                              cleanup_instance_disks=False):
-        try:
-            if guest and guest.is_active():
-                guest.poweroff()
-        finally:
-            self._cleanup(context, instance, network_info,
-                          block_device_info=block_device_info,
-                          destroy_vifs=True,
-                          cleanup_instance_dir=cleanup_instance_dir,
-                          cleanup_instance_disks=cleanup_instance_disks)
-
-    def _create_guest_with_network(self, context, xml, instance, network_info,
-                                   block_device_info, power_on=True,
-                                   vifs_already_plugged=False,
-                                   post_xml_callback=None,
-                                   external_events=None,
-                                   cleanup_instance_dir=False,
-                                   cleanup_instance_disks=False):
+    def _create_guest_with_network(
+        self,
+        context: nova_context.RequestContext,
+        xml: str,
+        instance: 'objects.Instance',
+        network_info: network_model.NetworkInfo,
+        block_device_info: ty.Optional[ty.Dict[str, ty.Any]],
+        power_on: bool = True,
+        vifs_already_plugged: bool = False,
+        post_xml_callback: ty.Callable = None,
+        external_events: ty.Optional[ty.List[str]] = None,
+        cleanup_instance_dir: bool = False,
+        cleanup_instance_disks: bool = False,
+    ) -> libvirt_guest.Guest:
         """Do required network setup and create domain."""
 
         timeout = CONF.vif_plugging_timeout
@@ -6918,39 +7182,39 @@ class LibvirtDriver(driver.ComputeDriver):
             events = []
 
         pause = bool(events)
-        guest: libvirt_guest.Guest = None
         try:
             with self.virtapi.wait_for_instance_event(
-                    instance, events, deadline=timeout,
-                    error_callback=self._neutron_failed_callback):
+                instance, events, deadline=timeout,
+                error_callback=self._neutron_failed_callback,
+            ):
                 self.plug_vifs(instance, network_info)
-                with self._lxc_disk_handler(context, instance,
-                                            instance.image_meta,
-                                            block_device_info):
+                with self._lxc_disk_handler(
+                    context, instance, instance.image_meta, block_device_info,
+                ):
                     guest = self._create_guest(
                         context, xml, instance,
                         pause=pause, power_on=power_on,
                         post_xml_callback=post_xml_callback)
-        except exception.VirtualInterfaceCreateException:
-            # Neutron reported failure and we didn't swallow it, so
-            # bail here
-            with excutils.save_and_reraise_exception():
-                self._cleanup_failed_start(
-                    context, instance, network_info, block_device_info, guest,
-                    cleanup_instance_dir=cleanup_instance_dir,
-                    cleanup_instance_disks=cleanup_instance_disks)
         except eventlet.timeout.Timeout:
             # We never heard from Neutron
-            LOG.warning('Timeout waiting for %(events)s for '
-                        'instance with vm_state %(vm_state)s and '
-                        'task_state %(task_state)s.',
-                        {'events': events,
-                         'vm_state': instance.vm_state,
-                         'task_state': instance.task_state},
-                        instance=instance)
+            LOG.warning(
+                'Timeout waiting for %(events)s for instance with '
+                'vm_state %(vm_state)s and task_state %(task_state)s',
+                {
+                    'events': events,
+                    'vm_state': instance.vm_state,
+                    'task_state': instance.task_state,
+                },
+                instance=instance)
+
             if CONF.vif_plugging_is_fatal:
-                self._cleanup_failed_start(
-                    context, instance, network_info, block_device_info, guest,
+                # NOTE(stephenfin): don't worry, guest will be in scope since
+                # we can only hit this branch if the VIF plug timed out
+                if guest.is_active():
+                    guest.poweroff()
+                self._cleanup(
+                    context, instance, network_info, block_device_info,
+                    destroy_vifs=True,
                     cleanup_instance_dir=cleanup_instance_dir,
                     cleanup_instance_disks=cleanup_instance_disks)
                 raise exception.VirtualInterfaceCreateException()
@@ -6958,13 +7222,16 @@ class LibvirtDriver(driver.ComputeDriver):
             # Any other error, be sure to clean up
             LOG.error('Failed to start libvirt guest', instance=instance)
             with excutils.save_and_reraise_exception():
-                self._cleanup_failed_start(
-                    context, instance, network_info, block_device_info, guest,
+                self._cleanup(
+                    context, instance, network_info, block_device_info,
+                    destroy_vifs=True,
                     cleanup_instance_dir=cleanup_instance_dir,
                     cleanup_instance_disks=cleanup_instance_disks)
+
         # Resume only if domain has been paused
         if pause:
             guest.resume()
+
         return guest
 
     def _get_pcpu_available(self):
@@ -9260,7 +9527,7 @@ class LibvirtDriver(driver.ComputeDriver):
                     # TODO(sahid): It's not a really good idea to pass
                     # the method _get_volume_config and we should to find
                     # a way to avoid this in future.
-                    guest, migrate_data, self._get_volume_config,
+                    instance, guest, migrate_data, self._get_volume_config,
                     get_vif_config=get_vif_config, new_resources=new_resources)
 
             # NOTE(pkoniszewski): Because of precheck which blocks
