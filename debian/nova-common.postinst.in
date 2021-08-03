@@ -64,13 +64,6 @@ manage_cinder_os_region () {
 	fi
 }
 
-manage_glance_api_servers () {
-	db_get nova/glance_api_servers
-	if [ -n "${RET}" ] ; then
-		pkgos_inifile set ${NOVA_CONF} glance api_servers ${RET}
-	fi
-}
-
 maintain_var_lib_nova_perms () {
 	if [ -z "$2" ]; then
 		# New install - blanket permissions
@@ -200,7 +193,6 @@ if [ "$1" = "configure" ] || [ "$1" = "reconfigure" ] ; then
 	manage_neutron_config
 	manage_placement_config
 	manage_cinder_os_region
-	manage_glance_api_servers
 
 	# Needed, because in some cases, it's owned by root:root,
 	# which makes the nova-manage db sync fail.
