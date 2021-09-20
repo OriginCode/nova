@@ -5,6 +5,8 @@ nova (2:24.0.0~rc1-1) experimental; urgency=medium
   * Fixed oslo.config namespaces when generating config file.
   * Do touch nova/db/api/__init__.py in d/rules until
     https://review.opendev.org/c/openstack/nova/+/809980 is merged.
+  * Do not manually copy nova/db/sqlalchemy/migrate_repo/migrate.cfg as
+    upstream switched to Alembic.
 
  -- Thomas Goirand <zigo@debian.org>  Mon, 20 Sep 2021 10:56:12 +0200
 
