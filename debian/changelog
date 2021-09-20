@@ -1,3 +1,9 @@
+nova (2:24.0.0~rc1-1) experimental; urgency=medium
+
+  * New upstream release.
+
+ -- Thomas Goirand <zigo@debian.org>  Mon, 20 Sep 2021 10:56:12 +0200
+
 nova (2:23.0.2-3) unstable; urgency=medium
 
   * Do not maintain glance_api_servers through debconf (as the default of
