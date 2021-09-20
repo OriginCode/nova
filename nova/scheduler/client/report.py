@@ -42,7 +42,7 @@ from nova import utils
 CONF = nova.conf.CONF
 LOG = logging.getLogger(__name__)
 WARN_EVERY = 10
-ROOT_REQUIRED_VERSION = '1.35'
+SAME_SUBTREE_VERSION = '1.36'
 RESHAPER_VERSION = '1.30'
 CONSUMER_GENERATION_VERSION = '1.28'
 ALLOW_RESERVED_EQUAL_TOTAL_INVENTORY_VERSION = '1.26'
@@ -181,9 +181,9 @@ class SchedulerReportClient(object):
         self._adapter = adapter
         # An object that contains a nova-compute-side cache of resource
         # provider and inventory information
-        self._provider_tree = None
+        self._provider_tree: provider_tree.ProviderTree = None
         # Track the last time we updated providers' aggregates and traits
-        self._association_refresh_time = None
+        self._association_refresh_time: ty.Dict[str, float] = {}
         self._client = self._create_client()
         # NOTE(danms): Keep track of how naggy we've been
         self._warn_count = 0
@@ -292,7 +292,7 @@ class SchedulerReportClient(object):
         """
         # Note that claim_resources() will use this version as well to
         # make allocations by `PUT /allocations/{consumer_uuid}`
-        version = ROOT_REQUIRED_VERSION
+        version = SAME_SUBTREE_VERSION
         qparams = resources.to_querystring()
         url = "/allocation_candidates?%s" % qparams
         resp = self.get(url, version=version,
@@ -677,11 +677,7 @@ class SchedulerReportClient(object):
             if resp:
                 LOG.info("Deleted resource provider %s", rp_uuid)
             # clean the caches
-            try:
-                self._provider_tree.remove(rp_uuid)
-            except ValueError:
-                pass
-            self._association_refresh_time.pop(rp_uuid, None)
+            self.invalidate_resource_provider(rp_uuid)
             return
 
         msg = ("[%(placement_req_id)s] Failed to delete resource provider "
@@ -2054,8 +2050,9 @@ class SchedulerReportClient(object):
         return r.status_code == 204
 
     @safe_connect
-    def delete_allocation_for_instance(self, context, uuid,
-                                       consumer_type='instance'):
+    def delete_allocation_for_instance(
+        self, context, uuid, consumer_type='instance', force=False
+    ):
         """Delete the instance allocation from placement
 
         :param context: The security context
@@ -2063,13 +2060,42 @@ class SchedulerReportClient(object):
                      as the consumer UUID towards placement
         :param consumer_type: The type of the consumer specified by uuid.
                               'instance' or 'migration' (Default: instance)
+        :param force: True if the allocations should be deleted without regard
+                      to consumer generation conflicts, False will attempt to
+                      GET and PUT empty allocations and use the consumer
+                      generation which could result in a conflict and need to
+                      retry the operation.
         :return: Returns True if the allocation is successfully deleted by this
                  call. Returns False if the allocation does not exist.
         :raises AllocationDeleteFailed: If the allocation cannot be read from
-                placement or it is changed by another process while we tried to
-                delete it.
+                placement (if force=False), is changed by another process while
+                we tried to delete it (if force=False), or if some other server
+                side error occurred (if force=True)
         """
         url = '/allocations/%s' % uuid
+        if force:
+            # Do not bother with consumer generations, just delete the
+            # allocations.
+            r = self.delete(url, global_request_id=context.global_id)
+            if r:
+                LOG.info('Deleted allocations for %(consumer_type)s %(uuid)s',
+                         {'consumer_type': consumer_type, 'uuid': uuid})
+                return True
+
+            # Check for 404 since we don't need to log a warning if we
+            # tried to delete something which doesn't actually exist.
+            if r.status_code != 404:
+                LOG.warning(
+                    'Unable to delete allocation for %(consumer_type)s '
+                    '%(uuid)s: (%(code)i %(text)s)',
+                    {'consumer_type': consumer_type,
+                     'uuid': uuid,
+                     'code': r.status_code,
+                     'text': r.text})
+                raise exception.AllocationDeleteFailed(consumer_uuid=uuid,
+                                                       error=r.text)
+            return False
+
         # We read the consumer generation then try to put an empty allocation
         # for that consumer. If between the GET and the PUT the consumer
         # generation changes then we raise AllocationDeleteFailed.
@@ -2249,7 +2275,8 @@ class SchedulerReportClient(object):
             instance_uuids = objects.InstanceList.get_uuids_by_host_and_node(
                 context, host, nodename)
             for instance_uuid in instance_uuids:
-                self.delete_allocation_for_instance(context, instance_uuid)
+                self.delete_allocation_for_instance(
+                    context, instance_uuid, force=True)
         # Ensure to delete resource provider in tree by top-down
         # traversable order.
         rps_to_refresh = self.get_providers_in_tree(context, rp_uuid)
@@ -2265,6 +2292,17 @@ class SchedulerReportClient(object):
                 # TODO(efried): Raise these.  Right now this is being
                 #  left a no-op for backward compatibility.
                 pass
+
+    def invalidate_resource_provider(self, name_or_uuid):
+        """Invalidate the cache for a resource provider.
+
+        :param name_or_uuid: Name or UUID of the resource provider to look up.
+        """
+        try:
+            self._provider_tree.remove(name_or_uuid)
+        except ValueError:
+            pass
+        self._association_refresh_time.pop(name_or_uuid, None)
 
     def get_provider_by_name(self, context, name):
         """Queries the placement API for resource provider information matching
@@ -2452,7 +2490,7 @@ class SchedulerReportClient(object):
             pcpus = usages['usages'].get(orc.PCPU, 0)
             return vcpus + pcpus
 
-        total_counts = {'project': {}}
+        total_counts: ty.Dict[str, ty.Dict[str, int]] = {'project': {}}
         # First query counts across all users of a project
         LOG.debug('Getting usages for project_id %s from placement',
                   project_id)

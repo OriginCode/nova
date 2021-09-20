@@ -51,9 +51,9 @@ from nova.compute import task_states
 from nova.compute import vm_states
 import nova.conf
 from nova import context
-from nova.db import api as db
-from nova.db.sqlalchemy import api as db_api
-from nova.db.sqlalchemy import models
+from nova.db import constants as db_const
+from nova.db.main import api as db
+from nova.db.main import models
 from nova import exception
 from nova.image import glance
 from nova import objects
@@ -116,25 +116,6 @@ def instance_update(context, instance_uuid, values):
     return inst
 
 
-def fake_compute_api(cls, req, id):
-    return True
-
-
-def fake_start_stop_not_ready(self, context, instance):
-    raise exception.InstanceNotReady(instance_id=instance["uuid"])
-
-
-def fake_start_stop_invalid_state(self, context, instance):
-    raise exception.InstanceInvalidState(
-        instance_uuid=instance['uuid'], attr='fake_attr',
-        method='fake_method', state='fake_state')
-
-
-def fake_instance_get_by_uuid_not_found(context, uuid,
-                                        columns_to_join, use_slave=False):
-    raise exception.InstanceNotFound(instance_id=uuid)
-
-
 def fake_instance_get_all_with_locked(context, list_locked, **kwargs):
     obj_list = []
     s_id = 0
@@ -157,12 +138,6 @@ def fake_instance_get_all_with_description(context, list_desc, **kwargs):
         server = fakes.stub_instance_obj(context, id=s_id, uuid=uuid, **kwargs)
         obj_list.append(server)
     return objects.InstanceList(objects=obj_list)
-
-
-def fake_compute_get_empty_az(*args, **kwargs):
-    inst = fakes.stub_instance(vm_state=vm_states.ACTIVE,
-                               availability_zone='')
-    return fake_instance.fake_instance_obj(args[1], **inst)
 
 
 def fake_bdms_get_all_by_instance_uuids(*args, **kwargs):
@@ -199,16 +174,6 @@ def fake_get_inst_mappings_by_instance_uuids_from_db(*args, **kwargs):
     }]
 
 
-class MockSetAdminPassword(object):
-    def __init__(self):
-        self.instance_id = None
-        self.password = None
-
-    def __call__(self, context, instance_id, password):
-        self.instance_id = instance_id
-        self.password = password
-
-
 class ControllerTest(test.TestCase):
     project_id = fakes.FAKE_PROJECT_ID
     path = '/%s/servers' % project_id
@@ -220,6 +185,7 @@ class ControllerTest(test.TestCase):
     path_detail_v2 = path_v2 + '/detail'
     path_detail_with_query = path_detail + '?%s'
     path_action = path + '/%s/action'
+    microversion = os_wsgi.DEFAULT_API_VERSION
 
     def setUp(self):
         super(ControllerTest, self).setUp()
@@ -241,9 +207,9 @@ class ControllerTest(test.TestCase):
             compute_api.API, 'get_all', side_effect=return_servers)).mock
         self.mock_get = self.useFixture(fixtures.MockPatchObject(
             compute_api.API, 'get', side_effect=return_server)).mock
-        self.stub_out('nova.db.api.instance_update_and_get_original',
+        self.stub_out('nova.db.main.api.instance_update_and_get_original',
                       instance_update_and_get_original)
-        self.stub_out('nova.db.api.'
+        self.stub_out('nova.db.main.api.'
                       'block_device_mapping_get_all_by_instance_uuids',
                       fake_bdms_get_all_by_instance_uuids)
         self.stub_out('nova.objects.InstanceMappingList.'
@@ -266,16 +232,21 @@ class ControllerTest(test.TestCase):
         mock_conductor.start()
         self.addCleanup(mock_conductor.stop)
 
+    def req(self, url, use_admin_context=False):
+        return fakes.HTTPRequest.blank(
+            url,
+            use_admin_context=use_admin_context,
+            version=self.microversion)
 
-class ServersControllerTest(ControllerTest):
-    wsgi_api_version = os_wsgi.DEFAULT_API_VERSION
+
+class _ServersControllerTest(ControllerTest):
 
     def setUp(self):
-        super(ServersControllerTest, self).setUp()
+        super().setUp()
         self.request = fakes.HTTPRequest.blank(
             self.path_with_id_v2 % FAKE_UUID,
             use_admin_context=False,
-            version=self.wsgi_api_version)
+            version=self.microversion)
         return_server = fakes.fake_compute_get(
             id=2, availability_zone='nova',
             launched_at=None,
@@ -286,119 +257,10 @@ class ServersControllerTest(ControllerTest):
             project_id=self.request.environ['nova.context'].project_id)
         self.mock_get.side_effect = return_server
 
-    def req(self, url, use_admin_context=False):
-        return fakes.HTTPRequest.blank(url,
-                                       use_admin_context=use_admin_context,
-                                       version=self.wsgi_api_version)
-
-    @mock.patch('nova.objects.Instance.get_by_uuid')
-    @mock.patch('nova.objects.InstanceMapping.get_by_instance_uuid')
-    def test_instance_lookup_targets(self, mock_get_im, mock_get_inst):
-        ctxt = context.RequestContext('fake', self.project_id)
-        mock_get_im.return_value.cell_mapping.database_connection = uuids.cell1
-        self.controller._get_instance(ctxt, 'foo')
-        mock_get_im.assert_called_once_with(ctxt, 'foo')
-        self.assertIsNotNone(ctxt.db_connection)
-
-    def test_requested_networks_prefix(self):
-        """Tests that we no longer support the legacy br-<uuid> format for
-        a network id.
-        """
-        uuid = 'br-00000000-0000-0000-0000-000000000000'
-        requested_networks = [{'uuid': uuid}]
-        ex = self.assertRaises(webob.exc.HTTPBadRequest,
-                               self.controller._get_requested_networks,
-                               requested_networks)
-        self.assertIn('Bad networks format: network uuid is not in proper '
-                      'format', str(ex))
-
-    def test_requested_networks_enabled_with_port(self):
-        port = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'
-        requested_networks = [{'port': port}]
-        res = self.controller._get_requested_networks(requested_networks)
-        self.assertEqual([(None, None, port, None)], res.as_tuples())
-
-    def test_requested_networks_enabled_with_network(self):
-        network = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-        requested_networks = [{'uuid': network}]
-        res = self.controller._get_requested_networks(requested_networks)
-        self.assertEqual([(network, None, None, None)], res.as_tuples())
-
-    def test_requested_networks_enabled_with_network_and_port(self):
-        network = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-        port = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'
-        requested_networks = [{'uuid': network, 'port': port}]
-        res = self.controller._get_requested_networks(requested_networks)
-        self.assertEqual([(None, None, port, None)], res.as_tuples())
-
-    def test_requested_networks_with_and_duplicate_networks(self):
-        network = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-        requested_networks = [{'uuid': network}, {'uuid': network}]
-        res = self.controller._get_requested_networks(requested_networks)
-        self.assertEqual([(network, None, None, None),
-                          (network, None, None, None)], res.as_tuples())
-
-    def test_requested_networks_enabled_conflict_on_fixed_ip(self):
-        network = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-        port = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'
-        addr = '10.0.0.1'
-        requested_networks = [{'uuid': network,
-                               'fixed_ip': addr,
-                               'port': port}]
-        self.assertRaises(
-            webob.exc.HTTPBadRequest,
-            self.controller._get_requested_networks,
-            requested_networks)
-
-    def test_requested_networks_api_enabled_with_v2_subclass(self):
-        network = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-        port = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'
-        requested_networks = [{'uuid': network, 'port': port}]
-        res = self.controller._get_requested_networks(requested_networks)
-        self.assertEqual([(None, None, port, None)], res.as_tuples())
-
-    def test_get_server_by_uuid(self):
-        res_dict = self.controller.show(self.request, FAKE_UUID)
-        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
-
-    def test_get_server_joins(self):
-        def fake_get(*args, **kwargs):
-            expected_attrs = kwargs['expected_attrs']
-            self.assertEqual(['flavor', 'info_cache', 'metadata',
-                              'numa_topology'], expected_attrs)
-            ctxt = context.RequestContext('fake', self.project_id)
-            return fake_instance.fake_instance_obj(
-                ctxt, expected_attrs=expected_attrs,
-                project_id=self.request.environ['nova.context'].project_id)
-        self.mock_get.side_effect = fake_get
-
-        self.controller.show(self.request, FAKE_UUID)
-
-    def test_unique_host_id(self):
-        """Create two servers with the same host and different
-        project_ids and check that the host_id's are unique.
-        """
-        def return_instance_with_host(context, *args, **kwargs):
-            project_id = context.project_id
-            return fakes.stub_instance_obj(context, id=1, uuid=FAKE_UUID,
-                                           project_id=project_id,
-                                           host='fake_host')
-
-        req1 = self.req(self.path_with_id % FAKE_UUID)
-        project_id = uuidutils.generate_uuid()
-        req2 = fakes.HTTPRequest.blank(self.path_with_id % FAKE_UUID,
-                                       version=self.wsgi_api_version,
-                                       project_id=project_id)
-
-        self.mock_get.side_effect = return_instance_with_host
-        server1 = self.controller.show(req1, FAKE_UUID)
-        server2 = self.controller.show(req2, FAKE_UUID)
-
-        self.assertNotEqual(server1['server']['hostId'],
-                            server2['server']['hostId'])
-
-    def _get_server_data_dict(self, uuid, image_bookmark, flavor_bookmark,
-                              status="ACTIVE", progress=100):
+    def _get_server_data_dict(
+        self, uuid, image_bookmark, flavor_bookmark,
+        status="ACTIVE", progress=100,
+    ):
         return {
             "server": {
                 "id": uuid,
@@ -410,7 +272,7 @@ class ServersControllerTest(ControllerTest):
                 "status": status,
                 "hostId": '',
                 "image": {
-                    "id": "10",
+                    "id": FAKE_UUID,
                     "links": [
                         {
                             "rel": "bookmark",
@@ -473,8 +335,123 @@ class ServersControllerTest(ControllerTest):
             }
         }
 
+
+class ServersControllerTest(_ServersControllerTest):
+
+    @mock.patch('nova.objects.Instance.get_by_uuid')
+    @mock.patch('nova.objects.InstanceMapping.get_by_instance_uuid')
+    def test_instance_lookup_targets(self, mock_get_im, mock_get_inst):
+        ctxt = context.RequestContext('fake', self.project_id)
+        mock_get_im.return_value.cell_mapping.database_connection = uuids.cell1
+        self.controller._get_instance(ctxt, 'foo')
+        mock_get_im.assert_called_once_with(ctxt, 'foo')
+        self.assertIsNotNone(ctxt.db_connection)
+
+    def test_requested_networks_prefix(self):
+        """Tests that we no longer support the legacy br-<uuid> format for
+        a network id.
+        """
+        uuid = 'br-00000000-0000-0000-0000-000000000000'
+        requested_networks = [{'uuid': uuid}]
+        ex = self.assertRaises(webob.exc.HTTPBadRequest,
+                               self.controller._get_requested_networks,
+                               requested_networks)
+        self.assertIn('Bad networks format: network uuid is not in proper '
+                      'format', str(ex))
+
+    def test_requested_networks_enabled_with_port(self):
+        port = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'
+        requested_networks = [{'port': port}]
+        res = self.controller._get_requested_networks(requested_networks)
+        self.assertEqual([(None, None, port, None, None, None)],
+                          res.as_tuples())
+
+    def test_requested_networks_enabled_with_network(self):
+        network = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        requested_networks = [{'uuid': network}]
+        res = self.controller._get_requested_networks(requested_networks)
+        self.assertEqual([(network, None, None, None, None, None)],
+                          res.as_tuples())
+
+    def test_requested_networks_enabled_with_network_and_port(self):
+        network = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        port = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'
+        requested_networks = [{'uuid': network, 'port': port}]
+        res = self.controller._get_requested_networks(requested_networks)
+        self.assertEqual([(None, None, port, None, None, None)],
+                          res.as_tuples())
+
+    def test_requested_networks_with_and_duplicate_networks(self):
+        network = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        requested_networks = [{'uuid': network}, {'uuid': network}]
+        res = self.controller._get_requested_networks(requested_networks)
+        self.assertEqual([(network, None, None, None, None, None),
+                          (network, None, None, None, None, None)],
+                          res.as_tuples())
+
+    def test_requested_networks_enabled_conflict_on_fixed_ip(self):
+        network = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        port = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'
+        addr = '10.0.0.1'
+        requested_networks = [{'uuid': network,
+                               'fixed_ip': addr,
+                               'port': port}]
+        self.assertRaises(
+            webob.exc.HTTPBadRequest,
+            self.controller._get_requested_networks,
+            requested_networks)
+
+    def test_requested_networks_api_enabled_with_v2_subclass(self):
+        network = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        port = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'
+        requested_networks = [{'uuid': network, 'port': port}]
+        res = self.controller._get_requested_networks(requested_networks)
+        self.assertEqual([(None, None, port, None, None, None)],
+                          res.as_tuples())
+
+    def test_get_server_by_uuid(self):
+        res_dict = self.controller.show(self.request, FAKE_UUID)
+        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
+
+    def test_get_server_joins(self):
+        def fake_get(*args, **kwargs):
+            expected_attrs = kwargs['expected_attrs']
+            self.assertEqual(['flavor', 'info_cache', 'metadata',
+                              'numa_topology'], expected_attrs)
+            ctxt = context.RequestContext('fake', self.project_id)
+            return fake_instance.fake_instance_obj(
+                ctxt, expected_attrs=expected_attrs,
+                project_id=self.request.environ['nova.context'].project_id)
+        self.mock_get.side_effect = fake_get
+
+        self.controller.show(self.request, FAKE_UUID)
+
+    def test_unique_host_id(self):
+        """Create two servers with the same host and different
+        project_ids and check that the host_id's are unique.
+        """
+        def return_instance_with_host(context, *args, **kwargs):
+            project_id = context.project_id
+            return fakes.stub_instance_obj(context, id=1, uuid=FAKE_UUID,
+                                           project_id=project_id,
+                                           host='fake_host')
+
+        req1 = self.req(self.path_with_id % FAKE_UUID)
+        project_id = uuidutils.generate_uuid()
+        req2 = fakes.HTTPRequest.blank(self.path_with_id % FAKE_UUID,
+                                       version=self.microversion,
+                                       project_id=project_id)
+
+        self.mock_get.side_effect = return_instance_with_host
+        server1 = self.controller.show(req1, FAKE_UUID)
+        server2 = self.controller.show(req2, FAKE_UUID)
+
+        self.assertNotEqual(server1['server']['hostId'],
+                            server2['server']['hostId'])
+
     def test_get_server_by_id(self):
-        image_bookmark = "http://localhost/%s/images/10" % self.project_id
+        image_bookmark = "http://localhost/%s/images/%s" % (
+            self.project_id, FAKE_UUID)
         flavor_bookmark = "http://localhost/%s/flavors/2" % self.project_id
 
         uuid = FAKE_UUID
@@ -499,7 +476,8 @@ class ServersControllerTest(ControllerTest):
         self.assertEqual(res_dict['server']['OS-EXT-AZ:availability_zone'], '')
 
     def test_get_server_with_active_status_by_id(self):
-        image_bookmark = "http://localhost/%s/images/10" % self.project_id
+        image_bookmark = "http://localhost/%s/images/%s" % (
+            self.project_id, FAKE_UUID)
         flavor_bookmark = "http://localhost/%s/flavors/2" % self.project_id
 
         res_dict = self.controller.show(self.request, FAKE_UUID)
@@ -517,7 +495,8 @@ class ServersControllerTest(ControllerTest):
                             'numa_topology'], cell_down_support=False)
 
     def test_get_server_with_id_image_ref_by_id(self):
-        image_bookmark = "http://localhost/%s/images/10" % self.project_id
+        image_bookmark = "http://localhost/%s/images/%s" % (
+            self.project_id, FAKE_UUID)
         flavor_bookmark = "http://localhost/%s/flavors/2" % self.project_id
 
         res_dict = self.controller.show(self.request, FAKE_UUID)
@@ -1173,25 +1152,6 @@ class ServersControllerTest(ControllerTest):
         servers = self.controller.index(req)['servers']
         self.assertEqual(1, len(servers))
 
-    def test_all_tenants_fail_policy(self):
-        def fake_get_all(context, search_opts=None, **kwargs):
-            self.assertIsNotNone(search_opts)
-            return [fakes.stub_instance_obj(100)]
-
-        rules = {
-            "os_compute_api:servers:index:get_all_tenants":
-                "project_id:non_fake",
-            "os_compute_api:servers:get_all":
-                "project_id:%s" % self.project_id,
-        }
-
-        policy.set_rules(oslo_policy.Rules.from_dict(rules))
-        self.mock_get_all.side_effect = fake_get_all
-
-        req = self.req(self.path_with_query % 'all_tenants=1')
-        self.assertRaises(exception.PolicyNotAuthorized,
-                          self.controller.index, req)
-
     def test_get_servers_allows_flavor(self):
         def fake_get_all(context, search_opts=None,
                          limit=None, marker=None,
@@ -1710,12 +1670,12 @@ class ServersControllerTest(ControllerTest):
                     ],
                 }
         expected_image = {
-            "id": "10",
+            "id": FAKE_UUID,
             "links": [
                 {
                     "rel": "bookmark",
-                    "href": ('http://localhost/%s/images/10' %
-                             self.project_id),
+                    "href": ('http://localhost/%s/images/%s' % (
+                        self.project_id, FAKE_UUID)),
                     },
                 ],
             }
@@ -1768,7 +1728,7 @@ class ServersControllerTest(ControllerTest):
                          limit=None, marker=None,
                          expected_attrs=None, sort_keys=None, sort_dirs=None,
                          cell_down_support=False, all_tenants=False):
-            cur = api_version_request.APIVersionRequest(self.wsgi_api_version)
+            cur = api_version_request.APIVersionRequest(self.microversion)
             v216 = api_version_request.APIVersionRequest('2.16')
             if cur >= v216:
                 self.assertIn('services', expected_attrs)
@@ -1783,12 +1743,12 @@ class ServersControllerTest(ControllerTest):
 
         req = fakes.HTTPRequest.blank(self.path_detail,
                                       use_admin_context=True,
-                                      version=self.wsgi_api_version)
+                                      version=self.microversion)
         self.assertIn('servers', self.controller.detail(req))
 
 
-class ServersControllerTestV23(ServersControllerTest):
-    wsgi_api_version = '2.3'
+class ServersControllerTestV23(_ServersControllerTest):
+    microversion = '2.3'
 
     def setUp(self):
         super(ServersControllerTestV23, self).setUp()
@@ -1838,7 +1798,8 @@ class ServersControllerTestV23(ServersControllerTest):
         return server_dict
 
     def test_show(self):
-        image_bookmark = "http://localhost/%s/images/10" % self.project_id
+        image_bookmark = "http://localhost/%s/images/%s" % (
+            self.project_id, FAKE_UUID)
         flavor_bookmark = "http://localhost/%s/flavors/2" % self.project_id
 
         res_dict = self.controller.show(self.request, FAKE_UUID)
@@ -1880,7 +1841,8 @@ class ServersControllerTestV23(ServersControllerTest):
             req.environ['nova.context'])
 
         servers_list = self.controller.detail(req)
-        image_bookmark = "http://localhost/%s/images/10" % self.project_id
+        image_bookmark = "http://localhost/%s/images/%s" % (
+            self.project_id, FAKE_UUID)
         flavor_bookmark = "http://localhost/%s/flavors/2" % self.project_id
         expected_server = self._get_server_data_dict(FAKE_UUID,
                                                      image_bookmark,
@@ -1890,8 +1852,8 @@ class ServersControllerTestV23(ServersControllerTest):
         self.assertIn(expected_server['server'], servers_list['servers'])
 
 
-class ServersControllerTestV29(ServersControllerTest):
-    wsgi_api_version = '2.9'
+class ServersControllerTestV29(_ServersControllerTest):
+    microversion = '2.9'
 
     def setUp(self):
         super(ServersControllerTestV29, self).setUp()
@@ -1941,7 +1903,8 @@ class ServersControllerTestV29(ServersControllerTest):
         return server_dict
 
     def _test_get_server_with_lock(self, locked_by):
-        image_bookmark = "http://localhost/%s/images/10" % self.project_id
+        image_bookmark = "http://localhost/%s/images/%s" % (
+            self.project_id, FAKE_UUID)
         flavor_bookmark = "http://localhost/%s/flavors/2" % self.project_id
         req = self.req(self.path_with_id % FAKE_UUID)
         project_id = req.environ['nova.context'].project_id
@@ -2045,8 +2008,8 @@ class ServersControllerTestV29(ServersControllerTest):
             self.assertNotIn(key, search_opts)
 
 
-class ServersControllerTestV216(ServersControllerTest):
-    wsgi_api_version = '2.16'
+class ServersControllerTestV216(_ServersControllerTest):
+    microversion = '2.16'
 
     def setUp(self):
         super(ServersControllerTestV216, self).setUp()
@@ -2121,7 +2084,8 @@ class ServersControllerTestV216(ServersControllerTest):
         policy.set_rules(orig_rules)
 
     def test_show(self):
-        image_bookmark = "http://localhost/%s/images/10" % self.project_id
+        image_bookmark = "http://localhost/%s/images/%s" % (
+            self.project_id, FAKE_UUID)
         flavor_bookmark = "http://localhost/%s/flavors/2" % self.project_id
         res_dict = self.controller.show(self.request, FAKE_UUID)
         expected_server = self._get_server_data_dict(FAKE_UUID,
@@ -2166,7 +2130,8 @@ class ServersControllerTestV216(ServersControllerTest):
 
         servers_list = self.controller.detail(req)
         self.assertEqual(2, len(servers_list['servers']))
-        image_bookmark = "http://localhost/%s/images/10" % self.project_id
+        image_bookmark = "http://localhost/%s/images/%s" % (
+            self.project_id, FAKE_UUID)
         flavor_bookmark = "http://localhost/%s/flavors/2" % self.project_id
         expected_server = self._get_server_data_dict(FAKE_UUID,
                                                      image_bookmark,
@@ -2182,8 +2147,8 @@ class ServersControllerTestV216(ServersControllerTest):
         self._verify_host_status_policy_behavior(func)
 
 
-class ServersControllerTestV219(ServersControllerTest):
-    wsgi_api_version = '2.19'
+class ServersControllerTestV219(_ServersControllerTest):
+    microversion = '2.19'
 
     def setUp(self):
         super(ServersControllerTestV219, self).setUp()
@@ -2237,7 +2202,8 @@ class ServersControllerTestV219(ServersControllerTest):
         return server_dict
 
     def _test_get_server_with_description(self, description):
-        image_bookmark = "http://localhost/%s/images/10" % self.project_id
+        image_bookmark = "http://localhost/%s/images/%s" % (
+            self.project_id, FAKE_UUID)
         flavor_bookmark = "http://localhost/%s/flavors/2" % self.project_id
         req = self.req(self.path_with_id % FAKE_UUID)
         project_id = req.environ['nova.context'].project_id
@@ -2296,11 +2262,11 @@ class ServersControllerTestV219(ServersControllerTest):
 
 
 class ServersControllerTestV226(ControllerTest):
-    wsgi_api_version = '2.26'
+    microversion = '2.26'
 
     def test_get_server_with_tags_by_id(self):
         req = fakes.HTTPRequest.blank(self.path_with_id % FAKE_UUID,
-                                      version=self.wsgi_api_version)
+                                      version=self.microversion)
         ctxt = req.environ['nova.context']
         tags = ['tag1', 'tag2']
 
@@ -2327,7 +2293,7 @@ class ServersControllerTestV226(ControllerTest):
     def _test_get_servers_allows_tag_filters(self, filter_name):
         query_string = '%s=t1,t2' % filter_name
         req = fakes.HTTPRequest.blank(self.path_with_query % query_string,
-                                      version=self.wsgi_api_version)
+                                      version=self.microversion)
 
         def fake_get_all(*a, **kw):
             self.assertIsNotNone(kw['search_opts'])
@@ -2357,13 +2323,13 @@ class ServersControllerTestV226(ControllerTest):
         self._test_get_servers_allows_tag_filters('not-tags-any')
 
 
-class ServerControllerTestV238(ControllerTest):
-    wsgi_api_version = '2.38'
+class ServersControllerTestV238(ControllerTest):
+    microversion = '2.38'
 
     def _test_invalid_status(self, is_admin):
         req = fakes.HTTPRequest.blank(
                 self.path_detail_with_query % 'status=invalid',
-                version=self.wsgi_api_version, use_admin_context=is_admin)
+                version=self.microversion, use_admin_context=is_admin)
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller.detail, req)
 
@@ -2374,7 +2340,7 @@ class ServerControllerTestV238(ControllerTest):
         self._test_invalid_status(False)
 
 
-class ServerControllerTestV247(ControllerTest):
+class ServersControllerTestV247(ControllerTest):
     """Server controller test for microversion 2.47
 
     The intent here is simply to verify that when showing server details
@@ -2382,7 +2348,7 @@ class ServerControllerTestV247(ControllerTest):
     information rather than as dict of id/links.  The existence of the
     'extra_specs' key is controlled by policy.
     """
-    wsgi_api_version = '2.47'
+    microversion = '2.47'
 
     @mock.patch.object(objects.TagList, 'get_by_resource_id')
     def test_get_all_server_details(self, mock_get_by_resource_id):
@@ -2399,7 +2365,7 @@ class ServerControllerTestV247(ControllerTest):
             'vcpus': 1}
 
         req = fakes.HTTPRequest.blank(self.path_detail,
-                                      version=self.wsgi_api_version)
+                                      version=self.microversion)
 
         hits = []
         real_auth = policy.authorize
@@ -2445,13 +2411,13 @@ class ServerControllerTestV247(ControllerTest):
             'vcpus': 1}
 
         req = fakes.HTTPRequest.blank(self.path_detail,
-                                      version=self.wsgi_api_version)
+                                      version=self.microversion)
         res_dict = self.controller.detail(req)
         for i, s in enumerate(res_dict['servers']):
             self.assertEqual(s['flavor'], expected_flavor)
 
 
-class ServerControllerTestV266(ControllerTest):
+class ServersControllerTestV266(ControllerTest):
     """Server controller test for microversion 2.66
 
     Add changes-before parameter to get servers or servers details of
@@ -2461,12 +2427,7 @@ class ServerControllerTestV266(ControllerTest):
     changed. Those changed before the specified date and time stamp are
     returned.
     """
-    wsgi_api_version = '2.66'
-
-    def req(self, url, use_admin_context=False):
-        return fakes.HTTPRequest.blank(url,
-                                       use_admin_context=use_admin_context,
-                                       version=self.wsgi_api_version)
+    microversion = '2.66'
 
     def test_get_servers_allows_changes_before(self):
         def fake_get_all(context, search_opts=None,
@@ -2546,12 +2507,7 @@ class ServerControllerTestV266(ControllerTest):
 
 
 class ServersControllerTestV271(ControllerTest):
-    wsgi_api_version = '2.71'
-
-    def req(self, url, use_admin_context=False):
-        return fakes.HTTPRequest.blank(url,
-                                       use_admin_context=use_admin_context,
-                                       version=self.wsgi_api_version)
+    microversion = '2.71'
 
     def test_show_server_group_not_exist(self):
         req = self.req(self.path_with_id % FAKE_UUID)
@@ -2571,12 +2527,7 @@ class ServersControllerTestV273(ControllerTest):
     after microversion 2.73 the response will also have the locked_reason
     key for the servers.
     """
-    wsgi_api_version = '2.73'
-
-    def req(self, url, use_admin_context=False):
-        return fakes.HTTPRequest.blank(url,
-                                       use_admin_context=use_admin_context,
-                                       version=self.wsgi_api_version)
+    microversion = '2.73'
 
     def test_get_servers_with_locked_filter(self):
         def fake_get_all(context, search_opts=None,
@@ -2665,8 +2616,8 @@ class ServersControllerTestV273(ControllerTest):
 
 
 class ServersControllerTestV275(ControllerTest):
-    wsgi_api_version = '2.75'
-    image_uuid = '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6'
+
+    microversion = '2.75'
 
     @mock.patch('nova.compute.api.API.get_all')
     def test_get_servers_additional_query_param_old_version(self, mock_get):
@@ -2685,7 +2636,7 @@ class ServersControllerTestV275(ControllerTest):
     def test_get_servers_additional_query_param(self):
         req = fakes.HTTPRequest.blank(self.path_with_query % 'unknown=1',
                                       use_admin_context=True,
-                                      version=self.wsgi_api_version)
+                                      version=self.microversion)
         self.assertRaises(exception.ValidationError, self.controller.index,
                           req)
 
@@ -2694,96 +2645,16 @@ class ServersControllerTestV275(ControllerTest):
             req = fakes.HTTPRequest.blank(
                 self.path_with_query % 'sort_key=%s' % s_ignore,
                 use_admin_context=True,
-                version=self.wsgi_api_version)
+                version=self.microversion)
             self.assertRaises(exception.ValidationError, self.controller.index,
                               req)
 
     def test_get_servers_additional_sort_key(self):
         req = fakes.HTTPRequest.blank(
                 self.path_with_query % 'sort_key=unknown',
-                use_admin_context=True, version=self.wsgi_api_version)
+                use_admin_context=True, version=self.microversion)
         self.assertRaises(exception.ValidationError, self.controller.index,
                           req)
-
-    def test_update_response_no_show_server_only_attributes_old_version(self):
-        # There are some old server attributes which were added only for
-        # GET server APIs not for PUT. GET server and PUT server share the
-        # same view builder method SHOW() to build the response, So make sure
-        # attributes which are not supposed to be included for PUT
-        # response are not present.
-        body = {'server': {'name': 'server_test'}}
-        req = fakes.HTTPRequest.blank(self.path_with_query % 'unknown=1',
-                                      use_admin_context=True,
-                                      version='2.74')
-        res_dict = self.controller.update(req, FAKE_UUID, body=body)
-        for field in GET_ONLY_FIELDS:
-            self.assertNotIn(field, res_dict['server'])
-        for items in res_dict['server']['addresses'].values():
-            for item in items:
-                self.assertNotIn('OS-EXT-IPS:type', item)
-                self.assertNotIn('OS-EXT-IPS-MAC:mac_addr', item)
-
-    def test_update_response_has_show_server_all_attributes(self):
-        body = {'server': {'name': 'server_test'}}
-        req = fakes.HTTPRequest.blank(self.path_with_query % 'unknown=1',
-                                      use_admin_context=True,
-                                      version=self.wsgi_api_version)
-        res_dict = self.controller.update(req, FAKE_UUID, body=body)
-        for field in GET_ONLY_FIELDS:
-            self.assertIn(field, res_dict['server'])
-        for items in res_dict['server']['addresses'].values():
-            for item in items:
-                self.assertIn('OS-EXT-IPS:type', item)
-                self.assertIn('OS-EXT-IPS-MAC:mac_addr', item)
-
-    def test_rebuild_response_no_show_server_only_attributes_old_version(self):
-        # There are some old server attributes which were added only for
-        # GET server APIs not for Rebuild. GET server and Rebuild server share
-        # same view builder method SHOW() to build the response, So make sure
-        # the attributes which are not supposed to be included for Rebuild
-        # response are not present.
-        body = {'rebuild': {"imageRef": self.image_uuid}}
-        req = fakes.HTTPRequest.blank(self.path_with_query % 'unknown=1',
-                                      use_admin_context=True,
-                                      version='2.74')
-        fake_get = fakes.fake_compute_get(
-            vm_state=vm_states.ACTIVE,
-            project_id=req.environ['nova.context'].project_id,
-            user_id=req.environ['nova.context'].user_id)
-        self.mock_get.side_effect = fake_get
-
-        res_dict = self.controller._action_rebuild(req, FAKE_UUID,
-                                                   body=body).obj
-        get_only_fields_Rebuild = copy.deepcopy(GET_ONLY_FIELDS)
-        get_only_fields_Rebuild.remove('key_name')
-        for field in get_only_fields_Rebuild:
-            self.assertNotIn(field, res_dict['server'])
-        for items in res_dict['server']['addresses'].values():
-            for item in items:
-                self.assertNotIn('OS-EXT-IPS:type', item)
-                self.assertNotIn('OS-EXT-IPS-MAC:mac_addr', item)
-
-    def test_rebuild_response_has_show_server_all_attributes(self):
-        body = {'rebuild': {"imageRef": self.image_uuid}}
-        req = fakes.HTTPRequest.blank(self.path_with_query % 'unknown=1',
-                                      use_admin_context=True,
-                                      version=self.wsgi_api_version)
-        fake_get = fakes.fake_compute_get(
-            vm_state=vm_states.ACTIVE,
-            project_id=req.environ['nova.context'].project_id,
-            user_id=req.environ['nova.context'].user_id)
-        self.mock_get.side_effect = fake_get
-        res_dict = self.controller._action_rebuild(req, FAKE_UUID,
-                                                   body=body).obj
-        for field in GET_ONLY_FIELDS:
-            if field == 'OS-EXT-SRV-ATTR:user_data':
-                self.assertNotIn(field, res_dict['server'])
-                field = 'user_data'
-            self.assertIn(field, res_dict['server'])
-        for items in res_dict['server']['addresses'].values():
-            for item in items:
-                self.assertIn('OS-EXT-IPS:type', item)
-                self.assertIn('OS-EXT-IPS-MAC:mac_addr', item)
 
 
 class ServersControllerTestV283(ControllerTest):
@@ -2844,6 +2715,67 @@ class ServersControllerTestV283(ControllerTest):
         query_str = "node=node1"
         req = fakes.HTTPRequest.blank(self.path_with_query % query_str,
                                       version='2.83')
+        servers = self.controller.index(req)['servers']
+
+        self.assertEqual(1, len(servers))
+        self.assertEqual(uuids.fake, servers[0]['id'])
+
+
+class ServersControllerTestV290(ControllerTest):
+    filters = ['hostname']
+
+    def test_get_servers_by_new_filter_for_non_admin(self):
+        def fake_get_all(context, search_opts=None, **kwargs):
+            self.assertIsNotNone(search_opts)
+            for f in self.filters:
+                self.assertIn(f, search_opts)
+            return objects.InstanceList(
+                objects=[fakes.stub_instance_obj(100, uuid=uuids.fake)])
+
+        self.mock_get_all.side_effect = fake_get_all
+
+        query_str = '&'.join('%s=test_value' % f for f in self.filters)
+        req = fakes.HTTPRequest.blank(
+            self.path_with_query % query_str, version='2.90')
+        servers = self.controller.index(req)['servers']
+
+        self.assertEqual(1, len(servers))
+        self.assertEqual(uuids.fake, servers[0]['id'])
+
+    def test_get_servers_new_filters_for_non_admin_old_version(self):
+        def fake_get_all(context, search_opts=None, **kwargs):
+            self.assertIsNotNone(search_opts)
+            for f in self.filters:
+                self.assertNotIn(f, search_opts)
+            return objects.InstanceList(objects=[])
+
+        # Without policy edition, test will fail and admin filter will work.
+        self.policy.set_rules({'os_compute_api:servers:index': ''})
+        self.mock_get_all.side_effect = fake_get_all
+
+        query_str = '&'.join('%s=test_value' % f for f in self.filters)
+        req = fakes.HTTPRequest.blank(
+            self.path_with_query % query_str, version='2.89')
+        servers = self.controller.index(req)['servers']
+
+        self.assertEqual(0, len(servers))
+
+    def test_get_servers_by_node_fail_non_admin(self):
+        def fake_get_all(context, search_opts=None, **kwargs):
+            self.assertIsNotNone(search_opts)
+            self.assertNotIn('node', search_opts)
+            return objects.InstanceList(
+                objects=[fakes.stub_instance_obj(100, uuid=uuids.fake)])
+
+        self.mock_get_all.side_effect = fake_get_all
+        self.policy.set_rules({
+            'os_compute_api:servers:index': '',
+            'os_compute_api:servers:allow_all_filters': 'role:admin',
+        })
+
+        query_str = "node=node1"
+        req = fakes.HTTPRequest.blank(
+            self.path_with_query % query_str, version='2.90')
         servers = self.controller.index(req)['servers']
 
         self.assertEqual(1, len(servers))
@@ -2933,7 +2865,8 @@ class ServersControllerDeleteTest(ControllerTest):
             self.server_delete_called = True
             deleted_at = timeutils.utcnow()
             return fake_instance.fake_db_instance(deleted_at=deleted_at)
-        self.stub_out('nova.db.api.instance_destroy', instance_destroy_mock)
+        self.stub_out(
+            'nova.db.main.api.instance_destroy', instance_destroy_mock)
 
         self.controller.delete(req, FAKE_UUID)
         # delete() should be called for instance which has never been active,
@@ -2941,13 +2874,129 @@ class ServersControllerDeleteTest(ControllerTest):
         self.assertTrue(self.server_delete_called)
 
 
-class ServersControllerRebuildInstanceTest(ControllerTest):
-
-    image_uuid = '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6'
-    expected_key_name = False
+class ServersControllerStartStopTest(ControllerTest):
 
     def setUp(self):
-        super(ServersControllerRebuildInstanceTest, self).setUp()
+        super().setUp()
+        self.req = fakes.HTTPRequest.blank(self.path_action % FAKE_UUID)
+        req_user_id = self.req.environ['nova.context'].user_id
+        req_project_id = self.req.environ['nova.context'].project_id
+        self.useFixture(nova_fixtures.SingleCellSimple())
+
+        def fake_get(ctrl, ctxt, uuid):
+            if uuid == 'test_inst':
+                raise webob.exc.HTTPNotFound(explanation='fakeout')
+            return fakes.stub_instance_obj(None,
+                                           vm_state=vm_states.ACTIVE,
+                                           project_id=req_project_id,
+                                           user_id=req_user_id)
+
+        self.useFixture(
+            fixtures.MonkeyPatch('nova.api.openstack.compute.servers.'
+                                 'ServersController._get_instance',
+                                 fake_get))
+        fake_get = fakes.fake_compute_get(vm_state=vm_states.ACTIVE,
+                                          project_id=req_project_id,
+                                          user_id=req_user_id)
+        self.mock_get.side_effect = fake_get
+
+    @mock.patch.object(compute_api.API, 'start')
+    def test_start(self, mock_start):
+        req = fakes.HTTPRequestV21.blank(self.path_action % FAKE_UUID)
+        body = dict(start="")
+        self.controller._start_server(req, FAKE_UUID, body)
+        mock_start.assert_called_once_with(mock.ANY, mock.ANY)
+
+    @mock.patch.object(compute_api.API, 'start')
+    def test_start_not_ready(self, mock_start):
+        mock_start.side_effect = exception.InstanceNotReady(
+            instance_id=FAKE_UUID)
+
+        req = fakes.HTTPRequestV21.blank(self.path_action % FAKE_UUID)
+        body = dict(start="")
+        self.assertRaises(webob.exc.HTTPConflict,
+            self.controller._start_server, req, FAKE_UUID, body)
+
+    @mock.patch.object(
+        compute_api.API, 'start', fakes.fake_actions_to_locked_server)
+    def test_start_locked_server(self):
+        req = fakes.HTTPRequestV21.blank(self.path_action % FAKE_UUID)
+        body = dict(start="")
+        self.assertRaises(webob.exc.HTTPConflict,
+            self.controller._start_server, req, FAKE_UUID, body)
+
+    @mock.patch.object(compute_api.API, 'start')
+    def test_start_invalid(self, mock_start):
+        mock_start.side_effect = exception.InstanceInvalidState(
+            instance_uuid=FAKE_UUID, attr='fake_attr',
+            method='fake_method', state='fake_state')
+
+        req = fakes.HTTPRequestV21.blank(self.path_action % FAKE_UUID)
+        body = {'start': ''}
+        self.assertRaises(webob.exc.HTTPConflict,
+            self.controller._start_server, req, FAKE_UUID, body)
+
+    @mock.patch.object(compute_api.API, 'stop')
+    def test_stop(self, mock_stop):
+        req = fakes.HTTPRequestV21.blank(self.path_action % FAKE_UUID)
+        body = dict(stop="")
+        self.controller._stop_server(req, FAKE_UUID, body)
+        mock_stop.assert_called_once_with(mock.ANY, mock.ANY)
+
+    @mock.patch.object(compute_api.API, 'stop')
+    def test_stop_not_ready(self, mock_stop):
+        mock_stop.side_effect = exception.InstanceNotReady(
+            instance_id=FAKE_UUID)
+
+        req = fakes.HTTPRequestV21.blank(self.path_action % FAKE_UUID)
+        body = dict(stop="")
+        self.assertRaises(webob.exc.HTTPConflict,
+            self.controller._stop_server, req, FAKE_UUID, body)
+
+    @mock.patch.object(
+        compute_api.API, 'stop', fakes.fake_actions_to_locked_server)
+    def test_stop_locked_server(self):
+        req = fakes.HTTPRequestV21.blank(self.path_action % FAKE_UUID)
+        body = dict(stop="")
+        self.assertRaises(webob.exc.HTTPConflict,
+            self.controller._stop_server, req, FAKE_UUID, body)
+
+    @mock.patch.object(compute_api.API, 'stop')
+    def test_stop_invalid_state(self, mock_stop):
+        mock_stop.side_effect = exception.InstanceInvalidState(
+            instance_uuid=FAKE_UUID, attr='fake_attr',
+            method='fake_method', state='fake_state')
+
+        req = fakes.HTTPRequestV21.blank(self.path_action % FAKE_UUID)
+        body = dict(start="")
+        self.assertRaises(webob.exc.HTTPConflict,
+            self.controller._stop_server, req, FAKE_UUID, body)
+
+    @mock.patch('nova.db.main.api.instance_get_by_uuid')
+    def test_start_with_bogus_id(self, mock_get):
+        mock_get.side_effect = exception.InstanceNotFound(instance_id='fake')
+
+        req = fakes.HTTPRequestV21.blank(self.path_action % 'test_inst')
+        body = dict(start="")
+        self.assertRaises(webob.exc.HTTPNotFound,
+            self.controller._start_server, req, 'test_inst', body)
+
+    @mock.patch('nova.db.main.api.instance_get_by_uuid')
+    def test_stop_with_bogus_id(self, mock_get):
+        mock_get.side_effect = exception.InstanceNotFound(instance_id='fake')
+
+        req = fakes.HTTPRequestV21.blank(self.path_action % 'test_inst')
+        body = dict(stop="")
+        self.assertRaises(webob.exc.HTTPNotFound,
+            self.controller._stop_server, req, 'test_inst', body)
+
+
+class _ServersControllerRebuildTest(ControllerTest):
+
+    image_uuid = '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6'
+
+    def setUp(self):
+        super().setUp()
         self.req = fakes.HTTPRequest.blank(self.path_action % FAKE_UUID)
         self.req.method = 'POST'
         self.req.headers["content-type"] = "application/json"
@@ -2956,8 +3005,6 @@ class ServersControllerRebuildInstanceTest(ControllerTest):
         self.useFixture(nova_fixtures.SingleCellSimple())
 
         def fake_get(ctrl, ctxt, uuid):
-            if uuid == 'test_inst':
-                raise webob.exc.HTTPNotFound(explanation='fakeout')
             return fakes.stub_instance_obj(None,
                                            vm_state=vm_states.ACTIVE,
                                            project_id=self.req_project_id,
@@ -2981,6 +3028,9 @@ class ServersControllerRebuildInstanceTest(ControllerTest):
                 },
             },
         }
+
+
+class ServersControllerRebuildTest(_ServersControllerRebuildTest):
 
     def test_rebuild_server_with_image_not_uuid(self):
         self.body['rebuild']['imageRef'] = 'not-uuid'
@@ -3204,90 +3254,11 @@ class ServersControllerRebuildInstanceTest(ControllerTest):
         body = self.controller._action_rebuild(self.req, FAKE_UUID,
                                                body=body).obj
         get_only_fields = copy.deepcopy(GET_ONLY_FIELDS)
-        if self.expected_key_name:
-            get_only_fields.remove('key_name')
         for field in get_only_fields:
             self.assertNotIn(field, body['server'])
 
-    @mock.patch.object(compute_api.API, 'start')
-    def test_start(self, mock_start):
-        req = fakes.HTTPRequestV21.blank(self.path_action % FAKE_UUID)
-        body = dict(start="")
-        self.controller._start_server(req, FAKE_UUID, body)
-        mock_start.assert_called_once_with(mock.ANY, mock.ANY)
 
-    @mock.patch.object(compute_api.API, 'start', fake_start_stop_not_ready)
-    def test_start_not_ready(self):
-        req = fakes.HTTPRequestV21.blank(self.path_action % FAKE_UUID)
-        body = dict(start="")
-        self.assertRaises(webob.exc.HTTPConflict,
-            self.controller._start_server, req, FAKE_UUID, body)
-
-    @mock.patch.object(
-        compute_api.API, 'start', fakes.fake_actions_to_locked_server)
-    def test_start_locked_server(self):
-        req = fakes.HTTPRequestV21.blank(self.path_action % FAKE_UUID)
-        body = dict(start="")
-        self.assertRaises(webob.exc.HTTPConflict,
-            self.controller._start_server, req, FAKE_UUID, body)
-
-    @mock.patch.object(compute_api.API, 'start', fake_start_stop_invalid_state)
-    def test_start_invalid(self):
-        req = fakes.HTTPRequestV21.blank(self.path_action % FAKE_UUID)
-        body = dict(start="")
-        self.assertRaises(webob.exc.HTTPConflict,
-            self.controller._start_server, req, FAKE_UUID, body)
-
-    @mock.patch.object(compute_api.API, 'stop')
-    def test_stop(self, mock_stop):
-        req = fakes.HTTPRequestV21.blank(self.path_action % FAKE_UUID)
-        body = dict(stop="")
-        self.controller._stop_server(req, FAKE_UUID, body)
-        mock_stop.assert_called_once_with(mock.ANY, mock.ANY)
-
-    @mock.patch.object(compute_api.API, 'stop', fake_start_stop_not_ready)
-    def test_stop_not_ready(self):
-        req = fakes.HTTPRequestV21.blank(self.path_action % FAKE_UUID)
-        body = dict(stop="")
-        self.assertRaises(webob.exc.HTTPConflict,
-            self.controller._stop_server, req, FAKE_UUID, body)
-
-    @mock.patch.object(
-        compute_api.API, 'stop', fakes.fake_actions_to_locked_server)
-    def test_stop_locked_server(self):
-        req = fakes.HTTPRequestV21.blank(self.path_action % FAKE_UUID)
-        body = dict(stop="")
-        self.assertRaises(webob.exc.HTTPConflict,
-            self.controller._stop_server, req, FAKE_UUID, body)
-
-    @mock.patch.object(compute_api.API, 'stop', fake_start_stop_invalid_state)
-    def test_stop_invalid_state(self):
-        req = fakes.HTTPRequestV21.blank(self.path_action % FAKE_UUID)
-        body = dict(start="")
-        self.assertRaises(webob.exc.HTTPConflict,
-            self.controller._stop_server, req, FAKE_UUID, body)
-
-    @mock.patch(
-        'nova.db.api.instance_get_by_uuid',
-        fake_instance_get_by_uuid_not_found)
-    def test_start_with_bogus_id(self):
-        req = fakes.HTTPRequestV21.blank(self.path_action % 'test_inst')
-        body = dict(start="")
-        self.assertRaises(webob.exc.HTTPNotFound,
-            self.controller._start_server, req, 'test_inst', body)
-
-    @mock.patch(
-        'nova.db.api.instance_get_by_uuid',
-        fake_instance_get_by_uuid_not_found)
-    def test_stop_with_bogus_id(self):
-        req = fakes.HTTPRequestV21.blank(self.path_action % 'test_inst')
-        body = dict(stop="")
-        self.assertRaises(webob.exc.HTTPNotFound,
-            self.controller._stop_server, req, 'test_inst', body)
-
-
-class ServersControllerRebuildTestV254(ServersControllerRebuildInstanceTest):
-    expected_key_name = True
+class ServersControllerRebuildTestV254(_ServersControllerRebuildTest):
 
     def setUp(self):
         super(ServersControllerRebuildTestV254, self).setUp()
@@ -3346,7 +3317,7 @@ class ServersControllerRebuildTestV254(ServersControllerRebuildInstanceTest):
     def test_rebuild_user_has_no_key_pair(self):
         def no_key_pair(context, user_id, name):
             raise exception.KeypairNotFound(user_id=user_id, name=name)
-        self.stub_out('nova.db.api.key_pair_get', no_key_pair)
+        self.stub_out('nova.db.main.api.key_pair_get', no_key_pair)
         fake_get = fakes.fake_compute_get(vm_state=vm_states.ACTIVE,
                                           key_name=None,
                                           project_id=self.req_project_id,
@@ -3420,7 +3391,7 @@ class ServersControllerRebuildTestV254(ServersControllerRebuildInstanceTest):
                           self.req, FAKE_UUID, body=body)
 
 
-class ServersControllerRebuildTestV257(ServersControllerRebuildTestV254):
+class ServersControllerRebuildTestV257(_ServersControllerRebuildTest):
     """Tests server rebuild at microversion 2.57 where user_data can be
     provided and personality files are no longer accepted.
     """
@@ -3488,7 +3459,7 @@ class ServersControllerRebuildTestV257(ServersControllerRebuildTestV254):
         self.assertIn('user_data', str(ex))
 
     @mock.patch.object(context.RequestContext, 'can')
-    @mock.patch('nova.db.api.instance_update_and_get_original')
+    @mock.patch('nova.db.main.api.instance_update_and_get_original')
     def test_rebuild_reset_user_data(self, mock_update, mock_policy):
         """Tests that passing user_data=None resets the user_data on the
         instance.
@@ -3519,7 +3490,7 @@ class ServersControllerRebuildTestV257(ServersControllerRebuildTestV254):
         self.assertEqual(2, mock_update.call_count)
 
 
-class ServersControllerRebuildTestV219(ServersControllerRebuildInstanceTest):
+class ServersControllerRebuildTestV219(_ServersControllerRebuildTest):
 
     def setUp(self):
         super(ServersControllerRebuildTestV219, self).setUp()
@@ -3569,7 +3540,7 @@ class ServersControllerRebuildTestV219(ServersControllerRebuildInstanceTest):
                           self.req, FAKE_UUID, body=self.body)
 
 
-# NOTE(jaypipes): Not based from ServersControllerRebuildInstanceTest because
+# NOTE(jaypipes): Not based from ServersControllerRebuildTest because
 # that test case's setUp is completely b0rked
 class ServersControllerRebuildTestV263(ControllerTest):
 
@@ -3597,7 +3568,6 @@ class ServersControllerRebuildTestV263(ControllerTest):
     @mock.patch('nova.compute.api.API.get')
     def _rebuild_server(self, mock_get, certs=None,
                         conf_enabled=True, conf_certs=None):
-        fakes.stub_out_trusted_certs(self, certs=certs)
         ctx = self.req.environ['nova.context']
         mock_get.return_value = fakes.stub_instance_obj(ctx,
             vm_state=vm_states.ACTIVE, trusted_certs=certs,
@@ -3614,6 +3584,11 @@ class ServersControllerRebuildTestV263(ControllerTest):
         server = self.controller._action_rebuild(
             self.req, FAKE_UUID, body=self.body).obj['server']
 
+        # TODO(stephenfin): This is a lie. We call '_get_server' immediately
+        # after making the call to 'nova.compute.api.API().rebuild_server' in
+        # '_action_rebuild', which means all we're testing here is the value
+        # returned by 'mock_get' above. Drop it in favour of testing the calls
+        # to the API itself
         if certs:
             self.assertEqual(certs, server['trusted_image_certificates'])
         else:
@@ -3717,18 +3692,6 @@ class ServersControllerRebuildTestV263(ControllerTest):
                                self.req, FAKE_UUID, body=self.body)
         self.assertIn('Additional properties are not allowed', str(ex))
 
-    def test_rebuild_server_with_trusted_certs_policy_failed(self):
-        rule_name = "os_compute_api:servers:rebuild:trusted_certs"
-        rules = {"os_compute_api:servers:rebuild": "@",
-                 rule_name: "project:%s" % fakes.FAKE_PROJECT_ID}
-        self.policy.set_rules(rules)
-        exc = self.assertRaises(exception.PolicyNotAuthorized,
-                                self._rebuild_server,
-                                certs=['0b5d2c72-12cc-4ba6-a8d7-3ff5cc1d8cb8'])
-        self.assertEqual(
-            "Policy doesn't allow %s to be performed." % rule_name,
-            exc.format_message())
-
     @mock.patch.object(compute_api.API, 'rebuild')
     def test_rebuild_server_with_cert_validation_error(
             self, mock_rebuild):
@@ -3778,23 +3741,150 @@ class ServersControllerRebuildTestV271(ControllerTest):
         self.assertEqual([], server['server_groups'])
 
 
-class ServersControllerUpdateTest(ControllerTest):
+class ServersControllerRebuildTestV275(ControllerTest):
+
+    microversion = '2.75'
+    image_uuid = '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6'
+
+    def test_rebuild_response_no_show_server_only_attributes_old_version(self):
+        # There are some old server attributes which were added only for
+        # GET server APIs not for Rebuild. GET server and Rebuild server share
+        # same view builder method SHOW() to build the response, So make sure
+        # the attributes which are not supposed to be included for Rebuild
+        # response are not present.
+        body = {'rebuild': {"imageRef": self.image_uuid}}
+        req = fakes.HTTPRequest.blank(self.path_with_query % 'unknown=1',
+                                      use_admin_context=True,
+                                      version='2.74')
+        fake_get = fakes.fake_compute_get(
+            vm_state=vm_states.ACTIVE,
+            project_id=req.environ['nova.context'].project_id,
+            user_id=req.environ['nova.context'].user_id)
+        self.mock_get.side_effect = fake_get
+
+        res_dict = self.controller._action_rebuild(req, FAKE_UUID,
+                                                   body=body).obj
+        get_only_fields_Rebuild = copy.deepcopy(GET_ONLY_FIELDS)
+        get_only_fields_Rebuild.remove('key_name')
+        for field in get_only_fields_Rebuild:
+            self.assertNotIn(field, res_dict['server'])
+        for items in res_dict['server']['addresses'].values():
+            for item in items:
+                self.assertNotIn('OS-EXT-IPS:type', item)
+                self.assertNotIn('OS-EXT-IPS-MAC:mac_addr', item)
+
+    def test_rebuild_response_has_show_server_all_attributes(self):
+        body = {'rebuild': {"imageRef": self.image_uuid}}
+        req = fakes.HTTPRequest.blank(self.path_with_query % 'unknown=1',
+                                      use_admin_context=True,
+                                      version=self.microversion)
+        fake_get = fakes.fake_compute_get(
+            vm_state=vm_states.ACTIVE,
+            project_id=req.environ['nova.context'].project_id,
+            user_id=req.environ['nova.context'].user_id)
+        self.mock_get.side_effect = fake_get
+        res_dict = self.controller._action_rebuild(req, FAKE_UUID,
+                                                   body=body).obj
+        for field in GET_ONLY_FIELDS:
+            if field == 'OS-EXT-SRV-ATTR:user_data':
+                self.assertNotIn(field, res_dict['server'])
+                field = 'user_data'
+            self.assertIn(field, res_dict['server'])
+        for items in res_dict['server']['addresses'].values():
+            for item in items:
+                self.assertIn('OS-EXT-IPS:type', item)
+                self.assertIn('OS-EXT-IPS-MAC:mac_addr', item)
+
+
+class ServersControllerRebuildTestV290(ControllerTest):
+    microversion = '2.90'
+    image_uuid = nova_fixtures.GlanceFixture.image3['id']
+
+    def setUp(self):
+        super().setUp()
+
+        mock_rebuild = mock.patch(
+            'nova.compute.api.API.rebuild', return_value=None)
+        self.mock_rebuild = mock_rebuild.start()
+        self.addCleanup(mock_rebuild.stop)
+
+    def _get_request(self, body=None):
+        req = fakes.HTTPRequest.blank(
+            self.path_action % FAKE_UUID,
+            use_admin_context=True,
+        )
+        req.method = 'POST'
+        req.content_type = 'application/json'
+        req.body = jsonutils.dump_as_bytes(body)
+        req.api_version_request = api_version_request.APIVersionRequest(
+            self.microversion)
+
+        return req
+
+    def test_rebuild_server_with_hostname(self):
+        body = {
+            'rebuild': {
+                'imageRef': self.image_uuid,
+                'hostname': 'new-hostname',
+            }
+        }
+        req = self._get_request(body)
+
+        # There's nothing to check here from the return value since the
+        # 'rebuild' API is a cast and we immediately fetch the instance from
+        # the database after this cast...which returns a mocked Instance
+        server = self.controller._action_rebuild(
+            req, FAKE_UUID, body=body,
+        ).obj['server']
+
+        # ...so instead we check the call to the API itself
+        self.mock_rebuild.assert_called_once()
+        self.assertIn('hostname', self.mock_rebuild.call_args[0][1])
+
+        # ...and check for the presence of *a* hostname field in the response
+        self.assertIn('OS-EXT-SRV-ATTR:hostname', server)
+
+    def test_rebuild_server_with_hostname_old_version(self):
+        """Tests that trying to rebuild with hostname before 2.90 fails."""
+        body = {
+            'rebuild': {
+                'imageRef': self.image_uuid,
+                'hostname': 'new-hostname',
+            }
+        }
+        req = self._get_request(body)
+        req.api_version_request = api_version_request.APIVersionRequest('2.89')
+
+        ex = self.assertRaises(
+            exception.ValidationError,
+            self.controller._action_rebuild,
+            req, FAKE_UUID, body=body)
+        self.assertIn('hostname', str(ex))
+
+
+class _ServersControllerUpdateTest(ControllerTest):
+
+    microversion = None
 
     def _get_request(self, body=None):
         req = fakes.HTTPRequestV21.blank(self.path_with_id % FAKE_UUID)
         req.method = 'PUT'
         req.content_type = 'application/json'
         req.body = jsonutils.dump_as_bytes(body)
+        if self.microversion:
+            req.api_version_request = api_version_request.APIVersionRequest(
+                self.microversion)
         fake_get = fakes.fake_compute_get(
             project_id=req.environ['nova.context'].project_id,
             user_id=req.environ['nova.context'].user_id)
         self.mock_get.side_effect = fake_get
         return req
 
+
+class ServersControllerUpdateTest(_ServersControllerUpdateTest):
+
     def test_update_server_all_attributes(self):
-        body = {'server': {
-                  'name': 'server_test',
-               }}
+        body = {'server': {'name': 'server_test'}}
         req = self._get_request(body)
         res_dict = self.controller.update(req, FAKE_UUID, body=body)
 
@@ -3821,6 +3911,27 @@ class ServersControllerUpdateTest(ControllerTest):
         for field in GET_ONLY_FIELDS:
             self.assertNotIn(field, res_dict['server'])
 
+    def test_update_server_no_body(self):
+        body = None
+        req = self._get_request(body)
+        self.assertRaises(
+            exception.ValidationError, self.controller.update,
+            req, FAKE_UUID, body=body)
+
+    def test_update_server_missing_server(self):
+        body = {'foo': {'a': 'b'}}
+        req = self._get_request(body)
+        self.assertRaises(
+            exception.ValidationError, self.controller.update,
+            req, FAKE_UUID, body=body)
+
+    def test_update_server_malformed_entity(self):
+        body = {'server': 'string'}
+        req = self._get_request(body)
+        self.assertRaises(
+            exception.ValidationError, self.controller.update,
+            req, FAKE_UUID, body=body)
+
     def test_update_server_name_too_long(self):
         body = {'server': {'name': 'x' * 256}}
         req = self._get_request(body)
@@ -3828,7 +3939,7 @@ class ServersControllerUpdateTest(ControllerTest):
                           req, FAKE_UUID, body=body)
 
     def test_update_server_name_all_blank_spaces(self):
-        self.stub_out('nova.db.api.instance_get',
+        self.stub_out('nova.db.main.api.instance_get',
                 fakes.fake_instance_get(name='server_test'))
         req = fakes.HTTPRequest.blank(self.path_with_id % FAKE_UUID)
         req.method = 'PUT'
@@ -3844,7 +3955,7 @@ class ServersControllerUpdateTest(ControllerTest):
         self.controller.update(req, FAKE_UUID, body=body)
 
     def test_update_server_name_with_leading_trailing_spaces(self):
-        self.stub_out('nova.db.api.instance_get',
+        self.stub_out('nova.db.main.api.instance_get',
                 fakes.fake_instance_get(name='server_test'))
         req = fakes.HTTPRequest.blank(self.path_with_id % FAKE_UUID)
         req.method = 'PUT'
@@ -3904,13 +4015,158 @@ class ServersControllerUpdateTest(ControllerTest):
         self.assertRaises(webob.exc.HTTPNotFound, self.controller.update,
                           req, FAKE_UUID, body=body)
 
-    def test_update_server_policy_fail(self):
-        rule = {'compute:update': 'role:admin'}
-        policy.set_rules(oslo_policy.Rules.from_dict(rule))
+
+class ServersControllerUpdateTestV219(_ServersControllerUpdateTest):
+
+    microversion = '2.19'
+
+    def _update_server_desc(self, set_desc, desc=None):
+        body = {'server': {}}
+        if set_desc is not None:
+            body['server']['description'] = desc
+        req = self._get_request()
+        res_dict = self.controller.update(req, FAKE_UUID, body=body)
+        return res_dict
+
+    def test_update_server_description(self):
+        res_dict = self._update_server_desc(True, 'server_desc')
+        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
+        self.assertEqual(res_dict['server']['description'], 'server_desc')
+
+    def test_update_server_empty_description(self):
+        res_dict = self._update_server_desc(True, '')
+        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
+        self.assertEqual(res_dict['server']['description'], '')
+
+    def test_update_server_without_description(self):
+        res_dict = self._update_server_desc(False)
+        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
+        self.assertIsNone(res_dict['server']['description'])
+
+    def test_update_server_remove_description(self):
+        res_dict = self._update_server_desc(True)
+        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
+        self.assertIsNone(res_dict['server']['description'])
+
+    def test_update_server_all_attributes(self):
+        body = {
+            'server': {
+                'name': 'server_test',
+                'description': 'server_desc'
+            },
+        }
+        req = self._get_request(body)
+        res_dict = self.controller.update(req, FAKE_UUID, body=body)
+
+        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
+        self.assertEqual(res_dict['server']['name'], 'server_test')
+        self.assertEqual(res_dict['server']['description'], 'server_desc')
+
+    def test_update_server_description_too_long(self):
+        body = {'server': {'description': 'x' * 256}}
+        req = self._get_request(body)
+        self.assertRaises(
+            exception.ValidationError, self.controller.update,
+            req, FAKE_UUID, body=body)
+
+    def test_update_server_description_invalid(self):
+        # Invalid non-printable control char in the desc.
+        body = {'server': {'description': "123\0d456"}}
+        req = self._get_request(body)
+        self.assertRaises(
+            exception.ValidationError, self.controller.update,
+            req, FAKE_UUID, body=body)
+
+
+class ServersControllerUpdateTestV271(_ServersControllerUpdateTest):
+
+    microversion = '2.71'
+
+    @mock.patch.object(
+        InstanceGroup, 'get_by_instance_uuid',
+        side_effect=exception.InstanceGroupNotFound(group_uuid=FAKE_UUID))
+    def test_update_with_server_group_not_exist(self, mock_sg_get):
         body = {'server': {'name': 'server_test'}}
         req = self._get_request(body)
-        self.assertRaises(exception.PolicyNotAuthorized,
-                self.controller.update, req, FAKE_UUID, body=body)
+        res_dict = self.controller.update(req, FAKE_UUID, body=body)
+        self.assertEqual([], res_dict['server']['server_groups'])
+
+
+class ServersControllerUpdateTestV275(_ServersControllerUpdateTest):
+
+    microversion = '2.75'
+
+    def test_update_response_no_show_server_only_attributes_old_version(self):
+        # There are some old server attributes which were added only for
+        # GET server APIs not for PUT. GET server and PUT server share the
+        # same view builder method SHOW() to build the response, So make sure
+        # attributes which are not supposed to be included for PUT
+        # response are not present.
+        body = {'server': {'name': 'server_test'}}
+        req = fakes.HTTPRequest.blank(self.path_with_query % 'unknown=1',
+                                      use_admin_context=True,
+                                      version='2.74')
+        res_dict = self.controller.update(req, FAKE_UUID, body=body)
+        for field in GET_ONLY_FIELDS:
+            self.assertNotIn(field, res_dict['server'])
+        for items in res_dict['server']['addresses'].values():
+            for item in items:
+                self.assertNotIn('OS-EXT-IPS:type', item)
+                self.assertNotIn('OS-EXT-IPS-MAC:mac_addr', item)
+
+    def test_update_response_has_show_server_all_attributes(self):
+        body = {'server': {'name': 'server_test'}}
+        req = fakes.HTTPRequest.blank(self.path_with_query % 'unknown=1',
+                                      use_admin_context=True,
+                                      version=self.microversion)
+        res_dict = self.controller.update(req, FAKE_UUID, body=body)
+        for field in GET_ONLY_FIELDS:
+            self.assertIn(field, res_dict['server'])
+        for items in res_dict['server']['addresses'].values():
+            for item in items:
+                self.assertIn('OS-EXT-IPS:type', item)
+                self.assertIn('OS-EXT-IPS-MAC:mac_addr', item)
+
+
+class ServersControllerUpdateTestV290(_ServersControllerUpdateTest):
+
+    microversion = '2.90'
+
+    def test_update_server_with_hostname(self):
+        body = {'server': {'hostname': 'my-hostname'}}
+        req = self._get_request(body)
+        res_dict = self.controller.update(req, FAKE_UUID, body=body)
+
+        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
+        self.assertEqual(
+            res_dict['server']["OS-EXT-SRV-ATTR:hostname"], 'my-hostname')
+
+    def test_update_server_with_hostname__too_long(self):
+        body = {'server': {'hostname': 'a' * 64}}
+        req = self._get_request(body)
+        self.assertRaises(
+            exception.ValidationError, self.controller.update,
+            req, FAKE_UUID, body=body)
+
+    def test_update_server_with_hostname__invalid_fqdn(self):
+        # only hostnames are allowed, not FQDN
+        body = {'server': {'hostname': 'hostname.example.com'}}
+        req = self._get_request(body)
+        self.assertRaises(
+            exception.ValidationError, self.controller.update,
+            req, FAKE_UUID, body=body)
+
+    def test_update_server_with_hostname_old_version(self):
+        """Tests that trying to update with hostname before 2.90 fails."""
+        body = {'server': {'hostname': 'new-hostname'}}
+        req = self._get_request(body)
+        req.api_version_request = api_version_request.APIVersionRequest('2.89')
+
+        ex = self.assertRaises(
+            exception.ValidationError,
+            self.controller.update,
+            req, FAKE_UUID, body=body)
+        self.assertIn('hostname', str(ex))
 
 
 class ServersControllerTriggerCrashDumpTest(ControllerTest):
@@ -3944,18 +4200,11 @@ class ServersControllerTriggerCrashDumpTest(ControllerTest):
                                                    body=self.body)
         mock_trigger_crash_dump.assert_called_with(ctxt, self.instance)
 
-    def test_trigger_crash_dump_policy_failed(self):
-        rule_name = "os_compute_api:servers:trigger_crash_dump"
-        self.policy.set_rules({rule_name: "project_id:non_fake"})
-        exc = self.assertRaises(exception.PolicyNotAuthorized,
-                                self.controller._action_trigger_crash_dump,
-                                self.req, FAKE_UUID, body=self.body)
-        self.assertIn("os_compute_api:servers:trigger_crash_dump",
-                      exc.format_message())
+    @mock.patch.object(compute_api.API, 'trigger_crash_dump')
+    def test_trigger_crash_dump_not_ready(self, mock_trigger_crash_dump):
+        mock_trigger_crash_dump.side_effect = exception.InstanceNotReady(
+            instance_id=FAKE_UUID)
 
-    @mock.patch.object(compute_api.API, 'trigger_crash_dump',
-                       fake_start_stop_not_ready)
-    def test_trigger_crash_dump_not_ready(self):
         self.assertRaises(webob.exc.HTTPConflict,
                           self.controller._action_trigger_crash_dump,
                           self.req, FAKE_UUID, body=self.body)
@@ -3967,9 +4216,12 @@ class ServersControllerTriggerCrashDumpTest(ControllerTest):
                           self.controller._action_trigger_crash_dump,
                           self.req, FAKE_UUID, body=self.body)
 
-    @mock.patch.object(compute_api.API, 'trigger_crash_dump',
-                       fake_start_stop_invalid_state)
-    def test_trigger_crash_dump_invalid_state(self):
+    @mock.patch.object(compute_api.API, 'trigger_crash_dump')
+    def test_trigger_crash_dump_invalid_state(self, mock_trigger_crash_dump):
+        mock_trigger_crash_dump.side_effect = exception.InstanceInvalidState(
+            instance_uuid=FAKE_UUID, attr='fake_attr',
+            method='fake_method', state='fake_state')
+
         self.assertRaises(webob.exc.HTTPConflict,
                           self.controller._action_trigger_crash_dump,
                           self.req, FAKE_UUID, body=self.body)
@@ -3990,84 +4242,6 @@ class ServersControllerTriggerCrashDumpTest(ControllerTest):
         self.assertRaises(exception.ValidationError,
                           self.controller._action_trigger_crash_dump,
                           self.req, FAKE_UUID, body=self.body)
-
-
-class ServersControllerUpdateTestV219(ServersControllerUpdateTest):
-    def _get_request(self, body=None):
-        req = super(ServersControllerUpdateTestV219, self)._get_request(
-            body=body)
-        req.api_version_request = api_version_request.APIVersionRequest('2.19')
-        return req
-
-    def _update_server_desc(self, set_desc, desc=None):
-        body = {'server': {}}
-        if set_desc:
-            body['server']['description'] = desc
-        req = self._get_request()
-        res_dict = self.controller.update(req, FAKE_UUID, body=body)
-        return res_dict
-
-    def test_update_server_description(self):
-        res_dict = self._update_server_desc(True, 'server_desc')
-        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
-        self.assertEqual(res_dict['server']['description'], 'server_desc')
-
-    def test_update_server_empty_description(self):
-        res_dict = self._update_server_desc(True, '')
-        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
-        self.assertEqual(res_dict['server']['description'], '')
-
-    def test_update_server_without_description(self):
-        res_dict = self._update_server_desc(False)
-        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
-        self.assertIsNone(res_dict['server']['description'])
-
-    def test_update_server_remove_description(self):
-        res_dict = self._update_server_desc(True)
-        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
-        self.assertIsNone(res_dict['server']['description'])
-
-    def test_update_server_all_attributes(self):
-        body = {'server': {
-                  'name': 'server_test',
-                  'description': 'server_desc'
-               }}
-        req = self._get_request(body)
-        res_dict = self.controller.update(req, FAKE_UUID, body=body)
-
-        self.assertEqual(res_dict['server']['id'], FAKE_UUID)
-        self.assertEqual(res_dict['server']['name'], 'server_test')
-        self.assertEqual(res_dict['server']['description'], 'server_desc')
-
-    def test_update_server_description_too_long(self):
-        body = {'server': {'description': 'x' * 256}}
-        req = self._get_request(body)
-        self.assertRaises(exception.ValidationError, self.controller.update,
-                          req, FAKE_UUID, body=body)
-
-    def test_update_server_description_invalid(self):
-        # Invalid non-printable control char in the desc.
-        body = {'server': {'description': "123\0d456"}}
-        req = self._get_request(body)
-        self.assertRaises(exception.ValidationError, self.controller.update,
-                          req, FAKE_UUID, body=body)
-
-
-class ServersControllerUpdateTestV271(ServersControllerUpdateTest):
-    body = {'server': {'name': 'server_test'}}
-
-    def _get_request(self, body=None):
-        req = super(ServersControllerUpdateTestV271, self)._get_request(
-            body=body)
-        req.api_version_request = api_version_request.APIVersionRequest('2.71')
-        return req
-
-    @mock.patch.object(InstanceGroup, 'get_by_instance_uuid',
-             side_effect=exception.InstanceGroupNotFound(group_uuid=FAKE_UUID))
-    def test_update_with_server_group_not_exist(self, mock_sg_get):
-        req = self._get_request(self.body)
-        res_dict = self.controller.update(req, FAKE_UUID, body=self.body)
-        self.assertEqual([], res_dict['server']['server_groups'])
 
 
 class ServerStatusTest(test.TestCase):
@@ -4108,19 +4282,6 @@ class ServerStatusTest(test.TestCase):
                                         task_states.REBOOTING_HARD)
         self.assertEqual(response['server']['status'], 'HARD_REBOOT')
 
-    def test_reboot_resize_policy_fail(self):
-        rule = {'compute:reboot': 'role:admin'}
-        policy.set_rules(oslo_policy.Rules.from_dict(rule))
-        req = fakes.HTTPRequestV21.blank(self.path_action % '1234')
-        self.stub_out('nova.compute.api.API.get',
-                fakes.fake_compute_get(
-                    vm_state='ACTIVE',
-                    task_state=None,
-                    project_id=req.environ['nova.context'].project_id))
-        self.assertRaises(exception.PolicyNotAuthorized,
-                self.controller._action_reboot, req, '1234',
-                body={'reboot': {'type': 'HARD'}})
-
     def test_rebuild(self):
         response = self._get_with_state(vm_states.ACTIVE,
                                         task_states.REBUILDING)
@@ -4135,19 +4296,6 @@ class ServerStatusTest(test.TestCase):
                                         task_states.RESIZE_PREP)
         self.assertEqual(response['server']['status'], 'RESIZE')
 
-    def test_confirm_resize_policy_fail(self):
-        rule = {'compute:confirm_resize': 'role:admin'}
-        policy.set_rules(oslo_policy.Rules.from_dict(rule))
-        req = fakes.HTTPRequestV21.blank(self.path_action % '1234')
-        self.stub_out('nova.compute.api.API.get',
-                fakes.fake_compute_get(
-                    vm_state='ACTIVE',
-                    task_state=None,
-                    project_id=req.environ['nova.context'].project_id))
-
-        self.assertRaises(exception.PolicyNotAuthorized,
-                self.controller._action_confirm_resize, req, '1234', {})
-
     def test_verify_resize(self):
         response = self._get_with_state(vm_states.RESIZED, None)
         self.assertEqual(response['server']['status'], 'VERIFY_RESIZE')
@@ -4156,19 +4304,6 @@ class ServerStatusTest(test.TestCase):
         response = self._get_with_state(vm_states.RESIZED,
                                         task_states.RESIZE_REVERTING)
         self.assertEqual(response['server']['status'], 'REVERT_RESIZE')
-
-    def test_revert_resize_policy_fail(self):
-        rule = {'compute:revert_resize': 'role:admin'}
-        policy.set_rules(oslo_policy.Rules.from_dict(rule))
-        req = fakes.HTTPRequestV21.blank(self.path_action % '1234')
-        self.stub_out('nova.compute.api.API.get',
-                fakes.fake_compute_get(
-                    vm_state='ACTIVE',
-                    task_state=None,
-                    project_id=req.environ['nova.context'].project_id))
-
-        self.assertRaises(exception.PolicyNotAuthorized,
-                self.controller._action_revert_resize, req, '1234', {})
 
     def test_password_update(self):
         response = self._get_with_state(vm_states.ACTIVE,
@@ -4180,80 +4315,22 @@ class ServerStatusTest(test.TestCase):
         self.assertEqual(response['server']['status'], 'SHUTOFF')
 
 
-class ServersControllerCreateTest(test.TestCase):
+class _ServersControllerCreateTest(test.TestCase):
     image_uuid = '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6'
     flavor_ref = 'http://localhost/123/flavors/3'
     project_id = fakes.FAKE_PROJECT_ID
 
     def setUp(self):
         """Shared implementation for tests below that create instance."""
-        super(ServersControllerCreateTest, self).setUp()
+        super().setUp()
 
         self.flags(enable_instance_password=True, group='api')
-        self.instance_cache_num = 0
-        self.instance_cache_by_id = {}
-        self.instance_cache_by_uuid = {}
-
         fakes.stub_out_nw_api(self)
+        fakes.stub_out_key_pair_funcs(self)
 
         self.controller = servers.ServersController()
 
-        def instance_create(context, inst):
-            inst_type = flavors.get_flavor_by_flavor_id(3)
-            image_uuid = '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6'
-            def_image_ref = 'http://localhost/%s/images/%s' % (self.project_id,
-                                                               image_uuid)
-            self.instance_cache_num += 1
-            instance = fake_instance.fake_db_instance(**{
-                'id': self.instance_cache_num,
-                'display_name': inst['display_name'] or 'test',
-                'display_description': inst['display_description'] or '',
-                'uuid': FAKE_UUID,
-                'instance_type': inst_type,
-                'image_ref': inst.get('image_ref', def_image_ref),
-                'user_id': 'fake',
-                'project_id': fakes.FAKE_PROJECT_ID,
-                'reservation_id': inst['reservation_id'],
-                "created_at": datetime.datetime(2010, 10, 10, 12, 0, 0),
-                "updated_at": datetime.datetime(2010, 11, 11, 11, 0, 0),
-                "config_drive": None,
-                "progress": 0,
-                "fixed_ips": [],
-                "task_state": "",
-                "vm_state": "",
-                "root_device_name": inst.get('root_device_name', 'vda'),
-            })
-
-            self.instance_cache_by_id[instance['id']] = instance
-            self.instance_cache_by_uuid[instance['uuid']] = instance
-            return instance
-
-        def instance_get(context, instance_id):
-            """Stub for compute/api create() pulling in instance after
-            scheduling
-            """
-            return self.instance_cache_by_id[instance_id]
-
-        def instance_update(context, uuid, values):
-            instance = self.instance_cache_by_uuid[uuid]
-            instance.update(values)
-            return instance
-
-        def server_update_and_get_original(
-                context, instance_uuid, params, columns_to_join=None):
-            inst = self.instance_cache_by_uuid[instance_uuid]
-            inst.update(params)
-            return (inst, inst)
-
-        fakes.stub_out_key_pair_funcs(self)
         self.useFixture(nova_fixtures.GlanceFixture(self))
-        self.stub_out('nova.db.api.instance_create', instance_create)
-        self.stub_out('nova.db.api.instance_system_metadata_update',
-                      lambda *a, **kw: None)
-        self.stub_out('nova.db.api.instance_get', instance_get)
-        self.stub_out('nova.db.api.instance_update', instance_update)
-        self.stub_out('nova.db.api.instance_update_and_get_original',
-                server_update_and_get_original)
         self.body = {
             'server': {
                 'name': 'server_test',
@@ -4294,8 +4371,7 @@ class ServersControllerCreateTest(test.TestCase):
 
     def _check_admin_password_len(self, server_dict):
         """utility function - check server_dict for admin_password length."""
-        self.assertEqual(CONF.password_length,
-                         len(server_dict["adminPass"]))
+        self.assertEqual(CONF.password_length, len(server_dict["adminPass"]))
 
     def _check_admin_password_missing(self, server_dict):
         """utility function - check server_dict for admin_password absence."""
@@ -4310,6 +4386,36 @@ class ServersControllerCreateTest(test.TestCase):
         server = self.controller.create(self.req, body=self.body).obj['server']
         self._check_admin_password_len(server)
         self.assertEqual(FAKE_UUID, server['id'])
+
+    def _test_create_extra(self, params, no_image=False):
+        self.body['server']['flavorRef'] = 2
+        if no_image:
+            self.body['server'].pop('imageRef', None)
+        self.body['server'].update(params)
+        self.req.body = jsonutils.dump_as_bytes(self.body)
+        self.req.headers["content-type"] = "application/json"
+        self.controller.create(self.req, body=self.body).obj['server']
+
+
+class ServersControllerCreateTest(_ServersControllerCreateTest):
+
+    def _invalid_server_create(self, body):
+        req = fakes.HTTPRequestV21.blank('/%s/servers' % fakes.FAKE_PROJECT_ID)
+        req.method = 'POST'
+
+        self.assertRaises(exception.ValidationError,
+                          self.controller.create, req, body=body)
+
+    def test_create_server_no_body(self):
+        self._invalid_server_create(body=None)
+
+    def test_create_server_missing_server(self):
+        body = {'foo': {'a': 'b'}}
+        self._invalid_server_create(body=body)
+
+    def test_create_server_malformed_entity(self):
+        body = {'server': 'string'}
+        self._invalid_server_create(body=body)
 
     def test_create_instance_with_none_value_port(self):
         self.body['server'] = {'networks': [{'port': None, 'uuid': FAKE_UUID}]}
@@ -4419,15 +4525,6 @@ class ServersControllerCreateTest(test.TestCase):
         fakes.stub_out_key_pair_funcs(self, have_key_pair=False)
         self._test_create_instance()
 
-    def _test_create_extra(self, params, no_image=False):
-        self.body['server']['flavorRef'] = 2
-        if no_image:
-            self.body['server'].pop('imageRef', None)
-        self.body['server'].update(params)
-        self.req.body = jsonutils.dump_as_bytes(self.body)
-        self.req.headers["content-type"] = "application/json"
-        self.controller.create(self.req, body=self.body).obj['server']
-
     @mock.patch.object(compute_api.API, 'create',
                        side_effect=exception.PortRequiresFixedIP(
                            port_id=uuids.port))
@@ -4454,6 +4551,44 @@ class ServersControllerCreateTest(test.TestCase):
         params = {'networks': requested_networks}
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self._test_create_extra, params)
+
+    @mock.patch.object(compute_api.API, 'create')
+    def test_create_instance_with_fixed_ip_already_in_use(self, create_mock):
+        network = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        address = '10.0.2.3'
+        requested_networks = [{'uuid': network, 'fixed_ip': address}]
+        params = {'networks': requested_networks}
+        create_mock.side_effect = exception.FixedIpAlreadyInUse(
+            address=address,
+            instance_uuid=network)
+        self.assertRaises(webob.exc.HTTPBadRequest,
+                          self._test_create_extra, params)
+        self.assertEqual(1, len(create_mock.call_args_list))
+
+    @mock.patch.object(compute_api.API, 'create')
+    def test_create_instance_with_invalid_fixed_ip(self, create_mock):
+        network = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        address = '999.0.2.3'
+        requested_networks = [{'uuid': network, 'fixed_ip': address}]
+        params = {'networks': requested_networks}
+        self.assertRaises(exception.ValidationError,
+                          self._test_create_extra, params)
+        self.assertFalse(create_mock.called)
+
+    @mock.patch.object(compute_api.API, 'create',
+                       side_effect=exception.InvalidVolume(reason='error'))
+    def test_create_instance_with_invalid_volume_error(self, create_mock):
+        # Tests that InvalidVolume is translated to a 400 error.
+        self.assertRaises(webob.exc.HTTPBadRequest,
+                          self._test_create_extra, {})
+
+    @mock.patch.object(
+        compute_api.API, 'create',
+        side_effect=exception.VolumeNotFound(volume_id='foo'))
+    def test_create_instance_with_volume_not_found_error(self, create_mock):
+        # Tests that InvalidVolume is translated to a 400 error.
+        self.assertRaises(
+            webob.exc.HTTPBadRequest, self._test_create_extra, {})
 
     @mock.patch.object(compute_api.API, 'create',
                        side_effect=exception.NoUniqueMatch(
@@ -4498,7 +4633,7 @@ class ServersControllerCreateTest(test.TestCase):
 
         def create(*args, **kwargs):
             result = [('76fa36fc-c930-4bf3-8c8a-ea2a2420deb6', None,
-                       None, None)]
+                       None, None, None, None)]
             self.assertEqual(result, kwargs['requested_networks'].as_tuples())
             return old_create(*args, **kwargs)
 
@@ -4563,21 +4698,184 @@ class ServersControllerCreateTest(test.TestCase):
         self.assertRaises(exception.ValidationError,
                           self.controller.create, req, body=body)
 
-    def test_create_az_with_leading_trailing_spaces(self):
+    def test_create_instance_az_with_leading_trailing_spaces(self):
         self.body['server']['availability_zone'] = '  zone1  '
         self.req.body = jsonutils.dump_as_bytes(self.body)
         self.assertRaises(exception.ValidationError,
                           self.controller.create, self.req, body=self.body)
 
-    def test_create_az_with_leading_trailing_spaces_in_compat_mode(
-            self):
+    def test_create_instance_az_with_leading_trailing_spaces_compat_mode(self):
         self.body['server']['name'] = '   abc    def   '
-        self.body['server']['availability_zones'] = '  zone1  '
+        self.body['server']['availability_zone'] = '  zone1  '
         self.req.body = jsonutils.dump_as_bytes(self.body)
         self.req.set_legacy_v2()
-        with mock.patch.object(availability_zones, 'get_availability_zones',
-                               return_value=['  zone1  ']):
+        with mock.patch.object(
+            availability_zones, 'get_availability_zones',
+            return_value=['  zone1  '],
+        ) as mock_get_azs:
             self.controller.create(self.req, body=self.body)
+            mock_get_azs.assert_called_once()
+
+    def test_create_instance_invalid_az(self):
+        self.body['server']['availability_zone'] = 'zone1'
+        self.req.body = jsonutils.dump_as_bytes(self.body)
+        with mock.patch.object(
+            availability_zones, 'get_availability_zones',
+            return_value=['zone2'],
+        ) as mock_get_azs:
+            self.assertRaises(
+                webob.exc.HTTPBadRequest,
+                self.controller.create,
+                self.req, body=self.body)
+            mock_get_azs.assert_called_once()
+
+    @mock.patch.object(objects.AggregateList, 'get_by_host')
+    @mock.patch.object(servers, 'LOG')
+    def test_create_instance_az_host(self, mock_log, mock_get_host_aggs):
+        """Ensure we handle az:host format for 'availability_zone'."""
+        mock_get_host_aggs.return_value = objects.AggregateList(
+            objects=[
+                objects.Aggregate(metadata={'availability_zone': 'zone1'}),
+            ],
+        )
+
+        self.body['server']['availability_zone'] = 'zone1:host1'
+        self.req.body = jsonutils.dump_as_bytes(self.body)
+
+        old_create = compute_api.API.create
+
+        def create(*args, **kwargs):
+            self.assertEqual('zone1', kwargs['availability_zone'])
+            return old_create(*args, **kwargs)
+
+        self.stub_out('nova.compute.api.API.create', create)
+
+        self.controller.create(self.req, body=self.body)
+
+        mock_get_host_aggs.assert_called_once()
+        mock_log.warning.assert_not_called()
+
+    @mock.patch.object(objects.AggregateList, 'get_by_host')
+    @mock.patch.object(servers, 'LOG')
+    def test_create_instance_az_host_mismatch_without_aggs(
+        self, mock_log, mock_get_host_aggs,
+    ):
+        """User requests an AZ but the host doesn't have one"""
+        mock_get_host_aggs.return_value = objects.AggregateList(objects=[])
+
+        self.body['server']['availability_zone'] = 'zone1:host1'
+        self.req.body = jsonutils.dump_as_bytes(self.body)
+
+        old_create = compute_api.API.create
+
+        def create(*args, **kwargs):
+            self.assertIsNone(kwargs['availability_zone'])
+            return old_create(*args, **kwargs)
+
+        self.stub_out('nova.compute.api.API.create', create)
+
+        self.controller.create(self.req, body=self.body)
+
+        mock_get_host_aggs.assert_called_once()
+        # we should see a log since the host doesn't belong to the requested AZ
+        self.assertIn('bug #1934770', mock_log.warning.call_args[0][0])
+
+    @mock.patch.object(objects.AggregateList, 'get_by_host')
+    @mock.patch.object(servers, 'LOG')
+    def test_create_instance_az_host_mismatch_without_aggs_in_default_az(
+        self, mock_log, mock_get_host_aggs,
+    ):
+        """User requests the default AZ and host isn't in any explicit AZ"""
+        self.flags(default_availability_zone='zone1')
+        mock_get_host_aggs.return_value = objects.AggregateList(objects=[])
+
+        self.body['server']['availability_zone'] = 'zone1:host1'
+        self.req.body = jsonutils.dump_as_bytes(self.body)
+
+        old_create = compute_api.API.create
+
+        def create(*args, **kwargs):
+            self.assertEqual('zone1', kwargs['availability_zone'])
+            return old_create(*args, **kwargs)
+
+        self.stub_out('nova.compute.api.API.create', create)
+
+        self.controller.create(self.req, body=self.body)
+
+        mock_get_host_aggs.assert_called_once()
+        # we shouldn't see a log since the host is not in any aggregate and
+        # therefore is in the default AZ
+        mock_log.warning.assert_not_called()
+
+    @mock.patch.object(objects.AggregateList, 'get_by_host')
+    @mock.patch.object(servers, 'LOG')
+    def test_create_instance_az_host_mismatch_with_aggs(
+        self, mock_log, mock_get_host_aggs,
+    ):
+        """User requests an AZ but the host has a different one."""
+        mock_get_host_aggs.return_value = objects.AggregateList(
+            objects=[
+                objects.Aggregate(metadata={'availability_zone': 'zone2'}),
+            ],
+        )
+
+        self.body['server']['availability_zone'] = 'zone1:host1'
+        self.req.body = jsonutils.dump_as_bytes(self.body)
+
+        old_create = compute_api.API.create
+
+        def create(*args, **kwargs):
+            self.assertIsNone(kwargs['availability_zone'])
+            return old_create(*args, **kwargs)
+
+        self.stub_out('nova.compute.api.API.create', create)
+
+        self.controller.create(self.req, body=self.body)
+
+        mock_get_host_aggs.assert_called_once()
+        # we should see a log since the host belongs to a different AZ
+        self.assertIn('bug #1934770', mock_log.warning.call_args[0][0])
+
+    @mock.patch.object(objects.AggregateList, 'get_by_host')
+    @mock.patch.object(servers, 'LOG')
+    def test_create_instance_az_host_mismatch_with_aggs_in_default_az(
+        self, mock_log, mock_get_host_aggs,
+    ):
+        """User requests the default AZ and host is in aggregates without AZ"""
+        self.flags(default_availability_zone='zone1')
+        mock_get_host_aggs.return_value = objects.AggregateList(
+            objects=[objects.Aggregate(metadata={})],
+        )
+
+        self.body['server']['availability_zone'] = 'zone1:host1'
+        self.req.body = jsonutils.dump_as_bytes(self.body)
+
+        old_create = compute_api.API.create
+
+        def create(*args, **kwargs):
+            self.assertEqual('zone1', kwargs['availability_zone'])
+            return old_create(*args, **kwargs)
+
+        self.stub_out('nova.compute.api.API.create', create)
+
+        self.controller.create(self.req, body=self.body)
+
+        mock_get_host_aggs.assert_called_once()
+        # we shouldn't see a log since none of the host aggregates have an
+        # explicit AZ set and the host is therefore in the default AZ
+        mock_log.warning.assert_not_called()
+
+    def test_create_instance_invalid_az_format(self):
+        self.body['server']['availability_zone'] = 'invalid::::zone'
+        self.assertRaises(webob.exc.HTTPBadRequest,
+                          self.controller.create,
+                          self.req, body=self.body)
+
+    def test_create_instance_invalid_az_as_int(self):
+        self.body['server']['availability_zone'] = 123
+        self.assertRaises(exception.ValidationError,
+                          self.controller.create,
+                          self.req, body=self.body)
 
     def test_create_instance(self):
         self.stub_out('uuid.uuid4', lambda: FAKE_UUID)
@@ -5292,7 +5590,7 @@ class ServersControllerCreateTest(test.TestCase):
         self._test_create_bdm_instance_with_size_error("0")
 
     def test_create_instance_with_size_greater_than_limit(self):
-        self._test_create_bdm_instance_with_size_error(db.MAX_INT + 1)
+        self._test_create_bdm_instance_with_size_error(db_const.MAX_INT + 1)
 
     def test_create_instance_with_bdm_delete_on_termination(self):
         bdm = [{'device_name': 'foo1', 'volume_id': fakes.FAKE_UUID,
@@ -5508,7 +5806,7 @@ class ServersControllerCreateTest(test.TestCase):
         mock_get_all_p.return_value = {'project_id': fakes.FAKE_PROJECT_ID}
         mock_get_all_pu.return_value = {'project_id': fakes.FAKE_PROJECT_ID,
                                         'user_id': 'fake_user'}
-        if resource in db_api.PER_PROJECT_QUOTAS:
+        if resource in db.PER_PROJECT_QUOTAS:
             mock_get_all_p.return_value[resource] = quota
         else:
             mock_get_all_pu.return_value[resource] = quota
@@ -5564,7 +5862,8 @@ class ServersControllerCreateTest(test.TestCase):
             return fakes.stub_instance(1)
 
         mock_limit_check.side_effect = fake_limit_check
-        self.stub_out('nova.db.api.instance_destroy', fake_instance_destroy)
+        self.stub_out(
+            'nova.db.main.api.instance_destroy', fake_instance_destroy)
         self.body['os:scheduler_hints'] = {'group': fake_group.uuid}
         self.req.body = jsonutils.dump_as_bytes(self.body)
         expected_msg = "Quota exceeded, too many servers in group"
@@ -5587,7 +5886,8 @@ class ServersControllerCreateTest(test.TestCase):
         def fake_instance_destroy(context, uuid, constraint):
             return fakes.stub_instance(1)
 
-        self.stub_out('nova.db.api.instance_destroy', fake_instance_destroy)
+        self.stub_out(
+                'nova.db.main.api.instance_destroy', fake_instance_destroy)
         self.body['os:scheduler_hints'] = {'group': test_group.uuid}
         self.req.body = jsonutils.dump_as_bytes(self.body)
         server = self.controller.create(self.req, body=self.body).obj['server']
@@ -5627,7 +5927,8 @@ class ServersControllerCreateTest(test.TestCase):
         def fake_instance_destroy(context, uuid, constraint):
             return fakes.stub_instance(1)
 
-        self.stub_out('nova.db.api.instance_destroy', fake_instance_destroy)
+        self.stub_out(
+            'nova.db.main.api.instance_destroy', fake_instance_destroy)
         self.body['os:scheduler_hints'] = {
             'group': '5b674f73-c8cf-40ef-9965-3b6fe4b304b1'}
         self.req.body = jsonutils.dump_as_bytes(self.body)
@@ -5847,6 +6148,8 @@ class ServersControllerCreateTest(test.TestCase):
         """Test creating multiple instances but not asking for
         reservation_id
         """
+        self.instance_cache_by_uuid = {}
+
         image_href = '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6'
         flavor_ref = 'http://localhost/123/flavors/3'
         body = {
@@ -5860,12 +6163,13 @@ class ServersControllerCreateTest(test.TestCase):
             }
         }
 
-        def create_db_entry_for_new_instance(*args, **kwargs):
-            instance = args[4]
+        def _populate_instance_for_create(*args, **kwargs):
+            instance = args[2]
             self.instance_cache_by_uuid[instance.uuid] = instance
             return instance
-        self.stub_out('nova.compute.api.API.create_db_entry_for_new_instance',
-                      create_db_entry_for_new_instance)
+
+        self.stub_out('nova.compute.api.API._populate_instance_for_create',
+                      _populate_instance_for_create)
         res = self.controller.create(self.req, body=body).obj
 
         instance_uuids = self.instance_cache_by_uuid.keys()
@@ -5877,6 +6181,8 @@ class ServersControllerCreateTest(test.TestCase):
         reservation_id
         """
         self.flags(enable_instance_password=False, group='api')
+        self.instance_cache_by_uuid = {}
+
         image_href = '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6'
         flavor_ref = 'http://localhost/123/flavors/3'
         body = {
@@ -5890,12 +6196,13 @@ class ServersControllerCreateTest(test.TestCase):
             }
         }
 
-        def create_db_entry_for_new_instance(*args, **kwargs):
-            instance = args[4]
+        def _populate_instance_for_create(*args, **kwargs):
+            instance = args[2]
             self.instance_cache_by_uuid[instance.uuid] = instance
             return instance
-        self.stub_out('nova.compute.api.API.create_db_entry_for_new_instance',
-                      create_db_entry_for_new_instance)
+
+        self.stub_out('nova.compute.api.API._populate_instance_for_create',
+                      _populate_instance_for_create)
         res = self.controller.create(self.req, body=body).obj
 
         instance_uuids = self.instance_cache_by_uuid.keys()
@@ -5906,13 +6213,15 @@ class ServersControllerCreateTest(test.TestCase):
         """Test creating multiple instances with asking for
         reservation_id
         """
-        def create_db_entry_for_new_instance(*args, **kwargs):
-            instance = args[4]
+        self.instance_cache_by_uuid = {}
+
+        def _populate_instance_for_create(*args, **kwargs):
+            instance = args[2]
             self.instance_cache_by_uuid[instance.uuid] = instance
             return instance
 
-        self.stub_out('nova.compute.api.API.create_db_entry_for_new_instance',
-                      create_db_entry_for_new_instance)
+        self.stub_out('nova.compute.api.API._populate_instance_for_create',
+                      _populate_instance_for_create)
         image_href = '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6'
         flavor_ref = 'http://localhost/123/flavors/3'
         body = {
@@ -6023,6 +6332,7 @@ class ServersControllerCreateTest(test.TestCase):
                           self.controller.create, self.req, body=body)
 
     def test_create_multiple_instance_max_count_overquota_min_count_ok(self):
+        self.instance_cache_by_uuid = {}
         self.flags(instances=3, group='quota')
         image_href = '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6'
         flavor_ref = 'http://localhost/123/flavors/3'
@@ -6036,12 +6346,13 @@ class ServersControllerCreateTest(test.TestCase):
             }
         }
 
-        def create_db_entry_for_new_instance(*args, **kwargs):
-            instance = args[4]
+        def _populate_instance_for_create(*args, **kwargs):
+            instance = args[2]
             self.instance_cache_by_uuid[instance.uuid] = instance
             return instance
-        self.stub_out('nova.compute.api.API.create_db_entry_for_new_instance',
-                      create_db_entry_for_new_instance)
+
+        self.stub_out('nova.compute.api.API._populate_instance_for_create',
+                      _populate_instance_for_create)
         res = self.controller.create(self.req, body=body).obj
         instance_uuids = self.instance_cache_by_uuid.keys()
         self.assertIn(res["server"]["id"], instance_uuids)
@@ -6063,9 +6374,8 @@ class ServersControllerCreateTest(test.TestCase):
                           self.req, body=body)
 
     @mock.patch.object(compute_api.API, 'create')
-    def test_create_multiple_instance_with_specified_ip_neutronv2(self,
-                                                                  _api_mock):
-        _api_mock.side_effect = exception.InvalidFixedIpAndMaxCountRequest(
+    def test_create_multiple_instance_with_specified_ip(self, mock_create):
+        mock_create.side_effect = exception.InvalidFixedIpAndMaxCountRequest(
             reason="")
         network = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
         port = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'
@@ -6077,13 +6387,10 @@ class ServersControllerCreateTest(test.TestCase):
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self._test_create_extra, params)
 
-    @mock.patch.object(compute_api.API, 'create',
-                       side_effect=exception.MultiplePortsNotApplicable(
-                           reason="Unable to launch multiple instances with "
-                                  "a single configured port ID. Please "
-                                  "launch your instance one by one with "
-                                  "different ports."))
+    @mock.patch.object(compute_api.API, 'create')
     def test_create_multiple_instance_with_port(self, mock_create):
+        mock_create.side_effect = exception.MultiplePortsNotApplicable(
+            reason='')
         requested_networks = [{'uuid': uuids.network, 'port': uuids.port}]
         params = {'networks': requested_networks}
         self.body['server']['max_count'] = 2
@@ -6178,18 +6485,6 @@ class ServersControllerCreateTest(test.TestCase):
                         image_id='dummy', response='dummy'))
     def test_create_instance_raise_image_bad_request(self, mock_create):
         self.assertRaises(webob.exc.HTTPBadRequest,
-                          self.controller.create,
-                          self.req, body=self.body)
-
-    def test_create_instance_invalid_availability_zone(self):
-        self.body['server']['availability_zone'] = 'invalid::::zone'
-        self.assertRaises(webob.exc.HTTPBadRequest,
-                          self.controller.create,
-                          self.req, body=self.body)
-
-    def test_create_instance_invalid_availability_zone_as_int(self):
-        self.body['server']['availability_zone'] = 123
-        self.assertRaises(exception.ValidationError,
                           self.controller.create,
                           self.req, body=self.body)
 
@@ -6376,7 +6671,8 @@ class ServersControllerCreateTest(test.TestCase):
         self._test_create_extra(params)
 
 
-class ServersControllerCreateTestV219(ServersControllerCreateTest):
+class ServersControllerCreateTestV219(_ServersControllerCreateTest):
+
     def _create_instance_req(self, set_desc, desc=None):
         if set_desc:
             self.body['server']['description'] = desc
@@ -6665,6 +6961,7 @@ class ServersControllerCreateTestV257(test.NoDBTestCase):
     """Tests that trying to create a server with personality files using
     microversion 2.57 fails.
     """
+
     def test_create_server_with_personality_fails(self):
         controller = servers.ServersController()
         body = {
@@ -6745,7 +7042,7 @@ class ServersControllerCreateTestV260(test.NoDBTestCase):
                       'compute API version 2.60', str(ex))
 
 
-class ServersControllerCreateTestV263(ServersControllerCreateTest):
+class ServersControllerCreateTestV263(_ServersControllerCreateTest):
     def _create_instance_req(self, certs=None):
         self.body['server']['trusted_image_certificates'] = certs
 
@@ -6831,25 +7128,8 @@ class ServersControllerCreateTestV263(ServersControllerCreateTest):
             body=self.body)
         self.assertIn('Additional properties are not allowed', str(ex))
 
-    def test_create_server_with_trusted_certs_policy_failed(self):
-        rule_name = "os_compute_api:servers:create:trusted_certs"
-        rules = {"os_compute_api:servers:create": "@",
-                 "os_compute_api:servers:create:forced_host": "@",
-                 "os_compute_api:servers:create:attach_volume": "@",
-                 "os_compute_api:servers:create:attach_network": "@",
-                 rule_name: "project:fake"}
-        self._create_instance_req(['0b5d2c72-12cc-4ba6-a8d7-3ff5cc1d8cb8'])
-        self.policy.set_rules(rules)
-        exc = self.assertRaises(exception.PolicyNotAuthorized,
-                                self.controller.create, self.req,
-                                body=self.body)
-        self.assertEqual(
-            "Policy doesn't allow %s to be performed." % rule_name,
-            exc.format_message())
-
     @mock.patch.object(compute_api.API, 'create')
-    def test_create_server_with_cert_validation_error(
-            self, mock_create):
+    def test_create_server_with_cert_validation_error(self, mock_create):
         mock_create.side_effect = exception.CertificateValidationFailed(
             cert_uuid="cert id", reason="test cert validation error")
 
@@ -6860,7 +7140,7 @@ class ServersControllerCreateTestV263(ServersControllerCreateTest):
         self.assertIn('test cert validation error', str(ex))
 
 
-class ServersControllerCreateTestV267(ServersControllerCreateTest):
+class ServersControllerCreateTestV267(_ServersControllerCreateTest):
     def setUp(self):
         super(ServersControllerCreateTestV267, self).setUp()
 
@@ -6930,7 +7210,7 @@ class ServersControllerCreateTestV267(ServersControllerCreateTest):
         self.assertIn('is too long', str(ex))
 
 
-class ServersControllerCreateTestV274(ServersControllerCreateTest):
+class ServersControllerCreateTestV274(_ServersControllerCreateTest):
     def setUp(self):
         super(ServersControllerCreateTestV274, self).setUp()
         self.req.environ['nova.context'] = fakes.FakeRequestContext(
@@ -7033,82 +7313,57 @@ class ServersControllerCreateTestV274(ServersControllerCreateTest):
         pass
 
 
-class ServersControllerCreateTestWithMock(test.TestCase):
-    image_uuid = '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6'
-    flavor_ref = 'http://localhost/123/flavors/3'
+class ServersControllerCreateTestV290(_ServersControllerCreateTest):
 
-    def setUp(self):
-        """Shared implementation for tests below that create instance."""
-        super(ServersControllerCreateTestWithMock, self).setUp()
-
-        self.flags(enable_instance_password=True, group='api')
-        self.instance_cache_num = 0
-        self.instance_cache_by_id = {}
-        self.instance_cache_by_uuid = {}
-
-        self.controller = servers.ServersController()
-
-        self.body = {
-            'server': {
-                'name': 'server_test',
-                'imageRef': self.image_uuid,
-                'flavorRef': self.flavor_ref,
-                'metadata': {
-                    'hello': 'world',
-                    'open': 'stack',
-                    },
-                },
-            }
-        self.req = fakes.HTTPRequest.blank(
-                '/%s/servers' % fakes.FAKE_PROJECT_ID)
-        self.req.method = 'POST'
-        self.req.headers["content-type"] = "application/json"
-
-    def _test_create_extra(self, params, no_image=False):
-        self.body['server']['flavorRef'] = 2
-        if no_image:
-            self.body['server'].pop('imageRef', None)
-        self.body['server'].update(params)
+    def _generate_req(self, hostname=None, api_version='2.90'):
+        if hostname:
+            self.body['server']['hostname'] = hostname
         self.req.body = jsonutils.dump_as_bytes(self.body)
-        self.req.headers["content-type"] = "application/json"
+        self.req.api_version_request = \
+            api_version_request.APIVersionRequest(api_version)
+
+    def test_create_instance_with_hostname(self):
+        self._generate_req(hostname='test-hostname')
         self.controller.create(self.req, body=self.body).obj['server']
 
-    @mock.patch.object(compute_api.API, 'create')
-    def test_create_instance_with_fixed_ip_already_in_use(self, create_mock):
-        network = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-        address = '10.0.2.3'
-        requested_networks = [{'uuid': network, 'fixed_ip': address}]
-        params = {'networks': requested_networks}
-        create_mock.side_effect = exception.FixedIpAlreadyInUse(
-            address=address,
-            instance_uuid=network)
-        self.assertRaises(webob.exc.HTTPBadRequest,
-                          self._test_create_extra, params)
-        self.assertEqual(1, len(create_mock.call_args_list))
+    def test_create_instance_with_hostname_invalid(self):
+        self._generate_req(hostname='example.com')
 
-    @mock.patch.object(compute_api.API, 'create')
-    def test_create_instance_with_invalid_fixed_ip(self, create_mock):
-        network = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-        address = '999.0.2.3'
-        requested_networks = [{'uuid': network, 'fixed_ip': address}]
-        params = {'networks': requested_networks}
-        self.assertRaises(exception.ValidationError,
-                          self._test_create_extra, params)
-        self.assertFalse(create_mock.called)
+        ex = self.assertRaises(
+            exception.ValidationError,
+            self.controller.create,
+            self.req, body=self.body)
+        self.assertIn('Invalid input for field/attribute hostname.', str(ex))
 
-    @mock.patch.object(compute_api.API, 'create',
-                       side_effect=exception.InvalidVolume(reason='error'))
-    def test_create_instance_with_invalid_volume_error(self, create_mock):
-        # Tests that InvalidVolume is translated to a 400 error.
-        self.assertRaises(webob.exc.HTTPBadRequest,
-                          self._test_create_extra, {})
+    def test_create_instance_with_hostname_old_version(self):
+        self._generate_req(hostname='hostname', api_version='2.89')
+
+        ex = self.assertRaises(
+            exception.ValidationError,
+            self.controller.create,
+            self.req, body=self.body)
+        self.assertIn("'hostname' was unexpected", str(ex))
+
+    @mock.patch.object(
+        compute_api.API, 'create',
+        side_effect=exception.AmbiguousHostnameForMultipleInstances())
+    def test_create_multiple_instances_with_hostname(self, mock_create):
+        self.body['server']['hostname'] = 'hostname'
+        self.body['server']['max_count'] = 2
+        self.req.body = jsonutils.dump_as_bytes(self.body)
+        self.req.api_version_request = \
+            api_version_request.APIVersionRequest('2.90')
+        self.assertRaises(
+            webob.exc.HTTPBadRequest,
+            self.controller.create,
+            self.req, body=self.body)
 
 
-class ServersViewBuilderTest(test.TestCase):
+class _ServersViewBuilderTest(test.TestCase):
     project_id = fakes.FAKE_PROJECT_ID
 
     def setUp(self):
-        super(ServersViewBuilderTest, self).setUp()
+        super().setUp()
         fakes.stub_out_nw_api(self)
         self.flags(group='glance', api_servers=['http://localhost:9292'])
         nw_cache_info = self._generate_nw_cache_info()
@@ -7129,7 +7384,7 @@ class ServersViewBuilderTest(test.TestCase):
         fakes.stub_out_secgroup_api(
             self, security_groups=[{'name': 'default'}])
 
-        self.stub_out('nova.db.api.'
+        self.stub_out('nova.db.main.api.'
                       'block_device_mapping_get_all_by_instance_uuids',
                       fake_bdms_get_all_by_instance_uuids)
         self.stub_out('nova.objects.InstanceMappingList.'
@@ -7182,7 +7437,10 @@ class ServersViewBuilderTest(test.TestCase):
                                       'ips': [_ip(fixed_ipv4[2])]}]}}]
         return nw_cache
 
-    def test_get_flavor_valid_instance_type(self):
+
+class ServersViewBuilderTest(_ServersViewBuilderTest):
+
+    def test_get_flavor_valid_flavor(self):
         flavor_bookmark = "http://localhost/%s/flavors/1" % self.project_id
         expected = {"id": "1",
                     "links": [{"rel": "bookmark",
@@ -7716,14 +7974,14 @@ class ServersViewBuilderTest(test.TestCase):
         self.assertThat(output, matchers.DictMatches(expected_server))
 
 
-class ServersViewBuilderTestV269(ServersViewBuilderTest):
+class ServersViewBuilderTestV269(_ServersViewBuilderTest):
     """Server ViewBuilder test for microversion 2.69
 
     The intent here is simply to verify that when showing server details
     after microversion 2.69 the response could have missing keys for those
     servers from the down cells.
     """
-    wsgi_api_version = '2.69'
+    microversion = '2.69'
 
     def setUp(self):
         super(ServersViewBuilderTestV269, self).setUp()
@@ -7738,9 +7996,10 @@ class ServersViewBuilderTestV269(ServersViewBuilderTest):
                       fake_is_supported)
 
     def req(self, url, use_admin_context=False):
-        return fakes.HTTPRequest.blank(url,
-                                       use_admin_context=use_admin_context,
-                                       version=self.wsgi_api_version)
+        return fakes.HTTPRequest.blank(
+            url,
+            use_admin_context=use_admin_context,
+            version=self.microversion)
 
     def test_get_server_list_detail_with_down_cells(self):
         # Fake out 1 partially constructued instance and one full instance.
@@ -8038,107 +8297,6 @@ class ServersViewBuilderTestV269(ServersViewBuilderTest):
             }
         }
         self.assertThat(output, matchers.DictMatches(expected))
-
-
-class ServersAllExtensionsTestCase(test.TestCase):
-    """Servers tests using default API router with all extensions enabled.
-
-    The intent here is to catch cases where extensions end up throwing
-    an exception because of a malformed request before the core API
-    gets a chance to validate the request and return a 422 response.
-
-    For example, AccessIPsController extends servers.Controller::
-
-        |   @wsgi.extends
-        |   def create(self, req, resp_obj, body):
-        |       context = req.environ['nova.context']
-        |       if authorize(context) and 'server' in resp_obj.obj:
-        |           resp_obj.attach(xml=AccessIPTemplate())
-        |           server = resp_obj.obj['server']
-        |           self._extend_server(req, server)
-
-    we want to ensure that the extension isn't barfing on an invalid
-    body.
-    """
-
-    def setUp(self):
-        super(ServersAllExtensionsTestCase, self).setUp()
-        self.app = compute.APIRouterV21()
-
-    @mock.patch.object(compute_api.API, 'create',
-                       side_effect=test.TestingException(
-                           "Should not reach the compute API."))
-    def test_create_missing_server(self, mock_create):
-        # Test create with malformed body.
-        req = fakes.HTTPRequestV21.blank(
-                '/%s/servers' % fakes.FAKE_PROJECT_ID)
-        req.method = 'POST'
-        req.content_type = 'application/json'
-        body = {'foo': {'a': 'b'}}
-
-        req.body = jsonutils.dump_as_bytes(body)
-        res = req.get_response(self.app)
-        self.assertEqual(400, res.status_int)
-
-    def test_update_missing_server(self):
-        # Test update with malformed body.
-
-        req = fakes.HTTPRequestV21.blank(
-                '/%s/servers/1' % fakes.FAKE_PROJECT_ID)
-        req.method = 'PUT'
-        req.content_type = 'application/json'
-        body = {'foo': {'a': 'b'}}
-        req.body = jsonutils.dump_as_bytes(body)
-        with mock.patch('nova.objects.Instance.save') as mock_save:
-            res = req.get_response(self.app)
-            self.assertFalse(mock_save.called)
-        self.assertEqual(400, res.status_int)
-
-
-class ServersInvalidRequestTestCase(test.TestCase):
-    """Tests of places we throw 400 Bad Request from."""
-
-    def setUp(self):
-        super(ServersInvalidRequestTestCase, self).setUp()
-        self.controller = servers.ServersController()
-
-    def _invalid_server_create(self, body):
-        req = fakes.HTTPRequestV21.blank(
-                '/%s/servers' % fakes.FAKE_PROJECT_ID)
-        req.method = 'POST'
-
-        self.assertRaises(exception.ValidationError,
-                          self.controller.create, req, body=body)
-
-    def test_create_server_no_body(self):
-        self._invalid_server_create(body=None)
-
-    def test_create_server_missing_server(self):
-        body = {'foo': {'a': 'b'}}
-        self._invalid_server_create(body=body)
-
-    def test_create_server_malformed_entity(self):
-        body = {'server': 'string'}
-        self._invalid_server_create(body=body)
-
-    def _unprocessable_server_update(self, body):
-        req = fakes.HTTPRequestV21.blank(
-                '/%s/servers/%s' % (fakes.FAKE_PROJECT_ID, FAKE_UUID))
-        req.method = 'PUT'
-
-        self.assertRaises(webob.exc.HTTPBadRequest,
-                          self.controller.update, req, FAKE_UUID, body=body)
-
-    def test_update_server_no_body(self):
-        self._invalid_server_create(body=None)
-
-    def test_update_server_missing_server(self):
-        body = {'foo': {'a': 'b'}}
-        self._invalid_server_create(body=body)
-
-    def test_create_update_malformed_entity(self):
-        body = {'server': 'string'}
-        self._invalid_server_create(body=body)
 
 
 class ServersActionsJsonTestV239(test.NoDBTestCase):

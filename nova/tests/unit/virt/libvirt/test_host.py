@@ -31,8 +31,9 @@ from nova import objects
 from nova.objects import fields as obj_fields
 from nova.pci import utils as pci_utils
 from nova import test
-from nova.tests.unit.virt.libvirt import fake_libvirt_data
-from nova.tests.unit.virt.libvirt import fakelibvirt
+from nova.tests import fixtures as nova_fixtures
+from nova.tests.fixtures import libvirt as fakelibvirt
+from nova.tests.fixtures import libvirt_data as fake_libvirt_data
 from nova.virt import event
 from nova.virt.libvirt import config as vconfig
 from nova.virt.libvirt import event as libvirtevent
@@ -67,7 +68,7 @@ class HostTestCase(test.NoDBTestCase):
     def setUp(self):
         super(HostTestCase, self).setUp()
 
-        self.useFixture(fakelibvirt.FakeLibvirtFixture())
+        self.useFixture(nova_fixtures.LibvirtFixture())
         self.host = host.Host("qemu:///system")
 
     @mock.patch("nova.virt.libvirt.host.Host._init_events")
@@ -686,6 +687,23 @@ class HostTestCase(test.NoDBTestCase):
             caps = self.host.get_capabilities()
             self.assertEqual(vconfig.LibvirtConfigCaps, type(caps))
             self.assertIsNone(caps.host.cpu.model)
+            self.assertEqual(0, len(caps.host.cpu.features))
+
+    def test_get_capabilities_on_aarch64(self):
+        """Tests that cpu features are not retrieved on aarch64 platform.
+        """
+        fake_caps_xml = '''
+<capabilities>
+  <host>
+    <uuid>cef19ce0-0ca2-11df-855d-b193fbce7686</uuid>
+    <cpu>
+      <arch>aarch64</arch>
+    </cpu>
+  </host>
+</capabilities>'''
+        with mock.patch.object(fakelibvirt.virConnect, 'getCapabilities',
+                               return_value=fake_caps_xml):
+            caps = self.host.get_capabilities()
             self.assertEqual(0, len(caps.host.cpu.features))
 
     def test__get_machine_types(self):
@@ -1809,7 +1827,7 @@ class TestLibvirtSEV(test.NoDBTestCase):
     def setUp(self):
         super(TestLibvirtSEV, self).setUp()
 
-        self.useFixture(fakelibvirt.FakeLibvirtFixture())
+        self.useFixture(nova_fixtures.LibvirtFixture())
         self.host = host.Host("qemu:///system")
 
 
@@ -1876,7 +1894,7 @@ class LibvirtTpoolProxyTestCase(test.NoDBTestCase):
     def setUp(self):
         super(LibvirtTpoolProxyTestCase, self).setUp()
 
-        self.useFixture(fakelibvirt.FakeLibvirtFixture())
+        self.useFixture(nova_fixtures.LibvirtFixture())
         self.host = host.Host("qemu:///system")
 
         def _stub_xml(uuid):

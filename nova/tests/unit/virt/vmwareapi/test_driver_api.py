@@ -266,9 +266,6 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
         super(VMwareAPIVMTestCase, self).tearDown()
         vmwareapi_fake.cleanup()
 
-    def test_legacy_block_device_info(self):
-        self.assertFalse(self.conn.need_legacy_block_device_info)
-
     def test_get_host_ip_addr(self):
         self.assertEqual(HOST, self.conn.get_host_ip_addr())
 
@@ -343,10 +340,10 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
             self.conn = driver.VMwareAPISession()
         self.assertEqual(2, self.attempts)
 
-    def _get_instance_type_by_name(self, type):
-        for instance_type in DEFAULT_FLAVOR_OBJS:
-            if instance_type.name == type:
-                return instance_type
+    def _get_flavor_by_name(self, type):
+        for flavor in DEFAULT_FLAVOR_OBJS:
+            if flavor.name == type:
+                return flavor
         if type == 'm1.micro':
             return {'memory_mb': 128, 'root_gb': 0, 'deleted_at': None,
                     'name': 'm1.micro', 'deleted': 0, 'created_at': None,
@@ -356,15 +353,15 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
                     'flavorid': '1', 'vcpu_weight': None, 'id': 2}
 
     def _create_instance(self, node=None, set_image_ref=True,
-                         uuid=None, instance_type='m1.large',
-                         ephemeral=None, instance_type_updates=None):
+                         uuid=None, flavor='m1.large',
+                         ephemeral=None, flavor_updates=None):
         if not node:
             node = self.node_name
         if not uuid:
             uuid = uuidutils.generate_uuid()
-        self.type_data = dict(self._get_instance_type_by_name(instance_type))
-        if instance_type_updates:
-            self.type_data.update(instance_type_updates)
+        self.type_data = dict(self._get_flavor_by_name(flavor))
+        if flavor_updates:
+            self.type_data.update(flavor_updates)
         if ephemeral is not None:
             self.type_data['ephemeral_gb'] = ephemeral
         values = {'name': 'fake_name',
@@ -393,15 +390,15 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
                 self.context, **values)
 
     def _create_vm(self, node=None, num_instances=1, uuid=None,
-                   instance_type='m1.large', powered_on=True,
-                   ephemeral=None, bdi=None, instance_type_updates=None):
+                   flavor='m1.large', powered_on=True,
+                   ephemeral=None, bdi=None, flavor_updates=None):
         """Create and spawn the VM."""
         if not node:
             node = self.node_name
         self._create_instance(node=node, uuid=uuid,
-                              instance_type=instance_type,
+                              flavor=flavor,
                               ephemeral=ephemeral,
-                              instance_type_updates=instance_type_updates)
+                              flavor_updates=flavor_updates)
         self.assertIsNone(vm_util.vm_ref_cache_get(self.uuid))
         self.conn.spawn(self.context, self.instance, self.image,
                         injected_files=[], admin_password=None, allocations={},
@@ -550,9 +547,9 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
         vmwareapi_fake.assertPathExists(self, str(path))
         vmwareapi_fake.assertPathExists(self, str(root))
 
-    def _iso_disk_type_created(self, instance_type='m1.large'):
+    def _iso_disk_type_created(self, flavor='m1.large'):
         self.image.disk_format = 'iso'
-        self._create_vm(instance_type=instance_type)
+        self._create_vm(flavor=flavor)
         path = ds_obj.DatastorePath(self.ds, 'vmware_base',
                                      self.fake_image_uuid,
                                      '%s.iso' % self.fake_image_uuid)
@@ -564,7 +561,7 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
         vmwareapi_fake.assertPathExists(self, str(path))
 
     def test_iso_disk_type_created_with_root_gb_0(self):
-        self._iso_disk_type_created(instance_type='m1.micro')
+        self._iso_disk_type_created(flavor='m1.micro')
         path = ds_obj.DatastorePath(self.ds, self.uuid, '%s.vmdk' % self.uuid)
         vmwareapi_fake.assertPathNotExists(self, str(path))
 
@@ -766,7 +763,7 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
         self._check_vm_info(info, power_state.RUNNING)
 
     def test_spawn_root_size_0(self):
-        self._create_vm(instance_type='m1.micro')
+        self._create_vm(flavor='m1.micro')
         info = self._get_info()
         self._check_vm_info(info, power_state.RUNNING)
         cache = ('[%s] vmware_base/%s/%s.vmdk' %
@@ -1197,7 +1194,7 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
 
     def test_spawn_hw_versions(self):
         updates = {'extra_specs': {'vmware:hw_version': 'vmx-08'}}
-        self._create_vm(instance_type_updates=updates)
+        self._create_vm(flavor_updates=updates)
         vm = self._get_vm_record()
         version = vm.get("version")
         self.assertEqual('vmx-08', version)
@@ -1244,7 +1241,7 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
         self._create_vm()
         vms = self.conn._session._call_method(vim_util, "get_objects",
                 "VirtualMachine", ['config.extraConfig["nvp.vm-uuid"]'])
-        vm_ref = vm_util._get_object_for_optionvalue(vms,
+        vm_ref = vm_util._get_object_for_optionvalue(vms.objects,
                                                      self.instance["uuid"])
         self.assertIsNotNone(vm_ref, 'VM Reference cannot be none')
 
@@ -1273,7 +1270,7 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
         self._test_snapshot()
 
     def test_snapshot_no_root_disk(self):
-        self._iso_disk_type_created(instance_type='m1.micro')
+        self._iso_disk_type_created(flavor='m1.micro')
         self.assertRaises(error_util.NoRootDiskDefined, self.conn.snapshot,
                           self.context, self.instance, "Test-Snapshot",
                           lambda *args, **kwargs: None)
@@ -1688,6 +1685,7 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
             hypervisor_os='esxi',
             config_drive=True)
         instance = objects.Instance(uuid=self.uuid,
+                                    image_ref='',
                                     config_drive=False,
                                     system_metadata={},
                                     node=self.instance_node)
@@ -2137,7 +2135,7 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
         self.assertEqual(2048, stats['memory_mb'])
         self.assertEqual(1000, stats['memory_mb_used'])
         self.assertEqual('VMware vCenter Server', stats['hypervisor_type'])
-        self.assertEqual(5001000, stats['hypervisor_version'])
+        self.assertEqual(5005000, stats['hypervisor_version'])
         self.assertEqual(self.node_name, stats['hypervisor_hostname'])
         self.assertIsNone(stats['cpu_info'])
         self.assertEqual(
@@ -2342,8 +2340,8 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
                               self.context, self.instance, vif)
 
     def test_resize_to_smaller_disk(self):
-        self._create_vm(instance_type='m1.large')
-        flavor = self._get_instance_type_by_name('m1.small')
+        self._create_vm(flavor='m1.large')
+        flavor = self._get_flavor_by_name('m1.small')
         self.assertRaises(exception.InstanceFaultRollback,
                           self.conn.migrate_disk_and_power_off, self.context,
                           self.instance, 'fake_dest', flavor, None)

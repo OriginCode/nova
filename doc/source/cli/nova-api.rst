@@ -20,7 +20,13 @@ APIs in separate greenthreads.
 Options
 =======
 
-**General options**
+.. rubric:: General options
+
+.. include:: opts/common.rst
+
+.. rubric:: Debugger options
+
+.. include:: opts/debugger.rst
 
 Files
 =====
@@ -28,14 +34,15 @@ Files
 * ``/etc/nova/nova.conf``
 * ``/etc/nova/api-paste.ini``
 * ``/etc/nova/policy.yaml``
+* ``/etc/nova/policy.d/``
 * ``/etc/nova/rootwrap.conf``
 * ``/etc/nova/rootwrap.d/``
 
 See Also
 ========
 
-* :nova-doc:`OpenStack Nova <>`
-* :nova-doc:`Using WSGI with Nova <user/wsgi.html>`
+:doc:`nova-api-metadata(1) <nova-api-metadata>`,
+:doc:`nova-api-os-compute(1) <nova-api-os-compute>`
 
 Bugs
 ====

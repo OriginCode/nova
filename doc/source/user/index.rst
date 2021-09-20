@@ -16,7 +16,6 @@ End user guide
    resize
    reboot
    rescue
-   availability-zones
    block-device-mapping
    /reference/api-microversion-history
 
@@ -73,9 +72,6 @@ Once you are running nova, the following information is extremely useful.
 * :doc:`Admin Guide </admin/index>`: A collection of guides for administrating
   nova.
 
-* :doc:`Upgrades </user/upgrade>`: How nova is designed to be upgraded for minimal
-  service impact, and the order you should do them in.
-
 * :doc:`Quotas </user/quotas>`: Managing project quotas in nova.
 
 * :doc:`Availablity Zones </admin/availability-zones>`: Availability Zones are
@@ -84,7 +80,7 @@ Once you are running nova, the following information is extremely useful.
   arbitrary factors, such as location (country, datacenter, rack), network
   layout and/or power source.
 
-* :doc:`Filter Scheduler </user/filter-scheduler>`: How the filter scheduler is
+* :doc:`Scheduling </admin/scheduling>`: How the scheduler is
   configured, and how that will impact where compute instances land in your
   environment. If you are seeing unexpected distribution of compute instances
   in your hosts, you'll want to dive into this configuration.

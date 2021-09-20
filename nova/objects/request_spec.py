@@ -20,8 +20,8 @@ from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import versionutils
 
-from nova.db.sqlalchemy import api as db
-from nova.db.sqlalchemy import api_models
+from nova.db.api import api as api_db_api
+from nova.db.api import models as api_models
 from nova import exception
 from nova import objects
 from nova.objects import base
@@ -199,6 +199,12 @@ class RequestSpec(base.NovaObject):
         # self.request_level_params and .root_forbidden lazy-default via their
         # respective obj_load_attr methods.
         return self.request_level_params.root_forbidden
+
+    @property
+    def same_subtree(self):
+        # self.request_level_params and .same_subtree lazy-default via their
+        # respective obj_load_attr methods.
+        return self.request_level_params.same_subtree
 
     def _image_meta_from_image(self, image):
         if isinstance(image, objects.ImageMeta):
@@ -468,10 +474,12 @@ class RequestSpec(base.NovaObject):
         return filt_props
 
     @classmethod
-    def from_components(cls, context, instance_uuid, image, flavor,
-            numa_topology, pci_requests, filter_properties, instance_group,
-            availability_zone, security_groups=None, project_id=None,
-            user_id=None, port_resource_requests=None):
+    def from_components(
+        cls, context, instance_uuid, image, flavor,
+        numa_topology, pci_requests, filter_properties, instance_group,
+        availability_zone, security_groups=None, project_id=None,
+        user_id=None, port_resource_requests=None, request_level_params=None
+    ):
         """Returns a new RequestSpec object hydrated by various components.
 
         This helper is useful in creating the RequestSpec from the various
@@ -497,6 +505,7 @@ class RequestSpec(base.NovaObject):
         :param port_resource_requests: a list of RequestGroup objects
                                        representing the resource needs of the
                                        neutron ports
+        :param request_level_params: a RequestLevelParams object
         """
         spec_obj = cls(context)
         spec_obj.num_instances = 1
@@ -530,9 +539,11 @@ class RequestSpec(base.NovaObject):
         if port_resource_requests:
             spec_obj.requested_resources.extend(port_resource_requests)
 
-        # NOTE(efried): We don't need to handle request_level_params here yet
-        #  because they're set dynamically by the scheduler. That could change
-        #  in the future.
+        # NOTE(gibi): later the scheduler adds more request level params but
+        # never overrides existing ones so we can initialize them here.
+        if request_level_params is None:
+            request_level_params = objects.RequestLevelParams()
+        spec_obj.request_level_params = request_level_params
 
         # NOTE(sbauza): Default the other fields that are not part of the
         # original contract
@@ -630,7 +641,7 @@ class RequestSpec(base.NovaObject):
         return spec
 
     @staticmethod
-    @db.api_context_manager.reader
+    @api_db_api.context_manager.reader
     def _get_by_instance_uuid_from_db(context, instance_uuid):
         db_spec = context.session.query(api_models.RequestSpec).filter_by(
             instance_uuid=instance_uuid).first()
@@ -645,7 +656,7 @@ class RequestSpec(base.NovaObject):
         return cls._from_db_object(context, cls(), db_spec)
 
     @staticmethod
-    @db.api_context_manager.writer
+    @api_db_api.context_manager.writer
     def _create_in_db(context, updates):
         db_spec = api_models.RequestSpec()
         db_spec.update(updates)
@@ -674,8 +685,7 @@ class RequestSpec(base.NovaObject):
                 spec.instance_group.hosts = None
             # NOTE(mriedem): Don't persist these since they are per-request
             for excluded in ('retry', 'requested_destination',
-                             'requested_resources', 'ignore_hosts',
-                             'request_level_params'):
+                             'requested_resources', 'ignore_hosts'):
                 if excluded in spec and getattr(spec, excluded):
                     setattr(spec, excluded, None)
             # NOTE(stephenfin): Don't persist network metadata since we have
@@ -686,6 +696,10 @@ class RequestSpec(base.NovaObject):
             # no need for it after scheduling
             if 'requested_networks' in spec and spec.requested_networks:
                 del spec.requested_networks
+            # NOTE(gibi): Don't persist requested_networks since we have
+            # no need for it after scheduling
+            if 'request_level_params' in spec and spec.request_level_params:
+                del spec.request_level_params
 
             db_updates = {'spec': jsonutils.dumps(spec.obj_to_primitive())}
             if 'instance_uuid' in updates:
@@ -706,7 +720,7 @@ class RequestSpec(base.NovaObject):
         self._from_db_object(self._context, self, db_spec)
 
     @staticmethod
-    @db.api_context_manager.writer
+    @api_db_api.context_manager.writer
     def _save_in_db(context, instance_uuid, updates):
         # FIXME(sbauza): Provide a classmethod when oslo.db bug #1520195 is
         # fixed and released
@@ -726,7 +740,7 @@ class RequestSpec(base.NovaObject):
             self.obj_reset_changes()
 
     @staticmethod
-    @db.api_context_manager.writer
+    @api_db_api.context_manager.writer
     def _destroy_in_db(context, instance_uuid):
         result = context.session.query(api_models.RequestSpec).filter_by(
             instance_uuid=instance_uuid).delete()
@@ -738,7 +752,7 @@ class RequestSpec(base.NovaObject):
         self._destroy_in_db(self._context, self.instance_uuid)
 
     @staticmethod
-    @db.api_context_manager.writer
+    @api_db_api.context_manager.writer
     def _destroy_bulk_in_db(context, instance_uuids):
         return context.session.query(api_models.RequestSpec).filter(
                 api_models.RequestSpec.instance_uuid.in_(instance_uuids)).\
@@ -1176,6 +1190,54 @@ class RequestGroup(base.NovaEphemeralObject):
         obj.obj_set_defaults()
         return obj
 
+    @classmethod
+    def from_extended_port_request(cls, context, port_resource_request):
+        """Create the group objects from the resource request of a neutron port
+
+        :param context: the request context
+        :param port_resource_request: the resource_request attribute of the
+                                      neutron port
+        For example:
+
+            port_resource_request = {
+                "request_groups":
+                [
+                    {
+                        "id": <uuid>
+                        "required": [CUSTOM_PHYSNET_2,
+                                     CUSTOM_VNIC_TYPE_NORMAL],
+                        "resources":{
+                            NET_PACKET_RATE_KILOPACKET_PER_SEC: 1000
+                        }
+                    },
+                    {
+                        "id": <uuid>
+                        "required": [CUSTOM_PHYSNET_2,
+                                     CUSTOM_VNIC_TYPE_NORMAL],
+                        "resources": {
+                            "NET_BW_IGR_KILOBIT_PER_SEC": 1000,
+                            "NET_BW_EGR_KILOBIT_PER_SEC": 1000,
+                        },
+                    }
+                ]
+            }
+        """
+        group_objs = []
+        for group in port_resource_request.get("request_groups", []):
+            # NOTE(gibi): Placement rejects allocation candidates where a
+            # request group has traits but no resources specified. This is why
+            # resources are handled as mandatory below but not traits.
+            obj = cls(
+                context=context,
+                use_same_provider=True,
+                resources=group['resources'],
+                required_traits=set(group.get('required', [])),
+                requester_id=group['id'])
+            obj.obj_set_defaults()
+            group_objs.append(obj)
+
+        return group_objs
+
     def obj_make_compatible(self, primitive, target_version):
         super(RequestGroup, self).obj_make_compatible(
             primitive, target_version)
@@ -1290,16 +1352,55 @@ class RequestLevelParams(base.NovaObject):
     RequestGroup).
     """
     # Version 1.0: Initial version
-    VERSION = '1.0'
+    # Version 1.1: Add same_subtree field
+    VERSION = '1.1'
 
     fields = {
         # Traits required on the root provider
         'root_required': fields.SetOfStringsField(default=set()),
         # Traits forbidden on the root provider
         'root_forbidden': fields.SetOfStringsField(default=set()),
+        # Lists of request group suffixes that needs to be allocated from the
+        # same provider subtree
+        'same_subtree': fields.ListOfListsOfStringsField(default=list()),
         # NOTE(efried): group_policy would be appropriate to include here, once
         # we have a use case for it.
     }
 
     def obj_load_attr(self, attrname):
         self.obj_set_defaults(attrname)
+
+    def obj_make_compatible(self, primitive, target_version):
+        super().obj_make_compatible(primitive, target_version)
+
+        target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 1):
+            if 'same_subtree' in primitive:
+                del primitive['same_subtree']
+
+    @classmethod
+    def from_port_request(cls, port_resource_request):
+        """Extracts request level global parameters from the resource_request
+        of a neutron port.
+
+        Neutron only uses same_subtree at the moment.
+        """
+        same_subtree = port_resource_request.get('same_subtree')
+        if same_subtree:
+            # NOTE(gibi): A single port only has a single list of groups
+            # requesting same subtree, but the RequestLevelParams maintains a
+            # list of such subtree requests
+            return cls(same_subtree=[same_subtree])
+
+        return cls()
+
+    def extend_with(self, other_req_lvl_params):
+        """Extends the existing object with parameter values from another
+        RequestLevelParams object. That new set of requirements are connected
+        with the existing ones with a logical AND operation.
+        """
+        self.root_required = self.root_required.union(
+            other_req_lvl_params.root_required)
+        self.root_forbidden = self.root_forbidden.union(
+            other_req_lvl_params.root_forbidden)
+        self.same_subtree.extend(other_req_lvl_params.same_subtree)

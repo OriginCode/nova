@@ -1083,9 +1083,10 @@ def get_headroom(quotas, usages, deltas):
     return headroom
 
 
-def check_num_instances_quota(context, instance_type, min_count,
-                              max_count, project_id=None, user_id=None,
-                              orig_num_req=None):
+def check_num_instances_quota(
+    context, flavor, min_count, max_count, project_id=None, user_id=None,
+    orig_num_req=None,
+):
     """Enforce quota limits on number of instances created."""
     # project_id is also used for the TooManyInstances error message
     if project_id is None:
@@ -1100,8 +1101,8 @@ def check_num_instances_quota(context, instance_type, min_count,
     if not any(r in user_quotas for r in ['instances', 'cores', 'ram']):
         user_id = None
     # Determine requested cores and ram
-    req_cores = max_count * instance_type.vcpus
-    req_ram = max_count * instance_type.memory_mb
+    req_cores = max_count * flavor.vcpus
+    req_ram = max_count * flavor.memory_mb
     deltas = {'instances': max_count, 'cores': req_cores, 'ram': req_ram}
 
     try:
@@ -1117,8 +1118,8 @@ def check_num_instances_quota(context, instance_type, min_count,
         if min_count == max_count == 0:
             # orig_num_req is the original number of instances requested in the
             # case of a recheck quota, for use in the over quota exception.
-            req_cores = orig_num_req * instance_type.vcpus
-            req_ram = orig_num_req * instance_type.memory_mb
+            req_cores = orig_num_req * flavor.vcpus
+            req_ram = orig_num_req * flavor.memory_mb
             requested = {'instances': orig_num_req, 'cores': req_cores,
                          'ram': req_ram}
             (overs, reqs, total_alloweds, useds) = get_over_quota_detail(
@@ -1136,21 +1137,19 @@ def check_num_instances_quota(context, instance_type, min_count,
 
         allowed = headroom.get('instances', 1)
         # Reduce 'allowed' instances in line with the cores & ram headroom
-        if instance_type.vcpus:
-            allowed = min(allowed,
-                          headroom['cores'] // instance_type.vcpus)
-        if instance_type.memory_mb:
-            allowed = min(allowed,
-                          headroom['ram'] // instance_type.memory_mb)
+        if flavor.vcpus:
+            allowed = min(allowed, headroom['cores'] // flavor.vcpus)
+        if flavor.memory_mb:
+            allowed = min(allowed, headroom['ram'] // flavor.memory_mb)
 
         # Convert to the appropriate exception message
         if allowed <= 0:
             msg = "Cannot run any more instances of this type."
         elif min_count <= allowed <= max_count:
             # We're actually OK, but still need to check against allowed
-            return check_num_instances_quota(context, instance_type, min_count,
-                                             allowed, project_id=project_id,
-                                             user_id=user_id)
+            return check_num_instances_quota(
+                context, flavor, min_count, allowed, project_id=project_id,
+                user_id=user_id)
         else:
             msg = "Can only run %s more instances of this type." % allowed
 
@@ -1538,16 +1537,28 @@ def update_pci_request_spec_with_allocated_interface_name(
                 spec['parent_ifname'] = rp_name_pieces[2]
 
 
-def delete_arqs_if_needed(context, instance):
-    """Delete Cyborg ARQs for the instance."""
-    dp_name = instance.flavor.extra_specs.get('accel:device_profile')
-    if dp_name is None:
-        return
+def delete_arqs_if_needed(context, instance, arq_uuids=None):
+    """Delete Cyborg ARQs for the instance.
+
+    :param context
+    :param instance: instance who own the args
+    :param uuids: delete arqs by uuids while did not bind to instance yet.
+    """
     cyclient = cyborg.get_client(context)
-    LOG.debug('Calling Cyborg to delete ARQs for instance %(instance)s',
+    dp_name = instance.flavor.extra_specs.get('accel:device_profile')
+
+    if dp_name:
+        LOG.debug('Calling Cyborg to delete ARQs for instance %(instance)s',
               {'instance': instance.uuid})
-    try:
-        cyclient.delete_arqs_for_instance(instance.uuid)
-    except exception.AcceleratorRequestOpFailed as e:
-        LOG.exception('Failed to delete accelerator requests for '
+        try:
+            cyclient.delete_arqs_for_instance(instance.uuid)
+        except exception.AcceleratorRequestOpFailed as e:
+            LOG.exception('Failed to delete accelerator requests for '
                       'instance %s. Exception: %s', instance.uuid, e)
+
+    if arq_uuids:
+        LOG.debug('Calling Cyborg to delete ARQs by uuids %(uuid)s for'
+              ' instance %(instance)s',
+              {'instance': instance.uuid,
+               'uuid': arq_uuids})
+        cyclient.delete_arqs_by_uuid(arq_uuids)

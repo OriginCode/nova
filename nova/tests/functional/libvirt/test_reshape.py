@@ -19,8 +19,8 @@ from oslo_log import log as logging
 
 from nova import context
 from nova import objects
+from nova.tests.fixtures import libvirt as fakelibvirt
 from nova.tests.functional.libvirt import base
-from nova.tests.unit.virt.libvirt import fakelibvirt
 from nova.virt.libvirt import utils
 
 
@@ -64,22 +64,22 @@ class VGPUReshapeTests(base.ServersTestBase):
                 fakelibvirt.FakeMdevDevice(
                     dev_name='mdev_4b20d080_1b54_4048_85b3_a6a62d165c01',
                     type_id=fakelibvirt.NVIDIA_11_VGPU_TYPE,
-                    parent=fakelibvirt.PGPU1_PCI_ADDR),
+                    parent=fakelibvirt.MDEVCAP_DEV1_PCI_ADDR),
             'mdev_4b20d080_1b54_4048_85b3_a6a62d165c02':
                 fakelibvirt.FakeMdevDevice(
                     dev_name='mdev_4b20d080_1b54_4048_85b3_a6a62d165c02',
                     type_id=fakelibvirt.NVIDIA_11_VGPU_TYPE,
-                    parent=fakelibvirt.PGPU2_PCI_ADDR),
+                    parent=fakelibvirt.MDEVCAP_DEV2_PCI_ADDR),
             'mdev_4b20d080_1b54_4048_85b3_a6a62d165c03':
                 fakelibvirt.FakeMdevDevice(
                     dev_name='mdev_4b20d080_1b54_4048_85b3_a6a62d165c03',
                     type_id=fakelibvirt.NVIDIA_11_VGPU_TYPE,
-                    parent=fakelibvirt.PGPU3_PCI_ADDR),
+                    parent=fakelibvirt.MDEVCAP_DEV3_PCI_ADDR),
         }
 
         # start a compute with vgpu support disabled so the driver will
         # ignore the content of the above HostMdevDeviceInfo
-        self.flags(enabled_vgpu_types='', group='devices')
+        self.flags(enabled_mdev_types='', group='devices')
 
         hostname = self.start_compute(
             hostname='compute1',
@@ -106,7 +106,7 @@ class VGPUReshapeTests(base.ServersTestBase):
 
         # enabled vgpu support
         self.flags(
-            enabled_vgpu_types=fakelibvirt.NVIDIA_11_VGPU_TYPE,
+            enabled_mdev_types=fakelibvirt.NVIDIA_11_VGPU_TYPE,
             group='devices')
         # We don't want to restart the compute service or it would call for
         # a reshape but we still want to accept some vGPU types so we call
@@ -181,9 +181,9 @@ class VGPUReshapeTests(base.ServersTestBase):
         # which ones are used.
         usages = {}
         pgpu_uuid_to_name = {}
-        for pci_device in [fakelibvirt.PGPU1_PCI_ADDR,
-                           fakelibvirt.PGPU2_PCI_ADDR,
-                           fakelibvirt.PGPU3_PCI_ADDR]:
+        for pci_device in [fakelibvirt.MDEVCAP_DEV1_PCI_ADDR,
+                           fakelibvirt.MDEVCAP_DEV2_PCI_ADDR,
+                           fakelibvirt.MDEVCAP_DEV3_PCI_ADDR]:
             gpu_rp_uuid = self.placement.get(
                 '/resource_providers?name=compute1_%s' % pci_device).body[
                 'resource_providers'][0]['uuid']

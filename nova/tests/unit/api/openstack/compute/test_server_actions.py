@@ -39,16 +39,6 @@ CONF = nova.conf.CONF
 FAKE_UUID = fakes.FAKE_UUID
 
 
-class MockSetAdminPassword(object):
-    def __init__(self):
-        self.instance_id = None
-        self.password = None
-
-    def __call__(self, context, instance, password):
-        self.instance_id = instance['uuid']
-        self.password = password
-
-
 @ddt.ddt
 class ServerActionsControllerTestV21(test.TestCase):
     image_uuid = '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6'
@@ -100,10 +90,12 @@ class ServerActionsControllerTestV21(test.TestCase):
             self.controller.compute_api, 'compute_task_api')
         mock_conductor.start()
         self.addCleanup(mock_conductor.stop)
-        # Assume that none of the tests are using ports with resource requests.
-        self.mock_list_port = self.useFixture(
-            fixtures.MockPatch('nova.network.neutron.API.list_ports')).mock
-        self.mock_list_port.return_value = {'ports': []}
+        self.mock_neutron_extension_list = self.useFixture(
+            fixtures.MockPatch(
+                'nova.network.neutron.API._refresh_neutron_extensions_cache'
+            )
+        ).mock
+        self.mock_neutron_extension_list.return_value = {'extensions': []}
 
     def _get_controller(self):
         return self.servers.ServersController()
@@ -267,7 +259,7 @@ class ServerActionsControllerTestV21(test.TestCase):
     def _test_rebuild_preserve_ephemeral(self, value=None):
         return_server = fakes.fake_compute_get(
                 project_id=fakes.FAKE_PROJECT_ID,
-                image_ref='2',
+                image_ref=uuids.image_ref,
                 vm_state=vm_states.ACTIVE,
                 host='fake_host')
         self.stub_out('nova.compute.api.API.get', return_server)
@@ -302,7 +294,7 @@ class ServerActionsControllerTestV21(test.TestCase):
     def test_rebuild_accepted_minimum(self):
         return_server = fakes.fake_compute_get(
                 project_id=fakes.FAKE_PROJECT_ID,
-                image_ref='2',
+                image_ref=uuids.image_ref,
                 vm_state=vm_states.ACTIVE, host='fake_host')
         self.stub_out('nova.compute.api.API.get', return_server)
         self_href = 'http://localhost/v2/servers/%s' % FAKE_UUID
@@ -316,7 +308,7 @@ class ServerActionsControllerTestV21(test.TestCase):
         robj = self.controller._action_rebuild(self.req, FAKE_UUID, body=body)
         body = robj.obj
 
-        self.assertEqual(body['server']['image']['id'], '2')
+        self.assertEqual(body['server']['image']['id'], uuids.image_ref)
         self.assertEqual(len(body['server']['adminPass']),
                          CONF.password_length)
 
@@ -361,7 +353,7 @@ class ServerActionsControllerTestV21(test.TestCase):
 
         return_server = fakes.fake_compute_get(
                 project_id=fakes.FAKE_PROJECT_ID,
-                image_ref='2',
+                image_ref=uuids.image_ref,
                 vm_state=vm_states.ACTIVE, host='fake_host')
         self.stub_out('nova.compute.api.API.get', return_server)
         self_href = 'http://localhost/v2/servers/%s' % FAKE_UUID
@@ -375,7 +367,7 @@ class ServerActionsControllerTestV21(test.TestCase):
         robj = self.controller._action_rebuild(self.req, FAKE_UUID, body=body)
         body = robj.obj
 
-        self.assertEqual(body['server']['image']['id'], '2')
+        self.assertEqual(body['server']['image']['id'], uuids.image_ref)
         self.assertNotIn("adminPass", body['server'])
 
         self.assertEqual(robj['location'], self_href)
@@ -384,10 +376,6 @@ class ServerActionsControllerTestV21(test.TestCase):
 
     @ddt.data(
         exception.InstanceIsLocked(instance_uuid=uuids.instance),
-        exception.OperationNotSupportedForVTPM(
-            instance_uuid=uuids.instance, operation='foo'),
-        exception.OperationNotSupportedForVDPAInterface(
-            instance_uuid=uuids.instance, operation='foo'),
     )
     @mock.patch('nova.compute.api.API.rebuild')
     def test_rebuild__http_conflict_error(self, exc, mock_rebuild):
@@ -397,6 +385,22 @@ class ServerActionsControllerTestV21(test.TestCase):
             self.controller._action_rebuild,
             self.req, uuids.instance,
             body={'rebuild': {'imageRef': uuids.image}})
+
+    @ddt.data(
+        exception.ForbiddenWithAccelerators(),
+        exception.OperationNotSupportedForVTPM(
+            instance_uuid=uuids.instance, operation='foo'),
+        exception.OperationNotSupportedForVDPAInterface(
+            instance_uuid=uuids.instance, operation='foo'),
+    )
+    @mock.patch('nova.compute.api.API.rebuild')
+    def test_rebuild_raises_badrequest_for_not_supported_features(
+        self, exc, mock_rebuild):
+        mock_rebuild.side_effect = exc
+        self.assertRaises(webob.exc.HTTPBadRequest,
+                          self.controller._action_rebuild,
+                          self.req, uuids.instance,
+                          body={'rebuild': {'imageRef': uuids.image}})
 
     def test_rebuild_raises_conflict_on_invalid_state(self):
         body = {'rebuild': {'imageRef': uuids.image}}
@@ -473,7 +477,7 @@ class ServerActionsControllerTestV21(test.TestCase):
     def test_rebuild_admin_pass(self):
         return_server = fakes.fake_compute_get(
                 project_id=fakes.FAKE_PROJECT_ID,
-                image_ref='2',
+                image_ref=uuids.image_ref,
                 vm_state=vm_states.ACTIVE, host='fake_host')
         self.stub_out('nova.compute.api.API.get', return_server)
 
@@ -487,7 +491,7 @@ class ServerActionsControllerTestV21(test.TestCase):
         body = self.controller._action_rebuild(self.req, FAKE_UUID,
                                                body=body).obj
 
-        self.assertEqual(body['server']['image']['id'], '2')
+        self.assertEqual(body['server']['image']['id'], uuids.image_ref)
         self.assertEqual(body['server']['adminPass'], 'asdf')
 
     def test_rebuild_admin_pass_pass_disabled(self):
@@ -497,7 +501,7 @@ class ServerActionsControllerTestV21(test.TestCase):
 
         return_server = fakes.fake_compute_get(
                 project_id=fakes.FAKE_PROJECT_ID,
-                image_ref='2',
+                image_ref=FAKE_UUID,
                 vm_state=vm_states.ACTIVE, host='fake_host')
         self.stub_out('nova.compute.api.API.get', return_server)
 
@@ -511,7 +515,7 @@ class ServerActionsControllerTestV21(test.TestCase):
         body = self.controller._action_rebuild(self.req, FAKE_UUID,
                                                body=body).obj
 
-        self.assertEqual(body['server']['image']['id'], '2')
+        self.assertEqual(body['server']['image']['id'], FAKE_UUID)
         self.assertNotIn('adminPass', body['server'])
 
     def test_rebuild_server_not_found(self):
@@ -578,12 +582,20 @@ class ServerActionsControllerTestV21(test.TestCase):
 
         def return_image_meta(*args, **kwargs):
             image_meta_table = {
-                '2': {'id': uuids.image_id, 'status': 'active',
-                      'container_format': 'ari'},
-                '155d900f-4e14-4e4c-a73d-069cbf4541e6':
-                     {'id': uuids.image_id, 'status': 'active',
-                      'container_format': 'raw',
-                      'properties': {'kernel_id': 1, 'ramdisk_id': 2}},
+                uuids.image_1_id: {
+                    'id': uuids.image_1_id,
+                    'status': 'active',
+                    'container_format': 'ari'
+                },
+                uuids.image_2_id: {
+                    'id': uuids.image_2_id,
+                    'status': 'active',
+                    'container_format': 'raw',
+                    'properties': {
+                        'kernel_id': uuids.kernel_id,
+                        'ramdisk_id': uuids.ramdisk_id
+                    }
+                },
             }
             image_id = args[2]
             try:
@@ -597,7 +609,7 @@ class ServerActionsControllerTestV21(test.TestCase):
                       return_image_meta)
         body = {
             "rebuild": {
-                "imageRef": "155d900f-4e14-4e4c-a73d-069cbf4541e6",
+                "imageRef": uuids.image_2_id,
             },
         }
         self.assertRaises(webob.exc.HTTPBadRequest,
@@ -860,9 +872,18 @@ class ServerActionsControllerTestV21(test.TestCase):
 
     @mock.patch('nova.compute.api.API.resize',
                 side_effect=exception.ForbiddenWithAccelerators)
-    def test_resize_raises_http_forbidden(self, mock_resize):
+    def test_resize_raises_badrequest_for_accelerator(self, mock_resize):
         body = dict(resize=dict(flavorRef="http://localhost/3"))
-        self.assertRaises(webob.exc.HTTPForbidden,
+        self.assertRaises(webob.exc.HTTPBadRequest,
+                          self.controller._action_resize,
+                          self.req, FAKE_UUID, body=body)
+
+    @mock.patch('nova.compute.api.API.resize',
+                side_effect=exception.OperationNotSupportedForVDPAInterface(
+                    instance_uuid=FAKE_UUID, operation='foo'))
+    def test_resize_raises_badrequest_for_vdpaInterface(self, mock_resize):
+        body = dict(resize=dict(flavorRef="http://localhost/3"))
+        self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller._action_resize,
                           self.req, FAKE_UUID, body=body)
 
@@ -1035,8 +1056,9 @@ class ServerActionsControllerTestV21(test.TestCase):
                          'delete_on_termination': False,
                          'no_device': None})]
 
-        self.stub_out('nova.db.api.block_device_mapping_get_all_by_instance',
-                      fake_block_device_mapping_get_all_by_instance)
+        self.stub_out(
+            'nova.db.main.api.block_device_mapping_get_all_by_instance',
+            fake_block_device_mapping_get_all_by_instance)
 
         system_metadata = dict(image_kernel_id=_fake_id('b'),
                                image_ramdisk_id=_fake_id('c'),
@@ -1147,8 +1169,9 @@ class ServerActionsControllerTestV21(test.TestCase):
                          'delete_on_termination': False,
                          'no_device': None})]
 
-        self.stub_out('nova.db.api.block_device_mapping_get_all_by_instance',
-                      fake_block_device_mapping_get_all_by_instance)
+        self.stub_out(
+            'nova.db.main.api.block_device_mapping_get_all_by_instance',
+            fake_block_device_mapping_get_all_by_instance)
 
         instance = fakes.fake_compute_get(
             project_id=fakes.FAKE_PROJECT_ID,

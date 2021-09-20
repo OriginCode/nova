@@ -23,14 +23,17 @@
 
 import collections
 import functools
+import os
 import re
 import sys
+import time
 import traceback
 from urllib import parse as urlparse
 
 from dateutil import parser as dateutil_parser
 from keystoneauth1 import exceptions as ks_exc
 from neutronclient.common import exceptions as neutron_client_exc
+from os_brick.initiator import connector
 import os_resource_classes as orc
 from oslo_config import cfg
 from oslo_db import exception as db_exc
@@ -43,13 +46,15 @@ import prettytable
 from sqlalchemy.engine import url as sqla_url
 
 from nova.cmd import common as cmd_common
-from nova.compute import api as compute_api
+from nova.compute import api
+from nova.compute import instance_actions
+from nova.compute import rpcapi
 import nova.conf
 from nova import config
 from nova import context
-from nova.db import api as db
+from nova.db import constants as db_const
+from nova.db.main import api as db
 from nova.db import migration
-from nova.db.sqlalchemy import api as sa_db
 from nova import exception
 from nova.i18n import _
 from nova.network import constants
@@ -57,6 +62,7 @@ from nova.network import neutron as neutron_api
 from nova import objects
 from nova.objects import block_device as block_device_obj
 from nova.objects import compute_node as compute_node_obj
+from nova.objects import fields as obj_fields
 from nova.objects import host_mapping as host_mapping_obj
 from nova.objects import instance as instance_obj
 from nova.objects import instance_mapping as instance_mapping_obj
@@ -66,16 +72,23 @@ from nova.objects import virtual_interface as virtual_interface_obj
 from nova import rpc
 from nova.scheduler.client import report
 from nova.scheduler import utils as scheduler_utils
+from nova import utils
 from nova import version
 from nova.virt.libvirt import machine_type_utils
+from nova.volume import cinder
 
 CONF = nova.conf.CONF
 LOG = logging.getLogger(__name__)
 
 # Keep this list sorted and one entry per line for readability.
-_EXTRA_DEFAULT_LOG_LEVELS = ['oslo_concurrency=INFO',
-                             'oslo_db=INFO',
-                             'oslo_policy=INFO']
+_EXTRA_DEFAULT_LOG_LEVELS = [
+    'nova=ERROR',
+    'oslo_concurrency=INFO',
+    'oslo_db=INFO',
+    'oslo_policy=INFO',
+    'oslo.privsep=ERROR',
+    'os_brick=ERROR',
+]
 
 # Consts indicating whether allocations need to be healed by creating them or
 # by updating existing allocations.
@@ -95,6 +108,35 @@ def mask_passwd_in_url(url):
         parsed.path, parsed.params,
         parsed.query, parsed.fragment)
     return urlparse.urlunparse(new_parsed)
+
+
+def format_dict(dct, dict_property="Property", dict_value='Value',
+                sort_key=None):
+    """Print a `dict` as a table of two columns.
+
+    :param dct: `dict` to print
+    :param dict_property: name of the first column
+    :param dict_value: header label for the value (second) column
+    :param sort_key: key used for sorting the dict
+    """
+    pt = prettytable.PrettyTable([dict_property, dict_value])
+    pt.align = 'l'
+    for k, v in sorted(dct.items(), key=sort_key):
+        # convert dict to str to check length
+        if isinstance(v, dict):
+            v = str(v)
+        # if value has a newline, add in multiple rows
+        # e.g. fault with stacktrace
+        if v and isinstance(v, str) and r'\n' in v:
+            lines = v.strip().split(r'\n')
+            col1 = k
+            for line in lines:
+                pt.add_row([col1, line])
+                col1 = ''
+        else:
+            pt.add_row([k, v])
+
+    return encodeutils.safe_encode(pt.get_string()).decode()
 
 
 class DbCommands(object):
@@ -120,7 +162,7 @@ class DbCommands(object):
         # Added in Pike
         quotas_obj.migrate_quota_classes_to_api_db,
         # Added in Queens
-        sa_db.migration_migrate_to_uuid,
+        db.migration_migrate_to_uuid,
         # Added in Queens
         block_device_obj.BlockDeviceMapping.populate_uuids,
         # Added in Rocky
@@ -140,36 +182,6 @@ class DbCommands(object):
         pci_device_obj.PciDevice.populate_dev_uuids,
     )
 
-    @staticmethod
-    def _print_dict(dct, dict_property="Property", dict_value='Value',
-                    sort_key=None):
-        """Print a `dict` as a table of two columns.
-
-        :param dct: `dict` to print
-        :param dict_property: name of the first column
-        :param wrap: wrapping for the second column
-        :param dict_value: header label for the value (second) column
-        :param sort_key: key used for sorting the dict
-        """
-        pt = prettytable.PrettyTable([dict_property, dict_value])
-        pt.align = 'l'
-        for k, v in sorted(dct.items(), key=sort_key):
-            # convert dict to str to check length
-            if isinstance(v, dict):
-                v = str(v)
-            # if value has a newline, add in multiple rows
-            # e.g. fault with stacktrace
-            if v and isinstance(v, str) and r'\n' in v:
-                lines = v.strip().split(r'\n')
-                col1 = k
-                for line in lines:
-                    pt.add_row([col1, line])
-                    col1 = ''
-            else:
-                pt.add_row([k, v])
-
-        print(encodeutils.safe_encode(pt.get_string()).decode())
-
     @args('--local_cell', action='store_true',
           help='Only sync db in the local cell: do not attempt to fan-out '
                'to all cells')
@@ -181,23 +193,30 @@ class DbCommands(object):
             # NOTE(mdoff): Multiple cells not yet implemented. Currently
             # fanout only looks for cell0.
             try:
-                cell_mapping = objects.CellMapping.get_by_uuid(ctxt,
-                                            objects.CellMapping.CELL0_UUID)
+                cell_mapping = objects.CellMapping.get_by_uuid(
+                    ctxt, objects.CellMapping.CELL0_UUID,
+                )
                 with context.target_cell(ctxt, cell_mapping) as cctxt:
                     migration.db_sync(version, context=cctxt)
             except exception.CellMappingNotFound:
-                print(_('WARNING: cell0 mapping not found - not'
-                        ' syncing cell0.'))
+                msg = _(
+                    'WARNING: cell0 mapping not found - not syncing cell0.'
+                )
+                print(msg)
             except Exception as e:
-                print(_("""ERROR: Could not access cell0.
-Has the nova_api database been created?
-Has the nova_cell0 database been created?
-Has "nova-manage api_db sync" been run?
-Has "nova-manage cell_v2 map_cell0" been run?
-Is [api_database]/connection set in nova.conf?
-Is the cell0 database connection URL correct?
-Error: %s""") % str(e))
+                msg = _(
+                    'ERROR: Could not access cell0.\n'
+                    'Has the nova_api database been created?\n'
+                    'Has the nova_cell0 database been created?\n'
+                    'Has "nova-manage api_db sync" been run?\n'
+                    'Has "nova-manage cell_v2 map_cell0" been run?\n'
+                    'Is [api_database]/connection set in nova.conf?\n'
+                    'Is the cell0 database connection URL correct?\n'
+                    'Error: %s'
+                )
+                print(msg % str(e))
                 return 1
+
         return migration.db_sync(version)
 
     def version(self):
@@ -223,9 +242,22 @@ Error: %s""") % str(e))
           help='Purge all data from shadow tables after archive completes')
     @args('--all-cells', action='store_true', dest='all_cells',
           default=False, help='Run command across all cells.')
-    def archive_deleted_rows(self, max_rows=1000, verbose=False,
-                             until_complete=False, purge=False,
-                             before=None, all_cells=False):
+    @args('--task-log', action='store_true', dest='task_log', default=False,
+          help=('Also archive ``task_log`` table records. Note that '
+                '``task_log`` records are never deleted, so archiving them '
+                'will move all of the ``task_log`` records up to now into the '
+                'shadow tables. It is recommended to also specify the '
+                '``--before`` option to avoid races for those consuming '
+                '``task_log`` record data via the '
+                '``/os-instance_usage_audit_log`` API (example: Telemetry).'))
+    @args('--sleep', type=int, metavar='<seconds>', dest='sleep',
+          help='The amount of time in seconds to sleep between batches when '
+               '``--until-complete`` is used. Defaults to 0.')
+    def archive_deleted_rows(
+        self, max_rows=1000, verbose=False,
+        until_complete=False, purge=False,
+        before=None, all_cells=False, task_log=False, sleep=0,
+    ):
         """Move deleted rows from production tables to shadow tables.
 
         Returns 0 if nothing was archived, 1 if some number of rows were
@@ -238,9 +270,9 @@ Error: %s""") % str(e))
         if max_rows < 0:
             print(_("Must supply a positive value for max_rows"))
             return 2
-        if max_rows > db.MAX_INT:
+        if max_rows > db_const.MAX_INT:
             print(_('max rows must be <= %(max_value)d') %
-                  {'max_value': db.MAX_INT})
+                  {'max_value': db_const.MAX_INT})
             return 2
 
         ctxt = context.get_admin_context()
@@ -317,7 +349,9 @@ Error: %s""") % str(e))
                         until_complete,
                         verbose,
                         before_date,
-                        cell_name)
+                        cell_name,
+                        task_log,
+                        sleep)
                 except KeyboardInterrupt:
                     interrupt = True
                     break
@@ -333,9 +367,12 @@ Error: %s""") % str(e))
 
         if verbose:
             if table_to_rows_archived:
-                self._print_dict(table_to_rows_archived, _('Table'),
-                                 dict_value=_('Number of Rows Archived'),
-                                 sort_key=print_sort_func)
+                print(format_dict(
+                    table_to_rows_archived,
+                    dict_property=_('Table'),
+                    dict_value=_('Number of Rows Archived'),
+                    sort_key=print_sort_func,
+                ))
             else:
                 print(_('Nothing was archived.'))
 
@@ -347,8 +384,10 @@ Error: %s""") % str(e))
         # NOTE(danms): Return nonzero if we archived something
         return int(bool(table_to_rows_archived))
 
-    def _do_archive(self, table_to_rows_archived, cctxt, max_rows,
-                    until_complete, verbose, before_date, cell_name):
+    def _do_archive(
+        self, table_to_rows_archived, cctxt, max_rows,
+        until_complete, verbose, before_date, cell_name, task_log, sleep,
+    ):
         """Helper function for archiving deleted rows for a cell.
 
         This will archive deleted rows for a cell database and remove the
@@ -367,11 +406,15 @@ Error: %s""") % str(e))
         :param before_date: Archive rows that were deleted before this date
         :param cell_name: Name of the cell or None if not archiving across all
             cells
+        :param task_log: Whether to archive task_log table rows
+        :param sleep: The amount of time in seconds to sleep between batches
+            when ``until_complete`` is True.
         """
         ctxt = context.get_admin_context()
         while True:
             run, deleted_instance_uuids, total_rows_archived = \
-                db.archive_deleted_rows(cctxt, max_rows, before=before_date)
+                db.archive_deleted_rows(
+                    cctxt, max_rows, before=before_date, task_log=task_log)
             for table_name, rows_archived in run.items():
                 if cell_name:
                     table_name = cell_name + '.' + table_name
@@ -397,6 +440,7 @@ Error: %s""") % str(e))
                         ctxt, deleted_instance_uuids))
                 table_to_rows_archived[
                     'API_DB.instance_group_member'] += deleted_group_members
+
             # If we're not archiving until there is nothing more to archive, we
             # have reached max_rows in this cell DB or there was nothing to
             # archive.
@@ -404,6 +448,8 @@ Error: %s""") % str(e))
                 break
             if verbose:
                 sys.stdout.write('.')
+            # Optionally sleep between batches to throttle the archiving.
+            time.sleep(sleep)
         return total_rows_archived
 
     @args('--before', metavar='<before>', dest='before',
@@ -448,13 +494,12 @@ Error: %s""") % str(e))
             for cell in cells:
                 identity = _('Cell %s') % cell.identity
                 with context.target_cell(admin_ctxt, cell) as cctxt:
-                    deleted += sa_db.purge_shadow_tables(cctxt,
-                                                         before_date,
-                                                         status_fn=status)
+                    deleted += db.purge_shadow_tables(
+                        cctxt, before_date, status_fn=status)
         else:
             identity = _('DB')
-            deleted = sa_db.purge_shadow_tables(admin_ctxt,
-                                                before_date, status_fn=status)
+            deleted = db.purge_shadow_tables(
+                admin_ctxt, before_date, status_fn=status)
         if deleted:
             return 0
         else:
@@ -706,7 +751,16 @@ class CellV2Commands(object):
             # worry about parsing and splitting a URL which could have special
             # characters in the password, which makes parsing a nightmare.
             url = sqla_url.make_url(connection)
-            url.database = url.database + '_cell0'
+
+            # TODO(gibi): remove hasattr() conditional in favor of "url.set()"
+            # when SQLAlchemy 1.4 is the minimum version in requirements
+            if hasattr(url, "set"):
+                url = url.set(database=url.database + '_cell0')
+            else:
+                # TODO(zzzeek): remove when SQLAlchemy 1.4
+                # is the minimum version in requirements
+                url.database = url.database + '_cell0'
+
             return urlparse.unquote(str(url))
 
         dbc = database_connection or cell0_default_connection()
@@ -1694,6 +1748,18 @@ class PlacementCommands(object):
         allocations['user_id'] = instance.user_id
         return allocations
 
+    @staticmethod
+    def ensure_instance_has_no_vgpu_request(instance):
+        if instance.flavor.extra_specs.get("resources:VGPU"):
+            raise exception.HealvGPUAllocationNotSupported(
+                instance_uuid=instance.uuid)
+
+    @staticmethod
+    def ensure_instance_has_no_cyborg_device_profile_request(instance):
+        if instance.flavor.extra_specs.get("accel:device_profile"):
+            raise exception.HealDeviceProfileAllocationNotSupported(
+                instance_uuid=instance.uuid)
+
     def _heal_allocations_for_instance(self, ctxt, instance, node_cache,
                                        output, placement, dry_run,
                                        heal_port_allocations, neutron,
@@ -1749,6 +1815,9 @@ class PlacementCommands(object):
         if instance.node is None:
             output(_('Instance %s is not on a host.') % instance.uuid)
             return
+
+        self.ensure_instance_has_no_vgpu_request(instance)
+        self.ensure_instance_has_no_cyborg_device_profile_request(instance)
 
         try:
             allocations = placement.get_allocs_for_consumer(
@@ -1866,7 +1935,7 @@ class PlacementCommands(object):
         :param max_count: batch size (limit per instance query)
         :param unlimited: True if all instances in the cell should be
             processed, else False to just process $max_count instances
-        :param outout: function that takes a single message for verbose output
+        :param output: function that takes a single message for verbose output
         :param placement: nova.scheduler.client.report.SchedulerReportClient
             to communicate with the Placement service API.
         :param dry_run: Process instances and print output but do not commit
@@ -2006,6 +2075,7 @@ class PlacementCommands(object):
         * 5: Unable to query ports from neutron
         * 6: Unable to update ports in neutron
         * 7: Cannot roll back neutron port updates. Manual steps needed.
+        * 8: Cannot heal instance with vGPU or Cyborg resource request
         * 127: Invalid input.
         """
         # NOTE(mriedem): Thoughts on ways to expand this:
@@ -2134,6 +2204,12 @@ class PlacementCommands(object):
                 except exception.UnableToRollbackPortUpdates as e:
                     print(e.format_message())
                     return 7
+                except (
+                    exception.HealvGPUAllocationNotSupported,
+                    exception.HealDeviceProfileAllocationNotSupported,
+                ) as e:
+                    print(e.format_message())
+                    return 8
 
                 # Make sure we don't go over the max count. Note that we
                 # don't include instances that already have allocations in the
@@ -2227,7 +2303,7 @@ class PlacementCommands(object):
         """
         # Start by getting all host aggregates.
         ctxt = context.get_admin_context()
-        aggregate_api = compute_api.AggregateAPI()
+        aggregate_api = api.AggregateAPI()
         placement = aggregate_api.placement_client
         aggregates = aggregate_api.get_aggregate_list(ctxt)
         # Now we're going to loop over the existing compute hosts in aggregates
@@ -2403,7 +2479,7 @@ class PlacementCommands(object):
         else:
             try:
                 placement.delete_allocation_for_instance(
-                    ctxt, consumer_uuid, consumer_type)
+                    ctxt, consumer_uuid, consumer_type, force=True)
             except exception.AllocationDeleteFailed:
                 return False
         return True
@@ -2541,7 +2617,7 @@ class PlacementCommands(object):
         """
         url = '/resource_providers'
         if 'uuid' in kwargs:
-            url += '&uuid=%s' % kwargs['uuid']
+            url += '?uuid=%s' % kwargs['uuid']
 
         resp = placement.get(url, global_request_id=context.global_id,
                              version='1.14')
@@ -2653,7 +2729,9 @@ class LibvirtCommands(object):
                 exception.InstanceMappingNotFound) as e:
             print(str(e))
             return 2
-        except Exception:
+        except Exception as e:
+            print('Unexpected error, see nova-manage.log for the full '
+                  'trace: %s ' % str(e))
             LOG.exception('Unexpected error')
             return 1
 
@@ -2707,7 +2785,9 @@ class LibvirtCommands(object):
         ) as e:
             print(str(e))
             return 2
-        except Exception:
+        except Exception as e:
+            print('Unexpected error, see nova-manage.log for the full '
+                  'trace: %s ' % str(e))
             LOG.exception('Unexpected error')
             return 1
 
@@ -2738,7 +2818,9 @@ class LibvirtCommands(object):
         except exception.CellMappingNotFound as e:
             print(str(e))
             return 2
-        except Exception:
+        except Exception as e:
+            print('Unexpected error, see nova-manage.log for the full '
+                  'trace: %s ' % str(e))
             LOG.exception('Unexpected error')
             return 1
 
@@ -2750,12 +2832,312 @@ class LibvirtCommands(object):
             return 0
 
 
+class VolumeAttachmentCommands(object):
+
+    @action_description(_("Show the details of a given volume attachment."))
+    @args(
+        'instance_uuid', metavar='<instance_uuid>',
+        help='UUID of the instance')
+    @args(
+        'volume_id', metavar='<volume_id>',
+        help='UUID of the volume')
+    @args(
+        '--connection_info', action='store_true',
+        default=False, dest='connection_info', required=False,
+        help='Only display the connection_info of the volume attachment.')
+    @args(
+        '--json', action='store_true',
+        default=False, dest='json', required=False,
+        help='Display output as json without a table.')
+    def show(
+        self,
+        instance_uuid=None,
+        volume_id=None,
+        connection_info=False,
+        json=False
+    ):
+        """Show attributes of a given volume attachment.
+
+        Return codes:
+        * 0: Command completed successfully.
+        * 1: An unexpected error happened.
+        * 2: Instance not found.
+        * 3: Volume is not attached to instance.
+        """
+        try:
+            ctxt = context.get_admin_context()
+            im = objects.InstanceMapping.get_by_instance_uuid(
+                ctxt, instance_uuid)
+            with context.target_cell(ctxt, im.cell_mapping) as cctxt:
+                bdm = objects.BlockDeviceMapping.get_by_volume(
+                    cctxt, volume_id, instance_uuid)
+                if connection_info and json:
+                    print(bdm.connection_info)
+                elif connection_info:
+                    print(format_dict(jsonutils.loads(bdm.connection_info)))
+                elif json:
+                    print(jsonutils.dumps(bdm))
+                else:
+                    print(format_dict(bdm))
+                return 0
+        except exception.VolumeBDMNotFound as e:
+            print(str(e))
+            return 3
+        except (
+            exception.InstanceNotFound,
+            exception.InstanceMappingNotFound,
+        ) as e:
+            print(str(e))
+            return 2
+        except Exception as e:
+            print('Unexpected error, see nova-manage.log for the full '
+                  'trace: %s ' % str(e))
+            LOG.exception('Unexpected error')
+            return 1
+
+    @action_description(_('Show the host connector for this host'))
+    @args(
+        '--json', action='store_true',
+        default=False, dest='json', required=False,
+        help='Display output as json without a table.')
+    def get_connector(self, json=False):
+        """Show the host connector for this host.
+
+        Return codes:
+        * 0: Command completed successfully.
+        * 1: An unexpected error happened.
+        """
+        try:
+            root_helper = utils.get_root_helper()
+            host_connector = connector.get_connector_properties(
+                root_helper, CONF.my_block_storage_ip,
+                CONF.libvirt.volume_use_multipath,
+                enforce_multipath=True,
+                host=CONF.host)
+            if json:
+                print(jsonutils.dumps(host_connector))
+            else:
+                print(format_dict(host_connector))
+            return 0
+        except Exception as e:
+            print('Unexpected error, see nova-manage.log for the full '
+                  'trace: %s ' % str(e))
+            LOG.exception('Unexpected error')
+            return 1
+
+    def _refresh(self, instance_uuid, volume_id, connector):
+        """Refresh the bdm.connection_info associated with a volume attachment
+
+        Unlike the current driver BDM implementation under
+        nova.virt.block_device.DriverVolumeBlockDevice.refresh_connection_info
+        that simply GETs an existing volume attachment from cinder this method
+        cleans up any existing volume connections from the host before creating
+        a fresh attachment in cinder and populates the underlying BDM with
+        connection_info from the new attachment.
+
+        We can do that here as the command requires that the instance is
+        stopped, something that isn't always the case with the current driver
+        BDM approach and thus the two are kept seperate for the time being.
+
+        :param instance_uuid: UUID of instance
+        :param volume_id: ID of volume attached to the instance
+        :param connector: Connector with which to create the new attachment
+        """
+        volume_api = cinder.API()
+        compute_rpcapi = rpcapi.ComputeAPI()
+        compute_api = api.API()
+
+        ctxt = context.get_admin_context()
+        im = objects.InstanceMapping.get_by_instance_uuid(ctxt, instance_uuid)
+        with context.target_cell(ctxt, im.cell_mapping) as cctxt:
+
+            instance = objects.Instance.get_by_uuid(cctxt, instance_uuid)
+            bdm = objects.BlockDeviceMapping.get_by_volume_and_instance(
+                    cctxt, volume_id, instance_uuid)
+
+            if instance.vm_state != obj_fields.InstanceState.STOPPED:
+                raise exception.InstanceInvalidState(
+                    instance_uuid=instance_uuid, attr='vm_state',
+                    state=instance.vm_state,
+                    method='refresh connection_info (must be stopped)')
+
+            if instance.locked:
+                raise exception.InstanceInvalidState(
+                    instance_uuid=instance_uuid, attr='locked', state='True',
+                    method='refresh connection_info (must be unlocked)')
+
+            compute_api.lock(
+                cctxt, instance,
+                reason=(
+                    f'Refreshing connection_info for BDM {bdm.uuid} '
+                    f'associated with instance {instance_uuid} and volume '
+                    f'{volume_id}.'))
+
+        # NOTE(lyarwood): Yes this is weird but we need to recreate the admin
+        # context here to ensure the lock above uses a unique request-id
+        # versus the following refresh and eventual unlock.
+        ctxt = context.get_admin_context()
+        with context.target_cell(ctxt, im.cell_mapping) as cctxt:
+            instance_action = None
+            new_attachment_id = None
+            try:
+                # Log this as an instance action so operators and users are
+                # aware that this has happened.
+                instance_action = objects.InstanceAction.action_start(
+                    cctxt, instance_uuid,
+                    instance_actions.NOVA_MANAGE_REFRESH_VOLUME_ATTACHMENT)
+
+                # Create a blank attachment to keep the volume reserved
+                new_attachment_id = volume_api.attachment_create(
+                    cctxt, volume_id, instance_uuid)['id']
+
+                # RPC call to the compute to cleanup the connections, which
+                # will in turn unmap the volume from the compute host
+                # TODO(lyarwood): Add delete_attachment as a kwarg to
+                # remove_volume_connection as is available in the private
+                # method within the manager.
+                compute_rpcapi.remove_volume_connection(
+                    cctxt, instance, volume_id, instance.host)
+
+                # Delete the existing volume attachment if present in the bdm.
+                # This isn't present when the original attachment was made
+                # using the legacy cinderv2 APIs before the cinderv3 attachment
+                # based APIs were present.
+                if bdm.attachment_id:
+                    volume_api.attachment_delete(cctxt, bdm.attachment_id)
+
+                # Update the attachment with host connector, this regenerates
+                # the connection_info that we can now stash in the bdm.
+                new_connection_info = volume_api.attachment_update(
+                    cctxt, new_attachment_id, connector)['connection_info']
+
+                # Before we save it to the BDM ensure the serial is stashed as
+                # is done in various other codepaths when attaching volumes.
+                if 'serial' not in new_connection_info:
+                    new_connection_info['serial'] = bdm.volume_id
+
+                # Save the new attachment id and connection_info to the DB
+                bdm.attachment_id = new_attachment_id
+                bdm.connection_info = jsonutils.dumps(new_connection_info)
+                bdm.save()
+
+                # Finally mark the attachment as complete, moving the volume
+                # status from attaching to in-use ahead of the instance
+                # restarting
+                volume_api.attachment_complete(cctxt, new_attachment_id)
+                return 0
+
+            finally:
+                # If the bdm.attachment_id wasn't updated make sure we clean
+                # up any attachments created during the run.
+                bdm = objects.BlockDeviceMapping.get_by_volume_and_instance(
+                    cctxt, volume_id, instance_uuid)
+                if (
+                    new_attachment_id and
+                    bdm.attachment_id != new_attachment_id
+                ):
+                    volume_api.attachment_delete(cctxt, new_attachment_id)
+
+                # If we failed during attachment_update the bdm.attachment_id
+                # has already been deleted so recreate it now to ensure the
+                # volume is still associated with the instance and clear the
+                # now stale connection_info.
+                try:
+                    volume_api.attachment_get(cctxt, bdm.attachment_id)
+                except exception.VolumeAttachmentNotFound:
+                    bdm.attachment_id = volume_api.attachment_create(
+                        cctxt, volume_id, instance_uuid)['id']
+                    bdm.connection_info = None
+                    bdm.save()
+
+                # Finish the instance action if it was created and started
+                # TODO(lyarwood): While not really required we should store
+                # the exec and traceback in here on failure.
+                if instance_action:
+                    instance_action.finish()
+
+                # NOTE(lyarwood): As above we need to unlock the instance with
+                # a fresh context and request-id to keep it unique. It's safe
+                # to assume that the instance is locked as this point as the
+                # earlier call to lock isn't part of this block.
+                with context.target_cell(
+                    context.get_admin_context(),
+                    im.cell_mapping
+                ) as u_cctxt:
+                    compute_api.unlock(u_cctxt, instance)
+
+    @action_description(
+        _("Refresh the connection info for a given volume attachment"))
+    @args(
+        'instance_uuid', metavar='<instance_uuid>',
+        help='UUID of the instance')
+    @args(
+        'volume_id', metavar='<volume_id>',
+        help='UUID of the volume')
+    @args(
+        'connector_path', metavar='<connector_path>',
+        help='Path to file containing the host connector in json format.')
+    def refresh(self, instance_uuid=None, volume_id=None, connector_path=None):
+        """Refresh the connection_info associated with a volume attachment
+
+        Return codes:
+        * 0: Command completed successfully.
+        * 1: An unexpected error happened.
+        * 2: Connector path does not exist.
+        * 3: Failed to open connector path.
+        * 4: Instance does not exist.
+        * 5: Instance state invalid.
+        * 6: Volume is not attached to instance.
+        """
+        try:
+            # TODO(lyarwood): Make this optional and provide a rpcapi capable
+            # of pulling this down from the target compute during this flow.
+            if not os.path.exists(connector_path):
+                raise exception.InvalidInput(
+                    reason=f'Connector file not found at {connector_path}')
+
+            # Read in the json connector file
+            with open(connector_path, 'rb') as connector_file:
+                connector = jsonutils.load(connector_file)
+
+            # Refresh the volume attachment
+            return self._refresh(instance_uuid, volume_id, connector)
+
+        except exception.VolumeBDMNotFound as e:
+            print(str(e))
+            return 6
+        except exception.InstanceInvalidState as e:
+            print(str(e))
+            return 5
+        except (
+            exception.InstanceNotFound,
+            exception.InstanceMappingNotFound,
+        ) as e:
+            print(str(e))
+            return 4
+        except (ValueError, OSError):
+            print(
+                f'Failed to open {connector_path}. Does it contain valid '
+                f'connector_info data?'
+            )
+            return 3
+        except exception.InvalidInput as e:
+            print(str(e))
+            return 2
+        except Exception as e:
+            print('Unexpected error, see nova-manage.log for the full '
+                  'trace: %s ' % str(e))
+            LOG.exception('Unexpected error')
+            return 1
+
+
 CATEGORIES = {
     'api_db': ApiDbCommands,
     'cell_v2': CellV2Commands,
     'db': DbCommands,
     'placement': PlacementCommands,
     'libvirt': LibvirtCommands,
+    'volume_attachment': VolumeAttachmentCommands,
 }
 
 

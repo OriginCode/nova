@@ -19,7 +19,7 @@ import mock
 from nova import context as nova_context
 from nova import exception_wrapper
 from nova import test
-from nova.tests.unit import fake_notifier
+from nova.tests import fixtures as nova_fixtures
 
 
 def bad_function_exception(self, context, extra, blah="a", boo="b", zoo=None):
@@ -52,8 +52,8 @@ def good_function(self, context):
 class WrapExceptionTestCase(test.NoDBTestCase):
     def setUp(self):
         super(WrapExceptionTestCase, self).setUp()
-        fake_notifier.stub_notifier(self)
-        self.addCleanup(fake_notifier.reset)
+        self.notifier = self.useFixture(
+            nova_fixtures.NotificationFixture(self))
 
     def test_cleanse_dict(self):
         kwargs = {'foo': 1, 'blah_pass': 2, 'zoo_password': 3, '_pass': 4}
@@ -66,8 +66,8 @@ class WrapExceptionTestCase(test.NoDBTestCase):
         wrapped = exception_wrapper.wrap_exception(
             service='compute', binary='nova-compute')
         self.assertEqual(99, wrapped(good_function)(1, 2))
-        self.assertEqual(0, len(fake_notifier.NOTIFICATIONS))
-        self.assertEqual(0, len(fake_notifier.VERSIONED_NOTIFICATIONS))
+        self.assertEqual(0, len(self.notifier.notifications))
+        self.assertEqual(0, len(self.notifier.versioned_notifications))
 
     def test_wrap_exception_unknown_module(self):
         ctxt = nova_context.get_admin_context()
@@ -75,8 +75,8 @@ class WrapExceptionTestCase(test.NoDBTestCase):
             service='compute', binary='nova-compute')
         self.assertRaises(
             TypeError, wrapped(bad_function_unknown_module), None, ctxt)
-        self.assertEqual(1, len(fake_notifier.VERSIONED_NOTIFICATIONS))
-        notification = fake_notifier.VERSIONED_NOTIFICATIONS[0]
+        self.assertEqual(1, len(self.notifier.versioned_notifications))
+        notification = self.notifier.versioned_notifications[0]
         payload = notification['payload']['nova_object.data']
         self.assertEqual('unknown', payload['module_name'])
 
@@ -87,8 +87,8 @@ class WrapExceptionTestCase(test.NoDBTestCase):
         self.assertRaises(test.TestingException,
                           wrapped(bad_function_exception), 1, ctxt, 3, zoo=3)
 
-        self.assertEqual(1, len(fake_notifier.NOTIFICATIONS))
-        notification = fake_notifier.NOTIFICATIONS[0]
+        self.assertEqual(1, len(self.notifier.notifications))
+        notification = self.notifier.notifications[0]
         self.assertEqual('bad_function_exception', notification.event_type)
         self.assertEqual(ctxt, notification.context)
         self.assertEqual(3, notification.payload['args']['extra'])
@@ -96,8 +96,8 @@ class WrapExceptionTestCase(test.NoDBTestCase):
             self.assertIn(key, notification.payload.keys())
         self.assertNotIn('context', notification.payload['args'].keys())
 
-        self.assertEqual(1, len(fake_notifier.VERSIONED_NOTIFICATIONS))
-        notification = fake_notifier.VERSIONED_NOTIFICATIONS[0]
+        self.assertEqual(1, len(self.notifier.versioned_notifications))
+        notification = self.notifier.versioned_notifications[0]
         self.assertEqual('compute.exception', notification['event_type'])
         self.assertEqual('nova-compute:fake-mini',
                          notification['publisher_id'])

@@ -313,6 +313,7 @@ class ViewBuilder(common.ViewBuilder):
             show_extended_attr = context.can(
                 esa_policies.BASE_POLICY_NAME, fatal=False,
                 target={'project_id': instance.project_id})
+
         if show_extended_attr:
             properties = ['host', 'name', 'node']
             if api_version_request.is_supported(request, min_version='2.3'):
@@ -342,6 +343,7 @@ class ViewBuilder(common.ViewBuilder):
                     # the OS-EXT-SRV-ATTR prefix for the attribute key name.
                     key = "OS-EXT-SRV-ATTR:%s" % attr
                 server["server"][key] = getattr(instance, attr)
+
         if show_extended_status:
             # NOTE(gmann): Removed 'locked_by' from extended status
             # to make it same as V2. If needed it can be added with
@@ -352,6 +354,7 @@ class ViewBuilder(common.ViewBuilder):
                 # compat with v2.0.
                 key = "%s:%s" % ('OS-EXT-STS', state)
                 server["server"][key] = instance[state]
+
         if show_extended_volumes:
             # NOTE(mriedem): The os-extended-volumes prefix should not be used
             # for new attributes after v2.1. They are only in v2.1 for backward
@@ -364,7 +367,8 @@ class ViewBuilder(common.ViewBuilder):
             self._add_volumes_attachments(server["server"],
                                           bdms,
                                           add_delete_on_termination)
-        if (api_version_request.is_supported(request, min_version='2.16')):
+
+        if api_version_request.is_supported(request, min_version='2.16'):
             if show_host_status is None:
                 unknown_only = self._get_host_status_unknown_only(
                     context, instance)
@@ -403,6 +407,15 @@ class ViewBuilder(common.ViewBuilder):
             if instance.trusted_certs:
                 trusted_certs = instance.trusted_certs.ids
             server["server"]["trusted_image_certificates"] = trusted_certs
+
+        # TODO(stephenfin): Remove this check once we remove the
+        # OS-EXT-SRV-ATTR:hostname policy checks from the policy is Y or later
+        if api_version_request.is_supported(request, min_version='2.90'):
+            # API 2.90 made this field visible to non-admins, but we only show
+            # it if it's not already added
+            if not show_extended_attr:
+                server["server"]["OS-EXT-SRV-ATTR:hostname"] = \
+                    instance.hostname
 
         if show_server_groups:
             server['server']['server_groups'] = self._get_server_groups(
@@ -525,10 +538,13 @@ class ViewBuilder(common.ViewBuilder):
         # Hide server addresses while the server is building.
         if instance.vm_state == vm_states.BUILDING:
             return {}
+
         context = request.environ["nova.context"]
         networks = common.get_networks_for_instance(context, instance)
-        return self._address_builder.index(networks,
-                                           extend_address)["addresses"]
+
+        return self._address_builder.index(
+            request, networks, extend_address,
+        )["addresses"]
 
     def _get_image(self, request, instance):
         image_ref = instance["image_ref"]
@@ -547,34 +563,32 @@ class ViewBuilder(common.ViewBuilder):
         else:
             return ""
 
-    def _get_flavor_dict(self, request, instance_type, show_extra_specs):
+    def _get_flavor_dict(self, request, flavor, show_extra_specs):
         flavordict = {
-            "vcpus": instance_type.vcpus,
-            "ram": instance_type.memory_mb,
-            "disk": instance_type.root_gb,
-            "ephemeral": instance_type.ephemeral_gb,
-            "swap": instance_type.swap,
-            "original_name": instance_type.name
+            "vcpus": flavor.vcpus,
+            "ram": flavor.memory_mb,
+            "disk": flavor.root_gb,
+            "ephemeral": flavor.ephemeral_gb,
+            "swap": flavor.swap,
+            "original_name": flavor.name
         }
         if show_extra_specs:
-            flavordict['extra_specs'] = instance_type.extra_specs
+            flavordict['extra_specs'] = flavor.extra_specs
         return flavordict
 
     def _get_flavor(self, request, instance, show_extra_specs):
-        instance_type = instance.get_flavor()
-        if not instance_type:
-            LOG.warning("Instance has had its instance_type removed "
+        flavor = instance.get_flavor()
+        if not flavor:
+            LOG.warning("Instance has had its flavor removed "
                         "from the DB", instance=instance)
             return {}
 
         if api_version_request.is_supported(request, min_version="2.47"):
-            return self._get_flavor_dict(request, instance_type,
-                                         show_extra_specs)
+            return self._get_flavor_dict(request, flavor, show_extra_specs)
 
-        flavor_id = instance_type["flavorid"]
-        flavor_bookmark = self._flavor_builder._get_bookmark_link(request,
-                                                                  flavor_id,
-                                                                  "flavors")
+        flavor_id = flavor["flavorid"]
+        flavor_bookmark = self._flavor_builder._get_bookmark_link(
+            request, flavor_id, "flavors")
         return {
             "id": str(flavor_id),
             "links": [{

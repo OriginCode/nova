@@ -18,7 +18,7 @@ from oslo_utils import units
 
 from nova.objects import fields as obj_fields
 from nova import test
-from nova.tests.unit.virt.libvirt import fake_libvirt_data
+from nova.tests.fixtures import libvirt_data as fake_libvirt_data
 from nova.virt import hardware
 from nova.virt.libvirt import config
 
@@ -1603,6 +1603,24 @@ class LibvirtConfigGuestHostdevPCI(LibvirtConfigBaseTest):
         obj.parse_str(xmldoc)
         self.assertEqual(obj.mode, 'subsystem')
         self.assertEqual(obj.type, 'usb')
+
+    def test_config_alias_parse(self):
+        xml = """
+            <hostdev mode='subsystem' type='pci' managed='yes'>
+                <driver name='vfio'/>
+                <source>
+                    <address domain='0x0000' bus='0x81' slot='0x00'
+                             function='0x1'/>
+                </source>
+                <alias name='hostdev1'/>
+                <address type='pci' domain='0x0000' bus='0x00' slot='0x05'
+                         function='0x0'/>
+            </hostdev>"""
+
+        xmldoc = etree.fromstring(xml)
+        obj = config.LibvirtConfigGuestHostdevPCI()
+        obj.parse_dom(xmldoc)
+        self.assertEqual('hostdev1', obj.alias)
 
 
 class LibvirtConfigGuestHostdevMDEV(LibvirtConfigBaseTest):

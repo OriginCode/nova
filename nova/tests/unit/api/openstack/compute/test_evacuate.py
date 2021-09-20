@@ -67,9 +67,12 @@ class EvacuateTestV21(test.NoDBTestCase):
         self.stub_out('nova.compute.api.API.get', fake_compute_api_get)
         self.stub_out('nova.compute.api.HostAPI.service_get_by_compute_host',
                       fake_service_get_by_compute_host)
-        self.mock_list_port = self.useFixture(
-            fixtures.MockPatch('nova.network.neutron.API.list_ports')).mock
-        self.mock_list_port.return_value = {'ports': []}
+        self.mock_neutron_extension_list = self.useFixture(
+            fixtures.MockPatch(
+                'nova.network.neutron.API._refresh_neutron_extensions_cache'
+            )
+        ).mock
+        self.mock_neutron_extension_list.return_value = {'extensions': []}
         self.UUID = uuids.fake
         for _method in self._methods:
             self.stub_out('nova.compute.api.API.%s' % _method,
@@ -112,20 +115,29 @@ class EvacuateTestV21(test.NoDBTestCase):
                                      uuid='BAD_UUID')
 
     @mock.patch('nova.compute.api.API.evacuate')
-    def test_evacuate__with_vtpm(self, mock_evacuate):
+    def test_evacuate_raise_badrequest_with_vtpm(self, mock_evacuate):
         mock_evacuate.side_effect = exception.OperationNotSupportedForVTPM(
             instance_uuid=uuids.instance, operation='foo')
         self._check_evacuate_failure(
-            webob.exc.HTTPConflict,
+            webob.exc.HTTPBadRequest,
             {'host': 'foo', 'onSharedStorage': 'False', 'adminPass': 'bar'})
 
     @mock.patch('nova.compute.api.API.evacuate')
-    def test_evacuate__with_vdpa_interface(self, mock_evacuate):
+    def test_evacuate_raise_badrequest_with_vdpa_interface(
+        self, mock_evacuate):
         mock_evacuate.side_effect = \
             exception.OperationNotSupportedForVDPAInterface(
                 instance_uuid=uuids.instance, operation='foo')
         self._check_evacuate_failure(
-            webob.exc.HTTPConflict,
+            webob.exc.HTTPBadRequest,
+            {'host': 'foo', 'onSharedStorage': 'False', 'adminPass': 'bar'})
+
+    @mock.patch('nova.compute.api.API.evacuate')
+    def test_evacuate_raise_badrequest_for_accelerator(self, mock_evacuate):
+        mock_evacuate.side_effect = \
+            exception.ForbiddenWithAccelerators()
+        self._check_evacuate_failure(
+            webob.exc.HTTPBadRequest,
             {'host': 'foo', 'onSharedStorage': 'False', 'adminPass': 'bar'})
 
     def test_evacuate_with_active_service(self):

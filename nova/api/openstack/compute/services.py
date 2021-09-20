@@ -189,6 +189,9 @@ class ServiceController(wsgi.Controller):
         host = body['host']
         binary = body['binary']
 
+        if binary == 'nova-compute' and forced_down is False:
+            self._check_for_evacuations(context, host)
+
         ret_value = {'service': {'host': host,
                                  'binary': binary,
                                  'forced_down': forced_down}}
@@ -224,6 +227,25 @@ class ServiceController(wsgi.Controller):
             raise webob.exc.HTTPNotFound(explanation=msg)
 
         return action(body, context)
+
+    def _check_for_evacuations(self, context, hostname):
+        # NOTE(lyarwood): When forcing a compute service back up ensure that
+        # there are no evacuation migration records against this host as the
+        # source that are marked as done, suggesting that the compute service
+        # hasn't restarted and moved such records to a completed state.
+        filters = {
+            'source_compute': hostname,
+            'status': 'done',
+            'migration_type': objects.fields.MigrationType.EVACUATION,
+        }
+        if any(objects.MigrationList.get_by_filters(context, filters)):
+            msg = _("Unable to force up host %(host)s as `done` evacuation "
+                    "migration records remain associated with the host. "
+                    "Ensure the compute service has been restarted, "
+                    "allowing these records to move to `completed` before "
+                    "retrying this request.") % {'host': hostname}
+            # TODO(lyarwood): Move to 409 HTTPConflict under a new microversion
+            raise webob.exc.HTTPBadRequest(explanation=msg)
 
     @wsgi.response(204)
     @wsgi.expected_errors((400, 404, 409))
@@ -266,10 +288,26 @@ class ServiceController(wsgi.Controller):
                 # service delete since we could orphan resource providers and
                 # break the ability to do things like confirm/revert instances
                 # in VERIFY_RESIZE status.
-                compute_nodes = objects.ComputeNodeList.get_all_by_host(
-                    context, service.host)
-                self._assert_no_in_progress_migrations(
-                    context, id, compute_nodes)
+                compute_nodes = []
+                try:
+                    compute_nodes = objects.ComputeNodeList.get_all_by_host(
+                        context, service.host)
+                    self._assert_no_in_progress_migrations(
+                        context, id, compute_nodes)
+                except exception.ComputeHostNotFound:
+                    # NOTE(artom) Consider the following situation:
+                    # - Using the Ironic virt driver
+                    # - Replacing (so removing and re-adding) all baremetal
+                    #   nodes associated with a single nova-compute service
+                    # The update resources periodic will have destroyed the
+                    # compute node records because they're no longer being
+                    # reported by the virt driver. If we then attempt to
+                    # manually delete the compute service record,
+                    # get_all_host() above will raise, as there are no longer
+                    # any compute node records for the host. Catch it here and
+                    # continue to allow compute service deletion.
+                    LOG.info('Deleting compute service with no associated '
+                             'compute nodes.')
 
                 aggrs = self.aggregate_api.get_aggregates_by_host(context,
                                                                   service.host)
@@ -446,6 +484,8 @@ class ServiceController(wsgi.Controller):
         if 'forced_down' in body:
             service.forced_down = strutils.bool_from_string(
                 body['forced_down'], strict=True)
+            if service.forced_down is False:
+                self._check_for_evacuations(context, service.host)
 
         # Check to see if anything was actually updated since the schema does
         # not define any required fields.

@@ -1,6 +1,6 @@
-===============
- Configuration
-===============
+=============
+Configuration
+=============
 
 To configure your Compute installation, you must define configuration options
 in these files:
@@ -25,6 +25,5 @@ A list of config options based on different topics can be found below:
    /admin/configuration/fibre-channel
    /admin/configuration/iscsi-offload
    /admin/configuration/hypervisors
-   /admin/configuration/schedulers
    /admin/configuration/logs
    /admin/configuration/samples/index

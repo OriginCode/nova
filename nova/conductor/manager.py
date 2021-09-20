@@ -42,7 +42,6 @@ from nova.conductor.tasks import cross_cell_migrate
 from nova.conductor.tasks import live_migrate
 from nova.conductor.tasks import migrate
 from nova import context as nova_context
-from nova.db import base
 from nova import exception
 from nova.i18n import _
 from nova.image import glance
@@ -224,7 +223,7 @@ def obj_target_cell(obj, cell):
 
 
 @profiler.trace_cls("rpc")
-class ComputeTaskManager(base.Base):
+class ComputeTaskManager:
     """Namespace for compute methods.
 
     This class presents an rpc API for nova-conductor under the 'compute_task'
@@ -236,7 +235,6 @@ class ComputeTaskManager(base.Base):
     target = messaging.Target(namespace='compute_task', version='1.23')
 
     def __init__(self):
-        super(ComputeTaskManager, self).__init__()
         self.compute_rpcapi = compute_rpcapi.ComputeAPI()
         self.volume_api = cinder.API()
         self.image_api = glance.API()
@@ -594,7 +592,13 @@ class ComputeTaskManager(base.Base):
             legacy_request_spec)
         self._cleanup_allocated_networks(
             context, instance, requested_networks)
-        compute_utils.delete_arqs_if_needed(context, instance)
+
+        arq_uuids = None
+        # arqs have not bound to port/instance yet
+        if requested_networks:
+            arq_uuids = [req.arq_uuid
+                for req in requested_networks if req.arq_uuid]
+        compute_utils.delete_arqs_if_needed(context, instance, arq_uuids)
 
     # NOTE(danms): This is never cell-targeted because it is only used for
     # n-cpu reschedules which go to the cell conductor and thus are always
@@ -838,7 +842,8 @@ class ComputeTaskManager(base.Base):
 
             try:
                 accel_uuids = self._create_and_bind_arq_for_instance(
-                    context, instance, host.nodename, local_reqspec)
+                    context, instance, host.nodename, local_reqspec,
+                    requested_networks)
             except Exception as exc:
                 LOG.exception('Failed to reschedule. Reason: %s', exc)
                 self._cleanup_when_reschedule_fails(
@@ -858,16 +863,36 @@ class ComputeTaskManager(base.Base):
                     limits=host.limits, host_list=host_list,
                     accel_uuids=accel_uuids)
 
-    def _create_and_bind_arq_for_instance(self, context, instance, hostname,
-                                          request_spec):
+    def _create_and_bind_arq_for_instance(
+            self, context, instance, hostname,
+            request_spec, requested_networks=None):
         try:
             resource_provider_mapping = (
                 request_spec.get_request_group_mapping())
             # Using nodename instead of hostname. See:
             # http://lists.openstack.org/pipermail/openstack-discuss/2019-November/011044.html  # noqa
-            return self._create_and_bind_arqs(
-                context, instance.uuid, instance.flavor.extra_specs,
+            cyclient = cyborg.get_client(context)
+            bindings = {}
+            port_bindings = {}
+
+            # Create ARQs comes from extra specs.
+            bindings = self._create_and_bind_arqs(
+                cyclient, instance.uuid, instance.flavor.extra_specs,
                 hostname, resource_provider_mapping)
+
+            if requested_networks:
+                # Create ARQs comes from port device profile
+                port_bindings = self._create_arqs_for_ports(
+                    cyclient, instance.uuid, requested_networks,
+                    hostname, resource_provider_mapping)
+
+            # Initiate Cyborg binding asynchronously
+            bindings.update(port_bindings)
+            if bindings:
+                cyclient.bind_arqs(bindings)
+
+            return list(bindings.keys())
+
         except exception.AcceleratorRequestBindingFailed as exc:
             # If anything failed here we need to cleanup and bail out.
             cyclient = cyborg.get_client(context)
@@ -962,20 +987,21 @@ class ComputeTaskManager(base.Base):
                     # when populate_filter_properties accepts it
                     filter_properties = request_spec.\
                         to_legacy_filter_properties_dict()
-
-                    external_resources = (
+                    res_req, req_lvl_params = (
                         self.network_api.get_requested_resource_for_instance(
-                            context, instance.uuid))
+                            context, instance.uuid)
+                    )
                     extra_specs = request_spec.flavor.extra_specs
                     device_profile = extra_specs.get('accel:device_profile')
-                    external_resources.extend(
+                    res_req.extend(
                         cyborg.get_device_profile_request_groups(
                             context, device_profile) if device_profile else [])
                     # NOTE(gibi): When other modules want to handle similar
                     # non-nova resources then here we have to collect all
                     # the external resource requests in a single list and
                     # add them to the RequestSpec.
-                    request_spec.requested_resources = external_resources
+                    request_spec.requested_resources = res_req
+                    request_spec.request_level_params = req_lvl_params
 
                     # NOTE(cfriesen): Ensure that we restrict the scheduler to
                     # the cell specified by the instance mapping.
@@ -1159,14 +1185,13 @@ class ComputeTaskManager(base.Base):
                     # if we want to make sure that the next destination
                     # is not forced to be the original host
                     request_spec.reset_forced_destinations()
-
-                    external_resources = []
-                    external_resources += (
+                    res_req, req_lvl_params = (
                         self.network_api.get_requested_resource_for_instance(
-                            context, instance.uuid))
+                            context, instance.uuid)
+                    )
                     extra_specs = request_spec.flavor.extra_specs
                     device_profile = extra_specs.get('accel:device_profile')
-                    external_resources.extend(
+                    res_req.extend(
                         cyborg.get_device_profile_request_groups(
                             context, device_profile)
                         if device_profile else [])
@@ -1174,7 +1199,8 @@ class ComputeTaskManager(base.Base):
                     # non-nova resources then here we have to collect all
                     # the external resource requests in a single list and
                     # add them to the RequestSpec.
-                    request_spec.requested_resources = external_resources
+                    request_spec.requested_resources = res_req
+                    request_spec.request_level_params = req_lvl_params
 
                 try:
                     # if this is a rebuild of instance on the same host with
@@ -1351,18 +1377,18 @@ class ComputeTaskManager(base.Base):
 
     # TODO(avolkov): move method to bdm
     @staticmethod
-    def _volume_size(instance_type, bdm):
+    def _volume_size(flavor, bdm):
         size = bdm.get('volume_size')
         # NOTE (ndipanov): inherit flavor size only for swap and ephemeral
         if (size is None and bdm.get('source_type') == 'blank' and
                 bdm.get('destination_type') == 'local'):
             if bdm.get('guest_format') == 'swap':
-                size = instance_type.get('swap', 0)
+                size = flavor.get('swap', 0)
             else:
-                size = instance_type.get('ephemeral_gb', 0)
+                size = flavor.get('ephemeral_gb', 0)
         return size
 
-    def _create_block_device_mapping(self, cell, instance_type, instance_uuid,
+    def _create_block_device_mapping(self, cell, flavor, instance_uuid,
                                      block_device_mapping):
         """Create the BlockDeviceMapping objects in the db.
 
@@ -1373,7 +1399,7 @@ class ComputeTaskManager(base.Base):
                   instance_uuid=instance_uuid)
         instance_block_device_mapping = copy.deepcopy(block_device_mapping)
         for bdm in instance_block_device_mapping:
-            bdm.volume_size = self._volume_size(instance_type, bdm)
+            bdm.volume_size = self._volume_size(flavor, bdm)
             bdm.instance_uuid = instance_uuid
             with obj_target_cell(bdm, cell):
                 bdm.update_or_create()
@@ -1583,7 +1609,7 @@ class ComputeTaskManager(base.Base):
                 except exception.InstanceMappingNotFound:
                     pass
                 self.report_client.delete_allocation_for_instance(
-                    context, instance.uuid)
+                    context, instance.uuid, force=True)
                 continue
             else:
                 if host.service_host not in host_az:
@@ -1678,7 +1704,8 @@ class ComputeTaskManager(base.Base):
 
             try:
                 accel_uuids = self._create_and_bind_arq_for_instance(
-                        context, instance, host.nodename, request_spec)
+                        context, instance, host.nodename, request_spec,
+                        requested_networks)
             except Exception as exc:
                 with excutils.save_and_reraise_exception():
                     self._cleanup_build_artifacts(
@@ -1704,33 +1731,78 @@ class ComputeTaskManager(base.Base):
                     limits=host.limits, host_list=host_list,
                     accel_uuids=accel_uuids)
 
-    def _create_and_bind_arqs(self, context, instance_uuid, extra_specs,
-                              hostname, resource_provider_mapping):
-        """Create ARQs, determine their RPs and initiate ARQ binding.
+    def _create_and_bind_arqs(
+            self, cyclient, instance_uuid, extra_specs,
+            hostname, resource_provider_mapping):
+        """Create ARQs comes from extra specs, determine their RPs.
 
            The binding is asynchronous; Cyborg will notify on completion.
            The notification will be handled in the compute manager.
         """
+        arqs = []
+        bindings = {}
         dp_name = extra_specs.get('accel:device_profile')
+
+        # profiles from request spec: Create ARQ and binding
         if not dp_name:
-            return []
+            # empty arq list and binding info
+            return bindings
 
         LOG.debug('Calling Cyborg to get ARQs. dp_name=%s instance=%s',
-                  dp_name, instance_uuid)
-        cyclient = cyborg.get_client(context)
+                dp_name, instance_uuid)
         arqs = cyclient.create_arqs_and_match_resource_providers(
             dp_name, resource_provider_mapping)
         LOG.debug('Got ARQs with resource provider mapping %s', arqs)
+        bindings = {
+            arq['uuid']:
+                {"hostname": hostname,
+                "device_rp_uuid": arq['device_rp_uuid'],
+                "instance_uuid": instance_uuid
+                }
+            for arq in arqs}
 
-        bindings = {arq['uuid']:
-                       {"hostname": hostname,
-                        "device_rp_uuid": arq['device_rp_uuid'],
-                        "instance_uuid": instance_uuid
-                       }
-                    for arq in arqs}
-        # Initiate Cyborg binding asynchronously
-        cyclient.bind_arqs(bindings=bindings)
-        return [arq['uuid'] for arq in arqs]
+        return bindings
+
+    def _create_arqs_for_ports(self, cyclient, instance_uuid,
+                               requested_networks,
+                               hostname, resource_provider_mapping):
+        """Create ARQs for port with backend device profile.
+
+           The binding is asynchronous; Cyborg will notify on completion.
+           The notification will be handled in the compute manager.
+        """
+        bindings = {}
+
+        for request_net in requested_networks:
+            if request_net.port_id and request_net.device_profile:
+                device_profile = request_net.device_profile
+                # the port doesn't support multiple devices
+                arqs = cyclient.create_arqs(device_profile)
+                if len(arqs) > 1:
+                    raise exception.AcceleratorRequestOpFailed(
+                        op=_('create'),
+                        msg='the port does not support multiple devices.')
+                arq = arqs[0]
+
+                LOG.debug("Create ARQ %s for port %s of instance %s",
+                    arq["uuid"], request_net.port_id, instance_uuid)
+                request_net.arq_uuid = arq["uuid"]
+
+                rp_uuid = cyclient.get_arq_device_rp_uuid(
+                    arq,
+                    resource_provider_mapping,
+                    request_net.port_id)
+
+                arq_binding = {request_net.arq_uuid:
+                    {"hostname": hostname,
+                    "device_rp_uuid": rp_uuid,
+                    "instance_uuid": instance_uuid}
+                }
+                LOG.debug("ARQ %s binding: %s", request_net.arq_uuid,
+                    arq_binding)
+                bindings.update(arq_binding)
+
+        return bindings
 
     @staticmethod
     def _map_instance_to_cell(context, instance, cell):

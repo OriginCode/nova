@@ -54,7 +54,7 @@ from nova.compute import vm_states
 import nova.conf
 from nova.console import type as ctype
 from nova import context
-from nova.db import api as db
+from nova.db.main import api as db
 from nova import exception
 from nova.image import glance as image_api
 from nova.network import model as network_model
@@ -68,6 +68,7 @@ from nova.policies import servers as servers_policy
 from nova.scheduler import utils as scheduler_utils
 from nova import test
 from nova.tests import fixtures
+from nova.tests.fixtures import cyborg as cyborg_fixture
 from nova.tests.unit.compute import eventlet_utils
 from nova.tests.unit.compute import fake_resource_tracker
 from nova.tests.unit import fake_block_device
@@ -75,7 +76,6 @@ from nova.tests.unit import fake_diagnostics
 from nova.tests.unit import fake_instance
 from nova.tests.unit import fake_network
 from nova.tests.unit import fake_network_cache_model
-from nova.tests.unit import fake_notifier
 from nova.tests.unit import fake_server_actions
 from nova.tests.unit import matchers
 from nova.tests.unit.objects import test_diagnostics
@@ -148,8 +148,7 @@ class BaseTestCase(test.TestCase):
     def setUp(self):
         super(BaseTestCase, self).setUp()
 
-        fake_notifier.stub_notifier(self)
-        self.addCleanup(fake_notifier.reset)
+        self.notifier = self.useFixture(fixtures.NotificationFixture(self))
 
         self.compute = compute_manager.ComputeManager()
         # NOTE(gibi): this is a hack to make the fake virt driver use the nodes
@@ -200,13 +199,14 @@ class BaseTestCase(test.TestCase):
                         context, objects.ComputeNode(), cn)
                     for cn in fake_compute_nodes]
 
-        def fake_compute_node_delete(context, compute_node_id):
+        def fake_compute_node_delete(context, compute_node_id,
+                                     constraint=None):
             self.assertEqual(2, compute_node_id)
 
         self.stub_out(
             'nova.compute.manager.ComputeManager._get_compute_nodes_in_db',
             fake_get_compute_nodes_in_db)
-        self.stub_out('nova.db.api.compute_node_delete',
+        self.stub_out('nova.db.main.api.compute_node_delete',
                 fake_compute_node_delete)
 
         self.compute.update_available_resource(
@@ -274,6 +274,9 @@ class BaseTestCase(test.TestCase):
                                   services=False, ctxt=None):
         ctxt = ctxt or self.context
         flavor = objects.Flavor.get_by_name(ctxt, type_name)
+        info_cache = objects.InstanceInfoCache(
+            network_info=network_model.NetworkInfo([]))
+
         inst = objects.Instance(context=ctxt)
         inst.vm_state = vm_states.ACTIVE
         inst.task_state = None
@@ -305,6 +308,7 @@ class BaseTestCase(test.TestCase):
         inst.flavor = flavor
         inst.old_flavor = None
         inst.new_flavor = None
+        inst.info_cache = info_cache
         if params:
             inst.flavor.update(params.pop('flavor', {}))
             inst.update(params)
@@ -315,6 +319,17 @@ class BaseTestCase(test.TestCase):
         with context.target_cell(ctxt, cell1) as cctxt:
             inst._context = cctxt
             inst.create()
+
+        inst.services = objects.ServiceList(ctxt)
+        inst.services.objects.append(
+            objects.Service(
+                context=ctxt,
+                host=inst.host,
+                binary='nova-compute',
+                topic='compute',
+                report_count=0
+            )
+        )
 
         # Create an instance mapping in cell1 so the API can get the instance.
         inst_map = objects.InstanceMapping(
@@ -373,8 +388,10 @@ class ComputeVolumeTestCase(BaseTestCase):
             self.cinfo = jsonutils.loads(args[-1].get('connection_info'))
             return self.fake_volume
 
-        self.stub_out('nova.db.api.block_device_mapping_create', store_cinfo)
-        self.stub_out('nova.db.api.block_device_mapping_update', store_cinfo)
+        self.stub_out(
+            'nova.db.main.api.block_device_mapping_create', store_cinfo)
+        self.stub_out(
+            'nova.db.main.api.block_device_mapping_update', store_cinfo)
 
     @mock.patch.object(compute_utils, 'EventReporter')
     def test_attach_volume_serial(self, mock_event):
@@ -877,17 +894,17 @@ class ComputeVolumeTestCase(BaseTestCase):
         self.flags(volume_usage_poll_interval=10)
         self.compute._poll_volume_usage(self.context)
         # Check that a volume.usage and volume.attach notification was sent
-        self.assertEqual(2, len(fake_notifier.NOTIFICATIONS))
+        self.assertEqual(2, len(self.notifier.notifications))
 
         self.compute.detach_volume(self.context, uuids.volume_id, instance,
                                    'attach-id')
 
         # Check that volume.attach, 2 volume.usage, and volume.detach
         # notifications were sent
-        self.assertEqual(4, len(fake_notifier.NOTIFICATIONS))
-        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertEqual(4, len(self.notifier.notifications))
+        msg = self.notifier.notifications[0]
         self.assertEqual('compute.instance.volume.attach', msg.event_type)
-        msg = fake_notifier.NOTIFICATIONS[2]
+        msg = self.notifier.notifications[2]
         self.assertEqual('volume.usage', msg.event_type)
         payload = msg.payload
         self.assertEqual(instance['uuid'], payload['instance_id'])
@@ -898,7 +915,7 @@ class ComputeVolumeTestCase(BaseTestCase):
         self.assertEqual(1, payload['writes'])
         self.assertEqual(20, payload['write_bytes'])
         self.assertIsNone(payload['availability_zone'])
-        msg = fake_notifier.NOTIFICATIONS[3]
+        msg = self.notifier.notifications[3]
         self.assertEqual('compute.instance.volume.detach', msg.event_type)
         mock_notify_usage.assert_has_calls([
             mock.call(self.context, test.MatchType(objects.VolumeUsage),
@@ -945,7 +962,7 @@ class ComputeVolumeTestCase(BaseTestCase):
     def test_prepare_image_mapping(self):
         swap_size = 1
         ephemeral_size = 1
-        instance_type = {'swap': swap_size,
+        flavor = {'swap': swap_size,
                          'ephemeral_gb': ephemeral_size}
         mappings = [
                 {'virtual': 'ami', 'device': 'sda1'},
@@ -958,7 +975,7 @@ class ComputeVolumeTestCase(BaseTestCase):
         ]
 
         preped_bdm = self.compute_api._prepare_image_mapping(
-            instance_type, mappings)
+            flavor, mappings)
 
         expected_result = [
             {
@@ -1011,7 +1028,7 @@ class ComputeVolumeTestCase(BaseTestCase):
         image_id = '77777777-aaaa-bbbb-cccc-555555555555'
 
         instance = self._create_fake_instance_obj()
-        instance_type = {'swap': 1, 'ephemeral_gb': 2}
+        flavor = {'swap': 1, 'ephemeral_gb': 2}
         mappings = [
             fake_block_device.FakeDbBlockDeviceDict({
                 'device_name': '/dev/sdb4',
@@ -1059,7 +1076,7 @@ class ComputeVolumeTestCase(BaseTestCase):
             volume_id: fake_get(None, None, volume_id)
         }
         self.compute_api._validate_bdm(self.context, instance,
-                                       instance_type, mappings, {},
+                                       flavor, mappings, {},
                                        volumes)
         self.assertEqual(4, mappings[1].volume_size)
         self.assertEqual(6, mappings[2].volume_size)
@@ -1068,7 +1085,7 @@ class ComputeVolumeTestCase(BaseTestCase):
         mappings[2].boot_index = 2
         self.assertRaises(exception.InvalidBDMBootSequence,
                           self.compute_api._validate_bdm,
-                          self.context, instance, instance_type,
+                          self.context, instance, flavor,
                           mappings, {}, volumes)
         mappings[2].boot_index = 0
 
@@ -1076,7 +1093,7 @@ class ComputeVolumeTestCase(BaseTestCase):
         self.flags(max_local_block_devices=1)
         self.assertRaises(exception.InvalidBDMLocalsLimit,
                           self.compute_api._validate_bdm,
-                          self.context, instance, instance_type,
+                          self.context, instance, flavor,
                           mappings, {}, volumes)
         ephemerals = [
             fake_block_device.FakeDbBlockDeviceDict({
@@ -1106,7 +1123,7 @@ class ComputeVolumeTestCase(BaseTestCase):
         mappings_ = mappings[:]
         mappings_.objects.extend(ephemerals)
         self.compute_api._validate_bdm(self.context, instance,
-                                       instance_type, mappings_, {},
+                                       flavor, mappings_, {},
                                        volumes)
 
         # Ephemerals over the size limit
@@ -1115,14 +1132,14 @@ class ComputeVolumeTestCase(BaseTestCase):
         mappings_.objects.extend(ephemerals)
         self.assertRaises(exception.InvalidBDMEphemeralSize,
                           self.compute_api._validate_bdm,
-                          self.context, instance, instance_type,
+                          self.context, instance, flavor,
                           mappings_, {}, volumes)
 
         # Swap over the size limit
         mappings[0].volume_size = 3
         self.assertRaises(exception.InvalidBDMSwapSize,
                           self.compute_api._validate_bdm,
-                          self.context, instance, instance_type,
+                          self.context, instance, flavor,
                           mappings, {}, volumes)
         mappings[0].volume_size = 1
 
@@ -1145,7 +1162,7 @@ class ComputeVolumeTestCase(BaseTestCase):
         mappings_.objects.extend(additional_swap)
         self.assertRaises(exception.InvalidBDMFormat,
                           self.compute_api._validate_bdm,
-                          self.context, instance, instance_type,
+                          self.context, instance, flavor,
                           mappings_, {}, volumes)
 
         image_no_size = [
@@ -1164,7 +1181,7 @@ class ComputeVolumeTestCase(BaseTestCase):
         mappings_.objects.extend(image_no_size)
         self.assertRaises(exception.InvalidBDM,
                           self.compute_api._validate_bdm,
-                          self.context, instance, instance_type,
+                          self.context, instance, flavor,
                           mappings_, {}, volumes)
 
         # blank device without a specified size fails
@@ -1183,11 +1200,11 @@ class ComputeVolumeTestCase(BaseTestCase):
         mappings_.objects.extend(blank_no_size)
         self.assertRaises(exception.InvalidBDM,
                           self.compute_api._validate_bdm,
-                          self.context, instance, instance_type,
+                          self.context, instance, flavor,
                           mappings_, {}, volumes)
 
     def test_validate_bdm_with_more_than_one_default(self):
-        instance_type = {'swap': 1, 'ephemeral_gb': 1}
+        flavor = {'swap': 1, 'ephemeral_gb': 1}
         all_mappings = [fake_block_device.FakeDbBlockDeviceDict({
                          'id': 1,
                          'no_device': None,
@@ -1218,13 +1235,13 @@ class ComputeVolumeTestCase(BaseTestCase):
         self.assertRaises(exception.InvalidBDMEphemeralSize,
                           self.compute_api._validate_bdm,
                           self.context, self.instance,
-                          instance_type, all_mappings, image_cache, volumes)
+                          flavor, all_mappings, image_cache, volumes)
 
     @mock.patch.object(cinder.API, 'attachment_create',
                        side_effect=exception.InvalidVolume(reason='error'))
     def test_validate_bdm_media_service_invalid_volume(self, mock_att_create):
         volume_id = uuids.volume_id
-        instance_type = {'swap': 1, 'ephemeral_gb': 1}
+        flavor = {'swap': 1, 'ephemeral_gb': 1}
         bdms = [fake_block_device.FakeDbBlockDeviceDict({
                         'id': 1,
                         'no_device': None,
@@ -1264,7 +1281,7 @@ class ComputeVolumeTestCase(BaseTestCase):
             self.assertRaises(exception.InvalidVolume,
                               self.compute_api._validate_bdm,
                               self.context, self.instance_object,
-                              instance_type, bdms, {}, volumes)
+                              flavor, bdms, {}, volumes)
 
     @mock.patch.object(cinder.API, 'check_availability_zone')
     @mock.patch.object(cinder.API, 'attachment_create',
@@ -1272,7 +1289,7 @@ class ComputeVolumeTestCase(BaseTestCase):
     def test_validate_bdm_media_service_valid(self, mock_att_create,
                                               mock_check_av_zone):
         volume_id = uuids.volume_id
-        instance_type = {'swap': 1, 'ephemeral_gb': 1}
+        flavor = {'swap': 1, 'ephemeral_gb': 1}
         bdms = [fake_block_device.FakeDbBlockDeviceDict({
                          'id': 1,
                          'no_device': None,
@@ -1293,7 +1310,7 @@ class ComputeVolumeTestCase(BaseTestCase):
         image_cache = {}
         volumes = {volume_id: volume}
         self.compute_api._validate_bdm(self.context, self.instance_object,
-                                       instance_type, bdms, image_cache,
+                                       flavor, bdms, image_cache,
                                        volumes)
         mock_check_av_zone.assert_not_called()
         mock_att_create.assert_called_once_with(
@@ -1425,7 +1442,6 @@ class ComputeVolumeTestCase(BaseTestCase):
         }
 
         manager = compute_manager.ComputeManager()
-        manager.use_legacy_block_device_info = False
         mock_bdm_saves = [mock.patch.object(bdm, 'save') for bdm in bdms]
         with test.nested(*mock_bdm_saves):
             block_device_info = manager._prep_block_device(self.context,
@@ -1614,17 +1630,6 @@ class ComputeTestCase(BaseTestCase,
         # placement/scheduler before the instance got here.
         self.assertEqual(11264, cn.memory_mb_used)
         self.assertEqual(17152, cn.local_gb_used)
-
-    def test_create_multiple_instance_with_neutron_port(self):
-        requested_networks = objects.NetworkRequestList(
-            objects=[objects.NetworkRequest(port_id=uuids.port_instance)])
-        self.assertRaises(exception.MultiplePortsNotApplicable,
-                          self.compute_api.create,
-                          self.context,
-                          instance_type=self.default_flavor,
-                          image_href=None,
-                          max_count=2,
-                          requested_networks=requested_networks)
 
     def test_create_instance_with_oversubscribed_ram(self):
         # Test passing of oversubscribed ram policy from the scheduler.
@@ -2257,7 +2262,7 @@ class ComputeTestCase(BaseTestCase,
         self.compute.build_and_run_instance(self.context, instance, {}, {}, {},
                                             [], block_device_mapping=[])
 
-        fake_notifier.NOTIFICATIONS = []
+        self.notifier.reset()
         instance.task_state = task_states.RESCUING
         instance.save()
         self.compute.rescue_instance(self.context, instance, None,
@@ -2267,7 +2272,7 @@ class ComputeTestCase(BaseTestCase,
         expected_notifications = ['compute.instance.rescue.start',
                                   'compute.instance.exists',
                                   'compute.instance.rescue.end']
-        self.assertEqual([m.event_type for m in fake_notifier.NOTIFICATIONS],
+        self.assertEqual([m.event_type for m in self.notifier.notifications],
                          expected_notifications)
         mock_notify.assert_has_calls([
             mock.call(self.context, instance, 'fake-mini',
@@ -2275,7 +2280,7 @@ class ComputeTestCase(BaseTestCase,
             mock.call(self.context, instance, 'fake-mini',
                       uuids.fake_image_ref_1, phase='end')])
 
-        for n, msg in enumerate(fake_notifier.NOTIFICATIONS):
+        for n, msg in enumerate(self.notifier.notifications):
             self.assertEqual(msg.event_type, expected_notifications[n])
             self.assertEqual(msg.priority, 'INFO')
             payload = msg.payload
@@ -2291,7 +2296,7 @@ class ComputeTestCase(BaseTestCase,
             image_ref_url = self.image_api.generate_image_url(FAKE_IMAGE_REF,
                  self.context)
             self.assertEqual(payload['image_ref_url'], image_ref_url)
-        msg = fake_notifier.NOTIFICATIONS[0]
+        msg = self.notifier.notifications[0]
         self.assertIn('rescue_image_name', msg.payload)
 
         self.compute.terminate_instance(self.context, instance, [])
@@ -2311,14 +2316,14 @@ class ComputeTestCase(BaseTestCase,
         self.compute.build_and_run_instance(self.context, instance, {}, {}, {},
                                             [], block_device_mapping=[])
 
-        fake_notifier.NOTIFICATIONS = []
+        self.notifier.reset()
         instance.task_state = task_states.UNRESCUING
         instance.save()
         self.compute.unrescue_instance(self.context, instance)
 
         expected_notifications = ['compute.instance.unrescue.start',
                                   'compute.instance.unrescue.end']
-        self.assertEqual([m.event_type for m in fake_notifier.NOTIFICATIONS],
+        self.assertEqual([m.event_type for m in self.notifier.notifications],
                          expected_notifications)
         mock_notify.assert_has_calls([
         mock.call(context, instance, 'fake-mini',
@@ -2326,7 +2331,7 @@ class ComputeTestCase(BaseTestCase,
         mock.call(context, instance, 'fake-mini',
                   action='unrescue', phase='end')])
 
-        for n, msg in enumerate(fake_notifier.NOTIFICATIONS):
+        for n, msg in enumerate(self.notifier.notifications):
             self.assertEqual(msg.event_type, expected_notifications[n])
             self.assertEqual(msg.priority, 'INFO')
             payload = msg.payload
@@ -2520,30 +2525,30 @@ class ComputeTestCase(BaseTestCase,
                 instance, {}, {}, {}, [], block_device_mapping=[])
         instance.task_state = task_states.PAUSING
         instance.save()
-        fake_notifier.NOTIFICATIONS = []
+        self.notifier.reset()
         self.compute.pause_instance(self.context, instance=instance)
         mock_notify.assert_has_calls([
             mock.call(ctxt, instance, 'fake-mini',
                       action='pause', phase='start'),
             mock.call(ctxt, instance, 'fake-mini',
                       action='pause', phase='end')])
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 2)
-        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertEqual(len(self.notifier.notifications), 2)
+        msg = self.notifier.notifications[0]
         self.assertEqual(msg.event_type,
                          'compute.instance.pause.start')
-        msg = fake_notifier.NOTIFICATIONS[1]
+        msg = self.notifier.notifications[1]
         self.assertEqual(msg.event_type,
                          'compute.instance.pause.end')
         instance.task_state = task_states.UNPAUSING
         instance.save()
         mock_notify.reset_mock()
-        fake_notifier.NOTIFICATIONS = []
+        self.notifier.reset()
         self.compute.unpause_instance(self.context, instance=instance)
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 2)
-        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertEqual(len(self.notifier.notifications), 2)
+        msg = self.notifier.notifications[0]
         self.assertEqual(msg.event_type,
                          'compute.instance.unpause.start')
-        msg = fake_notifier.NOTIFICATIONS[1]
+        msg = self.notifier.notifications[1]
         self.assertEqual(msg.event_type,
                          'compute.instance.unpause.end')
         mock_notify.assert_has_calls([
@@ -2569,12 +2574,12 @@ class ComputeTestCase(BaseTestCase,
         instance.save()
         self.compute.resume_instance(context, instance)
 
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 6)
+        self.assertEqual(len(self.notifier.notifications), 6)
 
-        msg = fake_notifier.NOTIFICATIONS[2]
+        msg = self.notifier.notifications[2]
         self.assertEqual(msg.event_type,
                          'compute.instance.suspend.start')
-        msg = fake_notifier.NOTIFICATIONS[3]
+        msg = self.notifier.notifications[3]
         self.assertEqual(msg.event_type,
                          'compute.instance.suspend.end')
         mock_notify.assert_has_calls([
@@ -2656,11 +2661,11 @@ class ComputeTestCase(BaseTestCase,
         instance.task_state = task_states.RESUMING
         instance.save()
         self.compute.resume_instance(self.context, instance)
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 6)
-        msg = fake_notifier.NOTIFICATIONS[4]
+        self.assertEqual(len(self.notifier.notifications), 6)
+        msg = self.notifier.notifications[4]
         self.assertEqual(msg.event_type,
                          'compute.instance.resume.start')
-        msg = fake_notifier.NOTIFICATIONS[5]
+        msg = self.notifier.notifications[5]
         self.assertEqual(msg.event_type,
                          'compute.instance.resume.end')
         mock_notify.assert_has_calls([
@@ -2931,13 +2936,13 @@ class ComputeTestCase(BaseTestCase,
                    power_state=10003,
                    vm_state=vm_states.ACTIVE,
                    task_state=expected_task,
-                   instance_type=self.default_flavor,
+                   flavor=self.default_flavor,
                    launched_at=timeutils.utcnow()))
         updated_dbinstance2 = fake_instance.fake_db_instance(
             **dict(uuid=uuids.db_instance_2,
                    power_state=10003,
                    vm_state=vm_states.ACTIVE,
-                   instance_type=self.default_flavor,
+                   flavor=self.default_flavor,
                    task_state=expected_task,
                    launched_at=timeutils.utcnow()))
 
@@ -3148,7 +3153,7 @@ class ComputeTestCase(BaseTestCase,
     def test_reboot_with_accels_ok(self, mock_get_arqs):
         dp_name = 'mydp'
         extra_specs = {'accel:device_profile': dp_name}
-        _, accel_info = fixtures.get_arqs(dp_name)
+        _, accel_info = cyborg_fixture.get_arqs(dp_name)
         mock_get_arqs.return_value = accel_info
 
         instance_uuid = self._test_reboot_with_accels(
@@ -3193,6 +3198,7 @@ class ComputeTestCase(BaseTestCase,
                     'image_id': uuids.image,
                     'boot_index': 0
         })])
+        driver_bdms = driver_block_device.convert_all_volumes(*bdms)
 
         with (mock.patch.object(
                 objects.BlockDeviceMappingList,
@@ -3207,13 +3213,7 @@ class ComputeTestCase(BaseTestCase,
                 'swap': None,
                 'ephemerals': [],
                 'root_device_name': None,
-                'block_device_mapping': [{
-                    'connection_info': {
-                        'driver_volume_type': 'rbd'
-                    },
-                    'mount_device': '/dev/vda',
-                    'delete_on_termination': False
-                }]
+                'block_device_mapping': driver_bdms
             }
             self.assertTrue(mock_get_by_instance.called)
             self.assertEqual(block_device_info, expected)
@@ -3228,6 +3228,8 @@ class ComputeTestCase(BaseTestCase,
                     'source_type': 'volume',
                     'destination_type': 'volume'})
                ])
+        driver_bdms = driver_block_device.convert_all_volumes(*bdms)
+
         with (mock.patch.object(
                 objects.BlockDeviceMappingList,
                 'get_by_instance_uuid')) as mock_get_by_instance:
@@ -3239,13 +3241,7 @@ class ComputeTestCase(BaseTestCase,
                 'swap': None,
                 'ephemerals': [],
                 'root_device_name': None,
-                'block_device_mapping': [{
-                    'connection_info': {
-                        'driver_volume_type': 'rbd'
-                    },
-                    'mount_device': '/dev/vdd',
-                    'delete_on_termination': False
-                }]
+                'block_device_mapping': driver_bdms
             }
             self.assertFalse(mock_get_by_instance.called)
             self.assertEqual(block_device_info, expected)
@@ -3301,11 +3297,27 @@ class ComputeTestCase(BaseTestCase,
                                 'get_by_instance_uuid', return_value=bdms)
         ) as mock_get_by_instance_uuid:
             expected_block_device_info = {
-                'swap': {'device_name': '/dev/vdd', 'swap_size': 1},
-                'ephemerals': [{'device_name': '/dev/vdb', 'num': 0, 'size': 1,
-                                'virtual_name': 'ephemeral0'},
-                               {'device_name': '/dev/vdc', 'num': 1, 'size': 2,
-                                'virtual_name': 'ephemeral1'}],
+                'swap': {
+                    'device_name': '/dev/vdd',
+                    'swap_size': 1,
+                    'disk_bus': 'virtio'
+                },
+                'ephemerals': [
+                    {
+                        'device_name': '/dev/vdb',
+                        'device_type': 'disk',
+                        'disk_bus': 'virtio',
+                        'guest_format': None,
+                        'size': 1
+                    },
+                    {
+                        'device_name': '/dev/vdc',
+                        'device_type': 'disk',
+                        'disk_bus': 'virtio',
+                        'guest_format': None,
+                        'size': 2
+                    }
+                ],
                 'block_device_mapping': [],
                 'root_device_name': None
             }
@@ -4211,13 +4223,13 @@ class ComputeTestCase(BaseTestCase,
 
         instance = self._create_fake_instance_obj()
 
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 0)
+        self.assertEqual(len(self.notifier.notifications), 0)
         with mock.patch.object(self.compute.network_api,
                                'add_fixed_ip_to_instance', dummy):
             self.compute.add_fixed_ip_to_instance(self.context, network_id=1,
                                                   instance=instance)
 
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 2)
+        self.assertEqual(len(self.notifier.notifications), 2)
         self.compute.terminate_instance(self.context, instance, [])
 
     def test_remove_fixed_ip_usage_notification(self):
@@ -4229,13 +4241,13 @@ class ComputeTestCase(BaseTestCase,
 
         instance = self._create_fake_instance_obj()
 
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 0)
+        self.assertEqual(len(self.notifier.notifications), 0)
         with mock.patch.object(self.compute.network_api,
                                'remove_fixed_ip_from_instance', dummy):
             self.compute.remove_fixed_ip_from_instance(self.context, 1,
                                                        instance=instance)
 
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 2)
+        self.assertEqual(len(self.notifier.notifications), 2)
         self.compute.terminate_instance(self.context, instance, [])
 
     def test_run_instance_usage_notification(self, request_spec=None):
@@ -4253,12 +4265,12 @@ class ComputeTestCase(BaseTestCase,
                                                    expected_image_name},
                                             accel_uuids=[],
                                             block_device_mapping=[])
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 2)
+        self.assertEqual(len(self.notifier.notifications), 2)
         instance.refresh()
-        msg = fake_notifier.NOTIFICATIONS[0]
+        msg = self.notifier.notifications[0]
         self.assertEqual(msg.event_type, 'compute.instance.create.start')
         # The last event is the one with the sugar in it.
-        msg = fake_notifier.NOTIFICATIONS[1]
+        msg = self.notifier.notifications[1]
         self.assertEqual(msg.priority, 'INFO')
         self.assertEqual(msg.event_type, 'compute.instance.create.end')
         payload = msg.payload
@@ -4309,10 +4321,10 @@ class ComputeTestCase(BaseTestCase,
 
         self.compute.build_and_run_instance(self.context, instance, {}, {}, {},
                                             [], block_device_mapping=[])
-        self.assertGreaterEqual(len(fake_notifier.NOTIFICATIONS), 2)
-        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertGreaterEqual(len(self.notifier.notifications), 2)
+        msg = self.notifier.notifications[0]
         self.assertEqual(msg.event_type, 'compute.instance.create.start')
-        msg = fake_notifier.NOTIFICATIONS[-1]
+        msg = self.notifier.notifications[-1]
 
         self.assertEqual(msg.event_type, 'compute.instance.create.error')
         self.assertEqual('ERROR', msg.priority)
@@ -4335,10 +4347,10 @@ class ComputeTestCase(BaseTestCase,
         self.compute.build_and_run_instance(self.context, instance, {}, {}, {},
                                             [], block_device_mapping=[])
 
-        self.assertGreaterEqual(len(fake_notifier.NOTIFICATIONS), 2)
-        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertGreaterEqual(len(self.notifier.notifications), 2)
+        msg = self.notifier.notifications[0]
         self.assertEqual(msg.event_type, 'compute.instance.create.start')
-        msg = fake_notifier.NOTIFICATIONS[-1]
+        msg = self.notifier.notifications[-1]
 
         self.assertEqual(msg.event_type, 'compute.instance.create.error')
         self.assertEqual('ERROR', msg.priority)
@@ -4360,10 +4372,10 @@ class ComputeTestCase(BaseTestCase,
                 self.context, instance, {}, {}, {}, [],
                 block_device_mapping=[])
 
-        self.assertGreaterEqual(len(fake_notifier.NOTIFICATIONS), 2)
-        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertGreaterEqual(len(self.notifier.notifications), 2)
+        msg = self.notifier.notifications[0]
         self.assertEqual(msg.event_type, 'compute.instance.create.start')
-        msg = fake_notifier.NOTIFICATIONS[-1]
+        msg = self.notifier.notifications[-1]
 
         self.assertEqual(msg.event_type, 'compute.instance.create.error')
         self.assertEqual('ERROR', msg.priority)
@@ -4384,20 +4396,20 @@ class ComputeTestCase(BaseTestCase,
         instance = self._create_fake_instance_obj()
         self.compute.build_and_run_instance(self.context, instance, {}, {}, {},
                                             [], block_device_mapping=[])
-        fake_notifier.NOTIFICATIONS = []
+        self.notifier.reset()
         time_fixture.advance_time_delta(cur_time - old_time)
         self.compute.terminate_instance(self.context, instance, [])
 
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 4)
+        self.assertEqual(len(self.notifier.notifications), 4)
 
-        msg = fake_notifier.NOTIFICATIONS[0]
+        msg = self.notifier.notifications[0]
         self.assertEqual(msg.priority, 'INFO')
         self.assertEqual(msg.event_type, 'compute.instance.delete.start')
-        msg1 = fake_notifier.NOTIFICATIONS[1]
+        msg1 = self.notifier.notifications[1]
         self.assertEqual(msg1.event_type, 'compute.instance.shutdown.start')
-        msg1 = fake_notifier.NOTIFICATIONS[2]
+        msg1 = self.notifier.notifications[2]
         self.assertEqual(msg1.event_type, 'compute.instance.shutdown.end')
-        msg1 = fake_notifier.NOTIFICATIONS[3]
+        msg1 = self.notifier.notifications[3]
         self.assertEqual(msg1.event_type, 'compute.instance.delete.end')
         payload = msg1.payload
         self.assertEqual(payload['tenant_id'], self.project_id)
@@ -4552,7 +4564,7 @@ class ComputeTestCase(BaseTestCase,
         migration.instance_uuid = 'b48316c5-71e8-45e4-9884-6c78055b9b13'
         migration.uuid = uuids.migration_uuid
         migration.new_instance_type_id = '1'
-        instance_type = objects.Flavor()
+        flavor = objects.Flavor()
 
         actions = [
             ("reboot_instance", task_states.REBOOTING,
@@ -4594,7 +4606,7 @@ class ComputeTestCase(BaseTestCase,
                                'request_spec': {}}),
             ("prep_resize", task_states.RESIZE_PREP,
                             {'image': {},
-                             'flavor': instance_type,
+                             'flavor': flavor,
                              'request_spec': {},
                              'filter_properties': {},
                              'node': None,
@@ -4684,18 +4696,18 @@ class ComputeTestCase(BaseTestCase,
         instance = self._create_fake_instance_obj(params)
         image = {}
         disk_info = 'fake-disk-info'
-        instance_type = self.default_flavor
+        flavor = self.default_flavor
 
         if not resize_instance:
-            old_instance_type = self.tiny_flavor
-            instance_type['root_gb'] = old_instance_type['root_gb']
-            instance_type['swap'] = old_instance_type['swap']
-            instance_type['ephemeral_gb'] = old_instance_type['ephemeral_gb']
+            old_flavor = self.tiny_flavor
+            flavor['root_gb'] = old_flavor['root_gb']
+            flavor['swap'] = old_flavor['swap']
+            flavor['ephemeral_gb'] = old_flavor['ephemeral_gb']
 
         instance.task_state = task_states.RESIZE_PREP
         instance.save()
         self.compute.prep_resize(self.context, instance=instance,
-                                 flavor=instance_type,
+                                 flavor=flavor,
                                  image={}, request_spec={},
                                  filter_properties={}, node=None,
                                  migration=None, clean_shutdown=True,
@@ -4763,7 +4775,7 @@ class ComputeTestCase(BaseTestCase,
             def _instance_save0(expected_task_state=None):
                 self.assertEqual(task_states.RESIZE_MIGRATED,
                                  expected_task_state)
-                self.assertEqual(instance_type['id'],
+                self.assertEqual(flavor['id'],
                                  instance.instance_type_id)
                 self.assertEqual(task_states.RESIZE_FINISH,
                                  instance.task_state)
@@ -4933,11 +4945,11 @@ class ComputeTestCase(BaseTestCase,
                              jsonutils.dumps(connection_info))
 
         # begin resize
-        instance_type = self.default_flavor
+        flavor = self.default_flavor
         instance.task_state = task_states.RESIZE_PREP
         instance.save()
         self.compute.prep_resize(self.context, instance=instance,
-                                 flavor=instance_type,
+                                 flavor=flavor,
                                  image={}, request_spec=request_spec,
                                  filter_properties={}, node=None,
                                  clean_shutdown=True, migration=None,
@@ -4954,7 +4966,8 @@ class ComputeTestCase(BaseTestCase,
                 instance.uuid, 'pre-migrating')
         self.compute.resize_instance(self.context, instance=instance,
                 migration=migration, image={},
-                flavor=jsonutils.to_primitive(instance_type),
+                # TODO(stephenfin): Why a JSON string?
+                flavor=jsonutils.to_primitive(flavor),
                 clean_shutdown=True, request_spec=request_spec)
 
         # assert bdm is unchanged
@@ -5021,12 +5034,12 @@ class ComputeTestCase(BaseTestCase,
         old_flavor_name = 'm1.tiny'
         instance = self._create_fake_instance_obj(type_name=old_flavor_name)
 
-        instance_type = objects.Flavor.get_by_name(self.context, 'm1.small')
+        flavor = objects.Flavor.get_by_name(self.context, 'm1.small')
 
         request_spec = objects.RequestSpec()
 
         self.compute.prep_resize(self.context, instance=instance,
-                                 flavor=instance_type,
+                                 flavor=flavor,
                                  image={},
                                  request_spec=request_spec,
                                  filter_properties={},
@@ -5054,7 +5067,7 @@ class ComputeTestCase(BaseTestCase,
         self.assertEqual(old_flavor['root_gb'], instance.root_gb)
         self.assertEqual(old_flavor['ephemeral_gb'], instance.ephemeral_gb)
         self.assertEqual(old_flavor['id'], instance.instance_type_id)
-        self.assertNotEqual(instance_type['id'], instance.instance_type_id)
+        self.assertNotEqual(flavor['id'], instance.instance_type_id)
 
     def test_set_instance_info(self):
         old_flavor_name = 'm1.tiny'
@@ -5080,7 +5093,7 @@ class ComputeTestCase(BaseTestCase,
                                             [], block_device_mapping=[])
         time_fixture.advance_time_delta(cur_time - old_time)
 
-        fake_notifier.NOTIFICATIONS = []
+        self.notifier.reset()
         instance = db.instance_get_by_uuid(self.context, inst_ref['uuid'])
         orig_sys_metadata = db.instance_system_metadata_get(self.context,
                 inst_ref['uuid'])
@@ -5107,17 +5120,17 @@ class ComputeTestCase(BaseTestCase,
         new_image_ref_url = self.image_api.generate_image_url(new_image_ref,
              self.context)
 
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 3)
-        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertEqual(len(self.notifier.notifications), 3)
+        msg = self.notifier.notifications[0]
         self.assertEqual(msg.event_type,
                           'compute.instance.exists')
         self.assertEqual(msg.payload['image_ref_url'], image_ref_url)
-        msg = fake_notifier.NOTIFICATIONS[1]
+        msg = self.notifier.notifications[1]
         self.assertEqual(msg.event_type,
                           'compute.instance.rebuild.start')
         self.assertEqual(msg.payload['image_ref_url'], new_image_ref_url)
         self.assertEqual(msg.payload['image_name'], 'fake_name')
-        msg = fake_notifier.NOTIFICATIONS[2]
+        msg = self.notifier.notifications[2]
         self.assertEqual(msg.event_type,
                           'compute.instance.rebuild.end')
         self.assertEqual(msg.priority, 'INFO')
@@ -5168,18 +5181,18 @@ class ComputeTestCase(BaseTestCase,
                 migration=migration, image={}, flavor=new_type,
                 clean_shutdown=True, request_spec=request_spec)
         time_fixture.advance_time_delta(cur_time - old_time)
-        fake_notifier.NOTIFICATIONS = []
+        self.notifier.reset()
 
         self.compute.finish_resize(self.context,
                 migration=migration,
                 disk_info={}, image={}, instance=instance,
                 request_spec=request_spec)
 
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 2)
-        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertEqual(len(self.notifier.notifications), 2)
+        msg = self.notifier.notifications[0]
         self.assertEqual(msg.event_type,
                          'compute.instance.finish_resize.start')
-        msg = fake_notifier.NOTIFICATIONS[1]
+        msg = self.notifier.notifications[1]
         self.assertEqual(msg.event_type,
                          'compute.instance.finish_resize.end')
         self.assertEqual(msg.priority, 'INFO')
@@ -5210,7 +5223,7 @@ class ComputeTestCase(BaseTestCase,
         self.compute.build_and_run_instance(self.context, instance, {}, {}, {},
                                             [], block_device_mapping=[])
         time_fixture.advance_time_delta(cur_time - old_time)
-        fake_notifier.NOTIFICATIONS = []
+        self.notifier.reset()
 
         instance.host = 'foo'
         instance.task_state = task_states.RESIZE_PREP
@@ -5224,14 +5237,14 @@ class ComputeTestCase(BaseTestCase,
                                                 instance.uuid,
                                                 'pre-migrating')
 
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 3)
-        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertEqual(len(self.notifier.notifications), 3)
+        msg = self.notifier.notifications[0]
         self.assertEqual(msg.event_type,
                          'compute.instance.exists')
-        msg = fake_notifier.NOTIFICATIONS[1]
+        msg = self.notifier.notifications[1]
         self.assertEqual(msg.event_type,
                          'compute.instance.resize.prep.start')
-        msg = fake_notifier.NOTIFICATIONS[2]
+        msg = self.notifier.notifications[2]
         self.assertEqual(msg.event_type,
                          'compute.instance.resize.prep.end')
         self.assertEqual(msg.priority, 'INFO')
@@ -5483,10 +5496,10 @@ class ComputeTestCase(BaseTestCase,
         instance.numa_topology = numa_topology
         instance.save()
 
-        new_instance_type_ref = flavors.get_flavor_by_flavor_id(3)
+        new_flavor_ref = flavors.get_flavor_by_flavor_id(3)
         self.compute.prep_resize(self.context,
                 instance=instance,
-                flavor=new_instance_type_ref,
+                flavor=new_flavor_ref,
                 image={}, request_spec=request_spec,
                 filter_properties={}, node=None, clean_shutdown=True,
                 migration=None, host_list=None)
@@ -5494,7 +5507,7 @@ class ComputeTestCase(BaseTestCase,
         # Memory usage should increase after the resize as well
         self.assertEqual(self.rt.compute_nodes[NODENAME].memory_mb_used,
              memory_mb_used + flavor.memory_mb +
-             new_instance_type_ref.memory_mb)
+             new_flavor_ref.memory_mb)
 
         migration = objects.Migration.get_by_instance_and_status(
                 self.context.elevated(),
@@ -5513,7 +5526,7 @@ class ComputeTestCase(BaseTestCase,
         self.compute.resize_instance(self.context, instance=instance,
                                      migration=migration,
                                      image={},
-                                     flavor=new_instance_type_ref,
+                                     flavor=new_flavor_ref,
                                      clean_shutdown=True,
                                      request_spec=request_spec)
         self.compute.finish_resize(self.context,
@@ -5524,7 +5537,7 @@ class ComputeTestCase(BaseTestCase,
         # Memory usage shouldn't had changed
         self.assertEqual(self.rt.compute_nodes[NODENAME].memory_mb_used,
              memory_mb_used + flavor.memory_mb +
-             new_instance_type_ref.memory_mb)
+             new_flavor_ref.memory_mb)
 
         # Prove that the instance size is now the new size
         flavor = objects.Flavor.get_by_id(self.context,
@@ -5549,7 +5562,7 @@ class ComputeTestCase(BaseTestCase,
         # Resources from the migration (based on initial flavor) should
         # be freed now
         self.assertEqual(self.rt.compute_nodes[NODENAME].memory_mb_used,
-                         memory_mb_used + new_instance_type_ref.memory_mb)
+                         memory_mb_used + new_flavor_ref.memory_mb)
 
         mock_notify.assert_has_calls([
             mock.call(self.context, instance,
@@ -5820,10 +5833,10 @@ class ComputeTestCase(BaseTestCase,
         instance.numa_topology = numa_topology
         instance.save()
 
-        new_instance_type_ref = flavors.get_flavor_by_flavor_id(3)
+        new_flavor_ref = flavors.get_flavor_by_flavor_id(3)
         self.compute.prep_resize(self.context,
                 instance=instance,
-                flavor=new_instance_type_ref,
+                flavor=new_flavor_ref,
                 image={}, request_spec=request_spec,
                 filter_properties={}, node=None,
                 migration=None, clean_shutdown=True, host_list=[])
@@ -5831,7 +5844,7 @@ class ComputeTestCase(BaseTestCase,
         # Memory usage should increase after the resize as well
         self.assertEqual(self.rt.compute_nodes[NODENAME].memory_mb_used,
             memory_mb_used + flavor.memory_mb +
-            new_instance_type_ref.memory_mb)
+            new_flavor_ref.memory_mb)
 
         migration = objects.Migration.get_by_instance_and_status(
                 self.context.elevated(),
@@ -5849,7 +5862,7 @@ class ComputeTestCase(BaseTestCase,
         self.compute.resize_instance(self.context, instance=instance,
                                      migration=migration,
                                      image={},
-                                     flavor=new_instance_type_ref,
+                                     flavor=new_flavor_ref,
                                      clean_shutdown=True,
                                      request_spec=request_spec)
         self.compute.finish_resize(self.context,
@@ -5860,11 +5873,11 @@ class ComputeTestCase(BaseTestCase,
         # Memory usage shouldn't had changed
         self.assertEqual(self.rt.compute_nodes[NODENAME].memory_mb_used,
             memory_mb_used + flavor.memory_mb +
-            new_instance_type_ref.memory_mb)
+            new_flavor_ref.memory_mb)
 
         # Prove that the instance size is now the new size
-        instance_type_ref = flavors.get_flavor_by_flavor_id(3)
-        self.assertEqual(instance_type_ref['flavorid'], '3')
+        flavor_ref = flavors.get_flavor_by_flavor_id(3)
+        self.assertEqual(flavor_ref['flavorid'], '3')
         # Prove that the NUMA topology has also been updated to that of the new
         # flavor - meaning None
         self.assertIsNone(instance.numa_topology)
@@ -5956,10 +5969,10 @@ class ComputeTestCase(BaseTestCase,
                                             request_spec, {},
                                             [], block_device_mapping=[])
 
-        new_instance_type_ref = flavors.get_flavor_by_flavor_id(3)
+        new_flavor_ref = flavors.get_flavor_by_flavor_id(3)
         self.compute.prep_resize(self.context,
                 instance=instance,
-                flavor=new_instance_type_ref,
+                flavor=new_flavor_ref,
                 image={}, request_spec=request_spec,
                 filter_properties={}, node=None,
                 clean_shutdown=True, migration=None,
@@ -5977,7 +5990,7 @@ class ComputeTestCase(BaseTestCase,
         self.compute.resize_instance(self.context, instance=instance,
                                      migration=migration,
                                      image={},
-                                     flavor=new_instance_type_ref,
+                                     flavor=new_flavor_ref,
                                      clean_shutdown=True,
                                      request_spec=request_spec)
         self.compute.finish_resize(self.context,
@@ -6064,7 +6077,7 @@ class ComputeTestCase(BaseTestCase,
         # creating instance testdata
         instance = self._create_fake_instance_obj({'host': 'dummy'})
         c = context.get_admin_context()
-        fake_notifier.NOTIFICATIONS = []
+
         migrate_data = objects.LibvirtLiveMigrateData(
             is_shared_instance_path=False)
         vifs = migrate_data_obj.VIFMigrateData.create_skeleton_migrate_vifs(
@@ -6079,11 +6092,11 @@ class ComputeTestCase(BaseTestCase,
                                                   migrate_data=migrate_data)
         self.assertIs(migrate_data, ret)
         self.assertTrue(ret.wait_for_vif_plugged, ret)
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 2)
-        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertEqual(len(self.notifier.notifications), 2)
+        msg = self.notifier.notifications[0]
         self.assertEqual(msg.event_type,
                          'compute.instance.live_migration.pre.start')
-        msg = fake_notifier.NOTIFICATIONS[1]
+        msg = self.notifier.notifications[1]
         self.assertEqual(msg.event_type,
                          'compute.instance.live_migration.pre.end')
 
@@ -6313,9 +6326,7 @@ class ComputeTestCase(BaseTestCase,
         # Confirm live_migration() works as expected correctly.
         # creating instance testdata
         c = context.get_admin_context()
-        params = {'info_cache': objects.InstanceInfoCache(
-            network_info=network_model.NetworkInfo([]))}
-        instance = self._create_fake_instance_obj(params=params, ctxt=c)
+        instance = self._create_fake_instance_obj(ctxt=c)
         instance.host = self.compute.host
         dest = 'desthost'
 
@@ -6683,7 +6694,6 @@ class ComputeTestCase(BaseTestCase,
         # creating instance testdata
         c = context.get_admin_context()
         instance = self._create_fake_instance_obj({'host': 'dummy'})
-        fake_notifier.NOTIFICATIONS = []
 
         # start test
         with mock.patch.object(self.compute.network_api,
@@ -6693,11 +6703,11 @@ class ComputeTestCase(BaseTestCase,
                                                         destroy_disks=True,
                                                         migrate_data=None)
         self.assertIsNone(ret)
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 2)
-        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertEqual(len(self.notifier.notifications), 2)
+        msg = self.notifier.notifications[0]
         self.assertEqual(msg.event_type,
                        'compute.instance.live_migration.rollback.dest.start')
-        msg = fake_notifier.NOTIFICATIONS[1]
+        msg = self.notifier.notifications[1]
         self.assertEqual(msg.event_type,
                         'compute.instance.live_migration.rollback.dest.end')
         mock_setup.assert_called_once_with(c, instance, self.compute.host,
@@ -6790,7 +6800,7 @@ class ComputeTestCase(BaseTestCase,
         except NotImplementedError:
             exc_info = sys.exc_info()
 
-        self.stub_out('nova.db.api.instance_fault_create',
+        self.stub_out('nova.db.main.api.instance_fault_create',
                       fake_db_fault_create)
 
         ctxt = context.get_admin_context()
@@ -6828,7 +6838,7 @@ class ComputeTestCase(BaseTestCase,
             raised_exc = exc
             exc_info = sys.exc_info()
 
-        self.stub_out('nova.db.api.instance_fault_create',
+        self.stub_out('nova.db.main.api.instance_fault_create',
                       fake_db_fault_create)
 
         ctxt = context.get_admin_context()
@@ -6858,7 +6868,7 @@ class ComputeTestCase(BaseTestCase,
         except exception.Invalid:
             exc_info = sys.exc_info()
 
-        self.stub_out('nova.db.api.instance_fault_create',
+        self.stub_out('nova.db.main.api.instance_fault_create',
                       fake_db_fault_create)
 
         ctxt = context.get_admin_context()
@@ -6879,7 +6889,7 @@ class ComputeTestCase(BaseTestCase,
             self.assertEqual(expected, values)
             return self._fill_fault(expected)
 
-        self.stub_out('nova.db.api.instance_fault_create',
+        self.stub_out('nova.db.main.api.instance_fault_create',
                       fake_db_fault_create)
 
         ctxt = context.get_admin_context()
@@ -6903,7 +6913,7 @@ class ComputeTestCase(BaseTestCase,
             self.assertEqual(expected, values)
             return self._fill_fault(expected)
 
-        self.stub_out('nova.db.api.instance_fault_create',
+        self.stub_out('nova.db.main.api.instance_fault_create',
                       fake_db_fault_create)
 
         ctxt = context.get_admin_context()
@@ -6935,7 +6945,7 @@ class ComputeTestCase(BaseTestCase,
         except NotImplementedError:
             exc_info = sys.exc_info()
 
-        self.stub_out('nova.db.api.instance_fault_create',
+        self.stub_out('nova.db.main.api.instance_fault_create',
                       fake_db_fault_create)
 
         ctxt = context.get_admin_context()
@@ -7181,9 +7191,9 @@ class ComputeTestCase(BaseTestCase,
                 raise exception.InstanceInfoCacheNotFound(
                                                 instance_uuid=instance['uuid'])
 
-        self.stub_out('nova.db.api.instance_get_all_by_host',
+        self.stub_out('nova.db.main.api.instance_get_all_by_host',
                 fake_instance_get_all_by_host)
-        self.stub_out('nova.db.api.instance_get_by_uuid',
+        self.stub_out('nova.db.main.api.instance_get_by_uuid',
                 fake_instance_get_by_uuid)
 
         self.stub_out('nova.compute.manager.ComputeManager.'
@@ -7444,13 +7454,15 @@ class ComputeTestCase(BaseTestCase,
                         migration['instance_uuid']):
                     migration2['status'] = 'confirmed'
 
-        self.stub_out('nova.db.api.instance_get_by_uuid',
-                fake_instance_get_by_uuid)
-        self.stub_out('nova.db.api.migration_get_unconfirmed_by_dest_compute',
-                fake_migration_get_unconfirmed_by_dest_compute)
-        self.stub_out('nova.db.api.migration_update', fake_migration_update)
-        self.stub_out('nova.compute.api.API.confirm_resize',
-                      fake_confirm_resize)
+        self.stub_out(
+            'nova.db.main.api.instance_get_by_uuid', fake_instance_get_by_uuid)
+        self.stub_out(
+            'nova.db.main.api.migration_get_unconfirmed_by_dest_compute',
+            fake_migration_get_unconfirmed_by_dest_compute)
+        self.stub_out(
+            'nova.db.main.api.migration_update', fake_migration_update)
+        self.stub_out(
+            'nova.compute.api.API.confirm_resize', fake_confirm_resize)
 
         def fetch_instance_migration_status(instance_uuid):
             for migration in migrations:
@@ -7746,22 +7758,21 @@ class ComputeTestCase(BaseTestCase,
             instance.deleted = True
 
         self.stub_out('nova.objects.instance.Instance.destroy', fake_destroy)
-
-        self.stub_out('nova.db.api.block_device_mapping_get_all_by_instance',
-                      lambda *a, **k: None)
-
-        self.stub_out('nova.compute.manager.ComputeManager.'
-                       '_complete_deletion',
-                       lambda *a, **k: None)
-
-        self.stub_out('nova.objects.quotas.Quotas.reserve',
-                      lambda *a, **k: None)
-
-        self.stub_out('nova.compute.utils.notify_about_instance_usage',
-                      lambda *a, **k: None)
-
-        self.stub_out('nova.compute.utils.notify_about_instance_action',
-                      lambda *a, **k: None)
+        self.stub_out(
+            'nova.db.main.api.block_device_mapping_get_all_by_instance',
+            lambda *a, **k: None)
+        self.stub_out(
+            'nova.compute.manager.ComputeManager._complete_deletion',
+            lambda *a, **k: None)
+        self.stub_out(
+            'nova.objects.quotas.Quotas.reserve',
+            lambda *a, **k: None)
+        self.stub_out(
+            'nova.compute.utils.notify_about_instance_usage',
+            lambda *a, **k: None)
+        self.stub_out(
+            'nova.compute.utils.notify_about_instance_action',
+            lambda *a, **k: None)
 
         self.compute._complete_partial_deletion(admin_context, instance)
 
@@ -8483,44 +8494,44 @@ class ComputeAPITestCase(BaseTestCase):
     def test_create_with_too_little_ram(self):
         # Test an instance type with too little memory.
 
-        inst_type = self.default_flavor
-        inst_type['memory_mb'] = 1
+        flavor = self.default_flavor
+        flavor['memory_mb'] = 1
 
         self.fake_image['min_ram'] = 2
         self.stub_out('nova.tests.fixtures.GlanceFixture.show', self.fake_show)
 
         self.assertRaises(exception.FlavorMemoryTooSmall,
             self.compute_api.create, self.context,
-            inst_type, self.fake_image['id'])
+            flavor, self.fake_image['id'])
 
-        # Now increase the inst_type memory and make sure all is fine.
-        inst_type['memory_mb'] = 2
-        (refs, resv_id) = self.compute_api.create(self.context,
-                inst_type, self.fake_image['id'])
+        # Now increase the flavor memory and make sure all is fine.
+        flavor['memory_mb'] = 2
+        refs, resv_id = self.compute_api.create(
+            self.context, flavor, self.fake_image['id'])
 
     def test_create_with_too_little_disk(self):
         # Test an instance type with too little disk space.
 
-        inst_type = self.default_flavor
-        inst_type['root_gb'] = 1
+        flavor = self.default_flavor
+        flavor['root_gb'] = 1
 
         self.fake_image['min_disk'] = 2
         self.stub_out('nova.tests.fixtures.GlanceFixture.show', self.fake_show)
 
         self.assertRaises(exception.FlavorDiskSmallerThanMinDisk,
             self.compute_api.create, self.context,
-            inst_type, self.fake_image['id'])
+            flavor, self.fake_image['id'])
 
-        # Now increase the inst_type disk space and make sure all is fine.
-        inst_type['root_gb'] = 2
-        (refs, resv_id) = self.compute_api.create(self.context,
-                inst_type, self.fake_image['id'])
+        # Now increase the flavor disk space and make sure all is fine.
+        flavor['root_gb'] = 2
+        refs, resv_id = self.compute_api.create(
+            self.context, flavor, self.fake_image['id'])
 
     def test_create_with_too_large_image(self):
         # Test an instance type with too little disk space.
 
-        inst_type = self.default_flavor
-        inst_type['root_gb'] = 1
+        flavor = self.default_flavor
+        flavor['root_gb'] = 1
 
         self.fake_image['size'] = '1073741825'
 
@@ -8528,39 +8539,39 @@ class ComputeAPITestCase(BaseTestCase):
 
         self.assertRaises(exception.FlavorDiskSmallerThanImage,
             self.compute_api.create, self.context,
-            inst_type, self.fake_image['id'])
+            flavor, self.fake_image['id'])
 
         # Reduce image to 1 GB limit and ensure it works
         self.fake_image['size'] = '1073741824'
-        (refs, resv_id) = self.compute_api.create(self.context,
-                inst_type, self.fake_image['id'])
+        refs, resv_id = self.compute_api.create(
+            self.context, flavor, self.fake_image['id'])
 
     def test_create_just_enough_ram_and_disk(self):
         # Test an instance type with just enough ram and disk space.
 
-        inst_type = self.default_flavor
-        inst_type['root_gb'] = 2
-        inst_type['memory_mb'] = 2
+        flavor = self.default_flavor
+        flavor['root_gb'] = 2
+        flavor['memory_mb'] = 2
 
         self.fake_image['min_ram'] = 2
         self.fake_image['min_disk'] = 2
         self.fake_image['name'] = 'fake_name'
         self.stub_out('nova.tests.fixtures.GlanceFixture.show', self.fake_show)
 
-        (refs, resv_id) = self.compute_api.create(self.context,
-                inst_type, self.fake_image['id'])
+        refs, resv_id = self.compute_api.create(
+            self.context, flavor, self.fake_image['id'])
 
     def test_create_with_no_ram_and_disk_reqs(self):
         # Test an instance type with no min_ram or min_disk.
 
-        inst_type = self.default_flavor
-        inst_type['root_gb'] = 1
-        inst_type['memory_mb'] = 1
+        flavor = self.default_flavor
+        flavor['root_gb'] = 1
+        flavor['memory_mb'] = 1
 
         self.stub_out('nova.tests.fixtures.GlanceFixture.show', self.fake_show)
 
-        (refs, resv_id) = self.compute_api.create(self.context,
-                inst_type, self.fake_image['id'])
+        refs, resv_id = self.compute_api.create(
+            self.context, flavor, self.fake_image['id'])
 
     def test_create_with_deleted_image(self):
         # If we're given a deleted image by glance, we should not be able to
@@ -8612,11 +8623,12 @@ class ComputeAPITestCase(BaseTestCase):
 
     def test_create_instance_sets_system_metadata(self):
         # Make sure image properties are copied into system metadata.
-        with mock.patch.object(self.compute_api.compute_task_api,
-                               'schedule_and_build_instances') as mock_sbi:
-            (ref, resv_id) = self.compute_api.create(
+        with mock.patch.object(
+            self.compute_api.compute_task_api, 'schedule_and_build_instances',
+        ) as mock_sbi:
+            ref, resv_id = self.compute_api.create(
                 self.context,
-                instance_type=self.default_flavor,
+                flavor=self.default_flavor,
                 image_href='f5000000-0000-0000-0000-000000000000')
 
             build_call = mock_sbi.call_args_list[0]
@@ -8630,11 +8642,12 @@ class ComputeAPITestCase(BaseTestCase):
             self.assertEqual(value, instance.system_metadata[key])
 
     def test_create_saves_flavor(self):
-        with mock.patch.object(self.compute_api.compute_task_api,
-                               'schedule_and_build_instances') as mock_sbi:
-            (ref, resv_id) = self.compute_api.create(
+        with mock.patch.object(
+            self.compute_api.compute_task_api, 'schedule_and_build_instances',
+        ) as mock_sbi:
+            ref, resv_id = self.compute_api.create(
                 self.context,
-                instance_type=self.default_flavor,
+                flavor=self.default_flavor,
                 image_href=uuids.image_href_id)
 
             build_call = mock_sbi.call_args_list[0]
@@ -8654,7 +8667,7 @@ class ComputeAPITestCase(BaseTestCase):
         ) as (mock_sbi, mock_secgroups):
             self.compute_api.create(
                 self.context,
-                instance_type=self.default_flavor,
+                flavor=self.default_flavor,
                 image_href=uuids.image_href_id,
                 security_groups=['testgroup'])
 
@@ -8671,12 +8684,13 @@ class ComputeAPITestCase(BaseTestCase):
             'nova.network.security_group_api.validate_name',
             side_effect=exception.SecurityGroupNotFound('foo'),
         ) as mock_secgroups:
-            self.assertRaises(exception.SecurityGroupNotFound,
-                              self.compute_api.create,
-                              self.context,
-                              instance_type=self.default_flavor,
-                              image_href=None,
-                              security_groups=['invalid_sec_group'])
+            self.assertRaises(
+                exception.SecurityGroupNotFound,
+                self.compute_api.create,
+                self.context,
+                flavor=self.default_flavor,
+                image_href=None,
+                security_groups=['invalid_sec_group'])
 
         self.assertEqual(pre_build_len,
                          len(db.instance_get_all(self.context)))
@@ -8689,15 +8703,17 @@ class ComputeAPITestCase(BaseTestCase):
             objects=[objects.NetworkRequest(port_id=uuids.port_instance)])
 
         with test.nested(
-                mock.patch.object(self.compute_api.compute_task_api,
-                                  'schedule_and_build_instances'),
-                mock.patch.object(self.compute_api.network_api,
-                                  'create_resource_requests',
-                                  return_value=(None, [])),
+            mock.patch.object(
+                self.compute_api.compute_task_api,
+                'schedule_and_build_instances'),
+            mock.patch.object(
+                self.compute_api.network_api,
+                'create_resource_requests',
+                return_value=(None, [], objects.RequestLevelParams())),
         ) as (mock_sbi, _mock_create_resreqs):
             self.compute_api.create(
                 self.context,
-                instance_type=self.default_flavor,
+                flavor=self.default_flavor,
                 image_href=uuids.image_href_id,
                 requested_networks=requested_networks)
 
@@ -8737,14 +8753,14 @@ class ComputeAPITestCase(BaseTestCase):
         instance = objects.Instance()
         instance.update(base_options)
         instance = self.compute_api._populate_instance_for_create(
-                                self.context,
-                                instance,
-                                self.fake_image,
-                                1,
-                                security_groups=objects.SecurityGroupList(),
-                                instance_type=self.tiny_flavor,
-                                num_instances=num_instances,
-                                shutdown_terminate=False)
+            self.context,
+            instance,
+            self.fake_image,
+            1,
+            security_groups=objects.SecurityGroupList(),
+            flavor=self.tiny_flavor,
+            num_instances=num_instances,
+            shutdown_terminate=False)
         self.assertEqual(str(base_options['image_ref']),
                          instance['system_metadata']['image_base_image_ref'])
         self.assertEqual(vm_states.BUILDING, instance['vm_state'])
@@ -8772,14 +8788,14 @@ class ComputeAPITestCase(BaseTestCase):
         self.compute_api.key_manager = key_manager.API()
         index = 1
         instance = self.compute_api._populate_instance_for_create(
-                                self.context,
-                                instance,
-                                self.fake_image,
-                                index,
-                                security_groups=objects.SecurityGroupList(),
-                                instance_type=self.tiny_flavor,
-                                num_instances=num_instances,
-                                shutdown_terminate=False)
+            self.context,
+            instance,
+            self.fake_image,
+            index,
+            security_groups=objects.SecurityGroupList(),
+            flavor=self.tiny_flavor,
+            num_instances=num_instances,
+            shutdown_terminate=False)
         self.assertIsNotNone(instance.ephemeral_key_uuid)
 
     def test_default_hostname_generator(self):
@@ -8961,14 +8977,17 @@ class ComputeAPITestCase(BaseTestCase):
             sys_meta = {k: v for k, v in instance.system_metadata.items()
                         if not k.startswith('instance_type')}
             self.assertEqual(
-                    {'image_kernel_id': uuids.kernel_id,
-                     'image_min_disk': '1',
-                     'image_ramdisk_id': uuids.ramdisk_id,
-                     'image_something_else': 'meow',
-                     'preserved': 'preserve this!',
-                     'image_base_image_ref': image_ref,
-                     'boot_roles': ''},
-                    sys_meta)
+                {
+                    'image_kernel_id': uuids.kernel_id,
+                    'image_min_disk': '1',
+                    'image_ramdisk_id': uuids.ramdisk_id,
+                    'image_something_else': 'meow',
+                    'preserved': 'preserve this!',
+                    'image_base_image_ref': image_ref,
+                    'boot_roles': ''
+                },
+                sys_meta
+            )
 
     def test_rebuild(self):
         self._test_rebuild(vm_state=vm_states.ACTIVE)
@@ -9451,8 +9470,8 @@ class ComputeAPITestCase(BaseTestCase):
         metadata = self.compute_api.get_instance_metadata(_context, instance)
         self.assertEqual(metadata, {'key1': 'value1', 'key2': 'value2'})
 
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 1)
-        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertEqual(len(self.notifier.notifications), 1)
+        msg = self.notifier.notifications[0]
         payload = msg.payload
         self.assertIn('metadata', payload)
         self.assertEqual(payload['metadata'], metadata)
@@ -9463,8 +9482,8 @@ class ComputeAPITestCase(BaseTestCase):
         metadata = self.compute_api.get_instance_metadata(_context, instance)
         self.assertEqual(metadata, new_metadata)
 
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 2)
-        msg = fake_notifier.NOTIFICATIONS[1]
+        self.assertEqual(len(self.notifier.notifications), 2)
+        msg = self.notifier.notifications[1]
         payload = msg.payload
         self.assertIn('metadata', payload)
         self.assertEqual(payload['metadata'], metadata)
@@ -9473,8 +9492,8 @@ class ComputeAPITestCase(BaseTestCase):
         metadata = self.compute_api.get_instance_metadata(_context, instance)
         self.assertEqual(metadata, {'key3': 'value3'})
 
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 3)
-        msg = fake_notifier.NOTIFICATIONS[2]
+        self.assertEqual(len(self.notifier.notifications), 3)
+        msg = self.notifier.notifications[2]
         payload = msg.payload
         self.assertIn('metadata', payload)
         self.assertEqual(payload['metadata'], {'key3': 'value3'})
@@ -9742,24 +9761,22 @@ class ComputeAPITestCase(BaseTestCase):
                       'destination_type': 'volume'}
         blank_bdm = {'source_type': 'blank', 'destination_type': 'volume'}
 
-        inst_type = {'ephemeral_gb': ephemeral_size, 'swap': swap_size}
+        flavor = {'ephemeral_gb': ephemeral_size, 'swap': swap_size}
         self.assertEqual(
-            self.compute_api._volume_size(inst_type, ephemeral_bdm),
+            self.compute_api._volume_size(flavor, ephemeral_bdm),
             ephemeral_size)
         ephemeral_bdm['volume_size'] = 42
         self.assertEqual(
-            self.compute_api._volume_size(inst_type, ephemeral_bdm), 42)
+            self.compute_api._volume_size(flavor, ephemeral_bdm), 42)
         self.assertEqual(
-            self.compute_api._volume_size(inst_type, swap_bdm),
-            swap_size)
+            self.compute_api._volume_size(flavor, swap_bdm), swap_size)
         swap_bdm['volume_size'] = 42
         self.assertEqual(
-                self.compute_api._volume_size(inst_type, swap_bdm), 42)
+            self.compute_api._volume_size(flavor, swap_bdm), 42)
         self.assertEqual(
-            self.compute_api._volume_size(inst_type, volume_bdm),
-            volume_size)
+            self.compute_api._volume_size(flavor, volume_bdm), volume_size)
         self.assertIsNone(
-            self.compute_api._volume_size(inst_type, blank_bdm))
+            self.compute_api._volume_size(flavor, blank_bdm))
 
     def test_reservation_id_one_instance(self):
         """Verify building an instance has a reservation_id that
@@ -9813,6 +9830,32 @@ class ComputeAPITestCase(BaseTestCase):
             name = 'x-%s' % (i + 1,)
             self.assertEqual(refs[i]['display_name'], name)
             self.assertEqual(refs[i]['hostname'], name)
+
+    @mock.patch("nova.objects.service.get_minimum_version_all_cells")
+    @mock.patch(
+        "nova.network.neutron.API.has_extended_resource_request_extension")
+    @mock.patch("nova.network.neutron.API.create_resource_requests")
+    def test_instance_create_with_extended_res_req_old_compute(
+        self, mock_create_res_req, mock_has_extended_res_req,
+        mock_get_min_svc_version
+    ):
+        requested_networks = objects.NetworkRequestList(
+            objects=[
+                objects.NetworkRequest(port_id=uuids.port1)
+            ]
+        )
+        mock_create_res_req.return_value = (
+            None, [objects.RequestGroup()], None)
+        mock_has_extended_res_req.return_value = True
+        mock_get_min_svc_version.return_value = 57
+
+        self.assertRaises(
+            exception.ExtendedResourceRequestOldCompute,
+            self.compute_api.create, self.context, self.default_flavor,
+            image_href=uuids.image_href_id,
+            requested_networks=requested_networks,
+            supports_port_resource_request=True,
+        )
 
     def test_instance_architecture(self):
         # Test the instance architecture.
@@ -10191,7 +10234,8 @@ class ComputeAPITestCase(BaseTestCase):
                 "_claim_pci_device_for_interface_attach",
                 return_value=None)
         ) as (cap, mock_lock, mock_create_resource_req, mock_claim_pci):
-            mock_create_resource_req.return_value = (None, [])
+            mock_create_resource_req.return_value = (
+                None, [], mock.sentinel.req_lvl_params)
             vif = self.compute.attach_interface(self.context,
                                                 instance,
                                                 network_id,
@@ -10251,7 +10295,8 @@ class ComputeAPITestCase(BaseTestCase):
               mock_allocate_res
         ):
             request_groups = [objects.RequestGroup]
-            mock_create_resource_req.return_value = (None, request_groups)
+            mock_create_resource_req.return_value = (
+                None, request_groups, mock.sentinel.req_lvl_params)
             mock_allocate_res.return_value = (
                 mock.sentinel.provider_mappings, mock.sentinel.resources)
             vif = self.compute.attach_interface(
@@ -10296,7 +10341,9 @@ class ComputeAPITestCase(BaseTestCase):
         # as this port has resource request we need to call
         # _allocate_port_resource_for_instance for it
         mock_allocate_res.assert_called_once_with(
-            self.context, instance, pci_reqs, request_groups)
+            self.context, instance, pci_reqs, request_groups,
+            mock.sentinel.req_lvl_params
+        )
 
     @mock.patch.object(compute_utils, 'notify_about_instance_action')
     def test_attach_sriov_interface(self, mock_notify):
@@ -10333,7 +10380,7 @@ class ComputeAPITestCase(BaseTestCase):
                 # Simulate that the requested port is an SRIOV port
                 pci_requests.requests.append(pci_req)
                 # without resource request
-                return None, []
+                return None, [], mock.sentinel.req_lvl_params
 
             mock_create_resource_req.side_effect = create_resource_req
 
@@ -10409,7 +10456,7 @@ class ComputeAPITestCase(BaseTestCase):
                 # Simulate that the requested port is an SRIOV port
                 pci_requests.requests.append(pci_req)
                 # with resource request
-                return None, request_groups
+                return None, request_groups, mock.sentinel.req_lvl_params
 
             mock_create_resource_req.side_effect = create_resource_req
 
@@ -10460,9 +10507,11 @@ class ComputeAPITestCase(BaseTestCase):
         self.assertIn(pci_device, instance.pci_devices.objects)
 
         # ensure that we called _allocate_port_resource_for_instance as it has
-        # resource reques
+        # resource request
         mock_allocate_res.assert_called_once_with(
-            self.context, instance, pci_reqs, request_groups)
+            self.context, instance, pci_reqs, request_groups,
+            mock.sentinel.req_lvl_params
+        )
 
     @mock.patch.object(compute_utils, 'notify_about_instance_action')
     def test_interface_tagged_attach(self, mock_notify):
@@ -10483,7 +10532,8 @@ class ComputeAPITestCase(BaseTestCase):
                               '_claim_pci_device_for_interface_attach',
                               return_value=None)
         ) as (mock_capabilities, mock_create_resource_req, mock_claim_pci):
-            mock_create_resource_req.return_value = (None, [])
+            mock_create_resource_req.return_value = (
+                None, [], mock.sentinel.req_lvl_params)
             vif = self.compute.attach_interface(self.context,
                                                 instance,
                                                 network_id,
@@ -10533,7 +10583,7 @@ class ComputeAPITestCase(BaseTestCase):
         instance = objects.Instance(
                        id=42,
                        uuid=uuids.interface_failed_instance,
-                       image_ref='foo',
+                       image_ref=uuids.image_ref,
                        system_metadata={},
                        flavor=new_type,
                        host='fake-host')
@@ -10559,7 +10609,8 @@ class ComputeAPITestCase(BaseTestCase):
         ) as (mock_notify, mock_attach, mock_allocate, mock_deallocate,
               mock_dict, mock_create_resource_req, mock_claim_pci):
 
-            mock_create_resource_req.return_value = (None, [])
+            mock_create_resource_req.return_value = (
+                None, [], mock.sentinel.req_lvl_params)
             mock_allocate.return_value = nwinfo
             mock_attach.side_effect = exception.NovaException("attach_failed")
             self.assertRaises(exception.InterfaceAttachFailed,
@@ -10597,7 +10648,7 @@ class ComputeAPITestCase(BaseTestCase):
         instance = objects.Instance(
             id=42,
             uuid=uuids.interface_failed_instance,
-            image_ref='foo',
+            image_ref=uuids.image_ref,
             system_metadata={},
             flavor=new_type,
             host='fake-host',
@@ -10637,7 +10688,7 @@ class ComputeAPITestCase(BaseTestCase):
                                     pci_requests=None, affinity_policy=None):
                 # Simulate that the requested port is an SRIOV port
                 pci_requests.requests.append(pci_req)
-                return None, []
+                return None, [], mock.sentinel.req_lvl_params
 
             mock_create_resource_req.side_effect = create_resource_req
             mock_allocate.return_value = nwinfo
@@ -10712,7 +10763,7 @@ class ComputeAPITestCase(BaseTestCase):
                                     pci_requests=None, affinity_policy=None):
                 # Simulate that the requested port is an SRIOV port
                 pci_requests.requests.append(pci_req)
-                return None, request_groups
+                return None, request_groups, mock.sentinel.req_lvl_params
 
             mock_create_resource_req.side_effect = create_resource_req
             mock_allocate_res.return_value = (
@@ -10737,7 +10788,12 @@ class ComputeAPITestCase(BaseTestCase):
             self.assertNotIn(pci_req, instance.pci_requests.requests)
 
             mock_allocate_res.assert_called_once_with(
-                self.context, instance, pci_reqs, request_groups)
+                self.context,
+                instance,
+                pci_reqs,
+                request_groups,
+                mock.sentinel.req_lvl_params
+            )
             mock_remove_res.assert_called_once_with(
                 self.context, instance.uuid, mock.sentinel.resources)
 
@@ -10749,6 +10805,10 @@ class ComputeAPITestCase(BaseTestCase):
                 resources={"CUSTOM_FOO": 13},
                 requester_id=uuids.requester_id)
             ]
+        req_lvl_params = objects.RequestLevelParams(
+            root_required={"CUSTOM_BLUE"},
+            same_subtree=[[uuids.group1, uuids.group2]]
+        )
 
         with test.nested(
             mock.patch.object(objects.ComputeNode, 'get_by_nodename'),
@@ -10777,7 +10837,9 @@ class ComputeAPITestCase(BaseTestCase):
                 alloc_reqs, mock.sentinel.provider_sums, mock.sentinel.version)
 
             res = self.compute._allocate_port_resource_for_instance(
-                self.context, instance, pci_reqs, request_groups)
+                self.context, instance, pci_reqs, request_groups,
+                req_lvl_params
+            )
             provider_mappings, resources = res
 
             self.assertEqual(
@@ -10793,6 +10855,11 @@ class ComputeAPITestCase(BaseTestCase):
                 request_groups[0].requester_id)
             self.assertEqual(request_groups[0], actual_rg)
             self.assertEqual(uuids.compute_node, actual_rg.in_tree)
+            self.assertEqual({"CUSTOM_BLUE"}, resource_request._root_required)
+            self.assertEqual(
+                [[uuids.group1, uuids.group2]],
+                resource_request._same_subtree
+            )
             mock_add_res.assert_called_once_with(
                 self.context, instance.uuid, mock.sentinel.resources)
             mock_update_pci.assert_called_once_with(
@@ -10807,6 +10874,10 @@ class ComputeAPITestCase(BaseTestCase):
                 resources={"CUSTOM_FOO": 13},
                 requester_id=uuids.requester_id)
             ]
+        req_lvl_params = objects.RequestLevelParams(
+            root_required={"CUSTOM_BLUE"},
+            same_subtree=[[uuids.group1, uuids.group2]]
+        )
 
         with test.nested(
             mock.patch.object(objects.ComputeNode, 'get_by_nodename'),
@@ -10832,7 +10903,9 @@ class ComputeAPITestCase(BaseTestCase):
             self.assertRaises(
                 exception.InterfaceAttachResourceAllocationFailed,
                 self.compute._allocate_port_resource_for_instance,
-                self.context, instance, pci_reqs, request_groups)
+                self.context, instance, pci_reqs, request_groups,
+                req_lvl_params,
+            )
 
             mock_get_nodename.assert_called_once_with(
                 self.context, instance.node)
@@ -10847,6 +10920,10 @@ class ComputeAPITestCase(BaseTestCase):
                 resources={"CUSTOM_FOO": 13},
                 requester_id=uuids.requester_id)
             ]
+        req_lvl_params = objects.RequestLevelParams(
+            root_required={"CUSTOM_BLUE"},
+            same_subtree=[[uuids.group1, uuids.group2]]
+        )
 
         with test.nested(
             mock.patch.object(objects.ComputeNode, 'get_by_nodename'),
@@ -10859,7 +10936,7 @@ class ComputeAPITestCase(BaseTestCase):
             mock.patch(
                 'nova.compute.utils.'
                 'update_pci_request_spec_with_allocated_interface_name',
-                new=mock.NonCallableMock),
+                new=mock.NonCallableMock()),
         ) as (
             mock_get_nodename, mock_get_alloc_candidates, mock_add_res,
             mock_update_pci
@@ -10881,7 +10958,9 @@ class ComputeAPITestCase(BaseTestCase):
             self.assertRaises(
                 exception.InterfaceAttachResourceAllocationFailed,
                 self.compute._allocate_port_resource_for_instance,
-                self.context, instance, pci_reqs, request_groups)
+                self.context, instance, pci_reqs, request_groups,
+                req_lvl_params
+            )
 
             mock_get_nodename.assert_called_once_with(
                 self.context, instance.node)
@@ -10892,6 +10971,11 @@ class ComputeAPITestCase(BaseTestCase):
                 request_groups[0].requester_id)
             self.assertEqual(request_groups[0], actual_rg)
             self.assertEqual(uuids.compute_node, actual_rg.in_tree)
+            self.assertEqual({"CUSTOM_BLUE"}, resource_request._root_required)
+            self.assertEqual(
+                [[uuids.group1, uuids.group2]],
+                resource_request._same_subtree
+            )
             mock_add_res.assert_called_once_with(
                 self.context, instance.uuid, mock.sentinel.resources)
 
@@ -10903,6 +10987,10 @@ class ComputeAPITestCase(BaseTestCase):
                 resources={"CUSTOM_FOO": 13},
                 requester_id=uuids.requester_id)
             ]
+        req_lvl_params = objects.RequestLevelParams(
+            root_required={"CUSTOM_BLUE"},
+            same_subtree=[[uuids.group1, uuids.group2]]
+        )
 
         with test.nested(
             mock.patch.object(objects.ComputeNode, 'get_by_nodename'),
@@ -10939,7 +11027,9 @@ class ComputeAPITestCase(BaseTestCase):
             self.assertRaises(
                 exception.AmbiguousResourceProviderForPCIRequest,
                 self.compute._allocate_port_resource_for_instance,
-                self.context, instance, pci_reqs, request_groups)
+                self.context, instance, pci_reqs, request_groups,
+                req_lvl_params
+            )
 
             mock_get_nodename.assert_called_once_with(
                 self.context, instance.node)
@@ -10950,6 +11040,11 @@ class ComputeAPITestCase(BaseTestCase):
                 request_groups[0].requester_id)
             self.assertEqual(request_groups[0], actual_rg)
             self.assertEqual(uuids.compute_node, actual_rg.in_tree)
+            self.assertEqual({"CUSTOM_BLUE"}, resource_request._root_required)
+            self.assertEqual(
+                [[uuids.group1, uuids.group2]],
+                resource_request._same_subtree
+            )
             mock_add_res.assert_called_once_with(
                 self.context, instance.uuid, mock.sentinel.resources)
             mock_update_pci.assert_called_once_with(
@@ -11286,8 +11381,8 @@ class ComputeAPITestCase(BaseTestCase):
             mock_attach_complete.assert_called_once_with(
                 self.context, uuids.attachment_id)
 
-    @mock.patch('nova.compute.api.API.get_instance_host_status',
-                new=mock.Mock(return_value=obj_fields.HostStatus.UP))
+    @mock.patch('nova.servicegroup.api.API.service_is_up',
+                new=mock.Mock(return_value=True))
     @mock.patch('nova.compute.api.API._record_action_start')
     def test_detach_volume(self, mock_record):
         # Ensure volume can be detached from instance
@@ -11364,18 +11459,13 @@ class ComputeAPITestCase(BaseTestCase):
         mock_begin_detaching.assert_not_called()
         self.assertTrue(mock_local_cleanup.called)
 
-    @mock.patch('nova.compute.api.API.get_instance_host_status',
-                new=mock.Mock(return_value=obj_fields.HostStatus.UP))
+    @mock.patch('nova.servicegroup.api.API.service_is_up',
+                new=mock.Mock(return_value=True))
     @mock.patch.object(nova.volume.cinder.API, 'begin_detaching',
                        side_effect=exception.InvalidInput(reason='error'))
     def test_detach_invalid_volume(self, mock_begin_detaching):
         # Ensure exception is raised while detaching an un-attached volume
-        fake_instance = self._fake_instance({
-                    'uuid': 'f7000000-0000-0000-0000-000000000001',
-                    'locked': False,
-                    'launched_at': timeutils.utcnow(),
-                    'vm_state': vm_states.ACTIVE,
-                    'task_state': None})
+        fake_instance = self._create_fake_instance_obj()
         volume = {'id': 1, 'attach_status': 'detached', 'status': 'available'}
 
         self.assertRaises(exception.InvalidVolume,
@@ -11859,7 +11949,7 @@ class ComputeAPITestCase(BaseTestCase):
         self.assertEqual(self.compute.host, migs[0].source_compute)
         self.assertEqual('accepted', migs[0].status)
         self.assertEqual('compute.instance.evacuate',
-                         fake_notifier.NOTIFICATIONS[0].event_type)
+                         self.notifier.notifications[0].event_type)
         mock_notify.assert_called_once_with(
             ctxt, instance, self.compute.host, action='evacuate',
             source='nova-api')
@@ -11945,6 +12035,21 @@ class ComputeAPITestCase(BaseTestCase):
                 host='fake_dest_host', on_shared_storage=True,
                 admin_password=None)
 
+    @mock.patch(
+        'nova.objects.service.get_minimum_version_all_cells',
+        new=mock.Mock(return_value=58),
+    )
+    @mock.patch(
+        'nova.network.neutron.API.instance_has_extended_resource_request',
+        new=mock.Mock(return_value=True),
+    )
+    def test_evacuate_with_extended_resource_request_old_compute(self):
+        instance = self._create_fake_instance_obj(services=True)
+        self.assertRaises(exception.ExtendedResourceRequestOldCompute,
+            self.compute_api.evacuate, self.context.elevated(), instance,
+            host='fake_dest_host', on_shared_storage=True,
+            admin_password=None)
+
     @mock.patch('nova.objects.MigrationList.get_by_filters')
     def test_get_migrations(self, mock_migration):
         migration = test_migration.fake_db_migration()
@@ -11966,7 +12071,7 @@ class ComputeAPITestCase(BaseTestCase):
         self.assertIsInstance(called_context, context.RequestContext)
         self.assertNotEqual(self.context, called_context)
 
-    @mock.patch("nova.db.api.migration_get_in_progress_by_instance")
+    @mock.patch("nova.db.main.api.migration_get_in_progress_by_instance")
     def test_get_migrations_in_progress_by_instance(self, mock_get):
         migration = test_migration.fake_db_migration(
             instance_uuid=uuids.instance)
@@ -11977,7 +12082,7 @@ class ComputeAPITestCase(BaseTestCase):
         self.assertEqual(migrations[0].id, migration['id'])
         mock_get.assert_called_once_with(self.context, uuids.instance, None)
 
-    @mock.patch("nova.db.api.migration_get_by_id_and_instance")
+    @mock.patch("nova.db.main.api.migration_get_by_id_and_instance")
     def test_get_migration_by_id_and_instance(self, mock_get):
         migration = test_migration.fake_db_migration(
             instance_uuid=uuids.instance)
@@ -12203,15 +12308,15 @@ class ComputeAPIAggrTestCase(BaseTestCase):
         # Ensure metadata can be updated.
         aggr = self.api.create_aggregate(self.context, 'fake_aggregate',
                                          'fake_zone')
-        fake_notifier.NOTIFICATIONS = []
+        self.notifier.reset()
         self.api.update_aggregate(self.context, aggr.id,
                                          {'name': 'new_fake_aggregate'})
         self.assertIsNone(availability_zones._get_cache().get('cache'))
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 2)
-        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertEqual(len(self.notifier.notifications), 2)
+        msg = self.notifier.notifications[0]
         self.assertEqual(msg.event_type,
                          'aggregate.updateprop.start')
-        msg = fake_notifier.NOTIFICATIONS[1]
+        msg = self.notifier.notifications[1]
         self.assertEqual(msg.event_type,
                          'aggregate.updateprop.end')
 
@@ -12234,13 +12339,13 @@ class ComputeAPIAggrTestCase(BaseTestCase):
         aggr2 = self._init_aggregate_with_host(None, 'fake_aggregate2', None,
                                                fake_host)
         metadata = {'name': 'new_fake_aggregate'}
-        fake_notifier.NOTIFICATIONS = []
+        self.notifier.reset()
         self.api.update_aggregate(self.context, aggr2.id, metadata)
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 2)
-        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertEqual(len(self.notifier.notifications), 2)
+        msg = self.notifier.notifications[0]
         self.assertEqual(msg.event_type,
                          'aggregate.updateprop.start')
-        msg = fake_notifier.NOTIFICATIONS[1]
+        msg = self.notifier.notifications[1]
         self.assertEqual(msg.event_type,
                          'aggregate.updateprop.end')
 
@@ -12264,13 +12369,13 @@ class ComputeAPIAggrTestCase(BaseTestCase):
         self._init_aggregate_with_host(None, 'fake_aggregate2', None,
                                        fake_host)
         metadata = {'availability_zone': 'new_fake_zone'}
-        fake_notifier.NOTIFICATIONS = []
+        self.notifier.reset()
         self.api.update_aggregate(self.context, aggr1.id, metadata)
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 2)
-        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertEqual(len(self.notifier.notifications), 2)
+        msg = self.notifier.notifications[0]
         self.assertEqual(msg.event_type,
                          'aggregate.updatemetadata.start')
-        msg = fake_notifier.NOTIFICATIONS[1]
+        msg = self.notifier.notifications[1]
         self.assertEqual(msg.event_type,
                          'aggregate.updatemetadata.end')
 
@@ -12281,7 +12386,7 @@ class ComputeAPIAggrTestCase(BaseTestCase):
                                        mock_get_all_by_host):
         # Ensure aggregate's availability zone can't be updated,
         # when aggregate has hosts in other availability zone
-        fake_notifier.NOTIFICATIONS = []
+
         values = _create_service_entries(self.context)
         fake_zone = values[0][0]
         fake_host = values[0][1][0]
@@ -12306,11 +12411,11 @@ class ComputeAPIAggrTestCase(BaseTestCase):
                                                None, fake_host2)
         metadata = {'availability_zone': fake_zone}
         self.api.update_aggregate(self.context, aggr3.id, metadata)
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 15)
-        msg = fake_notifier.NOTIFICATIONS[13]
+        self.assertEqual(len(self.notifier.notifications), 15)
+        msg = self.notifier.notifications[13]
         self.assertEqual(msg.event_type,
                          'aggregate.updatemetadata.start')
-        msg = fake_notifier.NOTIFICATIONS[14]
+        msg = self.notifier.notifications[14]
         self.assertEqual(msg.event_type,
                          'aggregate.updatemetadata.end')
         aggr4 = self.api.create_aggregate(self.context, 'fake_aggregate', None)
@@ -12326,7 +12431,7 @@ class ComputeAPIAggrTestCase(BaseTestCase):
                                                     mock_get_all_by_host):
         # Ensure aggregate's availability zone can't be updated,
         # when aggregate has hosts in other availability zone
-        fake_notifier.NOTIFICATIONS = []
+
         values = _create_service_entries(self.context)
         fake_host = values[0][1][0]
         mock_get_all_by_host.return_value = objects.ComputeNodeList(
@@ -12351,17 +12456,17 @@ class ComputeAPIAggrTestCase(BaseTestCase):
         metadata = {'foo_key1': 'foo_value1',
                     'foo_key2': 'foo_value2',
                     'availability_zone': 'fake_zone'}
-        fake_notifier.NOTIFICATIONS = []
+        self.notifier.reset()
         availability_zones._get_cache().region.get_or_create(
             'fake_ky', lambda: 'fake_value')
         aggr = self.api.update_aggregate_metadata(self.context, aggr.id,
                                                   metadata)
         self.assertIsNone(availability_zones._get_cache().get('fake_key'))
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 2)
-        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertEqual(len(self.notifier.notifications), 2)
+        msg = self.notifier.notifications[0]
         self.assertEqual(msg.event_type,
                          'aggregate.updatemetadata.start')
-        msg = fake_notifier.NOTIFICATIONS[1]
+        msg = self.notifier.notifications[1]
         self.assertEqual(msg.event_type,
                          'aggregate.updatemetadata.end')
         mock_notify.assert_has_calls([
@@ -12369,18 +12474,18 @@ class ComputeAPIAggrTestCase(BaseTestCase):
                       action='update_metadata', phase='start'),
             mock.call(context=self.context, aggregate=aggr,
                       action='update_metadata', phase='end')])
-        fake_notifier.NOTIFICATIONS = []
+        self.notifier.reset()
         metadata['foo_key1'] = None
         expected_payload_meta_data = {'foo_key1': None,
                                       'foo_key2': 'foo_value2',
                                       'availability_zone': 'fake_zone'}
         expected = self.api.update_aggregate_metadata(self.context,
                                              aggr.id, metadata)
-        self.assertEqual(2, len(fake_notifier.NOTIFICATIONS))
-        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertEqual(2, len(self.notifier.notifications))
+        msg = self.notifier.notifications[0]
         self.assertEqual('aggregate.updatemetadata.start', msg.event_type)
         self.assertEqual(expected_payload_meta_data, msg.payload['meta_data'])
-        msg = fake_notifier.NOTIFICATIONS[1]
+        msg = self.notifier.notifications[1]
         self.assertEqual('aggregate.updatemetadata.end', msg.event_type)
         self.assertEqual(expected_payload_meta_data, msg.payload['meta_data'])
         self.assertThat(expected.metadata,
@@ -12408,14 +12513,14 @@ class ComputeAPIAggrTestCase(BaseTestCase):
         aggr2 = self._init_aggregate_with_host(None, 'fake_aggregate2', None,
                                                fake_host)
         metadata = {'foo_key2': 'foo_value3'}
-        fake_notifier.NOTIFICATIONS = []
+        self.notifier.reset()
         aggr2 = self.api.update_aggregate_metadata(self.context, aggr2.id,
                                                   metadata)
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 2)
-        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertEqual(len(self.notifier.notifications), 2)
+        msg = self.notifier.notifications[0]
         self.assertEqual(msg.event_type,
                          'aggregate.updatemetadata.start')
-        msg = fake_notifier.NOTIFICATIONS[1]
+        msg = self.notifier.notifications[1]
         self.assertEqual(msg.event_type,
                          'aggregate.updatemetadata.end')
         mock_notify.assert_has_calls([
@@ -12446,13 +12551,13 @@ class ComputeAPIAggrTestCase(BaseTestCase):
         self._init_aggregate_with_host(None, 'fake_aggregate2', None,
                                        fake_host)
         metadata = {'availability_zone': 'new_fake_zone'}
-        fake_notifier.NOTIFICATIONS = []
+        self.notifier.reset()
         self.api.update_aggregate_metadata(self.context, aggr1.id, metadata)
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 2)
-        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertEqual(len(self.notifier.notifications), 2)
+        msg = self.notifier.notifications[0]
         self.assertEqual(msg.event_type,
                          'aggregate.updatemetadata.start')
-        msg = fake_notifier.NOTIFICATIONS[1]
+        msg = self.notifier.notifications[1]
         self.assertEqual(msg.event_type,
                          'aggregate.updatemetadata.end')
 
@@ -12479,7 +12584,7 @@ class ComputeAPIAggrTestCase(BaseTestCase):
                                                 mock_get_all_by_host):
         # Ensure aggregate's availability zone can't be updated,
         # when aggregate has hosts in other availability zone
-        fake_notifier.NOTIFICATIONS = []
+        self.notifier.reset()
         values = _create_service_entries(self.context)
         fake_zone = values[0][0]
         fake_host = values[0][1][0]
@@ -12499,11 +12604,11 @@ class ComputeAPIAggrTestCase(BaseTestCase):
                                                None, fake_host)
         metadata = {'availability_zone': fake_zone}
         self.api.update_aggregate_metadata(self.context, aggr3.id, metadata)
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 15)
-        msg = fake_notifier.NOTIFICATIONS[13]
+        self.assertEqual(len(self.notifier.notifications), 15)
+        msg = self.notifier.notifications[13]
         self.assertEqual(msg.event_type,
                          'aggregate.updatemetadata.start')
-        msg = fake_notifier.NOTIFICATIONS[14]
+        msg = self.notifier.notifications[14]
         self.assertEqual(msg.event_type,
                          'aggregate.updatemetadata.end')
         aggr4 = self.api.create_aggregate(self.context, 'fake_aggregate', None)
@@ -12515,14 +12620,13 @@ class ComputeAPIAggrTestCase(BaseTestCase):
     @mock.patch('nova.compute.utils.notify_about_aggregate_action')
     def test_delete_aggregate(self, mock_notify):
         # Ensure we can delete an aggregate.
-        fake_notifier.NOTIFICATIONS = []
         aggr = self.api.create_aggregate(self.context, 'fake_aggregate',
                                          'fake_zone')
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 2)
-        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertEqual(len(self.notifier.notifications), 2)
+        msg = self.notifier.notifications[0]
         self.assertEqual(msg.event_type,
                          'aggregate.create.start')
-        msg = fake_notifier.NOTIFICATIONS[1]
+        msg = self.notifier.notifications[1]
         self.assertEqual(msg.event_type,
                          'aggregate.create.end')
         mock_notify.assert_has_calls([
@@ -12532,13 +12636,13 @@ class ComputeAPIAggrTestCase(BaseTestCase):
                       action='create', phase='end')])
 
         mock_notify.reset_mock()
-        fake_notifier.NOTIFICATIONS = []
+        self.notifier.reset()
         self.api.delete_aggregate(self.context, aggr.id)
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 2)
-        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertEqual(len(self.notifier.notifications), 2)
+        msg = self.notifier.notifications[0]
         self.assertEqual(msg.event_type,
                          'aggregate.delete.start')
-        msg = fake_notifier.NOTIFICATIONS[1]
+        msg = self.notifier.notifications[1]
         self.assertEqual(msg.event_type,
                          'aggregate.delete.end')
         self.assertRaises(exception.AggregateNotFound,
@@ -12600,14 +12704,14 @@ class ComputeAPIAggrTestCase(BaseTestCase):
                 host=fake_host,
                 hypervisor_hostname=fake_host)])
 
-        fake_notifier.NOTIFICATIONS = []
+        self.notifier.reset()
         aggr = self.api.add_host_to_aggregate(self.context,
                                               aggr.id, fake_host)
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 2)
-        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertEqual(len(self.notifier.notifications), 2)
+        msg = self.notifier.notifications[0]
         self.assertEqual(msg.event_type,
                          'aggregate.addhost.start')
-        msg = fake_notifier.NOTIFICATIONS[1]
+        msg = self.notifier.notifications[1]
         self.assertEqual(msg.event_type,
                          'aggregate.addhost.end')
         self.assertEqual(len(aggr.hosts), 1)
@@ -12723,12 +12827,12 @@ class ComputeAPIAggrTestCase(BaseTestCase):
         # Ensure ComputeHostNotFound is raised when adding invalid host.
         aggr = self.api.create_aggregate(self.context, 'fake_aggregate',
                                          'fake_zone')
-        fake_notifier.NOTIFICATIONS = []
+        self.notifier.reset()
         self.assertRaises(exception.ComputeHostNotFound,
                           self.api.add_host_to_aggregate,
                           self.context, aggr.id, 'invalid_host')
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 2)
-        self.assertEqual(fake_notifier.NOTIFICATIONS[1].publisher_id,
+        self.assertEqual(len(self.notifier.notifications), 2)
+        self.assertEqual(self.notifier.notifications[1].publisher_id,
                          'compute.fake-mini')
         mock_add_host.assert_not_called()
 
@@ -12747,7 +12851,7 @@ class ComputeAPIAggrTestCase(BaseTestCase):
 
         aggr = self.api.create_aggregate(self.context, 'fake_aggregate',
                                          'fake_zone')
-        fake_notifier.NOTIFICATIONS = []
+        self.notifier.reset()
         values = _create_service_entries(self.context)
         fake_host = values[0][1][0]
         self.assertRaises(exception.ComputeHostNotFound,
@@ -12764,7 +12868,7 @@ class ComputeAPIAggrTestCase(BaseTestCase):
         # Ensure ComputeHostNotFound is raised when adding invalid host.
         aggr = self.api.create_aggregate(self.context, 'fake_aggregate',
                                          'fake_zone')
-        fake_notifier.NOTIFICATIONS = []
+        self.notifier.reset()
         self.assertRaises(exception.ComputeHostNotFound,
                           self.api.add_host_to_aggregate,
                           self.context, aggr.id, 'invalid_host')
@@ -12795,7 +12899,7 @@ class ComputeAPIAggrTestCase(BaseTestCase):
                                                   aggr.id, host)
         host_to_remove = values[0][1][0]
 
-        fake_notifier.NOTIFICATIONS = []
+        self.notifier.reset()
         mock_notify.reset_mock()
         mock_get_all_by_host.reset_mock()
         mock_get_all_by_host.return_value = objects.ComputeNodeList(
@@ -12805,11 +12909,11 @@ class ComputeAPIAggrTestCase(BaseTestCase):
         expected = self.api.remove_host_from_aggregate(self.context,
                                                        aggr.id,
                                                        host_to_remove)
-        self.assertEqual(len(fake_notifier.NOTIFICATIONS), 2)
-        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertEqual(len(self.notifier.notifications), 2)
+        msg = self.notifier.notifications[0]
         self.assertEqual(msg.event_type,
                          'aggregate.removehost.start')
-        msg = fake_notifier.NOTIFICATIONS[1]
+        msg = self.notifier.notifications[1]
         self.assertEqual(msg.event_type,
                          'aggregate.removehost.end')
         self.assertEqual(len(aggr.hosts) - 1, len(expected.hosts))
@@ -12864,7 +12968,7 @@ class ComputeAPIAggrTestCase(BaseTestCase):
 
         aggr = self.api.create_aggregate(self.context, 'fake_aggregate',
                                          'fake_zone')
-        fake_notifier.NOTIFICATIONS = []
+        self.notifier.reset()
         _create_service_entries(
             self.context, values=[['az', [fake_host]]],
             skip_host_mapping_creation_for_hosts=[fake_host])
@@ -13079,24 +13183,24 @@ class DisabledInstanceTypesTestCase(BaseTestCase):
     def setUp(self):
         super(DisabledInstanceTypesTestCase, self).setUp()
         self.compute_api = compute.API()
-        self.inst_type = objects.Flavor.get_by_name(self.context, 'm1.small')
+        self.flavor = objects.Flavor.get_by_name(self.context, 'm1.small')
 
-    def test_can_build_instance_from_visible_instance_type(self):
-        self.inst_type['disabled'] = False
+    def test_can_build_instance_from_visible_flavor(self):
+        self.flavor['disabled'] = False
         # Assert that exception.FlavorNotFound is not raised
-        self.compute_api.create(self.context, self.inst_type,
-                                image_href=uuids.image_instance)
+        self.compute_api.create(
+            self.context, self.flavor, image_href=uuids.image_instance)
 
-    def test_cannot_build_instance_from_disabled_instance_type(self):
-        self.inst_type['disabled'] = True
+    def test_cannot_build_instance_from_disabled_flavor(self):
+        self.flavor['disabled'] = True
         self.assertRaises(exception.FlavorNotFound,
-            self.compute_api.create, self.context, self.inst_type, None)
+            self.compute_api.create, self.context, self.flavor, None)
 
-    @mock.patch('nova.compute.api.API.get_instance_host_status',
-                new=mock.Mock(return_value=obj_fields.HostStatus.UP))
+    @mock.patch('nova.servicegroup.api.API.service_is_up',
+                new=mock.Mock(return_value=True))
     @mock.patch('nova.compute.api.API._validate_flavor_image_nostatus')
     @mock.patch('nova.objects.RequestSpec')
-    def test_can_resize_to_visible_instance_type(self, mock_reqspec,
+    def test_can_resize_to_visible_flavor(self, mock_reqspec,
                                                  mock_validate):
         instance = self._create_fake_instance_obj()
         orig_get_flavor_by_flavor_id =\
@@ -13104,11 +13208,11 @@ class DisabledInstanceTypesTestCase(BaseTestCase):
 
         def fake_get_flavor_by_flavor_id(flavor_id, ctxt=None,
                                                 read_deleted="yes"):
-            instance_type = orig_get_flavor_by_flavor_id(flavor_id,
+            flavor = orig_get_flavor_by_flavor_id(flavor_id,
                                                                 ctxt,
                                                                 read_deleted)
-            instance_type['disabled'] = False
-            return instance_type
+            flavor['disabled'] = False
+            return flavor
 
         self.stub_out('nova.compute.flavors.get_flavor_by_flavor_id',
                        fake_get_flavor_by_flavor_id)
@@ -13116,20 +13220,19 @@ class DisabledInstanceTypesTestCase(BaseTestCase):
         with mock.patch('nova.conductor.api.ComputeTaskAPI.resize_instance'):
             self.compute_api.resize(self.context, instance, '4')
 
-    @mock.patch('nova.compute.api.API.get_instance_host_status',
-                new=mock.Mock(return_value=obj_fields.HostStatus.UP))
-    def test_cannot_resize_to_disabled_instance_type(self):
-        instance = self._create_fake_instance_obj()
-        orig_get_flavor_by_flavor_id = \
-                flavors.get_flavor_by_flavor_id
+    @mock.patch('nova.servicegroup.api.API.service_is_up',
+                new=mock.Mock(return_value=True))
+    def test_cannot_resize_to_disabled_flavor(self):
+        instance = self._create_fake_instance_obj(services=True)
+        orig_get_flavor_by_flavor_id = flavors.get_flavor_by_flavor_id
 
-        def fake_get_flavor_by_flavor_id(flavor_id, ctxt=None,
-                                                read_deleted="yes"):
-            instance_type = orig_get_flavor_by_flavor_id(flavor_id,
-                                                                ctxt,
-                                                                read_deleted)
-            instance_type['disabled'] = True
-            return instance_type
+        def fake_get_flavor_by_flavor_id(
+            flavor_id, ctxt=None, read_deleted="yes"
+        ):
+            flavor = orig_get_flavor_by_flavor_id(
+                flavor_id, ctxt, read_deleted)
+            flavor['disabled'] = True
+            return flavor
 
         self.stub_out('nova.compute.flavors.get_flavor_by_flavor_id',
                        fake_get_flavor_by_flavor_id)
@@ -13150,7 +13253,7 @@ class ComputeRescheduleResizeOrReraiseTestCase(BaseTestCase):
         super(ComputeRescheduleResizeOrReraiseTestCase, self).setUp()
         self.instance = self._create_fake_instance_obj()
         self.instance_uuid = self.instance['uuid']
-        self.instance_type = objects.Flavor.get_by_name(
+        self.flavor = objects.Flavor.get_by_name(
             context.get_admin_context(), 'm1.tiny')
         self.request_spec = objects.RequestSpec()
 
@@ -13166,14 +13269,14 @@ class ComputeRescheduleResizeOrReraiseTestCase(BaseTestCase):
 
         self.compute.prep_resize(self.context, image=None,
                                  instance=inst_obj,
-                                 flavor=self.instance_type,
+                                 flavor=self.flavor,
                                  request_spec=self.request_spec,
                                  filter_properties={}, migration=mock.Mock(),
                                  node=None,
                                  clean_shutdown=True, host_list=None)
 
         mock_res.assert_called_once_with(mock.ANY, inst_obj, mock.ANY,
-                                         self.instance_type,
+                                         self.flavor,
                                          self.request_spec, {}, None)
 
     def test_reschedule_resize_or_reraise_no_filter_properties(self):
@@ -13192,7 +13295,7 @@ class ComputeRescheduleResizeOrReraiseTestCase(BaseTestCase):
         # because we're not retrying, we should re-raise the exception
         self.assertRaises(test.TestingException,
             self.compute._reschedule_resize_or_reraise, self.context,
-            self.instance, exc_info, self.instance_type,
+            self.instance, exc_info, self.flavor,
             self.request_spec, filter_properties, None)
 
     def test_reschedule_resize_or_reraise_no_retry_info(self):
@@ -13211,7 +13314,7 @@ class ComputeRescheduleResizeOrReraiseTestCase(BaseTestCase):
         # because we're not retrying, we should re-raise the exception
         self.assertRaises(test.TestingException,
             self.compute._reschedule_resize_or_reraise, self.context,
-            self.instance, exc_info, self.instance_type,
+            self.instance, exc_info, self.flavor,
             self.request_spec, filter_properties, None)
 
     @mock.patch.object(compute_manager.ComputeManager, '_instance_update')
@@ -13233,14 +13336,14 @@ class ComputeRescheduleResizeOrReraiseTestCase(BaseTestCase):
 
         self.assertRaises(test.TestingException,
             self.compute._reschedule_resize_or_reraise, self.context,
-            self.instance, exc_info, self.instance_type,
+            self.instance, exc_info, self.flavor,
             self.request_spec, filter_properties, None)
 
         mock_update.assert_called_once_with(
             self.context, mock.ANY, task_state=task_states.RESIZE_PREP)
         mock_resize.assert_called_once_with(
             self.context, mock.ANY,
-            {'filter_properties': filter_properties}, self.instance_type,
+            {'filter_properties': filter_properties}, self.flavor,
             request_spec=self.request_spec, host_list=None)
         mock_notify.assert_called_once_with(
             self.context, self.instance, 'fake-mini', action='resize',
@@ -13263,14 +13366,14 @@ class ComputeRescheduleResizeOrReraiseTestCase(BaseTestCase):
             exc_info = sys.exc_info()
 
         self.compute._reschedule_resize_or_reraise(
-            self.context, self.instance, exc_info, self.instance_type,
+            self.context, self.instance, exc_info, self.flavor,
             self.request_spec, filter_properties, None)
 
         mock_update.assert_called_once_with(
             self.context, mock.ANY, task_state=task_states.RESIZE_PREP)
         mock_resize.assert_called_once_with(
             self.context, mock.ANY,
-            {'filter_properties': filter_properties}, self.instance_type,
+            {'filter_properties': filter_properties}, self.flavor,
             request_spec=self.request_spec, host_list=None)
         mock_notify.assert_called_once_with(
             self.context, self.instance, 'fake-mini', action='resize',
@@ -13296,11 +13399,12 @@ class ComputeInactiveImageTestCase(BaseTestCase):
 
     def test_create_instance_with_deleted_image(self):
         # Make sure we can't start an instance with a deleted image.
-        inst_type = objects.Flavor.get_by_name(context.get_admin_context(),
-                                               'm1.tiny')
-        self.assertRaises(exception.ImageNotActive,
-                          self.compute_api.create,
-                          self.context, inst_type, uuids.image_instance)
+        flavor = objects.Flavor.get_by_name(
+            context.get_admin_context(), 'm1.tiny')
+        self.assertRaises(
+            exception.ImageNotActive,
+            self.compute_api.create,
+            self.context, flavor, uuids.image_instance)
 
 
 class EvacuateHostTestCase(BaseTestCase):
@@ -13816,91 +13920,91 @@ class CheckRequestedImageTestCase(test.TestCase):
         self.context = context.RequestContext(
                 'fake_user_id', 'fake_project_id')
 
-        self.instance_type = objects.Flavor.get_by_name(self.context,
+        self.flavor = objects.Flavor.get_by_name(self.context,
                                                         'm1.small')
-        self.instance_type['memory_mb'] = 64
-        self.instance_type['root_gb'] = 1
+        self.flavor['memory_mb'] = 64
+        self.flavor['root_gb'] = 1
 
     def test_no_image_specified(self):
         self.compute_api._validate_flavor_image(self.context, None, None,
-                self.instance_type, None)
+                self.flavor, None)
 
     def test_image_status_must_be_active(self):
         image = dict(id=uuids.image_id, status='foo')
 
         self.assertRaises(exception.ImageNotActive,
                 self.compute_api._validate_flavor_image, self.context,
-                image['id'], image, self.instance_type, None)
+                image['id'], image, self.flavor, None)
 
         image['status'] = 'active'
         self.compute_api._validate_flavor_image(self.context, image['id'],
-                image, self.instance_type, None)
+                image, self.flavor, None)
 
     def test_image_min_ram_check(self):
         image = dict(id=uuids.image_id, status='active', min_ram='65')
 
         self.assertRaises(exception.FlavorMemoryTooSmall,
                 self.compute_api._validate_flavor_image, self.context,
-                image['id'], image, self.instance_type, None)
+                image['id'], image, self.flavor, None)
 
         image['min_ram'] = '64'
         self.compute_api._validate_flavor_image(self.context, image['id'],
-                image, self.instance_type, None)
+                image, self.flavor, None)
 
     def test_image_min_disk_check(self):
         image = dict(id=uuids.image_id, status='active', min_disk='2')
 
         self.assertRaises(exception.FlavorDiskSmallerThanMinDisk,
                 self.compute_api._validate_flavor_image, self.context,
-                image['id'], image, self.instance_type, None)
+                image['id'], image, self.flavor, None)
 
         image['min_disk'] = '1'
         self.compute_api._validate_flavor_image(self.context, image['id'],
-                image, self.instance_type, None)
+                image, self.flavor, None)
 
     def test_image_too_large(self):
         image = dict(id=uuids.image_id, status='active', size='1073741825')
 
         self.assertRaises(exception.FlavorDiskSmallerThanImage,
                 self.compute_api._validate_flavor_image, self.context,
-                image['id'], image, self.instance_type, None)
+                image['id'], image, self.flavor, None)
 
         image['size'] = '1073741824'
         self.compute_api._validate_flavor_image(self.context, image['id'],
-                image, self.instance_type, None)
+                image, self.flavor, None)
 
     def test_root_gb_zero_disables_size_check(self):
         self.policy.set_rules({
             servers_policy.ZERO_DISK_FLAVOR: base_policy.RULE_ADMIN_OR_OWNER
         }, overwrite=False)
-        self.instance_type['root_gb'] = 0
+        self.flavor['root_gb'] = 0
         image = dict(id=uuids.image_id, status='active', size='1073741825')
 
         self.compute_api._validate_flavor_image(self.context, image['id'],
-                image, self.instance_type, None)
+                image, self.flavor, None)
 
     def test_root_gb_zero_disables_min_disk(self):
         self.policy.set_rules({
             servers_policy.ZERO_DISK_FLAVOR: base_policy.RULE_ADMIN_OR_OWNER
         }, overwrite=False)
-        self.instance_type['root_gb'] = 0
+        self.flavor['root_gb'] = 0
         image = dict(id=uuids.image_id, status='active', min_disk='2')
 
         self.compute_api._validate_flavor_image(self.context, image['id'],
-                image, self.instance_type, None)
+                image, self.flavor, None)
 
     def test_config_drive_option(self):
         image = {'id': uuids.image_id, 'status': 'active'}
         image['properties'] = {'img_config_drive': 'optional'}
         self.compute_api._validate_flavor_image(self.context, image['id'],
-                image, self.instance_type, None)
+                image, self.flavor, None)
         image['properties'] = {'img_config_drive': 'mandatory'}
         self.compute_api._validate_flavor_image(self.context, image['id'],
-                image, self.instance_type, None)
+                image, self.flavor, None)
         image['properties'] = {'img_config_drive': 'bar'}
         self.assertRaises(exception.InvalidImageConfigDrive,
                           self.compute_api._validate_flavor_image,
-                          self.context, image['id'], image, self.instance_type,
+                          self.context, image['id'], image, self.flavor,
                           None)
 
     def test_volume_blockdevicemapping(self):
@@ -13910,42 +14014,42 @@ class CheckRequestedImageTestCase(test.TestCase):
         # larger than the flavor root disk.
         image_uuid = uuids.fake
         image = dict(id=image_uuid, status='active',
-                     size=self.instance_type.root_gb * units.Gi,
-                     min_disk=self.instance_type.root_gb + 1)
+                     size=self.flavor.root_gb * units.Gi,
+                     min_disk=self.flavor.root_gb + 1)
 
         volume_uuid = uuids.fake_2
         root_bdm = block_device_obj.BlockDeviceMapping(
             source_type='volume', destination_type='volume',
-            volume_id=volume_uuid, volume_size=self.instance_type.root_gb + 1)
+            volume_id=volume_uuid, volume_size=self.flavor.root_gb + 1)
 
         self.compute_api._validate_flavor_image(self.context, image['id'],
-                image, self.instance_type, root_bdm)
+                image, self.flavor, root_bdm)
 
     def test_volume_blockdevicemapping_min_disk(self):
         # A bdm object volume smaller than the image's min_disk should not be
         # allowed
         image_uuid = uuids.fake
         image = dict(id=image_uuid, status='active',
-                     size=self.instance_type.root_gb * units.Gi,
-                     min_disk=self.instance_type.root_gb + 1)
+                     size=self.flavor.root_gb * units.Gi,
+                     min_disk=self.flavor.root_gb + 1)
 
         volume_uuid = uuids.fake_2
         root_bdm = block_device_obj.BlockDeviceMapping(
             source_type='image', destination_type='volume',
             image_id=image_uuid, volume_id=volume_uuid,
-            volume_size=self.instance_type.root_gb)
+            volume_size=self.flavor.root_gb)
 
         self.assertRaises(exception.VolumeSmallerThanMinDisk,
                           self.compute_api._validate_flavor_image,
-                          self.context, image_uuid, image, self.instance_type,
+                          self.context, image_uuid, image, self.flavor,
                           root_bdm)
 
     def test_volume_blockdevicemapping_min_disk_no_size(self):
         # We should allow a root volume whose size is not given
         image_uuid = uuids.fake
         image = dict(id=image_uuid, status='active',
-                     size=self.instance_type.root_gb * units.Gi,
-                     min_disk=self.instance_type.root_gb)
+                     size=self.flavor.root_gb * units.Gi,
+                     min_disk=self.flavor.root_gb)
 
         volume_uuid = uuids.fake_2
         root_bdm = block_device_obj.BlockDeviceMapping(
@@ -13953,27 +14057,27 @@ class CheckRequestedImageTestCase(test.TestCase):
             volume_id=volume_uuid, volume_size=None)
 
         self.compute_api._validate_flavor_image(self.context, image['id'],
-                image, self.instance_type, root_bdm)
+                image, self.flavor, root_bdm)
 
     def test_image_blockdevicemapping(self):
         # Test that we can succeed when passing bdms, and the root bdm isn't a
         # volume
         image_uuid = uuids.fake
         image = dict(id=image_uuid, status='active',
-                     size=self.instance_type.root_gb * units.Gi, min_disk=0)
+                     size=self.flavor.root_gb * units.Gi, min_disk=0)
 
         root_bdm = block_device_obj.BlockDeviceMapping(
             source_type='image', destination_type='local', image_id=image_uuid)
 
         self.compute_api._validate_flavor_image(self.context, image['id'],
-                image, self.instance_type, root_bdm)
+                image, self.flavor, root_bdm)
 
     def test_image_blockdevicemapping_too_big(self):
         # We should do a size check against flavor if we were passed bdms but
         # the root bdm isn't a volume
         image_uuid = uuids.fake
         image = dict(id=image_uuid, status='active',
-                     size=(self.instance_type.root_gb + 1) * units.Gi,
+                     size=(self.flavor.root_gb + 1) * units.Gi,
                      min_disk=0)
 
         root_bdm = block_device_obj.BlockDeviceMapping(
@@ -13982,14 +14086,14 @@ class CheckRequestedImageTestCase(test.TestCase):
         self.assertRaises(exception.FlavorDiskSmallerThanImage,
                           self.compute_api._validate_flavor_image,
                           self.context, image['id'],
-                          image, self.instance_type, root_bdm)
+                          image, self.flavor, root_bdm)
 
     def test_image_blockdevicemapping_min_disk(self):
         # We should do a min_disk check against flavor if we were passed bdms
         # but the root bdm isn't a volume
         image_uuid = uuids.fake
         image = dict(id=image_uuid, status='active',
-                     size=0, min_disk=self.instance_type.root_gb + 1)
+                     size=0, min_disk=self.flavor.root_gb + 1)
 
         root_bdm = block_device_obj.BlockDeviceMapping(
             source_type='image', destination_type='local', image_id=image_uuid)
@@ -13997,7 +14101,7 @@ class CheckRequestedImageTestCase(test.TestCase):
         self.assertRaises(exception.FlavorDiskSmallerThanMinDisk,
                           self.compute_api._validate_flavor_image,
                           self.context, image['id'],
-                          image, self.instance_type, root_bdm)
+                          image, self.flavor, root_bdm)
 
     @mock.patch('nova.virt.hardware.get_dedicated_cpu_constraint')
     def test_cpu_policy(self, dedicated_cpu_mock):
@@ -14011,11 +14115,11 @@ class CheckRequestedImageTestCase(test.TestCase):
                 dedicated_cpu_mock.return_value = None
 
             self.compute_api._validate_flavor_image(
-                self.context, image['id'], image, self.instance_type, None)
+                self.context, image['id'], image, self.flavor, None)
         image['properties'] = {'hw_cpu_policy': 'bar'}
         self.assertRaises(exception.InvalidRequest,
                           self.compute_api._validate_flavor_image,
-                          self.context, image['id'], image, self.instance_type,
+                          self.context, image['id'], image, self.flavor,
                           None)
 
     def test_cpu_thread_policy(self):
@@ -14025,11 +14129,11 @@ class CheckRequestedImageTestCase(test.TestCase):
         for v in obj_fields.CPUThreadAllocationPolicy.ALL:
             image['properties']['hw_cpu_thread_policy'] = v
             self.compute_api._validate_flavor_image(
-                self.context, image['id'], image, self.instance_type, None)
+                self.context, image['id'], image, self.flavor, None)
         image['properties']['hw_cpu_thread_policy'] = 'bar'
         self.assertRaises(exception.InvalidRequest,
                           self.compute_api._validate_flavor_image,
-                          self.context, image['id'], image, self.instance_type,
+                          self.context, image['id'], image, self.flavor,
                           None)
 
         image['properties'] = {
@@ -14038,5 +14142,5 @@ class CheckRequestedImageTestCase(test.TestCase):
                 obj_fields.CPUThreadAllocationPolicy.ISOLATE}
         self.assertRaises(exception.CPUThreadPolicyConfigurationInvalid,
                           self.compute_api._validate_flavor_image,
-                          self.context, image['id'], image, self.instance_type,
+                          self.context, image['id'], image, self.flavor,
                           None)

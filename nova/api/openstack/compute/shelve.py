@@ -24,7 +24,6 @@ from nova.api.openstack import wsgi
 from nova.api import validation
 from nova.compute import api as compute
 from nova import exception
-from nova.network import neutron
 from nova.policies import shelve as shelve_policies
 
 LOG = logging.getLogger(__name__)
@@ -34,10 +33,9 @@ class ShelveController(wsgi.Controller):
     def __init__(self):
         super(ShelveController, self).__init__()
         self.compute_api = compute.API()
-        self.network_api = neutron.API()
 
     @wsgi.response(202)
-    @wsgi.expected_errors((404, 403, 409))
+    @wsgi.expected_errors((404, 403, 409, 400))
     @wsgi.action('shelve')
     def _shelve(self, req, id, body):
         """Move an instance into shelved mode."""
@@ -51,19 +49,17 @@ class ShelveController(wsgi.Controller):
             self.compute_api.shelve(context, instance)
         except (
             exception.InstanceIsLocked,
-            exception.OperationNotSupportedForVTPM,
-            exception.OperationNotSupportedForVDPAInterface,
             exception.UnexpectedTaskStateError,
         ) as e:
             raise exc.HTTPConflict(explanation=e.format_message())
-        except exception.ForbiddenWithAccelerators as e:
-            raise exc.HTTPForbidden(explanation=e.format_message())
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
                                                                   'shelve', id)
+        except exception.ForbiddenPortsWithAccelerator as e:
+            raise exc.HTTPBadRequest(explanation=e.format_message())
 
     @wsgi.response(202)
-    @wsgi.expected_errors((404, 409))
+    @wsgi.expected_errors((400, 404, 409))
     @wsgi.action('shelveOffload')
     def _shelve_offload(self, req, id, body):
         """Force removal of a shelved instance from the compute node."""
@@ -79,6 +75,9 @@ class ShelveController(wsgi.Controller):
             common.raise_http_conflict_for_instance_invalid_state(state_error,
                                                               'shelveOffload',
                                                               id)
+
+        except exception.ForbiddenPortsWithAccelerator as e:
+            raise exc.HTTPBadRequest(explanation=e.format_message())
 
     @wsgi.response(202)
     @wsgi.expected_errors((400, 404, 409))
@@ -110,5 +109,8 @@ class ShelveController(wsgi.Controller):
             common.raise_http_conflict_for_instance_invalid_state(state_error,
                                                                   'unshelve',
                                                                   id)
-        except exception.InvalidRequest as e:
+        except (
+            exception.InvalidRequest,
+            exception.ExtendedResourceRequestOldCompute,
+        ) as e:
             raise exc.HTTPBadRequest(explanation=e.format_message())

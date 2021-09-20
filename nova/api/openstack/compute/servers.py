@@ -40,7 +40,6 @@ from nova import context as nova_context
 from nova import exception
 from nova.i18n import _
 from nova.image import glance
-from nova.network import neutron
 from nova import objects
 from nova.policies import servers as server_policies
 from nova import utils
@@ -114,7 +113,6 @@ class ServersController(wsgi.Controller):
     def __init__(self):
         super(ServersController, self).__init__()
         self.compute_api = compute.API()
-        self.network_api = neutron.API()
 
     @wsgi.expected_errors((400, 403))
     @validation.query_schema(schema_servers.query_params_v275, '2.75')
@@ -546,6 +544,84 @@ class ServersController(wsgi.Controller):
         create_kwargs['requested_networks'] = requested_networks
 
     @staticmethod
+    def _validate_host_availability_zone(context, availability_zone, host):
+        """Ensure the host belongs in the availability zone.
+
+        This is slightly tricky and it's probably worth recapping how host
+        aggregates and availability zones are related before reading. Hosts can
+        belong to zero or more host aggregates, but they will always belong to
+        exactly one availability zone. If the user has set the availability
+        zone key on one of the host aggregates that the host is a member of
+        then the host will belong to this availability zone. If the user has
+        not set the availability zone key on any of the host aggregates that
+        the host is a member of or the host is not a member of any host
+        aggregates, then the host will belong to the default availability zone.
+        Setting the availability zone key on more than one of host aggregates
+        that the host is a member of is an error and will be rejected by the
+        API.
+
+        Given the above, our host-availability zone check needs to vary
+        behavior based on whether we're requesting the default availability
+        zone or not. If we are not, then we simply ask "does this host belong
+        to a host aggregate and, if so, do any of the host aggregates have the
+        requested availability zone metadata set". By comparison, if we *are*
+        requesting the default availability zone then we want to ask the
+        inverse, or "does this host not belong to a host aggregate or, if it
+        does, is the availability zone information unset (or, naughty naughty,
+        set to the default) for each of the host aggregates". If both cases, if
+        the answer is no then we warn about the mismatch and then use the
+        actual availability zone of the host to avoid mismatches.
+
+        :param context: The nova auth request context
+        :param availability_zone: The name of the requested availability zone
+        :param host: The name of the requested host
+        :returns: The availability zone that should actually be used for the
+            request
+        """
+        aggregates = objects.AggregateList.get_by_host(context, host=host)
+        if not aggregates:
+            # a host is assigned to the default availability zone if it is not
+            # a member of any host aggregates
+            if availability_zone == CONF.default_availability_zone:
+                return availability_zone
+
+            LOG.warning(
+                "Requested availability zone '%s' but forced host '%s' "
+                "does not belong to any availability zones; ignoring "
+                "requested availability zone to avoid bug #1934770",
+                availability_zone, host,
+            )
+            return None
+
+        # only one host aggregate will have the availability_zone field set so
+        # use the first non-null value
+        host_availability_zone = next(
+            (a.availability_zone for a in aggregates if a.availability_zone),
+            None,
+        )
+
+        if availability_zone == host_availability_zone:
+            # if there's an exact match, use what the user requested
+            return availability_zone
+
+        if (
+            availability_zone == CONF.default_availability_zone and
+            host_availability_zone is None
+        ):
+            # special case the default availability zone since this won't (or
+            # rather shouldn't) be explicitly stored on any host aggregate
+            return availability_zone
+
+        # no match, so use the host's availability zone information, if any
+        LOG.warning(
+            "Requested availability zone '%s' but forced host '%s' "
+            "does not belong to this availability zone; overwriting "
+            "requested availability zone to avoid bug #1934770",
+            availability_zone, host,
+        )
+        return None
+
+    @staticmethod
     def _process_hosts_for_create(
             context, target, server_dict, create_kwargs, host, node):
         """Processes hosts request parameter for server create
@@ -576,18 +652,19 @@ class ServersController(wsgi.Controller):
 
     @wsgi.response(202)
     @wsgi.expected_errors((400, 403, 409))
-    @validation.schema(schema_servers.base_create_v20, '2.0', '2.0')
-    @validation.schema(schema_servers.base_create, '2.1', '2.18')
-    @validation.schema(schema_servers.base_create_v219, '2.19', '2.31')
-    @validation.schema(schema_servers.base_create_v232, '2.32', '2.32')
-    @validation.schema(schema_servers.base_create_v233, '2.33', '2.36')
-    @validation.schema(schema_servers.base_create_v237, '2.37', '2.41')
-    @validation.schema(schema_servers.base_create_v242, '2.42', '2.51')
-    @validation.schema(schema_servers.base_create_v252, '2.52', '2.56')
-    @validation.schema(schema_servers.base_create_v257, '2.57', '2.62')
-    @validation.schema(schema_servers.base_create_v263, '2.63', '2.66')
-    @validation.schema(schema_servers.base_create_v267, '2.67', '2.73')
-    @validation.schema(schema_servers.base_create_v274, '2.74')
+    @validation.schema(schema_servers.create_v20, '2.0', '2.0')
+    @validation.schema(schema_servers.create, '2.1', '2.18')
+    @validation.schema(schema_servers.create_v219, '2.19', '2.31')
+    @validation.schema(schema_servers.create_v232, '2.32', '2.32')
+    @validation.schema(schema_servers.create_v233, '2.33', '2.36')
+    @validation.schema(schema_servers.create_v237, '2.37', '2.41')
+    @validation.schema(schema_servers.create_v242, '2.42', '2.51')
+    @validation.schema(schema_servers.create_v252, '2.52', '2.56')
+    @validation.schema(schema_servers.create_v257, '2.57', '2.62')
+    @validation.schema(schema_servers.create_v263, '2.63', '2.66')
+    @validation.schema(schema_servers.create_v267, '2.67', '2.73')
+    @validation.schema(schema_servers.create_v274, '2.74', '2.89')
+    @validation.schema(schema_servers.create_v290, '2.90')
     def create(self, req, body):
         """Creates a new server for a given user."""
         context = req.environ['nova.context']
@@ -597,6 +674,9 @@ class ServersController(wsgi.Controller):
         description = name
         if api_version_request.is_supported(req, min_version='2.19'):
             description = server_dict.get('description')
+        hostname = None
+        if api_version_request.is_supported(req, min_version='2.90'):
+            hostname = server_dict.get('hostname')
 
         # Arguments to be passed to instance create function
         create_kwargs = {}
@@ -665,6 +745,8 @@ class ServersController(wsgi.Controller):
         if host or node:
             context.can(server_policies.SERVERS % 'create:forced_host',
                         target=target)
+            availability_zone = self._validate_host_availability_zone(
+                context, availability_zone, host)
 
         if api_version_request.is_supported(req, min_version='2.74'):
             self._process_hosts_for_create(context, target, server_dict,
@@ -680,17 +762,19 @@ class ServersController(wsgi.Controller):
 
         flavor_id = self._flavor_id_from_req_data(body)
         try:
-            inst_type = flavors.get_flavor_by_flavor_id(
-                    flavor_id, ctxt=context, read_deleted="no")
+            flavor = flavors.get_flavor_by_flavor_id(
+                flavor_id, ctxt=context, read_deleted="no")
 
             supports_multiattach = common.supports_multiattach_volume(req)
             supports_port_resource_request = \
                 common.supports_port_resource_request(req)
-            (instances, resv_id) = self.compute_api.create(context,
-                inst_type,
+            instances, resv_id = self.compute_api.create(
+                context,
+                flavor,
                 image_uuid,
                 display_name=name,
                 display_description=description,
+                hostname=hostname,
                 availability_zone=availability_zone,
                 forced_host=host, forced_node=node,
                 metadata=server_dict.get('metadata', {}),
@@ -730,9 +814,11 @@ class ServersController(wsgi.Controller):
                 exception.FlavorNotFound,
                 exception.InvalidMetadata,
                 exception.InvalidVolume,
+                exception.VolumeNotFound,
                 exception.MismatchVolumeAZException,
                 exception.MultiplePortsNotApplicable,
                 exception.InvalidFixedIpAndMaxCountRequest,
+                exception.AmbiguousHostnameForMultipleInstances,
                 exception.InstanceUserDataMalformed,
                 exception.PortNotFound,
                 exception.FixedIpAlreadyInUse,
@@ -760,7 +846,10 @@ class ServersController(wsgi.Controller):
                 exception.CertificateValidationFailed,
                 exception.CreateWithPortResourceRequestOldVersion,
                 exception.DeviceProfileError,
-                exception.ComputeHostNotFound) as error:
+                exception.ComputeHostNotFound,
+                exception.ForbiddenPortsWithAccelerator,
+                exception.ExtendedResourceRequestOldCompute,
+                ) as error:
             raise exc.HTTPBadRequest(explanation=error.format_message())
         except INVALID_FLAVOR_IMAGE_EXCEPTIONS as error:
             raise exc.HTTPBadRequest(explanation=error.format_message())
@@ -801,9 +890,10 @@ class ServersController(wsgi.Controller):
             self.compute_api.delete(context, instance)
 
     @wsgi.expected_errors(404)
-    @validation.schema(schema_servers.base_update_v20, '2.0', '2.0')
-    @validation.schema(schema_servers.base_update, '2.1', '2.18')
-    @validation.schema(schema_servers.base_update_v219, '2.19')
+    @validation.schema(schema_servers.update_v20, '2.0', '2.0')
+    @validation.schema(schema_servers.update, '2.1', '2.18')
+    @validation.schema(schema_servers.update_v219, '2.19', '2.89')
+    @validation.schema(schema_servers.update_v290, '2.90')
     def update(self, req, id, body):
         """Update server then pass on to version-specific controller."""
 
@@ -814,7 +904,7 @@ class ServersController(wsgi.Controller):
                  target={'user_id': instance.user_id,
                          'project_id': instance.project_id})
         show_server_groups = api_version_request.is_supported(
-                 req, min_version='2.71')
+             req, min_version='2.71')
 
         server = body['server']
 
@@ -826,11 +916,14 @@ class ServersController(wsgi.Controller):
             # This is allowed to be None (remove description)
             update_dict['display_description'] = server['description']
 
+        if 'hostname' in server:
+            update_dict['hostname'] = server['hostname']
+
         helpers.translate_attributes(helpers.UPDATE, server, update_dict)
 
         try:
-            instance = self.compute_api.update_instance(ctxt, instance,
-                                                        update_dict)
+            instance = self.compute_api.update_instance(
+                ctxt, instance, update_dict)
 
             # NOTE(gmann): Starting from microversion 2.75, PUT and Rebuild
             # API response will show all attributes like GET /servers API.
@@ -946,12 +1039,10 @@ class ServersController(wsgi.Controller):
         try:
             self.compute_api.resize(context, instance, flavor_id,
                                     auto_disk_config=auto_disk_config)
-        except (exception.QuotaError,
-                exception.ForbiddenWithAccelerators) as error:
+        except exception.QuotaError as error:
             raise exc.HTTPForbidden(
                 explanation=error.format_message())
         except (
-            exception.OperationNotSupportedForVDPAInterface,
             exception.InstanceIsLocked,
             exception.InstanceNotReady,
             exception.MixedInstanceNotSupportByComputeService,
@@ -969,10 +1060,13 @@ class ServersController(wsgi.Controller):
             msg = _("Image that the instance was started "
                     "with could not be found.")
             raise exc.HTTPBadRequest(explanation=msg)
-        except (exception.AutoDiskConfigDisabledByImage,
-                exception.CannotResizeDisk,
-                exception.CannotResizeToSameFlavor,
-                exception.FlavorNotFound) as e:
+        except (
+            exception.AutoDiskConfigDisabledByImage,
+            exception.CannotResizeDisk,
+            exception.CannotResizeToSameFlavor,
+            exception.FlavorNotFound,
+            exception.ExtendedResourceRequestOldCompute,
+        ) as e:
             raise exc.HTTPBadRequest(explanation=e.format_message())
         except INVALID_FLAVOR_IMAGE_EXCEPTIONS as e:
             raise exc.HTTPBadRequest(explanation=e.format_message())
@@ -1034,12 +1128,13 @@ class ServersController(wsgi.Controller):
     @wsgi.response(202)
     @wsgi.expected_errors((400, 403, 404, 409))
     @wsgi.action('rebuild')
-    @validation.schema(schema_servers.base_rebuild_v20, '2.0', '2.0')
-    @validation.schema(schema_servers.base_rebuild, '2.1', '2.18')
-    @validation.schema(schema_servers.base_rebuild_v219, '2.19', '2.53')
-    @validation.schema(schema_servers.base_rebuild_v254, '2.54', '2.56')
-    @validation.schema(schema_servers.base_rebuild_v257, '2.57', '2.62')
-    @validation.schema(schema_servers.base_rebuild_v263, '2.63')
+    @validation.schema(schema_servers.rebuild_v20, '2.0', '2.0')
+    @validation.schema(schema_servers.rebuild, '2.1', '2.18')
+    @validation.schema(schema_servers.rebuild_v219, '2.19', '2.53')
+    @validation.schema(schema_servers.rebuild_v254, '2.54', '2.56')
+    @validation.schema(schema_servers.rebuild_v257, '2.57', '2.62')
+    @validation.schema(schema_servers.rebuild_v263, '2.63', '2.89')
+    @validation.schema(schema_servers.rebuild_v290, '2.90')
     def _action_rebuild(self, req, id, body):
         """Rebuild an instance with the given attributes."""
         rebuild_dict = body['rebuild']
@@ -1063,8 +1158,10 @@ class ServersController(wsgi.Controller):
 
         helpers.translate_attributes(helpers.REBUILD, rebuild_dict, kwargs)
 
-        if (api_version_request.is_supported(req, min_version='2.54') and
-                'key_name' in rebuild_dict):
+        if (
+            api_version_request.is_supported(req, min_version='2.54') and
+            'key_name' in rebuild_dict
+        ):
             kwargs['key_name'] = rebuild_dict.get('key_name')
 
         # If user_data is not specified, we don't include it in kwargs because
@@ -1076,16 +1173,24 @@ class ServersController(wsgi.Controller):
 
         # Skip policy check for 'rebuild:trusted_certs' if no trusted
         # certificate IDs were provided.
-        if ((api_version_request.is_supported(req, min_version='2.63')) and
-                # Note that this is different from server create since with
-                # rebuild a user can unset/reset the trusted certs by
-                # specifying trusted_image_certificates=None, similar to
-                # key_name.
-                ('trusted_image_certificates' in rebuild_dict)):
+        if (
+            api_version_request.is_supported(req, min_version='2.63') and
+            # Note that this is different from server create since with
+            # rebuild a user can unset/reset the trusted certs by
+            # specifying trusted_image_certificates=None, similar to
+            # key_name.
+            'trusted_image_certificates' in rebuild_dict
+        ):
             kwargs['trusted_certs'] = rebuild_dict.get(
                 'trusted_image_certificates')
             context.can(server_policies.SERVERS % 'rebuild:trusted_certs',
                         target=target)
+
+        if (
+            api_version_request.is_supported(req, min_version='2.90') and
+            'hostname' in rebuild_dict
+        ):
+            kwargs['hostname'] = rebuild_dict['hostname']
 
         for request_attribute, instance_attribute in attr_map.items():
             try:
@@ -1104,11 +1209,7 @@ class ServersController(wsgi.Controller):
                                      image_href,
                                      password,
                                      **kwargs)
-        except (
-            exception.InstanceIsLocked,
-            exception.OperationNotSupportedForVTPM,
-            exception.OperationNotSupportedForVDPAInterface,
-        ) as e:
+        except exception.InstanceIsLocked as e:
             raise exc.HTTPConflict(explanation=e.format_message())
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
@@ -1122,8 +1223,7 @@ class ServersController(wsgi.Controller):
         except exception.KeypairNotFound:
             msg = _("Invalid key_name provided.")
             raise exc.HTTPBadRequest(explanation=msg)
-        except (exception.QuotaError,
-                exception.ForbiddenWithAccelerators) as error:
+        except exception.QuotaError as error:
             raise exc.HTTPForbidden(explanation=error.format_message())
         except (exception.AutoDiskConfigDisabledByImage,
                 exception.CertificateValidationFailed,
@@ -1285,6 +1385,8 @@ class ServersController(wsgi.Controller):
                          'created_at', 'launched_at', 'terminated_at',
                          'power_state', 'task_state', 'vm_state', 'progress',
                          'user_id',)
+        if api_version_request.is_supported(req, min_version='2.90'):
+            opt_list += ('hostname',)
         return opt_list
 
     def _get_instance(self, context, instance_uuid):

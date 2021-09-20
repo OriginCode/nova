@@ -24,7 +24,7 @@ from nova.api.openstack.compute import servers as servers_v21
 from nova import availability_zones
 from nova.compute import api as compute_api
 from nova import context
-from nova.db import api as db
+from nova.db.main import api as db
 from nova import exception
 from nova import objects
 from nova import test
@@ -203,14 +203,14 @@ class ServersControllerCreateTestV21(test.TestCase):
         fakes.stub_out_nw_api(self)
         self._set_up_controller()
 
-        def create_db_entry_for_new_instance(*args, **kwargs):
-            instance = args[4]
+        def _populate_instance_for_create(*args, **kwargs):
+            instance = args[2]
             instance.uuid = FAKE_UUID
             return instance
 
         self.useFixture(fixtures.GlanceFixture(self))
-        self.stub_out('nova.compute.api.API.create_db_entry_for_new_instance',
-                      create_db_entry_for_new_instance)
+        self.stub_out('nova.compute.api.API._populate_instance_for_create',
+                      _populate_instance_for_create)
 
     def _set_up_controller(self):
         self.controller = servers_v21.ServersController()

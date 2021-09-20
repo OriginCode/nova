@@ -39,9 +39,9 @@ from nova.conductor.tasks import live_migrate
 from nova.conductor.tasks import migrate
 from nova import conf
 from nova import context
-from nova.db import api as db
-from nova.db.sqlalchemy import api as db_api
-from nova.db.sqlalchemy import api_models
+from nova.db.api import api as api_db_api
+from nova.db.api import models as api_models
+from nova.db.main import api as main_db_api
 from nova import exception as exc
 from nova.image import glance as image_api
 from nova import objects
@@ -53,12 +53,11 @@ from nova.scheduler.client import query
 from nova.scheduler import utils as scheduler_utils
 from nova import test
 from nova.tests import fixtures
+from nova.tests.fixtures import cyborg as cyborg_fixture
 from nova.tests.unit.api.openstack import fakes
-from nova.tests.unit import cast_as_call
 from nova.tests.unit.compute import test_compute
 from nova.tests.unit import fake_build_request
 from nova.tests.unit import fake_instance
-from nova.tests.unit import fake_notifier
 from nova.tests.unit import fake_request_spec
 from nova.tests.unit import fake_server_actions
 from nova.tests.unit import utils as test_utils
@@ -138,8 +137,7 @@ class _BaseTestCase(object):
         self.project_id = fakes.FAKE_PROJECT_ID
         self.context = FakeContext(self.user_id, self.project_id)
 
-        fake_notifier.stub_notifier(self)
-        self.addCleanup(fake_notifier.reset)
+        self.useFixture(fixtures.NotificationFixture(self))
 
         self.stub_out('nova.rpc.RequestContextSerializer.deserialize_context',
                       lambda *args, **kwargs: self.context)
@@ -440,10 +438,11 @@ class _BaseTaskTestCase(object):
     def test_cold_migrate_forced_shutdown(self):
         self._test_cold_migrate(clean_shutdown=False)
 
+    @mock.patch('nova.accelerator.cyborg.get_client')
     @mock.patch.object(conductor_manager.ComputeTaskManager,
                        '_create_and_bind_arqs')
     @mock.patch.object(compute_rpcapi.ComputeAPI, 'build_and_run_instance')
-    @mock.patch.object(db, 'block_device_mapping_get_all_by_instance',
+    @mock.patch.object(main_db_api, 'block_device_mapping_get_all_by_instance',
                        return_value=[])
     @mock.patch.object(conductor_manager.ComputeTaskManager,
                        '_schedule_instances')
@@ -453,27 +452,28 @@ class _BaseTaskTestCase(object):
     @mock.patch.object(objects.RequestSpec, 'from_primitives')
     def test_build_instances(self, mock_fp, mock_save, mock_getaz,
                              mock_buildreq, mock_schedule, mock_bdm,
-                             mock_build, mock_create_bind_arqs):
+                             mock_build, mock_create_bind_arqs,
+                             mock_get_cyborg):
         """Tests creating two instances and the scheduler returns a unique
         host/node combo for each instance.
         """
         fake_spec = objects.RequestSpec()
         mock_fp.return_value = fake_spec
-        instance_type = objects.Flavor.get_by_name(self.context, 'm1.small')
+        flavor = objects.Flavor.get_by_name(self.context, 'm1.small')
         # NOTE(danms): Avoid datetime timezone issues with converted flavors
-        instance_type.created_at = None
+        flavor.created_at = None
         instances = [objects.Instance(context=self.context,
                                       id=i,
                                       uuid=uuids.fake,
-                                      flavor=instance_type) for i in range(2)]
-        instance_type_p = obj_base.obj_to_primitive(instance_type)
+                                      flavor=flavor) for i in range(2)]
+        flavor_p = obj_base.obj_to_primitive(flavor)
         instance_properties = obj_base.obj_to_primitive(instances[0])
         instance_properties['system_metadata'] = flavors.save_flavor_info(
-            {}, instance_type)
+            {}, flavor)
 
         spec = {'image': {'fake_data': 'should_pass_silently'},
                 'instance_properties': instance_properties,
-                'instance_type': instance_type_p,
+                'instance_type': flavor_p,
                 'num_instances': 2}
         filter_properties = {'retry': {'num_attempts': 1, 'hosts': []}}
         sched_return = copy.deepcopy(fake_host_lists2)
@@ -486,10 +486,10 @@ class _BaseTaskTestCase(object):
                                         'hosts': [['host2', 'node2']]}}
 
         # build_instances() is a cast, we need to wait for it to complete
-        self.useFixture(cast_as_call.CastAsCall(self))
+        self.useFixture(fixtures.CastAsCallFixture(self))
 
         mock_getaz.return_value = 'myaz'
-        mock_create_bind_arqs.return_value = mock.sentinel
+        mock_create_bind_arqs.return_value = {}
 
         self.conductor.build_instances(self.context,
                 instances=instances,
@@ -526,7 +526,7 @@ class _BaseTaskTestCase(object):
                       security_groups='security_groups',
                       block_device_mapping=mock.ANY,
                       node='node1', limits=None, host_list=sched_return[0],
-                      accel_uuids=mock.sentinel),
+                      accel_uuids=[]),
             mock.call(self.context, instance=mock.ANY, host='host2',
                       image={'fake_data': 'should_pass_silently'},
                       request_spec=fake_spec,
@@ -537,20 +537,25 @@ class _BaseTaskTestCase(object):
                       security_groups='security_groups',
                       block_device_mapping=mock.ANY,
                       node='node2', limits=None, host_list=sched_return[1],
-                      accel_uuids=mock.sentinel)])
+                      accel_uuids=[])])
         mock_create_bind_arqs.assert_has_calls([
-            mock.call(self.context, instances[0].uuid,
-                      instances[0].flavor.extra_specs, 'node1', mock.ANY),
-            mock.call(self.context, instances[1].uuid,
-                      instances[1].flavor.extra_specs, 'node2', mock.ANY),
+            mock.call(mock.ANY, instances[0].uuid,
+                      instances[0].flavor.extra_specs, 'node1', None),
+            mock.call(mock.ANY, instances[1].uuid,
+                      instances[1].flavor.extra_specs, 'node2', None),
             ])
+        mock_get_cyborg.assert_has_calls([
+             mock.call(self.context),
+             mock.call(self.context),
+        ])
 
+    @mock.patch('nova.accelerator.cyborg.get_client')
     @mock.patch.object(conductor_manager.ComputeTaskManager,
                        '_cleanup_when_reschedule_fails')
     @mock.patch.object(conductor_manager.ComputeTaskManager,
                        '_create_and_bind_arqs')
     @mock.patch.object(compute_rpcapi.ComputeAPI, 'build_and_run_instance')
-    @mock.patch.object(db, 'block_device_mapping_get_all_by_instance',
+    @mock.patch.object(main_db_api, 'block_device_mapping_get_all_by_instance',
                        return_value=[])
     @mock.patch.object(conductor_manager.ComputeTaskManager,
                        '_schedule_instances')
@@ -560,28 +565,29 @@ class _BaseTaskTestCase(object):
     @mock.patch.object(objects.RequestSpec, 'from_primitives')
     def test_build_instances_arq_failure(self, mock_fp, mock_save, mock_getaz,
                              mock_buildreq, mock_schedule, mock_bdm,
-                             mock_build, mock_create_bind_arqs, mock_cleanup):
+                             mock_build, mock_create_bind_arqs, mock_cleanup,
+                             mock_get_cyborg):
         """If _create_and_bind_arqs throws an exception,
            _destroy_build_request must be called for each instance.
         """
         fake_spec = objects.RequestSpec()
         mock_fp.return_value = fake_spec
-        instance_type = objects.Flavor.get_by_name(self.context, 'm1.small')
+        flavor = objects.Flavor.get_by_name(self.context, 'm1.small')
         # NOTE(danms): Avoid datetime timezone issues with converted flavors
-        instance_type.created_at = None
+        flavor.created_at = None
         instances = [objects.Instance(context=self.context,
                                       id=i,
                                       uuid=uuids.fake,
-                                      flavor=instance_type) for i in range(2)]
+                                      flavor=flavor) for i in range(2)]
         instance_properties = obj_base.obj_to_primitive(instances[0])
         instance_properties['system_metadata'] = flavors.save_flavor_info(
-            {}, instance_type)
+            {}, flavor)
 
         sched_return = copy.deepcopy(fake_host_lists2)
         mock_schedule.return_value = sched_return
 
         # build_instances() is a cast, we need to wait for it to complete
-        self.useFixture(cast_as_call.CastAsCall(self))
+        self.useFixture(fixtures.CastAsCallFixture(self))
 
         mock_getaz.return_value = 'myaz'
         mock_create_bind_arqs.side_effect = (
@@ -598,11 +604,15 @@ class _BaseTaskTestCase(object):
                 block_device_mapping='block_device_mapping',
                 legacy_bdm=False, host_lists=None)
         mock_create_bind_arqs.assert_has_calls([
-            mock.call(self.context, instances[0].uuid,
+            mock.call(mock.ANY, instances[0].uuid,
                       instances[0].flavor.extra_specs, 'node1', mock.ANY),
-            mock.call(self.context, instances[1].uuid,
+            mock.call(mock.ANY, instances[1].uuid,
                       instances[1].flavor.extra_specs, 'node2', mock.ANY),
             ])
+        mock_get_cyborg.assert_has_calls([
+             mock.call(self.context),
+             mock.call(self.context),
+        ])
         # Comparing instances fails because the instance objects have changed
         # in the above flow. So, we compare the fields instead.
         mock_cleanup.assert_has_calls([
@@ -645,7 +655,7 @@ class _BaseTaskTestCase(object):
         updates = {'vm_state': vm_states.ERROR, 'task_state': None}
 
         # build_instances() is a cast, we need to wait for it to complete
-        self.useFixture(cast_as_call.CastAsCall(self))
+        self.useFixture(fixtures.CastAsCallFixture(self))
 
         self.conductor.build_instances(
             self.context,
@@ -689,7 +699,7 @@ class _BaseTaskTestCase(object):
                   set_vm_state_and_notify, cleanup_mock):
             # build_instances() is a cast, we need to wait for it to
             # complete
-            self.useFixture(cast_as_call.CastAsCall(self))
+            self.useFixture(fixtures.CastAsCallFixture(self))
 
             populate_retry.side_effect = exc.MaxRetriesExceeded(
                 reason="Too many try")
@@ -736,7 +746,7 @@ class _BaseTaskTestCase(object):
         updates = {'vm_state': vm_states.ERROR, 'task_state': None}
 
         # build_instances() is a cast, we need to wait for it to complete
-        self.useFixture(cast_as_call.CastAsCall(self))
+        self.useFixture(fixtures.CastAsCallFixture(self))
 
         self.conductor.build_instances(
                           context=self.context,
@@ -779,7 +789,7 @@ class _BaseTaskTestCase(object):
         image = {'fake-data': 'should_pass_silently'}
 
         # build_instances() is a cast, we need to wait for it to complete
-        self.useFixture(cast_as_call.CastAsCall(self))
+        self.useFixture(fixtures.CastAsCallFixture(self))
 
         with mock.patch.object(self.conductor_manager.compute_rpcapi,
                 'build_and_run_instance'):
@@ -804,11 +814,12 @@ class _BaseTaskTestCase(object):
     def test_build_instances_exhaust_host_list(self, _mock_save, mock_notify):
         # A list of three alternate hosts for one instance
         host_lists = copy.deepcopy(fake_host_lists_alt)
-        instance = fake_instance.fake_instance_obj(self.context)
+        instance = fake_instance.fake_instance_obj(
+            self.context, expected_attrs='system_metadata')
         image = {'fake-data': 'should_pass_silently'}
 
         # build_instances() is a cast, we need to wait for it to complete
-        self.useFixture(cast_as_call.CastAsCall(self))
+        self.useFixture(fixtures.CastAsCallFixture(self))
 
         self.conductor.build_instances(
             context=self.context,
@@ -845,7 +856,7 @@ class _BaseTaskTestCase(object):
         image = {'fake-data': 'should_pass_silently'}
 
         # build_instances() is a cast, we need to wait for it to complete
-        self.useFixture(cast_as_call.CastAsCall(self))
+        self.useFixture(fixtures.CastAsCallFixture(self))
         with mock.patch.object(self.conductor_manager.compute_rpcapi,
                 'build_and_run_instance'):
             self.conductor.build_instances(context=self.context,
@@ -884,7 +895,7 @@ class _BaseTaskTestCase(object):
         image = {'fake-data': 'should_pass_silently'}
 
         # build_instances() is a cast, we need to wait for it to complete
-        self.useFixture(cast_as_call.CastAsCall(self))
+        self.useFixture(fixtures.CastAsCallFixture(self))
 
         with mock.patch.object(self.conductor_manager.compute_rpcapi,
                 'build_and_run_instance'):
@@ -933,7 +944,7 @@ class _BaseTaskTestCase(object):
         image = {'fake-data': 'should_pass_silently'}
 
         # build_instances() is a cast, we need to wait for it to complete
-        self.useFixture(cast_as_call.CastAsCall(self))
+        self.useFixture(fixtures.CastAsCallFixture(self))
 
         with mock.patch.object(self.conductor_manager.compute_rpcapi,
                 'build_and_run_instance'):
@@ -977,7 +988,7 @@ class _BaseTaskTestCase(object):
         image = {'fake-data': 'should_pass_silently'}
 
         # build_instances() is a cast, we need to wait for it to complete
-        self.useFixture(cast_as_call.CastAsCall(self))
+        self.useFixture(fixtures.CastAsCallFixture(self))
 
         @mock.patch.object(self.conductor_manager.compute_rpcapi,
                 'build_and_run_instance', new=mock.MagicMock())
@@ -1018,7 +1029,7 @@ class _BaseTaskTestCase(object):
         image = {'fake-data': 'should_pass_silently'}
 
         # build_instances() is a cast, we need to wait for it to complete
-        self.useFixture(cast_as_call.CastAsCall(self))
+        self.useFixture(fixtures.CastAsCallFixture(self))
 
         @mock.patch.object(self.conductor_manager.compute_rpcapi,
                            'build_and_run_instance')
@@ -1082,7 +1093,7 @@ class _BaseTaskTestCase(object):
         image = {'fake-data': 'should_pass_silently'}
 
         # build_instances() is a cast, we need to wait for it to complete
-        self.useFixture(cast_as_call.CastAsCall(self))
+        self.useFixture(fixtures.CastAsCallFixture(self))
 
         @mock.patch('nova.scheduler.utils.'
                     'fill_provider_mapping')
@@ -1159,7 +1170,7 @@ class _BaseTaskTestCase(object):
         image = {'fake-data': 'should_pass_silently'}
 
         # build_instances() is a cast, we need to wait for it to complete
-        self.useFixture(cast_as_call.CastAsCall(self))
+        self.useFixture(fixtures.CastAsCallFixture(self))
 
         @mock.patch('nova.scheduler.utils.'
                     'fill_provider_mapping')
@@ -1356,7 +1367,7 @@ class _BaseTaskTestCase(object):
         host = {'host': 'host1', 'nodename': 'node1', 'limits': {}}
 
         # unshelve_instance() is a cast, we need to wait for it to complete
-        self.useFixture(cast_as_call.CastAsCall(self))
+        self.useFixture(fixtures.CastAsCallFixture(self))
 
         @mock.patch.object(objects.InstanceMapping, 'get_by_instance_uuid')
         @mock.patch.object(self.conductor_manager.compute_rpcapi,
@@ -1624,12 +1635,16 @@ class _BaseTaskTestCase(object):
         mock_schedule.return_value = [[selection]]
 
         res_req = [objects.RequestGroup()]
-        mock_get_res_req.return_value = res_req
+        mock_get_res_req.return_value = (res_req, objects.RequestLevelParams())
 
         self.conductor_manager.unshelve_instance(
             self.context, instance, request_spec)
 
         self.assertEqual(res_req, request_spec.requested_resources)
+        self.assertEqual(
+            mock_get_res_req.return_value[1],
+            request_spec.request_level_params,
+        )
 
         mock_get_res_req.assert_called_once_with(self.context, instance.uuid)
         mock_schedule.assert_called_once_with(
@@ -1662,7 +1677,7 @@ class _BaseTaskTestCase(object):
             limits=None)
         mock_schedule.return_value = [[selection]]
 
-        mock_get_res_req.return_value = []
+        mock_get_res_req.return_value = ([], objects.RequestLevelParams())
 
         dp_groups = [objects.RequestGroup(requester_id='deviceprofile2'),
                      objects.RequestGroup(requester_id='deviceprofile3')]
@@ -1673,6 +1688,10 @@ class _BaseTaskTestCase(object):
             self.context, instance, request_spec)
 
         self.assertEqual(dp_groups, request_spec.requested_resources)
+        self.assertEqual(
+            mock_get_res_req.return_value[1],
+            request_spec.request_level_params,
+        )
 
         mock_get_res_req.assert_called_once_with(self.context, instance.uuid)
         mock_schedule.assert_called_once_with(
@@ -1708,7 +1727,7 @@ class _BaseTaskTestCase(object):
         dp_groups = [objects.RequestGroup(requester_id='deviceprofile2'),
                      objects.RequestGroup(requester_id='deviceprofile3')]
         mock_get_dp.return_value = dp_groups
-        mock_get_res_req.return_value = []
+        mock_get_res_req.return_value = ([], objects.RequestLevelParams())
         arqs = ["fake-arq-uuid"]
         mock_get_arqs.side_effect = exc.AcceleratorRequestBindingFailed(
                                     arqs=arqs, msg='')
@@ -1783,7 +1802,7 @@ class _BaseTaskTestCase(object):
                                             **compute_args)
             self.assertEqual(inst_obj.project_id, fake_spec.project_id)
         self.assertEqual('compute.instance.rebuild.scheduled',
-                         fake_notifier.NOTIFICATIONS[0].event_type)
+                         self.notifier.notifications[0].event_type)
         mock_notify.assert_called_once_with(
             self.context, inst_obj, 'thebesthost', action='rebuild_scheduled',
             source='nova-conductor')
@@ -1834,7 +1853,7 @@ class _BaseTaskTestCase(object):
                                             **compute_args)
             self.assertEqual(inst_obj.project_id, fake_spec.project_id)
         self.assertEqual('compute.instance.rebuild.scheduled',
-                         fake_notifier.NOTIFICATIONS[0].event_type)
+                         self.notifier.notifications[0].event_type)
         mock_notify.assert_called_once_with(
             self.context, inst_obj, 'thebesthost', action='rebuild_scheduled',
             source='nova-conductor')
@@ -1889,7 +1908,7 @@ class _BaseTaskTestCase(object):
         sig_mock.side_effect = exception
 
         # build_instances() is a cast, we need to wait for it to complete
-        self.useFixture(cast_as_call.CastAsCall(self))
+        self.useFixture(fixtures.CastAsCallFixture(self))
 
         # Create the migration record (normally created by the compute API).
         migration = objects.Migration(self.context,
@@ -2005,7 +2024,7 @@ class _BaseTaskTestCase(object):
             mock.patch('nova.scheduler.utils.fill_provider_mapping'),
             mock.patch('nova.network.neutron.API.'
                        'get_requested_resource_for_instance',
-                       return_value=[])
+                       return_value=([], objects.RequestLevelParams()))
         ) as (rebuild_mock, sig_mock, select_dest_mock, reset_fd,
               fill_rp_mapping_mock, get_req_res_mock):
             self.conductor_manager.rebuild_instance(context=self.context,
@@ -2032,7 +2051,7 @@ class _BaseTaskTestCase(object):
                 fake_spec, fake_selection)
 
         self.assertEqual('compute.instance.rebuild.scheduled',
-                         fake_notifier.NOTIFICATIONS[0].event_type)
+                         self.notifier.notifications[0].event_type)
         mock_notify.assert_called_once_with(
             self.context, inst_obj, 'thebesthost', action='rebuild_scheduled',
             source='nova-conductor')
@@ -2075,7 +2094,7 @@ class _BaseTaskTestCase(object):
             mock.patch('nova.scheduler.utils.fill_provider_mapping'),
             mock.patch('nova.network.neutron.API.'
                        'get_requested_resource_for_instance',
-                       return_value=[])
+                       return_value=([], objects.RequestLevelParams()))
         ) as (rebuild_mock, sig_mock, select_dest_mock, reset_fd,
               fill_rp_mapping_mock, get_req_res_mock):
             self.conductor_manager.rebuild_instance(context=self.context,
@@ -2104,7 +2123,7 @@ class _BaseTaskTestCase(object):
             mock_del_arqs.assert_called_once()
 
         self.assertEqual('compute.instance.rebuild.scheduled',
-                         fake_notifier.NOTIFICATIONS[0].event_type)
+                         self.notifier.notifications[0].event_type)
         mock_notify.assert_called_once_with(
             self.context, inst_obj, 'thebesthost', action='rebuild_scheduled',
             source='nova-conductor')
@@ -2149,7 +2168,7 @@ class _BaseTaskTestCase(object):
             mock.patch('nova.scheduler.utils.fill_provider_mapping'),
             mock.patch('nova.network.neutron.API.'
                        'get_requested_resource_for_instance',
-                       return_value=[])
+                       return_value=([], objects.RequestLevelParams()))
         ) as (sig_mock, select_dest_mock, reset_fd,
               fill_rp_mapping_mock, get_req_res_mock):
             ex = self.assertRaises(exc.AcceleratorRequestBindingFailed,
@@ -2177,7 +2196,7 @@ class _BaseTaskTestCase(object):
             mock_del_arqs_instance.assert_called_once()
 
         self.assertEqual('compute.instance.rebuild.scheduled',
-                         fake_notifier.NOTIFICATIONS[0].event_type)
+                         self.notifier.notifications[0].event_type)
         mock_notify.assert_called_once_with(
             self.context, inst_obj, 'thebesthost', action='rebuild_scheduled',
             source='nova-conductor')
@@ -2259,8 +2278,8 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
         self.params = params
         self.flavor = objects.Flavor.get_by_name(self.ctxt, 'm1.tiny')
 
-    @mock.patch('nova.accelerator.cyborg.get_client')
-    def test_create_bind_arqs_no_device_profile(self, mock_get_client):
+    @mock.patch('nova.accelerator.cyborg._CyborgClient.bind_arqs')
+    def test_create_bind_arqs_no_device_profile(self, mock_bind_arqs):
         # If no device profile name, it is a no op.
         hostname = 'myhost'
         instance = fake_instance.fake_instance_obj(self.context)
@@ -2269,22 +2288,22 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
         self.conductor._create_and_bind_arqs(self.context,
             instance.uuid, instance.flavor.extra_specs,
             hostname, resource_provider_mapping=mock.ANY)
-        mock_get_client.assert_not_called()
+        mock_bind_arqs.assert_not_called()
 
-    @mock.patch('nova.accelerator.cyborg._CyborgClient.bind_arqs')
     @mock.patch('nova.accelerator.cyborg._CyborgClient.'
                 'create_arqs_and_match_resource_providers')
-    def test_create_bind_arqs(self, mock_create, mock_bind):
+    def test_create_bind_arqs(self, mock_create):
         # Happy path
         hostname = 'myhost'
         instance = fake_instance.fake_instance_obj(self.context)
         dp_name = 'mydp'
         instance.flavor.extra_specs = {'accel:device_profile': dp_name}
+        cyclient = cyborg.get_client(self.context)
 
-        in_arq_list, _ = fixtures.get_arqs(dp_name)
-        mock_create.return_value = in_arq_list
+        in_arq_list, _ = cyborg_fixture.get_arqs(dp_name)
+        mock_create.return_value = [in_arq_list[0]]
 
-        self.conductor._create_and_bind_arqs(self.context,
+        bindings = self.conductor._create_and_bind_arqs(cyclient,
             instance.uuid, instance.flavor.extra_specs,
             hostname, resource_provider_mapping=mock.ANY)
 
@@ -2296,7 +2315,97 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
                  'device_rp_uuid': mock.ANY,
                  'instance_uuid': instance.uuid}
         }
-        mock_bind.assert_called_once_with(bindings=expected_bindings)
+        self.assertEqual(expected_bindings, bindings)
+
+    @mock.patch('nova.accelerator.cyborg._CyborgClient.create_arqs')
+    def test_create_bind_arqs_device_profile_arq_get_fail(self,
+            mock_create):
+        hostname = 'myhost'
+        instance = fake_instance.fake_instance_obj(self.context)
+        dp_name = 'smart_nic'
+        cyclient = cyborg.get_client(self.context)
+
+        arq_in_list, _ = fixtures.cyborg.get_arqs(dp_name)
+        mock_create.side_effect = (exc.AcceleratorRequestOpFailed(
+                "Arq Not found"))
+        arq_uuid = arq_in_list[0]['uuid']
+
+        request_tuples = [('123', '1.2.3.4', uuids.fakeid,
+            None, arq_uuid, dp_name)]
+        requests = objects.NetworkRequestList.from_tuples(request_tuples)
+
+        ex = self.assertRaises(exc.AcceleratorRequestOpFailed,
+            self.conductor._create_arqs_for_ports,
+                    cyclient,
+                    instance.uuid, requests,
+                    hostname, mock.ANY,
+                    )
+
+        self.assertEqual(mock_create.side_effect, ex)
+
+    @mock.patch('nova.network.neutron.get_client')
+    @mock.patch('nova.network.neutron.API._get_port_vnic_info')
+    @mock.patch('nova.accelerator.cyborg._CyborgClient.create_arqs')
+    def test_create_arq_for_port(
+            self, mock_create_arq, mock_port_get, mock_neutron):
+        """Test create arq for ports"""
+        dp_name = 'smart_nic'
+        port_id = uuids.port_id
+        rp_uuid = uuids.rp_uuid
+
+        mock_neutron.return_value = mock.Mock()
+        cyclient = cyborg.get_client(self.context)
+        arq_in_list, _ = fixtures.cyborg.get_arqs(dp_name)
+        arq = arq_in_list[0]
+        mock_create_arq.return_value = [arq]
+        mock_port_get.return_value = ('accelerator-direct', None,
+             '1', None, None, dp_name)
+        arq_uuid = arq['uuid']
+
+        request_tuples = [('123', '1.2.3.4', port_id, None,
+            arq_uuid, dp_name)]
+        requests = objects.NetworkRequestList.from_tuples(request_tuples)
+        inst_uuid = uuids.inst
+        rp_map = {"device_profile_0" + str(port_id): [rp_uuid]}
+        expected_bindings = {
+            arq_uuid:
+                {'hostname': 'host0',
+                 'device_rp_uuid': rp_uuid,
+                 'instance_uuid': inst_uuid}
+        }
+
+        bindings = self.conductor._create_arqs_for_ports(
+            cyclient, inst_uuid, requests, 'host0', rp_map)
+        mock_create_arq.assert_called_once_with(dp_name)
+        self.assertEqual(expected_bindings, bindings)
+
+    @mock.patch('nova.accelerator.cyborg._CyborgClient.create_arqs')
+    @mock.patch('nova.network.neutron.API._get_port_vnic_info')
+    def test_create_bind_arqs_for_port_multi_devices(self,
+            mock_port_get, mock_create):
+        hostname = 'myhost'
+        instance = fake_instance.fake_instance_obj(self.context)
+        instance.flavor.extra_specs = {}
+        dp_name = 'smart_nic'
+        rp_uuid = uuids.rp_uuid
+        port_id = uuids.port_id
+
+        cyclient = cyborg.get_client(self.context)
+        arq_in_list, _ = fixtures.cyborg.get_arqs(dp_name)
+        mock_port_get.return_value = ('accelerator-direct', None,
+             '1', None, None, dp_name)
+        arq_uuid = arq_in_list[0]['uuid']
+
+        # muliti device request
+        mock_create.return_value = [arq_in_list[0], arq_in_list[0]]
+        rp_map = {"request_group_0" + str(port_id): rp_uuid}
+        request_tuples = [('123', '1.2.3.4', port_id,
+            None, arq_uuid, dp_name)]
+        requests = objects.NetworkRequestList.from_tuples(request_tuples)
+
+        self.assertRaises(exc.AcceleratorRequestOpFailed,
+                          self.conductor._create_arqs_for_ports,
+                          cyclient, instance.uuid, requests, hostname, rp_map)
 
     @mock.patch('nova.availability_zones.get_host_availability_zone')
     @mock.patch('nova.compute.rpcapi.ComputeAPI.build_and_run_instance')
@@ -2743,7 +2852,7 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
 
         self.assertEqual(0, len(build_requests))
 
-        @db_api.api_context_manager.reader
+        @api_db_api.context_manager.reader
         def request_spec_get_all(context):
             return context.session.query(api_models.RequestSpec).all()
 
@@ -2813,10 +2922,11 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
         self.params['request_specs'][0].requested_resources = []
         self._do_schedule_and_build_instances_test(self.params)
 
+    @mock.patch('nova.accelerator.cyborg.get_client')
     @mock.patch.object(conductor_manager.ComputeTaskManager,
                        '_create_and_bind_arqs')
     def test_schedule_and_build_instances_with_arqs_bind_ok(
-            self, mock_create_bind_arqs):
+            self, mock_create_bind_arqs, mock_get_client):
         extra_specs = {'accel:device_profile': 'mydp'}
         instance = self.params['build_requests'][0].instance
         instance.flavor.extra_specs = extra_specs
@@ -2827,8 +2937,37 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
         # associated with a host yet. The default host.nodename is
         # 'node1'.
         mock_create_bind_arqs.assert_called_once_with(
-            self.params['context'], instance.uuid, extra_specs,
+            mock.ANY, instance.uuid, extra_specs,
             'node1', mock.ANY)
+        mock_get_client.assert_called_once_with(self.params['context'])
+
+    @mock.patch('nova.accelerator.cyborg._CyborgClient.'
+                'bind_arqs')
+    @mock.patch('nova.accelerator.cyborg._CyborgClient.'
+                'create_arqs')
+    @mock.patch('nova.accelerator.cyborg._CyborgClient.'
+                'get_arq_device_rp_uuid')
+    def test_schedule_and_build_instances_with_device_profile(
+            self, mock_get, mock_create_arq, mock_bind_arq):
+        dp_name = 'smart_nic'
+        arq_in_list, _ = fixtures.cyborg.get_arqs(dp_name)
+        mock_create_arq.return_value = [arq_in_list[0]]
+        arq_uuid = arq_in_list[0]['uuid']
+        request_tuples = [('123', '1.2.3.4', uuids.fakeid,
+            None, arq_uuid, dp_name)]
+        requests = objects.NetworkRequestList.from_tuples(request_tuples)
+        rp_uuid = uuids.rp_uuid
+        mock_get.return_value = rp_uuid
+
+        params = copy.deepcopy(self.params)
+        params['requested_networks'] = requests
+        instance_uuid = self._do_schedule_and_build_instances_test(params)
+        expect_bindings = {arq_uuid: {'hostname': 'node1',
+                                      'device_rp_uuid': rp_uuid,
+                                      'instance_uuid': instance_uuid}}
+
+        mock_create_arq.assert_called_once_with(dp_name)
+        mock_bind_arq.assert_called_once_with(expect_bindings)
 
     @mock.patch.object(conductor_manager.ComputeTaskManager,
                        '_cleanup_build_artifacts')
@@ -2855,7 +2994,7 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
     @mock.patch.object(cyborg, "get_client")
     @mock.patch.object(
         conductor_manager.ComputeTaskManager, '_create_and_bind_arqs')
-    def test__create_and_bind_arq_for_instance(
+    def test_create_and_bind_arq_for_instance(
             self, mock_create_bind_arqs, mock_client, mock_request_mappings):
         # Exceptions in _create_and_bind_arqs result in cleanup
         arqs = ["fake-arq-uuid"]
@@ -2866,10 +3005,141 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
         instance.uuid = "fake-uuid"
         ex = self.assertRaises(exc.AcceleratorRequestBindingFailed,
             self.conductor._create_and_bind_arq_for_instance,
-            None, instance, mock.Mock(), request_spec.RequestSpec())
+            None, instance, mock.Mock(), request_spec.RequestSpec(), None)
 
         self.assertIn('Failed to bind accelerator requests', ex.message)
         mock_client.return_value.delete_arqs_by_uuid.assert_called_with(arqs)
+
+    @mock.patch.object(cyborg._CyborgClient, "bind_arqs")
+    @mock.patch.object(request_spec.RequestSpec, "get_request_group_mapping")
+    @mock.patch.object(
+        conductor_manager.ComputeTaskManager, '_create_and_bind_arqs')
+    def test_create_and_bind_arq_for_instance_from_extra_spec(
+            self, mock_create_bind_arqs, mock_request_mappings,
+            mock_bind_arqs):
+        # Exceptions in _create_and_bind_arqs result in cleanup
+        extra_specs = {'accel:device_profile': 'mydp'}
+        inst = fake_instance.fake_db_instance(image_ref='image_ref')
+        inst_obj = objects.Instance._from_db_object(
+            self.context, objects.Instance(), inst, [])
+        flavor = objects.Flavor.get_by_name(self.context, 'm1.small')
+        flavor.extra_specs = extra_specs
+        inst_obj.flavor = flavor
+        req_spec = request_spec.RequestSpec(instance_uuid=inst_obj.uuid)
+        rp_map = {"request_group_id": uuids.rp_uuid}
+        mock_request_mappings.return_value = rp_map
+
+        arq_uuid = uuids.arq_uuid
+        binds_extra_spec = {
+            arq_uuid:
+                {"hostname": 'fake_hostname',
+                "device_rp_uuid": uuids.rp_uuid,
+                "instance_uuid": inst_obj.uuid
+                }
+        }
+        mock_create_bind_arqs.return_value = binds_extra_spec
+        # mock_client.return_value = mock.Mock()
+        self.conductor._create_and_bind_arq_for_instance(
+            self.context, inst_obj, 'fake_hostname', req_spec, None)
+
+        mock_create_bind_arqs.assert_called_once_with(
+            mock.ANY, inst_obj.uuid, extra_specs,
+            'fake_hostname', rp_map)
+        mock_bind_arqs.assert_called_once_with(binds_extra_spec)
+
+    @mock.patch.object(cyborg._CyborgClient, "bind_arqs")
+    @mock.patch.object(
+        conductor_manager.ComputeTaskManager, '_create_arqs_for_ports')
+    @mock.patch.object(request_spec.RequestSpec, "get_request_group_mapping")
+    @mock.patch.object(
+        conductor_manager.ComputeTaskManager, '_create_and_bind_arqs')
+    def test_create_and_bind_arq_for_instance_request_net(
+            self, mock_create_bind_arqs,
+            mock_request_mappings, mock_create_arqs_for_port,
+            mock_bind_arqs):
+        # Exceptions in _create_and_bind_arqs result in cleanup
+        inst = fake_instance.fake_db_instance(image_ref='image_ref')
+        inst_obj = objects.Instance._from_db_object(
+            self.context, objects.Instance(), inst, [])
+        flavor = objects.Flavor.get_by_name(self.context, 'm1.small')
+        flavor.extra_specs = {}
+        inst_obj.flavor = flavor
+        req_spec = request_spec.RequestSpec(instance_uuid=inst_obj.uuid)
+        rp_map = {"request_group_id": uuids.rp_uuid}
+        mock_request_mappings.return_value = rp_map
+
+        mock_create_bind_arqs.return_value = {}
+        req_nets = [{'uuid': 'network', 'fixed_ip': 'address',
+                    'port': 'port'}]
+        arq_uuid = uuids.arq_uuid
+        binds_ports = {
+            arq_uuid:
+                {"hostname": 'fake_hostname',
+                "device_rp_uuid": uuids.rp_uuid,
+                "instance_uuid": inst_obj.uuid
+                }
+        }
+        mock_create_arqs_for_port.return_value = binds_ports
+
+        self.conductor._create_and_bind_arq_for_instance(
+            self.context, inst_obj, 'fake_hostname', req_spec, req_nets)
+        mock_create_bind_arqs.assert_called_once_with(
+            mock.ANY, inst_obj.uuid, {}, 'fake_hostname', rp_map)
+        mock_create_arqs_for_port.assert_called_once_with(
+            mock.ANY, inst_obj.uuid, req_nets, 'fake_hostname', rp_map)
+        mock_bind_arqs.assert_called_once_with(binds_ports)
+
+    @mock.patch.object(cyborg._CyborgClient, "bind_arqs")
+    @mock.patch.object(
+        conductor_manager.ComputeTaskManager, '_create_arqs_for_ports')
+    @mock.patch.object(request_spec.RequestSpec, "get_request_group_mapping")
+    @mock.patch.object(
+        conductor_manager.ComputeTaskManager, '_create_and_bind_arqs')
+    def test_create_and_bind_arq_for_instance_both(
+            self, mock_create_bind_arqs,
+            mock_request_mappings, mock_create_arqs_for_port,
+            mock_bind_arqs):
+        extra_specs = {'accel:device_profile': 'mydp'}
+        inst = fake_instance.fake_db_instance(image_ref='image_ref')
+        inst_obj = objects.Instance._from_db_object(
+            self.context, objects.Instance(), inst, [])
+        flavor = objects.Flavor.get_by_name(self.context, 'm1.small')
+        flavor.extra_specs = extra_specs
+        inst_obj.flavor = flavor
+        req_spec = request_spec.RequestSpec(instance_uuid=inst_obj.uuid)
+        rp_map = {"request_group_id": uuids.rp_uuid}
+        mock_request_mappings.return_value = rp_map
+
+        binds_extra_spec = {
+            uuids.arq_uuid1:
+                {"hostname": 'fake_hostname1',
+                "device_rp_uuid": uuids.rp_uuid,
+                "instance_uuid": inst_obj.uuid
+                }
+        }
+        mock_create_bind_arqs.return_value = binds_extra_spec
+
+        req_nets = [{'uuid': 'network', 'fixed_ip': 'address',
+                    'port': 'port'}]
+        binds_ports = {
+            uuids.arq_uuid2:
+                {"hostname": 'fake_hostname',
+                "device_rp_uuid": uuids.rp_uuid,
+                "instance_uuid": inst_obj.uuid
+                }
+        }
+        mock_create_arqs_for_port.return_value = binds_ports
+
+        self.conductor._create_and_bind_arq_for_instance(
+            self.context, inst_obj, 'fake_hostname', req_spec, req_nets)
+
+        mock_create_bind_arqs.assert_called_once_with(
+            mock.ANY, inst_obj.uuid, extra_specs, 'fake_hostname', rp_map)
+        mock_create_arqs_for_port.assert_called_once_with(
+            mock.ANY, inst_obj.uuid, req_nets, 'fake_hostname', rp_map)
+        # expected binds
+        binds_ports.update(binds_extra_spec)
+        mock_bind_arqs.assert_called_once_with(binds_ports)
 
     def test_map_instance_to_cell_already_mapped(self):
         """Tests a scenario where an instance is already mapped to a cell
@@ -3665,7 +3935,7 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
                                         'hosts': [['host2', 'node2']]}}
 
         # build_instances() is a cast, we need to wait for it to complete
-        self.useFixture(cast_as_call.CastAsCall(self))
+        self.useFixture(fixtures.CastAsCallFixture(self))
 
         self.conductor.build_instances(self.context,
                 instances=instances,
@@ -3729,7 +3999,7 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
                         build_and_run_instance, get_buildreq):
 
             # build_instances() is a cast, we need to wait for it to complete
-            self.useFixture(cast_as_call.CastAsCall(self))
+            self.useFixture(fixtures.CastAsCallFixture(self))
 
             self.conductor.build_instances(self.context,
                     instances=instances,
@@ -3767,7 +4037,8 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
         """Tests that when populate_retry raises MaxRetriesExceeded in
         build_instances, we don't attempt to cleanup the build request.
         """
-        instance = fake_instance.fake_instance_obj(self.context)
+        instance = fake_instance.fake_instance_obj(
+            self.context, expected_attrs=['system_metadata'])
         image = {'id': uuids.image_id}
         filter_props = {
             'retry': {
@@ -3883,7 +4154,25 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
         self.conductor_manager._cleanup_when_reschedule_fails(
             self.context, instance, exception=None,
             legacy_request_spec=None, requested_networks=None)
-        mock_del_arqs.assert_called_once_with(self.context, instance)
+        mock_del_arqs.assert_called_once_with(
+            self.context, instance, None)
+
+    @mock.patch.object(conductor_manager.ComputeTaskManager,
+                       '_cleanup_allocated_networks')
+    @mock.patch.object(conductor_manager.ComputeTaskManager,
+                       '_set_vm_state_and_notify')
+    @mock.patch.object(compute_utils, 'delete_arqs_if_needed')
+    def test_cleanup_arqs_on_reschedule_by_uuid(self, mock_del_arqs,
+            mock_set_vm, mock_clean_net):
+        instance = fake_instance.fake_instance_obj(self.context)
+        request_tuples = [('123', '1.2.3.4', uuids.fakeid,
+            None, uuids.arq_uuid, None)]
+        requests = objects.NetworkRequestList.from_tuples(request_tuples)
+        self.conductor_manager._cleanup_when_reschedule_fails(
+            self.context, instance, exception=None,
+            legacy_request_spec=None, requested_networks=requests)
+        mock_del_arqs.assert_called_once_with(self.context,
+            instance, [uuids.arq_uuid])
 
     def test_cleanup_allocated_networks_none_requested(self):
         # Tests that we don't deallocate networks if 'none' were specifically

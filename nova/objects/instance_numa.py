@@ -17,7 +17,7 @@ import itertools
 from oslo_serialization import jsonutils
 from oslo_utils import versionutils
 
-from nova.db import api as db
+from nova.db.main import api as db
 from nova import exception
 from nova.i18n import _
 from nova.objects import base
@@ -79,6 +79,8 @@ class InstanceNUMACell(base.NovaEphemeralObject,
         'memory': obj_fields.IntegerField(),
         'pagesize': obj_fields.IntegerField(nullable=True,
                                             default=None),
+        # TODO(sean-k-mooney): This is no longer used and should be
+        # removed in v2
         'cpu_topology': obj_fields.ObjectField('VirtCPUTopology',
                                                nullable=True),
         'cpu_pinning_raw': obj_fields.DictOfIntegersField(nullable=True,

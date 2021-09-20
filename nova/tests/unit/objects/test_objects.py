@@ -16,6 +16,7 @@ import collections
 import contextlib
 import copy
 import datetime
+import inspect
 import os
 import pprint
 
@@ -34,7 +35,6 @@ from nova.objects import fields
 from nova.objects import virt_device_metadata
 from nova import test
 from nova.tests import fixtures as nova_fixtures
-from nova.tests.unit import fake_notifier
 from nova import utils
 
 
@@ -211,8 +211,8 @@ class _BaseTestCase(test.TestCase):
         self.user_id = 'fake-user'
         self.project_id = 'fake-project'
         self.context = context.RequestContext(self.user_id, self.project_id)
-        fake_notifier.stub_notifier(self)
-        self.addCleanup(fake_notifier.reset)
+        self.notifier = self.useFixture(
+            nova_fixtures.NotificationFixture(self))
 
         # NOTE(danms): register these here instead of at import time
         # so that they're not always present
@@ -1074,7 +1074,7 @@ object_data = {
     'HyperVLiveMigrateData': '1.4-e265780e6acfa631476c8170e8d6fce0',
     'IDEDeviceBus': '1.0-29d4c9f27ac44197f01b6ac1b7e16502',
     'ImageMeta': '1.8-642d1b2eb3e880a367f37d72dd76162d',
-    'ImageMetaProps': '1.29-5c02bd7b1e050ef39513d3fca728e543',
+    'ImageMetaProps': '1.30-5bfc3dd01bbfdbb28cb3a096c0b2f383',
     'Instance': '2.7-d187aec68cad2e4d8b8a03a68e4739ce',
     'InstanceAction': '1.2-9a5abc87fdd3af46f45731960651efb5',
     'InstanceActionEvent': '1.4-5b1f361bd81989f8bb2c20bb7e8a4cb4',
@@ -1111,7 +1111,7 @@ object_data = {
     'NUMATopologyLimits': '1.1-4235c5da7a76c7e36075f0cd2f5cf922',
     'NetworkInterfaceMetadata': '1.2-6f3d480b40fe339067b1c0dd4d656716',
     'NetworkMetadata': '1.0-2cb8d21b34f87b0261d3e1d1ae5cf218',
-    'NetworkRequest': '1.2-af1ff2d986999fbb79377712794d82aa',
+    'NetworkRequest': '1.3-3a815ea3df7defa61e0b894dee5288ba',
     'NetworkRequestList': '1.1-15ecf022a68ddbb8c2a6739cfc9f8f5e',
     'NicDiagnostics': '1.0-895e9ad50e0f56d5258585e3e066aea5',
     'PCIDeviceBus': '1.0-2b891cb77e42961044689f3dc2718995',
@@ -1123,7 +1123,7 @@ object_data = {
     'Quotas': '1.3-3b2b91371f60e788035778fc5f87797d',
     'QuotasNoOp': '1.3-d1593cf969c81846bc8192255ea95cce',
     'RequestGroup': '1.3-0458d350a8ec9d0673f9be5640a990ce',
-    'RequestLevelParams': '1.0-1e5c8c18bd44cd233c8b32509c99d06f',
+    'RequestLevelParams': '1.1-3a718a0ae0bfdec669e7108631b3f313',
     'RequestSpec': '1.14-2cdbda368ca07e10905dc5fe96908a58',
     'Resource': '1.0-d8a2abbb380da583b995fd118f6a8953',
     'ResourceList': '1.0-4a53826625cc280e15fae64a575e0879',
@@ -1318,12 +1318,12 @@ class TestObjEqualPrims(_BaseTestCase):
 
 class TestObjMethodOverrides(test.NoDBTestCase):
     def test_obj_reset_changes(self):
-        args = utils.getargspec(base.NovaObject.obj_reset_changes)
+        args = inspect.getfullargspec(base.NovaObject.obj_reset_changes)
         obj_classes = base.NovaObjectRegistry.obj_classes()
         for obj_name in obj_classes:
             obj_class = obj_classes[obj_name][0]
             self.assertEqual(args,
-                utils.getargspec(obj_class.obj_reset_changes))
+                inspect.getfullargspec(obj_class.obj_reset_changes))
 
 
 class TestObjectsDefaultingOnInit(test.NoDBTestCase):

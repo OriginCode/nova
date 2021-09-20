@@ -16,12 +16,11 @@ from oslo_db import exception as db_exc
 from oslo_log import log as logging
 from oslo_utils import excutils
 from oslo_utils import uuidutils
-from sqlalchemy.orm import contains_eager
-from sqlalchemy.orm import joinedload
+from sqlalchemy import orm
 
 from nova.compute import utils as compute_utils
-from nova.db.sqlalchemy import api as db_api
-from nova.db.sqlalchemy import api_models
+from nova.db.api import api as api_db_api
+from nova.db.api import models as api_models
 from nova import exception
 from nova.i18n import _
 from nova import objects
@@ -33,11 +32,11 @@ LOG = logging.getLogger(__name__)
 DEPRECATED_FIELDS = ['deleted', 'deleted_at']
 
 
-@db_api.api_context_manager.reader
+@api_db_api.context_manager.reader
 def _aggregate_get_from_db(context, aggregate_id):
     query = context.session.query(api_models.Aggregate).\
-            options(joinedload('_hosts')).\
-            options(joinedload('_metadata'))
+            options(orm.joinedload('_hosts')).\
+            options(orm.joinedload('_metadata'))
     query = query.filter(api_models.Aggregate.id == aggregate_id)
 
     aggregate = query.first()
@@ -48,11 +47,11 @@ def _aggregate_get_from_db(context, aggregate_id):
     return aggregate
 
 
-@db_api.api_context_manager.reader
+@api_db_api.context_manager.reader
 def _aggregate_get_from_db_by_uuid(context, aggregate_uuid):
     query = context.session.query(api_models.Aggregate).\
-            options(joinedload('_hosts')).\
-            options(joinedload('_metadata'))
+            options(orm.joinedload('_hosts')).\
+            options(orm.joinedload('_metadata'))
     query = query.filter(api_models.Aggregate.uuid == aggregate_uuid)
 
     aggregate = query.first()
@@ -65,7 +64,7 @@ def _aggregate_get_from_db_by_uuid(context, aggregate_uuid):
 
 def _host_add_to_db(context, aggregate_id, host):
     try:
-        with db_api.api_context_manager.writer.using(context):
+        with api_db_api.context_manager.writer.using(context):
             # Check to see if the aggregate exists
             _aggregate_get_from_db(context, aggregate_id)
 
@@ -80,7 +79,7 @@ def _host_add_to_db(context, aggregate_id, host):
 
 def _host_delete_from_db(context, aggregate_id, host):
     count = 0
-    with db_api.api_context_manager.writer.using(context):
+    with api_db_api.context_manager.writer.using(context):
         # Check to see if the aggregate exists
         _aggregate_get_from_db(context, aggregate_id)
 
@@ -99,7 +98,7 @@ def _metadata_add_to_db(context, aggregate_id, metadata, max_retries=10,
     all_keys = metadata.keys()
     for attempt in range(max_retries):
         try:
-            with db_api.api_context_manager.writer.using(context):
+            with api_db_api.context_manager.writer.using(context):
                 query = context.session.query(api_models.AggregateMetadata).\
                             filter_by(aggregate_id=aggregate_id)
 
@@ -143,7 +142,7 @@ def _metadata_add_to_db(context, aggregate_id, metadata, max_retries=10,
                     LOG.warning(msg)
 
 
-@db_api.api_context_manager.writer
+@api_db_api.context_manager.writer
 def _metadata_delete_from_db(context, aggregate_id, key):
     # Check to see if the aggregate exists
     _aggregate_get_from_db(context, aggregate_id)
@@ -158,7 +157,7 @@ def _metadata_delete_from_db(context, aggregate_id, key):
                             aggregate_id=aggregate_id, metadata_key=key)
 
 
-@db_api.api_context_manager.writer
+@api_db_api.context_manager.writer
 def _aggregate_create_in_db(context, values, metadata=None):
     query = context.session.query(api_models.Aggregate)
     query = query.filter(api_models.Aggregate.name == values['name'])
@@ -182,7 +181,7 @@ def _aggregate_create_in_db(context, values, metadata=None):
     return aggregate
 
 
-@db_api.api_context_manager.writer
+@api_db_api.context_manager.writer
 def _aggregate_delete_from_db(context, aggregate_id):
     # Delete Metadata first
     context.session.query(api_models.AggregateMetadata).\
@@ -197,7 +196,7 @@ def _aggregate_delete_from_db(context, aggregate_id):
         raise exception.AggregateNotFound(aggregate_id=aggregate_id)
 
 
-@db_api.api_context_manager.writer
+@api_db_api.context_manager.writer
 def _aggregate_update_to_db(context, aggregate_id, values):
     aggregate = _aggregate_get_from_db(context, aggregate_id)
 
@@ -412,20 +411,20 @@ class Aggregate(base.NovaPersistentObject, base.NovaObject):
         return self.metadata.get('availability_zone', None)
 
 
-@db_api.api_context_manager.reader
+@api_db_api.context_manager.reader
 def _get_all_from_db(context):
     query = context.session.query(api_models.Aggregate).\
-            options(joinedload('_hosts')).\
-            options(joinedload('_metadata'))
+            options(orm.joinedload('_hosts')).\
+            options(orm.joinedload('_metadata'))
 
     return query.all()
 
 
-@db_api.api_context_manager.reader
+@api_db_api.context_manager.reader
 def _get_by_host_from_db(context, host, key=None):
     query = context.session.query(api_models.Aggregate).\
-            options(joinedload('_hosts')).\
-            options(joinedload('_metadata'))
+            options(orm.joinedload('_hosts')).\
+            options(orm.joinedload('_metadata'))
     query = query.join('_hosts')
     query = query.filter(api_models.AggregateHost.host == host)
 
@@ -436,7 +435,7 @@ def _get_by_host_from_db(context, host, key=None):
     return query.all()
 
 
-@db_api.api_context_manager.reader
+@api_db_api.context_manager.reader
 def _get_by_metadata_from_db(context, key=None, value=None):
     assert(key is not None or value is not None)
     query = context.session.query(api_models.Aggregate)
@@ -445,13 +444,13 @@ def _get_by_metadata_from_db(context, key=None, value=None):
         query = query.filter(api_models.AggregateMetadata.key == key)
     if value is not None:
         query = query.filter(api_models.AggregateMetadata.value == value)
-    query = query.options(contains_eager("_metadata"))
-    query = query.options(joinedload("_hosts"))
+    query = query.options(orm.contains_eager("_metadata"))
+    query = query.options(orm.joinedload("_hosts"))
 
     return query.all()
 
 
-@db_api.api_context_manager.reader
+@api_db_api.context_manager.reader
 def _get_non_matching_by_metadata_keys_from_db(context, ignored_keys,
                                                key_prefix, value):
     """Filter aggregates based on non matching metadata.
@@ -477,8 +476,8 @@ def _get_non_matching_by_metadata_keys_from_db(context, ignored_keys,
         query = query.filter(~api_models.AggregateMetadata.key.in_(
             ignored_keys))
 
-    query = query.options(contains_eager("_metadata"))
-    query = query.options(joinedload("_hosts"))
+    query = query.options(orm.contains_eager("_metadata"))
+    query = query.options(orm.joinedload("_hosts"))
 
     return query.all()
 

@@ -32,11 +32,9 @@ from nova.network import constants
 from nova import objects
 from nova.objects import fields
 from nova.tests import fixtures as nova_fixtures
+from nova.tests.fixtures import libvirt as fakelibvirt
 from nova.tests.functional.api import client
 from nova.tests.functional.libvirt import base
-from nova.tests.unit import fake_notifier
-from nova.tests.unit.virt.libvirt import fake_os_brick_connector
-from nova.tests.unit.virt.libvirt import fakelibvirt
 
 CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
@@ -56,7 +54,7 @@ class _PCIServersTestBase(base.ServersTestBase):
 
         # Mock the 'PciPassthroughFilter' filter, as most tests need to inspect
         # this
-        host_manager = self.scheduler.manager.driver.host_manager
+        host_manager = self.scheduler.manager.host_manager
         pci_filter_class = host_manager.filter_cls_map['PciPassthroughFilter']
         host_pass_mock = mock.Mock(wraps=pci_filter_class().host_passes)
         self.mock_filter = self.useFixture(fixtures.MockPatch(
@@ -123,10 +121,7 @@ class SRIOVServersTest(_PCIServersTestBase):
         self.neutron = self.useFixture(base.LibvirtNeutronFixture(self))
 
         self.useFixture(fixtures.MonkeyPatch(
-            'nova.virt.libvirt.driver.connector',
-            fake_os_brick_connector))
-        self.useFixture(fixtures.MonkeyPatch(
-            'nova.tests.unit.virt.libvirt.fakelibvirt.Domain.migrateToURI3',
+            'nova.tests.fixtures.libvirt.Domain.migrateToURI3',
             self._migrate_stub))
 
     def _migrate_stub(self, domain, destination, params, flags):
@@ -322,8 +317,8 @@ class SRIOVServersTest(_PCIServersTestBase):
             self._live_migrate,
             server, 'completed')
         # NOTE(stephenfin): this wouldn't happen in a real deployment since
-        # live migration is a cast, but since we are using CastAsCall this will
-        # bubble to the API
+        # live migration is a cast, but since we are using CastAsCallFixture
+        # this will bubble to the API
         self.assertEqual(500, ex.response.status_code)
         self.assertIn('NoValidHost', str(ex))
 
@@ -353,8 +348,8 @@ class SRIOVServersTest(_PCIServersTestBase):
             self._live_migrate,
             server, 'completed')
         # NOTE(stephenfin): this wouldn't happen in a real deployment since
-        # live migration is a cast, but since we are using CastAsCall this will
-        # bubble to the API
+        # live migration is a cast, but since we are using CastAsCallFixture
+        # this will bubble to the API
         self.assertEqual(500, ex.response.status_code)
         self.assertIn('NoValidHost', str(ex))
 
@@ -577,16 +572,15 @@ class SRIOVServersTest(_PCIServersTestBase):
         self.start_compute(pci_info=pci_info)
 
         # create the SR-IOV port
-        self.neutron.create_port({'port': self.neutron.network_4_port_1})
+        port = self.neutron.create_port(
+            {'port': self.neutron.network_4_port_1})
 
-        # create a server using the VF and multiple networks
-        extra_spec = {'pci_passthrough:alias': f'{self.VFS_ALIAS_NAME}:1'}
-        flavor_id = self._create_flavor(extra_spec=extra_spec)
+        flavor_id = self._create_flavor()
         server = self._create_server(
             flavor_id=flavor_id,
             networks=[
                 {'uuid': base.LibvirtNeutronFixture.network_1['id']},
-                {'port': base.LibvirtNeutronFixture.network_4_port_1['id']},
+                {'port': port['port']['id']},
             ],
         )
 
@@ -600,13 +594,16 @@ class SRIOVServersTest(_PCIServersTestBase):
             base.LibvirtNeutronFixture.network_1_port_2['mac_address'],
             diagnostics['nic_details'][0]['mac_address'],
         )
-        self.assertIsNotNone(diagnostics['nic_details'][0]['tx_packets'])
+
+        for key in ('rx_packets', 'tx_packets'):
+            self.assertIn(key, diagnostics['nic_details'][0])
 
         self.assertEqual(
             base.LibvirtNeutronFixture.network_4_port_1['mac_address'],
             diagnostics['nic_details'][1]['mac_address'],
         )
-        self.assertIsNone(diagnostics['nic_details'][1]['tx_packets'])
+        for key in ('rx_packets', 'tx_packets'):
+            self.assertIn(key, diagnostics['nic_details'][1])
 
     def test_create_server_after_change_in_nonsriov_pf_to_sriov_pf(self):
         # Starts a compute with PF not configured with SRIOV capabilities
@@ -712,14 +709,14 @@ class SRIOVAttachDetachTest(_PCIServersTestBase):
 
     def _detach_port(self, instance_uuid, port_id):
         self.api.detach_interface(instance_uuid, port_id)
-        fake_notifier.wait_for_versioned_notifications(
+        self.notifier.wait_for_versioned_notifications(
             'instance.interface_detach.end')
 
     def _attach_port(self, instance_uuid, port_id):
         self.api.attach_interface(
             instance_uuid,
             {'interfaceAttachment': {'port_id': port_id}})
-        fake_notifier.wait_for_versioned_notifications(
+        self.notifier.wait_for_versioned_notifications(
             'instance.interface_attach.end')
 
     def _test_detach_attach(self, first_port_id, second_port_id):
@@ -1087,10 +1084,32 @@ class PCIServersTest(_PCIServersTestBase):
             self._live_migrate,
             server, 'completed')
         # NOTE(stephenfin): this wouldn't happen in a real deployment since
-        # live migration is a cast, but since we are using CastAsCall this will
-        # bubble to the API
+        # live migration is a cast, but since we are using CastAsCallFixture
+        # this will bubble to the API
         self.assertEqual(500, ex.response.status_code)
         self.assertIn('NoValidHost', str(ex))
+
+    def test_resize_pci_to_vanilla(self):
+        # Start two computes, one with PCI and one without.
+        self.start_compute(
+            hostname='test_compute0',
+            pci_info=fakelibvirt.HostPCIDevicesInfo(num_pci=1))
+        self.start_compute(hostname='test_compute1')
+
+        # Boot a server with a single PCI device.
+        extra_spec = {'pci_passthrough:alias': f'{self.ALIAS_NAME}:1'}
+        pci_flavor_id = self._create_flavor(extra_spec=extra_spec)
+        server = self._create_server(flavor_id=pci_flavor_id, networks='none')
+
+        # Resize it to a flavor without PCI devices. We expect this to work, as
+        # test_compute1 is available.
+        # FIXME(artom) This is bug 1941005.
+        flavor_id = self._create_flavor()
+        ex = self.assertRaises(client.OpenStackApiException,
+                               self._resize_server, server, flavor_id)
+        self.assertEqual(500, ex.response.status_code)
+        self.assertIn('NoValidHost', str(ex))
+        # self._confirm_resize(server)
 
     def _confirm_resize(self, server, host='host1'):
         # NOTE(sbauza): Unfortunately, _cleanup_resize() in libvirt checks the

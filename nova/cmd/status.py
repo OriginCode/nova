@@ -25,14 +25,15 @@ from oslo_config import cfg
 from oslo_upgradecheck import common_checks
 from oslo_upgradecheck import upgradecheck
 import pkg_resources
+import sqlalchemy as sa
 from sqlalchemy import func as sqlfunc
-from sqlalchemy import MetaData, Table, select
 
 from nova.cmd import common as cmd_common
 import nova.conf
 from nova import config
 from nova import context as nova_context
-from nova.db.sqlalchemy import api as db_session
+from nova.db.api import api as api_db_api
+from nova.db.main import api as main_db_api
 from nova import exception
 from nova.i18n import _
 from nova.objects import cell_mapping as cell_mapping_obj
@@ -48,12 +49,12 @@ from nova.volume import cinder
 
 CONF = nova.conf.CONF
 
-# NOTE(efried): 1.35 is required by nova-scheduler to support the root_required
-# queryparam to make GET /allocation_candidates require that a trait be present
-# on the root provider, irrespective of how the request groups are specified.
+# NOTE(gibi): 1.36 is required by nova-scheduler to support the same_subtree
+# queryparam to make GET /allocation_candidates require that a list of request
+# groups are satisfied from the same provider subtree.
 # NOTE: If you bump this version, remember to update the history
 # section in the nova-status man page (doc/source/cli/nova-status).
-MIN_PLACEMENT_MICROVERSION = "1.35"
+MIN_PLACEMENT_MICROVERSION = "1.36"
 
 # NOTE(mriedem): 3.44 is needed to work with volume attachment records which
 # are required for supporting multi-attach capable volumes.
@@ -86,10 +87,10 @@ class UpgradeCommands(upgradecheck.UpgradeCommands):
         # table, or by only counting compute nodes with a service version of at
         # least 15 which was the highest service version when Newton was
         # released.
-        meta = MetaData(bind=db_session.get_engine(context=context))
-        compute_nodes = Table('compute_nodes', meta, autoload=True)
-        return select([sqlfunc.count()]).select_from(compute_nodes).where(
-                compute_nodes.c.deleted == 0).scalar()
+        meta = sa.MetaData(bind=main_db_api.get_engine(context=context))
+        compute_nodes = sa.Table('compute_nodes', meta, autoload=True)
+        return sa.select([sqlfunc.count()]).select_from(compute_nodes).where(
+            compute_nodes.c.deleted == 0).scalar()
 
     def _check_cellsv2(self):
         """Checks to see if cells v2 has been setup.
@@ -102,8 +103,8 @@ class UpgradeCommands(upgradecheck.UpgradeCommands):
         this on an initial install. This also has to be careful about checking
         for compute nodes if there are no host mappings on a fresh install.
         """
-        meta = MetaData()
-        meta.bind = db_session.get_api_engine()
+        meta = sa.MetaData()
+        meta.bind = api_db_api.get_engine()
 
         cell_mappings = self._get_cell_mappings()
         count = len(cell_mappings)
@@ -122,8 +123,9 @@ class UpgradeCommands(upgradecheck.UpgradeCommands):
                     'retry.')
             return upgradecheck.Result(upgradecheck.Code.FAILURE, msg)
 
-        host_mappings = Table('host_mappings', meta, autoload=True)
-        count = select([sqlfunc.count()]).select_from(host_mappings).scalar()
+        host_mappings = sa.Table('host_mappings', meta, autoload=True)
+        count = sa.select([sqlfunc.count()]).select_from(host_mappings)\
+            .scalar()
         if count == 0:
             # This may be a fresh install in which case there may not be any
             # compute_nodes in the cell database if the nova-compute service

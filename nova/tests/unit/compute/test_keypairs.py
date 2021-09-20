@@ -25,7 +25,6 @@ from nova.objects import keypair as keypair_obj
 from nova import quota
 from nova.tests.unit.compute import test_compute
 from nova.tests.unit import fake_crypto
-from nova.tests.unit import fake_notifier
 from nova.tests.unit.objects import test_keypair
 from nova.tests.unit import utils as test_utils
 
@@ -75,16 +74,16 @@ class KeypairAPITestCase(test_compute.BaseTestCase):
             else:
                 raise exception.KeypairNotFound(user_id=user_id, name=name)
 
-        self.stub_out("nova.db.api.key_pair_get_all_by_user",
+        self.stub_out("nova.db.main.api.key_pair_get_all_by_user",
                        db_key_pair_get_all_by_user)
-        self.stub_out("nova.db.api.key_pair_create", db_key_pair_create)
-        self.stub_out("nova.db.api.key_pair_destroy", db_key_pair_destroy)
-        self.stub_out("nova.db.api.key_pair_get", db_key_pair_get)
+        self.stub_out("nova.db.main.api.key_pair_create", db_key_pair_create)
+        self.stub_out("nova.db.main.api.key_pair_destroy", db_key_pair_destroy)
+        self.stub_out("nova.db.main.api.key_pair_get", db_key_pair_get)
 
     def _check_notifications(self, action='create', key_name='foo'):
-        self.assertEqual(2, len(fake_notifier.NOTIFICATIONS))
+        self.assertEqual(2, len(self.notifier.notifications))
 
-        n1 = fake_notifier.NOTIFICATIONS[0]
+        n1 = self.notifier.notifications[0]
         self.assertEqual('INFO', n1.priority)
         self.assertEqual('keypair.%s.start' % action, n1.event_type)
         self.assertEqual('api.%s' % CONF.host, n1.publisher_id)
@@ -92,7 +91,7 @@ class KeypairAPITestCase(test_compute.BaseTestCase):
         self.assertEqual('fake', n1.payload['tenant_id'])
         self.assertEqual(key_name, n1.payload['key_name'])
 
-        n2 = fake_notifier.NOTIFICATIONS[1]
+        n2 = self.notifier.notifications[1]
         self.assertEqual('INFO', n2.priority)
         self.assertEqual('keypair.%s.end' % action, n2.event_type)
         self.assertEqual('api.%s' % CONF.host, n2.publisher_id)
@@ -142,7 +141,7 @@ class CreateImportSharedTestMixIn(object):
         def db_key_pair_create_duplicate(context, keypair):
             raise exception.KeyPairExists(key_name=keypair.get('name', ''))
 
-        self.stub_out("nova.db.api.key_pair_create",
+        self.stub_out("nova.db.main.api.key_pair_create",
                       db_key_pair_create_duplicate)
 
         msg = ("Key pair '%(key_name)s' already exists." %
@@ -216,6 +215,12 @@ class ImportKeypairTestCase(KeypairAPITestCase, CreateImportSharedTestMixIn):
         self._check_notifications(action='import')
 
     def test_success_ssh(self):
+        self._check_success()
+
+    def test_success_ssh_ed25519(self):
+        self.pub_key = ('ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFl6u75BTi8xGtSPm'
+                        '1yVJuLE/oMtCOuEMJJnBSuZEdXz')
+        self.fingerprint = '1a:1d:a7:2c:4c:ff:15:c4:70:13:38:b6:ac:4c:dc:12'
         self._check_success()
 
     def test_success_x509(self):

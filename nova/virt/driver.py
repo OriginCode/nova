@@ -124,6 +124,8 @@ CAPABILITY_TRAITS_MAP = {
     "supports_migrate_to_same_host": os_traits.COMPUTE_SAME_HOST_COLD_MIGRATE,
     "supports_bfv_rescue": os_traits.COMPUTE_RESCUE_BFV,
     "supports_secure_boot": os_traits.COMPUTE_SECURITY_UEFI_SECURE_BOOT,
+    "supports_socket_pci_numa_affinity":
+        os_traits.COMPUTE_SOCKET_PCI_NUMA_AFFINITY,
 }
 
 
@@ -191,6 +193,7 @@ class ComputeDriver(object):
         "supports_bfv_rescue": False,
         "supports_vtpm": False,
         "supports_secure_boot": False,
+        "supports_socket_pci_numa_affinity": False,
 
         # Image type support flags
         "supports_image_type_aki": False,
@@ -412,7 +415,7 @@ class ComputeDriver(object):
         raise NotImplementedError()
 
     def destroy(self, context, instance, network_info, block_device_info=None,
-                destroy_disks=True):
+                destroy_disks=True, destroy_secrets=True):
         """Destroy the specified instance from the Hypervisor.
 
         If the instance is not found (for example if networking failed), this
@@ -425,11 +428,13 @@ class ComputeDriver(object):
         :param block_device_info: Information about block devices that should
                                   be detached from the instance.
         :param destroy_disks: Indicates if disks should be destroyed
+        :param destroy_secrets: Indicates if secrets should be destroyed
         """
         raise NotImplementedError()
 
     def cleanup(self, context, instance, network_info, block_device_info=None,
-                destroy_disks=True, migrate_data=None, destroy_vifs=True):
+                destroy_disks=True, migrate_data=None, destroy_vifs=True,
+                destroy_secrets=True):
         """Cleanup the instance resources .
 
         Instance should have been destroyed from the Hypervisor before calling
@@ -442,6 +447,8 @@ class ComputeDriver(object):
                                   be detached from the instance.
         :param destroy_disks: Indicates if disks should be destroyed
         :param migrate_data: implementation specific params
+        :param destroy_vifs: Indicates if vifs should be unplugged
+        :param destroy_secrets: Indicates if secrets should be destroyed
         """
         raise NotImplementedError()
 
@@ -1131,7 +1138,7 @@ class ComputeDriver(object):
 
         :param context: security context
         :param instance:
-            nova.db.sqlalchemy.models.Instance object
+            nova.db.main.models.Instance object
             instance object that is migrated.
         :param dest: destination host
         :param post_method:
@@ -1261,7 +1268,7 @@ class ComputeDriver(object):
         back to the source host to check the results.
 
         :param context: security context
-        :param instance: nova.db.sqlalchemy.models.Instance
+        :param instance: nova.db.main.models.Instance
         :param src_compute_info: Info about the sending machine
         :param dst_compute_info: Info about the receiving machine
         :param block_migration: if true, prepare for block migration
@@ -1303,7 +1310,7 @@ class ComputeDriver(object):
         results from check_can_live_migrate_destination.
 
         :param context: security context
-        :param instance: nova.db.sqlalchemy.models.Instance
+        :param instance: nova.db.main.models.Instance
         :param dest_check_data: result of check_can_live_migrate_destination
         :param block_device_info: result of _get_instance_block_device_info
         :returns: a LiveMigrateData object
@@ -1610,15 +1617,6 @@ class ComputeDriver(object):
 
         :param instance: nova.objects.instance.Instance
         :returns: True if the instance was deleted from disk, False otherwise.
-        """
-        return True
-
-    @property
-    def need_legacy_block_device_info(self):
-        """Tell the caller if the driver requires legacy block device info.
-
-        Tell the caller whether we expect the legacy format of block
-        device info to be passed in to methods that expect it.
         """
         return True
 

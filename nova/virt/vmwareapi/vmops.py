@@ -885,10 +885,7 @@ class VMwareVMOps(object):
                             datastore, file_path):
         """Attach cdrom to VM by reconfiguration."""
         client_factory = self._session.vim.client.factory
-        devices = self._session._call_method(vutil,
-                                             "get_object_property",
-                                             vm_ref,
-                                             "config.hardware.device")
+        devices = vm_util.get_hardware_devices(self._session, vm_ref)
         (controller_key, unit_number,
          controller_spec) = vm_util.allocate_controller_key_and_unit_number(
                                                     client_factory,
@@ -1189,10 +1186,7 @@ class VMwareVMOps(object):
             raise exception.InstanceResumeFailure(reason=reason)
 
     def _get_rescue_device(self, instance, vm_ref):
-        hardware_devices = self._session._call_method(vutil,
-                                                      "get_object_property",
-                                                      vm_ref,
-                                                      "config.hardware.device")
+        hardware_devices = vm_util.get_hardware_devices(self._session, vm_ref)
         return vm_util.find_rescue_device(hardware_devices,
                                           instance)
 
@@ -1225,7 +1219,8 @@ class VMwareVMOps(object):
         self._fetch_image_if_missing(context, vi)
 
         # Get the rescue disk path
-        rescue_disk_path = datastore.build_path(instance.uuid,
+        vm_folder = ds_obj.DatastorePath.parse(vmdk.path).dirname
+        rescue_disk_path = datastore.build_path(vm_folder,
                 "%s-rescue.%s" % (image_info.image_id, image_info.file_type))
 
         # Copy the cached image to the be the rescue disk. This will be used
@@ -1583,8 +1578,9 @@ class VMwareVMOps(object):
         ds_hosts = self._session._call_method(vutil, 'get_object_property',
                                               ds_ref, 'host')
         for ds_host in ds_hosts.DatastoreHostMount:
+            ds_host_ref_value = vutil.get_moref_value(ds_host.key)
             for cluster_host in cluster_hosts.ManagedObjectReference:
-                if ds_host.key.value == cluster_host.value:
+                if ds_host_ref_value == vutil.get_moref_value(cluster_host):
                     return cluster_host
 
     def _find_datastore_for_migration(self, instance, vm_ref, cluster_ref,
@@ -1604,8 +1600,9 @@ class VMwareVMOps(object):
             return None
         # check if the current datastore is connected to the destination
         # cluster
+        ds_ref_value = vutil.get_moref_value(ds_ref)
         for datastore in cluster_datastores.ManagedObjectReference:
-            if datastore.value == ds_ref.value:
+            if vutil.get_moref_value(datastore) == ds_ref_value:
                 ds = ds_obj.get_datastore_by_ref(self._session, ds_ref)
                 if (datastore_regex is None or
                         datastore_regex.match(ds.name)):
@@ -1646,8 +1643,7 @@ class VMwareVMOps(object):
         network_info = instance.get_network_info()
         client_factory = self._session.vim.client.factory
         devices = []
-        hardware_devices = self._session._call_method(
-            vutil, "get_object_property", vm_ref, "config.hardware.device")
+        hardware_devices = vm_util.get_hardware_devices(self._session, vm_ref)
         vif_model = instance.image_meta.properties.get('hw_vif_model',
             constants.DEFAULT_VIF_MODEL)
         for vif in network_info:
@@ -1819,13 +1815,14 @@ class VMwareVMOps(object):
                   instance=instance)
 
     def _get_ds_browser(self, ds_ref):
-        ds_browser = self._datastore_browser_mapping.get(ds_ref.value)
+        ds_ref_value = vutil.get_moref_value(ds_ref)
+        ds_browser = self._datastore_browser_mapping.get(ds_ref_value)
         if not ds_browser:
             ds_browser = self._session._call_method(vutil,
                                                     "get_object_property",
                                                     ds_ref,
                                                     "browser")
-            self._datastore_browser_mapping[ds_ref.value] = ds_browser
+            self._datastore_browser_mapping[ds_ref_value] = ds_browser
         return ds_browser
 
     def _create_folder_if_missing(self, ds_name, ds_ref, folder):
@@ -1879,9 +1876,9 @@ class VMwareVMOps(object):
     def _get_valid_vms_from_retrieve_result(self, retrieve_result):
         """Returns list of valid vms from RetrieveResult object."""
         lst_vm_names = []
-
-        while retrieve_result:
-            for vm in retrieve_result.objects:
+        with vutil.WithRetrieval(self._session.vim, retrieve_result) as \
+                objects:
+            for vm in objects:
                 vm_uuid = None
                 conn_state = None
                 for prop in vm.propSet:
@@ -1895,9 +1892,7 @@ class VMwareVMOps(object):
                 # Ignoring the orphaned or inaccessible VMs
                 if conn_state not in ["orphaned", "inaccessible"]:
                     lst_vm_names.append(vm_uuid)
-            retrieve_result = self._session._call_method(vutil,
-                                                         'continue_retrieval',
-                                                         retrieve_result)
+
         return lst_vm_names
 
     def instance_exists(self, instance):
@@ -1955,11 +1950,8 @@ class VMwareVMOps(object):
                         "VM") % vif['id']
                 raise exception.NotFound(msg)
 
-            hardware_devices = self._session._call_method(
-                                                    vutil,
-                                                    "get_object_property",
-                                                    vm_ref,
-                                                    "config.hardware.device")
+            hardware_devices = vm_util.get_hardware_devices(self._session,
+                                                            vm_ref)
             device = vmwarevif.get_network_device(hardware_devices,
                                                   vif['address'])
             if device is None:

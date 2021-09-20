@@ -21,8 +21,6 @@ from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import integrated_helpers
 from nova.tests.unit import fake_network
-from nova.tests.unit import fake_notifier
-from nova.tests.unit import policy_fixture
 
 
 LOG = logging.getLogger(__name__)
@@ -44,7 +42,7 @@ class FailedEvacuateStateTests(test.TestCase,
     def setUp(self):
         super(FailedEvacuateStateTests, self).setUp()
 
-        self.useFixture(policy_fixture.RealPolicyFixture())
+        self.useFixture(nova_fixtures.RealPolicyFixture())
         self.useFixture(nova_fixtures.NeutronFixture(self))
         self.useFixture(nova_fixtures.GlanceFixture(self))
         self.useFixture(func_fixtures.PlacementFixture())
@@ -65,8 +63,8 @@ class FailedEvacuateStateTests(test.TestCase,
     def _wait_for_notification_event_type(self, event_type, max_retries=10):
         retry_counter = 0
         while True:
-            if len(fake_notifier.NOTIFICATIONS) > 0:
-                for notification in fake_notifier.NOTIFICATIONS:
+            if len(self.notifier.notifications) > 0:
+                for notification in self.notifier.notifications:
                     if notification.event_type == event_type:
                         return
             if retry_counter == max_retries:
@@ -92,8 +90,8 @@ class FailedEvacuateStateTests(test.TestCase,
             host=self.hostname, binary='nova-compute')[0]['id']
         self.api.put_service(compute_id, {'forced_down': 'true'})
 
-        fake_notifier.stub_notifier(self)
-        fake_notifier.reset()
+        self.notifier = self.useFixture(
+            nova_fixtures.NotificationFixture(self))
 
         # Initiate evacuation
         self._evacuate_server(

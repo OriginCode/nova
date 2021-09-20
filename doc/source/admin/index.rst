@@ -77,6 +77,8 @@ responsibilities of services and drivers are:
    remote-console-access
    service-groups
    node-down
+   scheduling
+   upgrades
 
 
 Advanced configuration
@@ -119,6 +121,8 @@ instance for these kind of workloads.
    sev
    managing-resource-providers
    resource-limits
+   cpu-models
+   libvirt-misc
 
 
 Additional guides
@@ -150,6 +154,5 @@ Additional guides
    ssh-configuration
    support-compute
    secure-live-migration-with-qemu-native-tls
-   mitigation-for-Intel-MDS-security-flaws
    vendordata
    hw-machine-type

@@ -14,15 +14,14 @@ import collections
 
 from oslo_log import log as logging
 from oslo_utils import versionutils
+from sqlalchemy import orm
 from sqlalchemy.orm import exc as orm_exc
-from sqlalchemy.orm import joinedload
-from sqlalchemy.sql import false
+from sqlalchemy import sql
 from sqlalchemy.sql import func
-from sqlalchemy.sql import or_
 
 from nova import context as nova_context
-from nova.db.sqlalchemy import api as db_api
-from nova.db.sqlalchemy import api_models
+from nova.db.api import api as api_db_api
+from nova.db.api import models as api_models
 from nova import exception
 from nova.i18n import _
 from nova import objects
@@ -97,13 +96,12 @@ class InstanceMapping(base.NovaTimestampObject, base.NovaObject):
         return instance_mapping
 
     @staticmethod
-    @db_api.api_context_manager.reader
+    @api_db_api.context_manager.reader
     def _get_by_instance_uuid_from_db(context, instance_uuid):
-        db_mapping = (context.session.query(api_models.InstanceMapping)
-                        .options(joinedload('cell_mapping'))
-                        .filter(
-                            api_models.InstanceMapping.instance_uuid ==
-                            instance_uuid)).first()
+        db_mapping = context.session.query(api_models.InstanceMapping)\
+            .options(orm.joinedload('cell_mapping'))\
+            .filter(api_models.InstanceMapping.instance_uuid == instance_uuid)\
+            .first()
         if not db_mapping:
             raise exception.InstanceMappingNotFound(uuid=instance_uuid)
 
@@ -115,7 +113,7 @@ class InstanceMapping(base.NovaTimestampObject, base.NovaObject):
         return cls._from_db_object(context, cls(), db_mapping)
 
     @staticmethod
-    @db_api.api_context_manager.writer
+    @api_db_api.context_manager.writer
     def _create_in_db(context, updates):
         db_mapping = api_models.InstanceMapping()
         db_mapping.update(updates)
@@ -140,7 +138,7 @@ class InstanceMapping(base.NovaTimestampObject, base.NovaObject):
         self._from_db_object(self._context, self, db_mapping)
 
     @staticmethod
-    @db_api.api_context_manager.writer
+    @api_db_api.context_manager.writer
     def _save_in_db(context, instance_uuid, updates):
         db_mapping = context.session.query(
                 api_models.InstanceMapping).filter_by(
@@ -175,7 +173,7 @@ class InstanceMapping(base.NovaTimestampObject, base.NovaObject):
         self.obj_reset_changes()
 
     @staticmethod
-    @db_api.api_context_manager.writer
+    @api_db_api.context_manager.writer
     def _destroy_in_db(context, instance_uuid):
         result = context.session.query(api_models.InstanceMapping).filter_by(
                 instance_uuid=instance_uuid).delete()
@@ -187,7 +185,7 @@ class InstanceMapping(base.NovaTimestampObject, base.NovaObject):
         self._destroy_in_db(self._context, self.instance_uuid)
 
 
-@db_api.api_context_manager.writer
+@api_db_api.context_manager.writer
 def populate_queued_for_delete(context, max_count):
     cells = objects.CellMappingList.get_all(context)
     processed = 0
@@ -231,7 +229,7 @@ def populate_queued_for_delete(context, max_count):
     return processed, processed
 
 
-@db_api.api_context_manager.writer
+@api_db_api.context_manager.writer
 def populate_user_id(context, max_count):
     cells = objects.CellMappingList.get_all(context)
     cms_by_id = {cell.id: cell for cell in cells}
@@ -311,12 +309,11 @@ class InstanceMappingList(base.ObjectListBase, base.NovaObject):
         }
 
     @staticmethod
-    @db_api.api_context_manager.reader
+    @api_db_api.context_manager.reader
     def _get_by_project_id_from_db(context, project_id):
-        return (context.session.query(api_models.InstanceMapping)
-                .options(joinedload('cell_mapping'))
-                .filter(
-                    api_models.InstanceMapping.project_id == project_id)).all()
+        return context.session.query(api_models.InstanceMapping)\
+            .options(orm.joinedload('cell_mapping'))\
+            .filter(api_models.InstanceMapping.project_id == project_id).all()
 
     @base.remotable_classmethod
     def get_by_project_id(cls, context, project_id):
@@ -326,11 +323,11 @@ class InstanceMappingList(base.ObjectListBase, base.NovaObject):
                 db_mappings)
 
     @staticmethod
-    @db_api.api_context_manager.reader
+    @api_db_api.context_manager.reader
     def _get_by_cell_id_from_db(context, cell_id):
-        return (context.session.query(api_models.InstanceMapping)
-                .options(joinedload('cell_mapping'))
-                .filter(api_models.InstanceMapping.cell_id == cell_id)).all()
+        return context.session.query(api_models.InstanceMapping)\
+            .options(orm.joinedload('cell_mapping'))\
+            .filter(api_models.InstanceMapping.cell_id == cell_id).all()
 
     @base.remotable_classmethod
     def get_by_cell_id(cls, context, cell_id):
@@ -339,12 +336,12 @@ class InstanceMappingList(base.ObjectListBase, base.NovaObject):
                 db_mappings)
 
     @staticmethod
-    @db_api.api_context_manager.reader
+    @api_db_api.context_manager.reader
     def _get_by_instance_uuids_from_db(context, uuids):
-        return (context.session.query(api_models.InstanceMapping)
-                .options(joinedload('cell_mapping'))
-                .filter(api_models.InstanceMapping.instance_uuid.in_(uuids))
-                .all())
+        return context.session.query(api_models.InstanceMapping)\
+            .options(orm.joinedload('cell_mapping'))\
+            .filter(api_models.InstanceMapping.instance_uuid.in_(uuids))\
+            .all()
 
     @base.remotable_classmethod
     def get_by_instance_uuids(cls, context, uuids):
@@ -353,7 +350,7 @@ class InstanceMappingList(base.ObjectListBase, base.NovaObject):
                 db_mappings)
 
     @staticmethod
-    @db_api.api_context_manager.writer
+    @api_db_api.context_manager.writer
     def _destroy_bulk_in_db(context, instance_uuids):
         return context.session.query(api_models.InstanceMapping).filter(
                 api_models.InstanceMapping.instance_uuid.in_(instance_uuids)).\
@@ -364,7 +361,7 @@ class InstanceMappingList(base.ObjectListBase, base.NovaObject):
         return cls._destroy_bulk_in_db(context, instance_uuids)
 
     @staticmethod
-    @db_api.api_context_manager.reader
+    @api_db_api.context_manager.reader
     def _get_not_deleted_by_cell_and_project_from_db(context, cell_uuid,
                                                      project_id, limit):
         query = context.session.query(api_models.InstanceMapping)
@@ -376,11 +373,11 @@ class InstanceMappingList(base.ObjectListBase, base.NovaObject):
         # queued_for_delete was not run) and False (cases when the online
         # data migration for queued_for_delete was run) are assumed to mean
         # that the instance is not queued for deletion.
-        query = (query.filter(or_(
-            api_models.InstanceMapping.queued_for_delete == false(),
+        query = (query.filter(sql.or_(
+            api_models.InstanceMapping.queued_for_delete == sql.false(),
             api_models.InstanceMapping.queued_for_delete.is_(None)))
             .join('cell_mapping')
-            .options(joinedload('cell_mapping'))
+            .options(orm.joinedload('cell_mapping'))
             .filter(api_models.CellMapping.uuid == cell_uuid))
         if limit is not None:
             query = query.limit(limit)
@@ -403,7 +400,7 @@ class InstanceMappingList(base.ObjectListBase, base.NovaObject):
                 db_mappings)
 
     @staticmethod
-    @db_api.api_context_manager.reader
+    @api_db_api.context_manager.reader
     def _get_counts_in_db(context, project_id, user_id=None):
         project_query = context.session.query(
             func.count(api_models.InstanceMapping.id)).\
@@ -438,7 +435,7 @@ class InstanceMappingList(base.ObjectListBase, base.NovaObject):
         return cls._get_counts_in_db(context, project_id, user_id=user_id)
 
     @staticmethod
-    @db_api.api_context_manager.reader
+    @api_db_api.context_manager.reader
     def _get_count_by_uuids_and_user_in_db(context, uuids, user_id):
         query = (context.session.query(
             func.count(api_models.InstanceMapping.id))

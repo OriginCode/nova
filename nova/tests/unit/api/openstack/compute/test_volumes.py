@@ -101,16 +101,19 @@ def fake_compute_volume_snapshot_delete(self, context, volume_id, snapshot_id,
 def fake_bdm_get_by_volume_and_instance(cls, ctxt, volume_id, instance_uuid):
     if volume_id != FAKE_UUID_A:
         raise exception.VolumeBDMNotFound(volume_id=volume_id)
-    db_bdm = fake_block_device.FakeDbBlockDeviceDict(
-        {'id': 1,
-         'instance_uuid': instance_uuid,
-         'device_name': '/dev/fake0',
-         'delete_on_termination': 'False',
-         'source_type': 'volume',
-         'destination_type': 'volume',
-         'snapshot_id': None,
-         'volume_id': FAKE_UUID_A,
-         'volume_size': 1})
+    db_bdm = fake_block_device.FakeDbBlockDeviceDict({
+        'id': 1,
+        'uuid': uuids.bdm,
+        'instance_uuid': instance_uuid,
+        'device_name': '/dev/fake0',
+        'delete_on_termination': 'False',
+        'source_type': 'volume',
+        'destination_type': 'volume',
+        'snapshot_id': None,
+        'volume_id': FAKE_UUID_A,
+        'volume_size': 1,
+        'attachment_id': uuids.attachment_id
+    })
     return objects.BlockDeviceMapping._from_db_object(
         ctxt, objects.BlockDeviceMapping(), db_bdm)
 
@@ -126,18 +129,18 @@ class BootFromVolumeTest(test.TestCase):
         self._legacy_bdm_seen = True
 
     def _get_fake_compute_api_create(self):
-        def _fake_compute_api_create(cls, context, instance_type,
+        def _fake_compute_api_create(cls, context, flavor,
                                     image_href, **kwargs):
             self._block_device_mapping_seen = kwargs.get(
                 'block_device_mapping')
             self._legacy_bdm_seen = kwargs.get('legacy_bdm')
 
-            inst_type = flavors.get_flavor_by_flavor_id(2)
+            flavor = flavors.get_flavor_by_flavor_id(2)
             resv_id = None
             return ([{'id': 1,
                       'display_name': 'test_server',
                       'uuid': FAKE_UUID,
-                      'instance_type': inst_type,
+                      'flavor': flavor,
                       'access_ip_v4': '1.2.3.4',
                       'access_ip_v6': 'fead::1234',
                       'image_ref': IMAGE_UUID,
@@ -974,7 +977,7 @@ class VolumeAttachTestsV260(test.NoDBTestCase):
                 side_effect=
                 exception.MultiattachNotSupportedByVirtDriver(
                     volume_id=FAKE_UUID_A)) as attach:
-            ex = self.assertRaises(webob.exc.HTTPConflict, self._post_attach)
+            ex = self.assertRaises(webob.exc.HTTPBadRequest, self._post_attach)
         create_kwargs = attach.call_args[1]
         self.assertTrue(create_kwargs['supports_multiattach'])
         self.assertIn("has 'multiattach' set, which is not supported for "
@@ -1539,6 +1542,83 @@ class UpdateVolumeAttachTests(VolumeAttachTestsV279):
                                req, FAKE_UUID,
                                FAKE_UUID_A, body=body)
         self.assertIn('Additional properties are not allowed', str(ex))
+
+
+class VolumeAttachTestsV289(UpdateVolumeAttachTests):
+    microversion = '2.89'
+
+    def setUp(self):
+        super().setUp()
+        self.controller = volumes_v21.VolumeAttachmentController()
+        self.expected_show = {
+            'volumeAttachment': {
+                'device': '/dev/fake0',
+                'serverId': FAKE_UUID,
+                'volumeId': FAKE_UUID_A,
+                'tag': None,
+                'delete_on_termination': False,
+                'attachment_id': None,
+                'bdm_uuid': uuids.bdm,
+            }
+        }
+
+    def test_show_pre_v289(self):
+        req = self._get_req(body={}, microversion='2.88')
+        req.method = 'GET'
+        result = self.attachments.show(req, FAKE_UUID, FAKE_UUID_A)
+        self.assertIn('id', result['volumeAttachment'])
+        self.assertNotIn('bdm_uuid', result['volumeAttachment'])
+        self.assertNotIn('attachment_id', result['volumeAttachment'])
+
+    @mock.patch('nova.objects.BlockDeviceMappingList.get_by_instance_uuid')
+    def test_list(self, mock_get_bdms):
+        vol_bdm = objects.BlockDeviceMapping(
+            self.context,
+            id=1,
+            uuid=uuids.bdm,
+            instance_uuid=FAKE_UUID,
+            volume_id=FAKE_UUID_A,
+            source_type='volume',
+            destination_type='volume',
+            delete_on_termination=True,
+            connection_info=None,
+            tag='fake-tag',
+            device_name='/dev/fake0',
+            attachment_id=uuids.attachment_id)
+        bdms = objects.BlockDeviceMappingList(objects=[vol_bdm])
+        mock_get_bdms.return_value = bdms
+
+        req = fakes.HTTPRequest.blank(
+            '/v2/servers/id/os-volume_attachments',
+            version="2.88")
+        req.body = jsonutils.dump_as_bytes({})
+        req.method = 'GET'
+        req.headers['content-type'] = 'application/json'
+
+        result = self.attachments.index(req, FAKE_UUID)
+        self.assertIn('id', result['volumeAttachments'][0])
+        self.assertNotIn('attachment_id', result['volumeAttachments'][0])
+        self.assertNotIn('bdm_uuid', result['volumeAttachments'][0])
+
+        req = fakes.HTTPRequest.blank(
+            '/v2/servers/id/os-volume_attachments',
+            version="2.89")
+        req.body = jsonutils.dump_as_bytes({})
+        req.method = 'GET'
+        req.headers['content-type'] = 'application/json'
+
+        result = self.attachments.index(req, FAKE_UUID)
+        self.assertNotIn('id', result['volumeAttachments'][0])
+        self.assertIn('attachment_id', result['volumeAttachments'][0])
+        self.assertEqual(
+            uuids.attachment_id,
+            result['volumeAttachments'][0]['attachment_id']
+        )
+        self.assertIn('bdm_uuid', result['volumeAttachments'][0])
+        self.assertEqual(
+            uuids.bdm,
+            result['volumeAttachments'][0]['bdm_uuid']
+        )
 
 
 class SwapVolumeMultiattachTestCase(test.NoDBTestCase):

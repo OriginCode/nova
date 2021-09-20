@@ -12,7 +12,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-
 import copy
 import datetime
 
@@ -192,9 +191,9 @@ class ServicesTestV21(test.TestCase):
             mock.Mock(side_effect=fake_service_get_all(fake_services_list)))
 
         self.useFixture(utils_fixture.TimeFixture(fake_utcnow()))
-        self.stub_out('nova.db.api.service_get_by_host_and_binary',
+        self.stub_out('nova.db.main.api.service_get_by_host_and_binary',
                       fake_db_service_get_by_host_binary(fake_services_list))
-        self.stub_out('nova.db.api.service_update',
+        self.stub_out('nova.db.main.api.service_update',
                       fake_db_service_update(fake_services_list))
 
         # NOTE(gibi): enable / disable a compute service tries to call
@@ -596,7 +595,7 @@ class ServicesTestV21(test.TestCase):
             self.assertIsNone(values['disabled_reason'])
             return dict(test_service.fake_service, id=service_id, **values)
 
-        self.stub_out('nova.db.api.service_update', _service_update)
+        self.stub_out('nova.db.main.api.service_update', _service_update)
 
         body = {'host': 'host1', 'binary': 'nova-compute'}
         res_dict = self.controller.update(self.req, "enable", body=body)
@@ -699,6 +698,21 @@ class ServicesTestV21(test.TestCase):
             self.assertEqual(self.controller.delete.wsgi_code, 204)
         mock_get_compute_nodes.assert_called_once_with(
             self.req.environ['nova.context'], compute.host)
+
+    @mock.patch(
+        'nova.objects.ComputeNodeList.get_all_by_host',
+        side_effect=exception.ComputeHostNotFound(host='fake-compute-host'))
+    def test_services_delete_compute_host_not_found(
+            self, mock_get_all_by_host):
+        compute = objects.Service(self.ctxt,
+                                  **{'host': 'fake-compute-host',
+                                     'binary': 'nova-compute',
+                                     'topic': 'compute',
+                                     'report_count': 0})
+        compute.create()
+        self.controller.delete(self.req, compute.id)
+        mock_get_all_by_host.assert_called_with(
+            self.req.environ['nova.context'], 'fake-compute-host')
 
     def test_services_delete_not_found(self):
 
@@ -1197,18 +1211,6 @@ class ServicesTestV253(test.TestCase):
         ex = self.assertRaises(webob.exc.HTTPBadRequest,
                                self.controller.update, self.req, 1234, body={})
         self.assertIn('Invalid uuid', str(ex))
-
-    def test_update_policy_failed(self):
-        """Tests that policy is checked with microversion 2.53."""
-        rule_name = "os_compute_api:os-services:update"
-        self.policy.set_rules({rule_name: "project_id:non_fake"})
-        exc = self.assertRaises(
-            exception.PolicyNotAuthorized,
-            self.controller.update, self.req, uuidsentinel.service_uuid,
-            body={})
-        self.assertEqual(
-            "Policy doesn't allow %s to be performed." % rule_name,
-            exc.format_message())
 
     def test_update_service_not_found(self):
         """Tests that we get a 404 response if the service is not found by

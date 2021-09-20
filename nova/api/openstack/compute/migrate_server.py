@@ -26,7 +26,6 @@ from nova.api import validation
 from nova.compute import api as compute
 from nova import exception
 from nova.i18n import _
-from nova.network import neutron
 from nova.policies import migrate_server as ms_policies
 
 LOG = logging.getLogger(__name__)
@@ -36,7 +35,6 @@ class MigrateServerController(wsgi.Controller):
     def __init__(self):
         super(MigrateServerController, self).__init__()
         self.compute_api = compute.API()
-        self.network_api = neutron.API()
 
     @wsgi.response(202)
     @wsgi.expected_errors((400, 403, 404, 409))
@@ -59,14 +57,12 @@ class MigrateServerController(wsgi.Controller):
         try:
             self.compute_api.resize(req.environ['nova.context'], instance,
                                     host_name=host_name)
-        except (exception.TooManyInstances, exception.QuotaError,
-                exception.ForbiddenWithAccelerators) as e:
+        except (exception.TooManyInstances, exception.QuotaError) as e:
             raise exc.HTTPForbidden(explanation=e.format_message())
         except (
             exception.InstanceIsLocked,
             exception.InstanceNotReady,
             exception.ServiceUnavailable,
-            exception.OperationNotSupportedForVDPAInterface,
         ) as e:
             raise exc.HTTPConflict(explanation=e.format_message())
         except exception.InstanceInvalidState as state_error:
@@ -74,8 +70,12 @@ class MigrateServerController(wsgi.Controller):
                     'migrate', id)
         except exception.InstanceNotFound as e:
             raise exc.HTTPNotFound(explanation=e.format_message())
-        except (exception.ComputeHostNotFound,
-                exception.CannotMigrateToSameHost) as e:
+        except (
+            exception.ComputeHostNotFound,
+            exception.CannotMigrateToSameHost,
+            exception.ForbiddenPortsWithAccelerator,
+            exception.ExtendedResourceRequestOldCompute,
+        ) as e:
             raise exc.HTTPBadRequest(explanation=e.format_message())
 
     @wsgi.response(202)
@@ -132,7 +132,8 @@ class MigrateServerController(wsgi.Controller):
                 exception.InvalidLocalStorage,
                 exception.InvalidSharedStorage,
                 exception.HypervisorUnavailable,
-                exception.MigrationPreCheckError) as ex:
+                exception.MigrationPreCheckError,
+                exception.ForbiddenPortsWithAccelerator) as ex:
             if async_:
                 with excutils.save_and_reraise_exception():
                     LOG.error("Unexpected exception received from "
@@ -140,21 +141,16 @@ class MigrateServerController(wsgi.Controller):
                               "'%(ex)s'", {'ex': ex})
             else:
                 raise exc.HTTPBadRequest(explanation=ex.format_message())
-        except (
-            exception.OperationNotSupportedForSEV,
-            exception.OperationNotSupportedForVTPM,
-            exception.OperationNotSupportedForVDPAInterface,
-        ) as e:
-            raise exc.HTTPConflict(explanation=e.format_message())
         except exception.InstanceIsLocked as e:
             raise exc.HTTPConflict(explanation=e.format_message())
-        except exception.ComputeHostNotFound as e:
+        except (
+            exception.ComputeHostNotFound,
+            exception.ExtendedResourceRequestOldCompute,
+        )as e:
             raise exc.HTTPBadRequest(explanation=e.format_message())
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
                     'os-migrateLive', id)
-        except exception.ForbiddenWithAccelerators as e:
-            raise exc.HTTPForbidden(explanation=e.format_message())
 
     def _get_force_param_for_live_migration(self, body, host):
         force = body["os-migrateLive"].get("force", False)

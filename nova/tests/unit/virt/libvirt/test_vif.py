@@ -28,8 +28,9 @@ from nova.network import model as network_model
 from nova import objects
 from nova.pci import utils as pci_utils
 from nova import test
+from nova.tests import fixtures as nova_fixtures
+from nova.tests.fixtures import libvirt as fakelibvirt
 from nova.tests.unit.virt import fakelibosinfo
-from nova.tests.unit.virt.libvirt import fakelibvirt
 from nova.virt.libvirt import config as vconfig
 from nova.virt.libvirt import vif
 
@@ -149,7 +150,8 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         type=network_model.VIF_TYPE_OVS,
         details={'port_filter': True},
         devname='tap-xxx-yyy-zzz',
-        ovs_interfaceid=uuids.ovs)
+        ovs_interfaceid=uuids.ovs,
+        delegate_create=True)
 
     vif_ovs_legacy = network_model.VIF(id=uuids.vif,
         address='ca:fe:de:ad:be:ef',
@@ -198,6 +200,18 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         network=network_8021,
         type=network_model.VIF_TYPE_HW_VEB,
         vnic_type=network_model.VNIC_TYPE_DIRECT,
+        ovs_interfaceid=None,
+        details={
+            network_model.VIF_DETAILS_VLAN: 100},
+        profile={'pci_vendor_info': '1137:0043',
+                 'pci_slot': '0000:0a:00.1',
+                 'physical_network': 'phynet1'})
+
+    vif_hw_veb_arq = network_model.VIF(id=uuids.vif,
+        address='ca:fe:de:ad:be:ef',
+        network=network_8021,
+        type=network_model.VIF_TYPE_HW_VEB,
+        vnic_type=network_model.VNIC_TYPE_ACCELERATOR_DIRECT,
         ovs_interfaceid=None,
         details={
             network_model.VIF_DETAILS_VLAN: 100},
@@ -378,6 +392,10 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         uuid='f0000000-0000-0000-0000-000000000001',
         project_id=723)
 
+    flavor_1vcpu = objects.Flavor(vcpus=1, memory=512, root_gb=1)
+
+    flavor_2vcpu = objects.Flavor(vcpus=2, memory=512, root_gb=1)
+
     bandwidth = {
         'quota:vif_inbound_peak': '200',
         'quota:vif_outbound_peak': '20',
@@ -406,7 +424,8 @@ class LibvirtVifTestCase(test.NoDBTestCase):
 
         self.os_vif_ovs_prof = osv_objects.vif.VIFPortProfileOpenVSwitch(
             interface_id="07bd6cea-fb37-4594-b769-90fc51854ee9",
-            profile_id="fishfood")
+            profile_id="fishfood",
+            create_port=True)
 
         self.os_vif_repr_prof = osv_objects.vif.VIFPortProfileOVSRepresentor(
             interface_id="07bd6cea-fb37-4594-b769-90fc51854ee9",
@@ -498,7 +517,7 @@ class LibvirtVifTestCase(test.NoDBTestCase):
     def setUp(self):
         super(LibvirtVifTestCase, self).setUp()
 
-        self.useFixture(fakelibvirt.FakeLibvirtFixture(stub_os_vif=False))
+        self.useFixture(nova_fixtures.LibvirtFixture(stub_os_vif=False))
 
         # os_vif.initialize is typically done in nova-compute startup
         os_vif.initialize()
@@ -862,7 +881,7 @@ class LibvirtVifTestCase(test.NoDBTestCase):
 
     @mock.patch.object(vif.designer, 'set_vif_guest_frontend_config',
                        wraps=vif.designer.set_vif_guest_frontend_config)
-    def test_model_sriov_direct(self, mock_set):
+    def _test_model_sriov(self, vinc_type, mock_set):
         """Direct attach vNICs shouldn't retrieve info from image_meta."""
         self.flags(use_virtio_for_bridges=True,
                    virt_type='kvm',
@@ -874,12 +893,18 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         image_meta = objects.ImageMeta.from_dict(
             {'properties': {'hw_vif_model': 'virtio'}})
         conf = d.get_base_config(None, 'ca:fe:de:ad:be:ef', image_meta,
-                                 None, 'kvm', network_model.VNIC_TYPE_DIRECT)
+                                 None, 'kvm', vinc_type)
         mock_set.assert_called_once_with(mock.ANY, 'ca:fe:de:ad:be:ef',
                                          None, None, None, None)
         self.assertIsNone(conf.vhost_queues)
         self.assertIsNone(conf.driver_name)
         self.assertIsNone(conf.model)
+
+    def test_model_sriov_direct(self):
+        self._test_model_sriov(network_model.VNIC_TYPE_DIRECT)
+
+    def test_model_accelerator_direct(self):
+        self._test_model_sriov(network_model.VNIC_TYPE_ACCELERATOR_DIRECT)
 
     def test_model_qemu(self):
         vif_objs = [
@@ -1010,35 +1035,12 @@ class LibvirtVifTestCase(test.NoDBTestCase):
                        self.vif_iovisor['network']['id'],
                        self.instance.project_id)])
 
-    def _check_ovs_virtualport_driver(self, d, vif, want_iface_id):
-        xml = self._get_instance_xml(d, vif)
-        node = self._get_node(xml)
-        self._assertTypeAndMacEquals(node, "bridge", "source", "bridge",
-                                     vif, "br0")
-        vp = node.find("virtualport")
-        self.assertEqual(vp.get("type"), "openvswitch")
-        iface_id_found = False
-        for p_elem in vp.findall("parameters"):
-            iface_id = p_elem.get("interfaceid", None)
-            if iface_id:
-                self.assertEqual(iface_id, want_iface_id)
-                iface_id_found = True
-
-        self.assertTrue(iface_id_found)
-
-    def test_generic_ovs_virtualport_driver(self):
-        d = vif.LibvirtGenericVIFDriver()
-        want_iface_id = self.vif_ovs['ovs_interfaceid']
-        self._check_ovs_virtualport_driver(d,
-                                           self.vif_ovs,
-                                           want_iface_id)
-
     def test_direct_plug_with_port_filter_cap_no_nova_firewall(self):
         d = vif.LibvirtGenericVIFDriver()
         br_want = self.vif_midonet['devname']
         xml = self._get_instance_xml(d, self.vif_ovs_filter_cap)
         node = self._get_node(xml)
-        self._assertTypeAndMacEquals(node, "bridge", "target", "dev",
+        self._assertTypeAndMacEquals(node, "ethernet", "target", "dev",
                                      self.vif_ovs_filter_cap, br_want)
 
     def test_ib_hostdev_driver(self):
@@ -1068,30 +1070,50 @@ class LibvirtVifTestCase(test.NoDBTestCase):
     @mock.patch('nova.privsep.linux_net.device_exists', return_value=True)
     @mock.patch('nova.privsep.linux_net.set_device_mtu')
     @mock.patch('nova.privsep.linux_net.create_tap_dev')
-    def test_plug_tap_kvm_virtio(self, mock_create_tap_dev, mock_set_mtu,
-                      mock_device_exists):
+    def test_plug_tap_kvm_virtio(
+            self, mock_create_tap_dev, mock_set_mtu, mock_device_exists):
 
         d1 = vif.LibvirtGenericVIFDriver()
         ins = objects.Instance(
             id=1, uuid='f0000000-0000-0000-0000-000000000001',
+            image_ref=uuids.image_ref, flavor=self.flavor_2vcpu,
             project_id=723, system_metadata={}
         )
         d1.plug(ins, self.vif_tap)
-        mock_create_tap_dev.assert_called_once_with('tap-xxx-yyy-zzz', None,
-                                                    multiqueue=False)
+        mock_create_tap_dev.assert_called_once_with(
+            'tap-xxx-yyy-zzz', None, multiqueue=False)
 
         mock_create_tap_dev.reset_mock()
 
         d2 = vif.LibvirtGenericVIFDriver()
         mq_ins = objects.Instance(
             id=1, uuid='f0000000-0000-0000-0000-000000000001',
+            image_ref=uuids.image_ref, flavor=self.flavor_2vcpu,
             project_id=723, system_metadata={
                 'image_hw_vif_multiqueue_enabled': 'True'
             }
         )
         d2.plug(mq_ins, self.vif_tap)
-        mock_create_tap_dev.assert_called_once_with('tap-xxx-yyy-zzz', None,
-                                                    multiqueue=True)
+        mock_create_tap_dev.assert_called_once_with(
+            'tap-xxx-yyy-zzz', None, multiqueue=True)
+
+    @mock.patch('nova.privsep.linux_net.device_exists', return_value=True)
+    @mock.patch('nova.privsep.linux_net.set_device_mtu')
+    @mock.patch('nova.privsep.linux_net.create_tap_dev')
+    def test_plug_tap_mq_ignored_1vcpu(
+            self, mock_create_tap_dev, mock_set_mtu, mock_device_exists):
+
+        d1 = vif.LibvirtGenericVIFDriver()
+        mq_ins = objects.Instance(
+            id=1, uuid='f0000000-0000-0000-0000-000000000001',
+            image_ref=uuids.image_ref, flavor=self.flavor_1vcpu,
+            project_id=723, system_metadata={
+                'image_hw_vif_multiqueue_enabled': 'True',
+            }
+        )
+        d1.plug(mq_ins, self.vif_tap)
+        mock_create_tap_dev.assert_called_once_with(
+            'tap-xxx-yyy-zzz', None, multiqueue=False)
 
     @mock.patch('nova.privsep.linux_net.device_exists', return_value=True)
     @mock.patch('nova.privsep.linux_net.set_device_mtu')
@@ -1106,14 +1128,14 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         d1 = vif.LibvirtGenericVIFDriver()
         ins = objects.Instance(
             id=1, uuid='f0000000-0000-0000-0000-000000000001',
+            image_ref=uuids.image_ref, flavor=self.flavor_2vcpu,
             project_id=723, system_metadata={
                 'image_hw_vif_multiqueue_enabled': 'True'
             }
         )
         d1.plug(ins, self.vif_tap)
-        mock_create_tap_dev.assert_called_once_with('tap-xxx-yyy-zzz',
-                                                    None,
-                                                    multiqueue=False)
+        mock_create_tap_dev.assert_called_once_with(
+            'tap-xxx-yyy-zzz', None, multiqueue=False)
 
     @mock.patch('nova.privsep.linux_net.device_exists', return_value=True)
     @mock.patch('nova.privsep.linux_net.set_device_mtu')
@@ -1124,15 +1146,15 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         d1 = vif.LibvirtGenericVIFDriver()
         ins = objects.Instance(
             id=1, uuid='f0000000-0000-0000-0000-000000000001',
+            image_ref=uuids.image_ref, flavor=self.flavor_2vcpu,
             project_id=723, system_metadata={
                 'image_hw_vif_multiqueue_enabled': 'True',
                 'image_hw_vif_model': 'e1000',
             }
         )
         d1.plug(ins, self.vif_tap)
-        mock_create_tap_dev.assert_called_once_with('tap-xxx-yyy-zzz',
-                                                    None,
-                                                    multiqueue=False)
+        mock_create_tap_dev.assert_called_once_with(
+            'tap-xxx-yyy-zzz', None, multiqueue=False)
 
     def test_unplug_tap(self):
         d = vif.LibvirtGenericVIFDriver()
@@ -1223,6 +1245,17 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         self.assertIn('macvtap_source', str(e))
         self.assertIn('macvtap_mode', str(e))
         self.assertIn('physical_interface', str(e))
+
+    def test_hw_veb_driver_arq(self):
+        d = vif.LibvirtGenericVIFDriver()
+        xml = self._get_instance_xml(d, self.vif_hw_veb_arq)
+        node = self._get_node(xml)
+        self._assertTypeAndPciEquals(node, "hostdev", self.vif_hw_veb_arq)
+        self._assertMacEquals(node, self.vif_hw_veb_arq)
+
+        conf = vconfig.LibvirtConfigGuestInterface()
+        conf.parse_dom(node)
+        self.assertEqual(conf.vlan, self.vif_hw_veb_arq["details"]["vlan"])
 
     @mock.patch('nova.virt.libvirt.vif.ensure_vlan')
     def test_macvtap_plug_vlan(self, ensure_vlan_mock):
@@ -1498,8 +1531,8 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         d = vif.LibvirtGenericVIFDriver()
         xml = self._get_instance_xml(d, vif_model)
         node = self._get_node(xml)
-
-        self._assertXmlEqual(expected_xml, node)
+        node_xml = etree.tostring(node).decode()
+        self._assertXmlEqual(expected_xml, node_xml)
 
     def test_config_os_vif_bridge(self):
         os_vif_type = self.os_vif_bridge
@@ -1559,20 +1592,15 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         vif_type = self.vif_agilio_ovs
 
         expected_xml = """
-            <interface type="bridge">
+            <interface type="ethernet">
              <mac address="22:52:25:62:e2:aa"/>
              <model type="virtio"/>
-             <source bridge="br0"/>
              <mtu size="9000"/>
              <target dev="nicdc065497-3c"/>
-             <virtualport type="openvswitch">
-              <parameters
-              interfaceid="07bd6cea-fb37-4594-b769-90fc51854ee9"/>
-             </virtualport>
-              <bandwidth>
-               <inbound average="100" peak="200" burst="300"/>
-               <outbound average="10" peak="20" burst="30"/>
-              </bandwidth>
+             <bandwidth>
+              <inbound average="100" peak="200" burst="300"/>
+              <outbound average="10" peak="20" burst="30"/>
+             </bandwidth>
             </interface>"""
 
         self._test_config_os_vif(os_vif_type, vif_type, expected_xml)
@@ -1612,15 +1640,11 @@ class LibvirtVifTestCase(test.NoDBTestCase):
         vif_type = self.vif_ovs
 
         expected_xml = """
-            <interface type="bridge">
+            <interface type="ethernet">
              <mac address="22:52:25:62:e2:aa"/>
              <model type="virtio"/>
-             <source bridge="br0"/>
              <mtu size="9000"/>
              <target dev="nicdc065497-3c"/>
-             <virtualport type="openvswitch">
-              <parameters interfaceid="07bd6cea-fb37-4594-b769-90fc51854ee9"/>
-             </virtualport>
              <bandwidth>
               <inbound average="100" peak="200" burst="300"/>
               <outbound average="10" peak="20" burst="30"/>

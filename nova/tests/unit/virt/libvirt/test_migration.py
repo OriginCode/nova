@@ -26,7 +26,8 @@ from nova import exception
 from nova.network import model as network_model
 from nova import objects
 from nova import test
-from nova.tests.unit.virt.libvirt import fakelibvirt
+from nova.tests import fixtures as nova_fixtures
+from nova.tests.fixtures import libvirt as fakelibvirt
 from nova.virt.libvirt import config as vconfig
 from nova.virt.libvirt import guest as libvirt_guest
 from nova.virt.libvirt import host
@@ -955,7 +956,7 @@ class MigrationMonitorTestCase(test.NoDBTestCase):
     def setUp(self):
         super(MigrationMonitorTestCase, self).setUp()
 
-        self.useFixture(fakelibvirt.FakeLibvirtFixture())
+        self.useFixture(nova_fixtures.LibvirtFixture())
 
         flavor = objects.Flavor(memory_mb=2048,
                                 swap=0,
@@ -982,12 +983,12 @@ class MigrationMonitorTestCase(test.NoDBTestCase):
             'image_ref': '155d900f-4e14-4e4c-a73d-069cbf4541e6',
             'root_gb': 10,
             'ephemeral_gb': 20,
-            'instance_type_id': '5',  # m1.small
+            'instance_type_id': flavor.id,
+            'flavor': flavor,
             'extra_specs': {},
             'system_metadata': {
                 'image_disk_format': 'raw',
             },
-            'flavor': flavor,
             'new_flavor': None,
             'old_flavor': None,
             'pci_devices': objects.PciDeviceList(),

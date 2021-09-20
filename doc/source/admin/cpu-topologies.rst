@@ -93,7 +93,7 @@ guest OS.
 
 In all cases where NUMA awareness is used, the ``NUMATopologyFilter``
 filter must be enabled. Details on this filter are provided in
-:doc:`/admin/configuration/schedulers`.
+:doc:`/admin/scheduling`.
 
 .. caution::
 
@@ -139,7 +139,7 @@ The allocation of instance vCPUs and memory from different host NUMA nodes can
 be configured. This allows for asymmetric allocation of vCPUs and memory, which
 can be important for some workloads. You can configure the allocation of
 instance vCPUs and memory across each **guest** NUMA node using the
-:nova:extra-spec:`hw:numa_cpus.{id}` and :nova:extra-spec:`hw:numa_mem.{id}`
+:nova:extra-spec:`hw:numa_cpus.{num}` and :nova:extra-spec:`hw:numa_mem.{num}`
 extra specs respectively.
 For example, to spread the 6 vCPUs and 6 GB of memory
 of an instance across two NUMA nodes and create an asymmetric 1:2 vCPU and
@@ -368,9 +368,9 @@ you can request hosts **without** SMT. To configure this, run:
      --property hw:cpu_policy=dedicated \
      --property hw:cpu_thread_policy=isolate
 
-This will ensure the instance gets scheduled to a host with SMT by requesting
-hosts that **do not** report the ``HW_CPU_HYPERTHREADING`` trait. It is also
-possible to request this trait explicitly. To configure this, run:
+This will ensure the instance gets scheduled to a host without SMT by
+requesting hosts that **do not** report the ``HW_CPU_HYPERTHREADING`` trait.
+It is also possible to request this trait explicitly. To configure this, run:
 
 .. code-block:: console
 

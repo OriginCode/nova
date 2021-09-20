@@ -19,12 +19,11 @@ from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import uuidutils
 from oslo_utils import versionutils
-from sqlalchemy.orm import contains_eager
-from sqlalchemy.orm import joinedload
+from sqlalchemy import orm
 
 from nova.compute import utils as compute_utils
-from nova.db.sqlalchemy import api as db_api
-from nova.db.sqlalchemy import api_models
+from nova.db.api import api as api_db_api
+from nova.db.api import models as api_models
 from nova import exception
 from nova import objects
 from nova.objects import base
@@ -37,8 +36,8 @@ LOG = logging.getLogger(__name__)
 
 def _instance_group_get_query(context, id_field=None, id=None):
     query = context.session.query(api_models.InstanceGroup).\
-            options(joinedload('_policies')).\
-            options(joinedload('_members'))
+        options(orm.joinedload('_policies')).\
+        options(orm.joinedload('_members'))
     if not context.is_admin:
         query = query.filter_by(project_id=context.project_id)
     if id and id_field:
@@ -89,7 +88,7 @@ def _instance_group_members_add_by_uuid(context, group_uuid, members):
             outerjoin(api_models.InstanceGroupMember,
             api_models.InstanceGroupMember.instance_uuid.in_(set(members))).\
             filter(api_models.InstanceGroup.uuid == group_uuid).\
-            options(contains_eager('_members')).first()
+            options(orm.contains_eager('_members')).first()
     if not group:
         raise exception.InstanceGroupNotFound(group_uuid=group_uuid)
     return _instance_group_model_add(context, api_models.InstanceGroupMember,
@@ -214,7 +213,7 @@ class InstanceGroup(base.NovaPersistentObject, base.NovaObject,
         return instance_group
 
     @staticmethod
-    @db_api.api_context_manager.reader
+    @api_db_api.context_manager.reader
     def _get_from_db_by_uuid(context, uuid):
         grp = _instance_group_get_query(context,
                                         id_field=api_models.InstanceGroup.uuid,
@@ -224,7 +223,7 @@ class InstanceGroup(base.NovaPersistentObject, base.NovaObject,
         return grp
 
     @staticmethod
-    @db_api.api_context_manager.reader
+    @api_db_api.context_manager.reader
     def _get_from_db_by_id(context, id):
         grp = _instance_group_get_query(context,
                                         id_field=api_models.InstanceGroup.id,
@@ -234,7 +233,7 @@ class InstanceGroup(base.NovaPersistentObject, base.NovaObject,
         return grp
 
     @staticmethod
-    @db_api.api_context_manager.reader
+    @api_db_api.context_manager.reader
     def _get_from_db_by_name(context, name):
         grp = _instance_group_get_query(context).filter_by(name=name).first()
         if not grp:
@@ -242,7 +241,7 @@ class InstanceGroup(base.NovaPersistentObject, base.NovaObject,
         return grp
 
     @staticmethod
-    @db_api.api_context_manager.reader
+    @api_db_api.context_manager.reader
     def _get_from_db_by_instance(context, instance_uuid):
         grp_member = context.session.query(api_models.InstanceGroupMember).\
                      filter_by(instance_uuid=instance_uuid).first()
@@ -252,7 +251,7 @@ class InstanceGroup(base.NovaPersistentObject, base.NovaObject,
         return grp
 
     @staticmethod
-    @db_api.api_context_manager.writer
+    @api_db_api.context_manager.writer
     def _save_in_db(context, group_uuid, values):
         grp = InstanceGroup._get_from_db_by_uuid(context, group_uuid)
         values_copy = copy.copy(values)
@@ -266,7 +265,7 @@ class InstanceGroup(base.NovaPersistentObject, base.NovaObject,
         return grp
 
     @staticmethod
-    @db_api.api_context_manager.writer
+    @api_db_api.context_manager.writer
     def _create_in_db(context, values, policies=None, members=None,
                       policy=None, rules=None):
         try:
@@ -302,7 +301,7 @@ class InstanceGroup(base.NovaPersistentObject, base.NovaObject,
         return group
 
     @staticmethod
-    @db_api.api_context_manager.writer
+    @api_db_api.context_manager.writer
     def _destroy_in_db(context, group_uuid):
         qry = _instance_group_get_query(context,
                                         id_field=api_models.InstanceGroup.uuid,
@@ -320,13 +319,13 @@ class InstanceGroup(base.NovaPersistentObject, base.NovaObject,
         qry.delete()
 
     @staticmethod
-    @db_api.api_context_manager.writer
+    @api_db_api.context_manager.writer
     def _add_members_in_db(context, group_uuid, members):
         return _instance_group_members_add_by_uuid(context, group_uuid,
                                                    members)
 
     @staticmethod
-    @db_api.api_context_manager.writer
+    @api_db_api.context_manager.writer
     def _remove_members_in_db(context, group_id, instance_uuids):
         # There is no public method provided for removing members because the
         # user-facing API doesn't allow removal of instance group members. We
@@ -338,7 +337,7 @@ class InstanceGroup(base.NovaPersistentObject, base.NovaObject,
             delete(synchronize_session=False)
 
     @staticmethod
-    @db_api.api_context_manager.writer
+    @api_db_api.context_manager.writer
     def _destroy_members_bulk_in_db(context, instance_uuids):
         return context.session.query(api_models.InstanceGroupMember).filter(
             api_models.InstanceGroupMember.instance_uuid.in_(instance_uuids)).\
@@ -538,7 +537,7 @@ class InstanceGroupList(base.ObjectListBase, base.NovaObject):
         }
 
     @staticmethod
-    @db_api.api_context_manager.reader
+    @api_db_api.context_manager.reader
     def _get_from_db(context, project_id=None):
         query = _instance_group_get_query(context)
         if project_id is not None:
@@ -546,7 +545,7 @@ class InstanceGroupList(base.ObjectListBase, base.NovaObject):
         return query.all()
 
     @staticmethod
-    @db_api.api_context_manager.reader
+    @api_db_api.context_manager.reader
     def _get_counts_from_db(context, project_id, user_id=None):
         query = context.session.query(api_models.InstanceGroup.id).\
                 filter_by(project_id=project_id)

@@ -62,14 +62,10 @@ Fortunately, nova provides functionality to ensure NUMA affinitization is
 provided for instances using neutron. How this works depends on the type of
 port you are trying to use.
 
-.. todo::
-
-   Add documentation for PCI NUMA affinity and PCI policies and link to it from
-   here.
-
 For SR-IOV ports, virtual functions, which are PCI devices, are attached to the
 instance. This means the instance can benefit from the NUMA affinity guarantees
-provided for PCI devices. This happens automatically.
+provided for PCI devices. This happens automatically and is described in detail
+in :ref:`pci-numa-affinity-policy`.
 
 For all other types of ports, some manual configuration is required.
 
@@ -154,7 +150,7 @@ For all other types of ports, some manual configuration is required.
    networks on a given host. There is only one configuration option that must
    be set:
 
-   ``[neutron_tunneled] numa_nodes``
+   ``[neutron_tunnel] numa_nodes``
      This should be set to a list of one or NUMA nodes to which instances using
      tunneled networks will be affinitized.
 
@@ -195,7 +191,7 @@ Now, take an example for a deployment using L3 networks.
 
 .. code-block:: ini
 
-   [neutron_tunneled]
+   [neutron_tunnel]
    numa_nodes = 0
 
 This is much simpler as all tunneled traffic uses the same logical interface.

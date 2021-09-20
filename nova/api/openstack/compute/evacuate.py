@@ -26,7 +26,6 @@ from nova.compute import api as compute
 import nova.conf
 from nova import exception
 from nova.i18n import _
-from nova.network import neutron
 from nova.policies import evacuate as evac_policies
 from nova import utils
 
@@ -40,7 +39,6 @@ class EvacuateController(wsgi.Controller):
         super(EvacuateController, self).__init__()
         self.compute_api = compute.API()
         self.host_api = compute.HostAPI()
-        self.network_api = neutron.API()
 
     def _get_on_shared_storage(self, req, evacuate_body):
         if api_version_request.is_supported(req, min_version='2.14'):
@@ -126,15 +124,12 @@ class EvacuateController(wsgi.Controller):
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
                     'evacuate', id)
-        except exception.ComputeServiceInUse as e:
-            raise exc.HTTPBadRequest(explanation=e.format_message())
-        except exception.ForbiddenWithAccelerators as e:
-            raise exc.HTTPForbidden(explanation=e.format_message())
         except (
-            exception.OperationNotSupportedForVTPM,
-            exception.OperationNotSupportedForVDPAInterface,
+            exception.ComputeServiceInUse,
+            exception.ForbiddenPortsWithAccelerator,
+            exception.ExtendedResourceRequestOldCompute,
         ) as e:
-            raise exc.HTTPConflict(explanation=e.format_message())
+            raise exc.HTTPBadRequest(explanation=e.format_message())
 
         if (not api_version_request.is_supported(req, min_version='2.14') and
                 CONF.api.enable_instance_password):

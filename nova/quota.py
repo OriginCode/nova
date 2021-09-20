@@ -20,16 +20,13 @@ import copy
 
 from oslo_log import log as logging
 from oslo_utils import importutils
-from sqlalchemy.sql import and_
-from sqlalchemy.sql import false
-from sqlalchemy.sql import null
-from sqlalchemy.sql import or_
+from sqlalchemy import sql
 
 import nova.conf
 from nova import context as nova_context
-from nova.db import api as db
-from nova.db.sqlalchemy import api as db_api
-from nova.db.sqlalchemy import api_models
+from nova.db.api import api as api_db_api
+from nova.db.api import models as api_models
+from nova.db.main import api as main_db_api
 from nova import exception
 from nova import objects
 from nova.scheduler.client import report
@@ -181,7 +178,10 @@ class DbQuotaDriver(object):
                 # displaying used limits. They are always zero.
                 usages[resource.name] = {'in_use': 0}
             else:
-                if resource.name in db.quota_get_per_project_resources():
+                if (
+                    resource.name in
+                    main_db_api.quota_get_per_project_resources()
+                ):
                     count = resource.count_as_dict(context, project_id)
                     key = 'project'
                 else:
@@ -1049,7 +1049,7 @@ class QuotaEngine(object):
         return 0
 
 
-@db_api.api_context_manager.reader
+@api_db_api.context_manager.reader
 def _user_id_queued_for_delete_populated(context, project_id=None):
     """Determine whether user_id and queued_for_delete are set.
 
@@ -1077,13 +1077,13 @@ def _user_id_queued_for_delete_populated(context, project_id=None):
     :returns: True if user_id is set for all non-deleted instances and
               queued_for_delete is set for all instances, else False
     """
-    user_id_not_populated = and_(
-        api_models.InstanceMapping.user_id == null(),
-        api_models.InstanceMapping.queued_for_delete == false())
+    user_id_not_populated = sql.and_(
+        api_models.InstanceMapping.user_id == sql.null(),
+        api_models.InstanceMapping.queued_for_delete == sql.false())
     # If either queued_for_delete or user_id are unmigrated, we will return
     # False.
-    unmigrated_filter = or_(
-        api_models.InstanceMapping.queued_for_delete == null(),
+    unmigrated_filter = sql.or_(
+        api_models.InstanceMapping.queued_for_delete == sql.null(),
         user_id_not_populated)
     query = context.session.query(api_models.InstanceMapping).filter(
         unmigrated_filter)

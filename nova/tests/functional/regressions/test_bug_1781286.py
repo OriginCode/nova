@@ -20,8 +20,6 @@ from nova import test
 from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import integrated_helpers
-from nova.tests.unit import fake_notifier
-from nova.tests.unit import policy_fixture
 
 
 class RescheduleBuildAvailabilityZoneUpCall(
@@ -37,7 +35,7 @@ class RescheduleBuildAvailabilityZoneUpCall(
     def setUp(self):
         super(RescheduleBuildAvailabilityZoneUpCall, self).setUp()
         # Use the standard fixtures.
-        self.useFixture(policy_fixture.RealPolicyFixture())
+        self.useFixture(nova_fixtures.RealPolicyFixture())
         self.useFixture(nova_fixtures.GlanceFixture(self))
         self.useFixture(nova_fixtures.NeutronFixture(self))
         self.useFixture(func_fixtures.PlacementFixture())
@@ -52,8 +50,8 @@ class RescheduleBuildAvailabilityZoneUpCall(
         self.start_service('compute', host='host1')
         self.start_service('compute', host='host2')
         # Listen for notifications.
-        fake_notifier.stub_notifier(self)
-        self.addCleanup(fake_notifier.reset)
+        self.notifier = self.useFixture(
+            nova_fixtures.NotificationFixture(self))
 
     def test_server_create_reschedule_blocked_az_up_call(self):
         self.flags(default_availability_zone='us-central')
@@ -81,7 +79,7 @@ class RescheduleBuildAvailabilityZoneUpCall(
         # Because we poisoned AggregateList.get_by_host after hitting the
         # compute service we have to wait for the notification that the build
         # is complete and then stop the mock so we can use the API again.
-        fake_notifier.wait_for_versioned_notifications('instance.create.end')
+        self.notifier.wait_for_versioned_notifications('instance.create.end')
         # Note that we use stopall here because we actually called
         # build_and_run_instance twice so we have more than one instance of
         # the mock that needs to be stopped.
@@ -101,7 +99,7 @@ class RescheduleMigrateAvailabilityZoneUpCall(
     def setUp(self):
         super(RescheduleMigrateAvailabilityZoneUpCall, self).setUp()
         # Use the standard fixtures.
-        self.useFixture(policy_fixture.RealPolicyFixture())
+        self.useFixture(nova_fixtures.RealPolicyFixture())
         self.useFixture(nova_fixtures.GlanceFixture(self))
         self.useFixture(nova_fixtures.NeutronFixture(self))
         self.useFixture(func_fixtures.PlacementFixture())
@@ -117,8 +115,8 @@ class RescheduleMigrateAvailabilityZoneUpCall(
         self.start_service('compute', host='host2')
         self.start_service('compute', host='host3')
         # Listen for notifications.
-        fake_notifier.stub_notifier(self)
-        self.addCleanup(fake_notifier.reset)
+        self.notifier = self.useFixture(
+            nova_fixtures.NotificationFixture(self))
 
     def test_migrate_reschedule_blocked_az_up_call(self):
         self.flags(default_availability_zone='us-central')
@@ -154,7 +152,7 @@ class RescheduleMigrateAvailabilityZoneUpCall(
         # Because we poisoned AggregateList.get_by_host after hitting the
         # compute service we have to wait for the notification that the resize
         # is complete and then stop the mock so we can use the API again.
-        fake_notifier.wait_for_versioned_notifications(
+        self.notifier.wait_for_versioned_notifications(
             'instance.resize_finish.end')
         # Note that we use stopall here because we actually called _prep_resize
         # twice so we have more than one instance of the mock that needs to be

@@ -21,9 +21,8 @@ import mock
 
 from nova import conf
 from nova.tests import fixtures as nova_fixtures
+from nova.tests.fixtures import libvirt as fakelibvirt
 from nova.tests.functional import integrated_helpers
-from nova.tests.unit.virt.libvirt import fake_imagebackend
-from nova.tests.unit.virt.libvirt import fakelibvirt
 
 
 CONF = conf.CONF
@@ -42,8 +41,9 @@ class ServersTestBase(integrated_helpers._IntegratedTestBase):
 
         super(ServersTestBase, self).setUp()
 
-        self.useFixture(fake_imagebackend.ImageBackendFixture())
-        self.useFixture(fakelibvirt.FakeLibvirtFixture())
+        self.useFixture(nova_fixtures.LibvirtImageBackendFixture())
+        self.useFixture(nova_fixtures.LibvirtFixture())
+        self.useFixture(nova_fixtures.OSBrickFixture())
 
         self.useFixture(fixtures.MockPatch(
             'nova.virt.libvirt.LibvirtDriver._create_image',
@@ -158,6 +158,31 @@ class ServersTestBase(integrated_helpers._IntegratedTestBase):
             'resource_providers'][0]['uuid']
 
         return hostname
+
+
+class LibvirtMigrationMixin(object):
+    """A simple mixin to facilliate successful libvirt live migrations
+
+    Requires that the test class set self.server for the specific test instnace
+    and self.{src,dest} to indicate the direction of the migration. For any
+    scenarios more complex than this they should override _migrate_stub with
+    their own implementation.
+    """
+    def setUp(self):
+        super().setUp()
+        self.useFixture(fixtures.MonkeyPatch(
+            'nova.tests.fixtures.libvirt.Domain.migrateToURI3',
+            self._migrate_stub))
+        self.migrate_stub_ran = False
+
+    def _migrate_stub(self, domain, destination, params, flags):
+        self.dest.driver._host.get_connection().createXML(
+            params['destination_xml'],
+            'fake-createXML-doesnt-care-about-flags')
+        conn = self.src.driver._host.get_connection()
+        dom = conn.lookupByUUIDString(self.server['id'])
+        dom.complete_job()
+        self.migrate_stub_ran = True
 
 
 class LibvirtNeutronFixture(nova_fixtures.NeutronFixture):

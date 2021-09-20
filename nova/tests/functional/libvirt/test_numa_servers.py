@@ -24,10 +24,9 @@ from nova.conf import neutron as neutron_conf
 from nova import context as nova_context
 from nova import objects
 from nova.tests import fixtures as nova_fixtures
+from nova.tests.fixtures import libvirt as fakelibvirt
 from nova.tests.functional.api import client
 from nova.tests.functional.libvirt import base
-from nova.tests.unit import fake_notifier
-from nova.tests.unit.virt.libvirt import fakelibvirt
 
 CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
@@ -43,7 +42,7 @@ class NUMAServersTestBase(base.ServersTestBase):
 
         # Mock the 'NUMATopologyFilter' filter, as most tests need to inspect
         # this
-        host_manager = self.scheduler.manager.driver.host_manager
+        host_manager = self.scheduler.manager.host_manager
         numa_filter_class = host_manager.filter_cls_map['NUMATopologyFilter']
         host_pass_mock = mock.Mock(wraps=numa_filter_class().host_passes)
         _p = mock.patch('nova.scheduler.filters'
@@ -104,8 +103,8 @@ class NUMAServersTest(NUMAServersTestBase):
         nodes.
         """
 
-        host_info = fakelibvirt.HostInfo(cpu_nodes=2, cpu_sockets=1,
-                                         cpu_cores=2, cpu_threads=2)
+        host_info = fakelibvirt.HostInfo(
+            cpu_nodes=2, cpu_sockets=1, cpu_cores=2, cpu_threads=2)
         self.start_compute(host_info=host_info, hostname='compute1')
 
         extra_spec = {'hw:numa_nodes': '2'}
@@ -119,6 +118,35 @@ class NUMAServersTest(NUMAServersTestBase):
         self.assertEqual(2, len(inst.numa_topology.cells))
         self.assertNotIn('cpu_topology', inst.numa_topology.cells[0])
         self.assertNotIn('cpu_topology', inst.numa_topology.cells[1])
+
+    def test_create_server_with_numa_topology_and_cpu_topology_and_pinning(
+            self):
+        """Create a server with two NUMA nodes.
+
+        This should pass and result in a guest NUMA topology with two NUMA
+        nodes, pinned cpus and numa affined memory.
+        """
+
+        host_info = fakelibvirt.HostInfo(
+            cpu_nodes=2, cpu_sockets=1, cpu_cores=4, cpu_threads=1,
+            kB_mem=(1024 * 1024 * 16))  # 16 GB
+        self.start_compute(host_info=host_info, hostname='compute1')
+
+        extra_spec = {
+            'hw:numa_nodes': '2',
+            'hw:cpu_max_sockets': '2',
+            'hw:cpu_max_cores': '2',
+            'hw:cpu_max_threads': '8',
+            'hw:cpu_policy': 'dedicated'}
+        flavor_id = self._create_flavor(vcpu=8, extra_spec=extra_spec)
+        server = self._run_build_test(flavor_id)
+
+        ctx = nova_context.get_admin_context()
+        inst = objects.Instance.get_by_uuid(ctx, server['id'])
+        self.assertEqual(2, len(inst.numa_topology.cells))
+        self.assertLessEqual(inst.vcpu_model.topology.sockets, 2)
+        self.assertLessEqual(inst.vcpu_model.topology.cores, 2)
+        self.assertLessEqual(inst.vcpu_model.topology.threads, 8)
 
     def test_create_server_with_numa_fails(self):
         """Create a two NUMA node instance on a host with only one node.
@@ -217,7 +245,7 @@ class NUMAServersTest(NUMAServersTestBase):
 
         inst = objects.Instance.get_by_uuid(self.ctxt, server['id'])
         self.assertEqual(1, len(inst.numa_topology.cells))
-        self.assertEqual(5, inst.numa_topology.cells[0].cpu_topology.cores)
+        self.assertEqual(5, inst.vcpu_model.topology.sockets)
 
     def test_create_server_with_mixed_policy(self):
         """Create a server using the 'hw:cpu_policy=mixed' extra spec.
@@ -267,7 +295,6 @@ class NUMAServersTest(NUMAServersTestBase):
         # sanity check the instance topology
         inst = objects.Instance.get_by_uuid(self.ctxt, server['id'])
         self.assertEqual(1, len(inst.numa_topology.cells))
-        self.assertEqual(4, inst.numa_topology.cells[0].cpu_topology.cores)
         self.assertEqual({0}, inst.numa_topology.cells[0].cpuset)
         self.assertEqual({1, 2, 3}, inst.numa_topology.cells[0].pcpuset)
         self.assertEqual(
@@ -476,8 +503,6 @@ class NUMAServersTest(NUMAServersTestBase):
         ctx = nova_context.get_admin_context()
         inst = objects.Instance.get_by_uuid(ctx, server['id'])
         self.assertEqual(1, len(inst.numa_topology.cells))
-        self.assertEqual(1, inst.numa_topology.cells[0].cpu_topology.cores)
-        self.assertEqual(2, inst.numa_topology.cells[0].cpu_topology.threads)
 
     def test_create_server_with_pcpu_fails(self):
         """Create a pinned instance on a host with no PCPUs.
@@ -1193,8 +1218,8 @@ class NUMAServersWithNetworksTest(NUMAServersTestBase):
         ex = self.assertRaises(client.OpenStackApiException,
                                self.api.post_server_action, server['id'], post)
         # NOTE(danms): This wouldn't happen in a real deployment since rebuild
-        # is a cast, but since we are using CastAsCall this will bubble to the
-        # API.
+        # is a cast, but since we are using CastAsCallFixture this will bubble
+        # to the API.
         self.assertEqual(500, ex.response.status_code)
         self.assertIn('NoValidHost', str(ex))
 
@@ -1251,9 +1276,6 @@ class NUMAServersRebuildTests(NUMAServersTestBase):
         # save references to first two images for server create and rebuild
         self.image_ref_0 = images[0]['id']
         self.image_ref_1 = images[1]['id']
-
-        fake_notifier.stub_notifier(self)
-        self.addCleanup(fake_notifier.reset)
 
     def _create_active_server(self, server_args=None):
         basic_server = {

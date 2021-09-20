@@ -56,15 +56,13 @@ import testtools
 from nova.api.openstack import wsgi_app
 from nova.compute import rpcapi as compute_rpcapi
 from nova import context
-from nova.db.sqlalchemy import api as sqlalchemy_api
+from nova.db.main import api as db_api
 from nova import exception
 from nova import objects
 from nova.objects import base as objects_base
 from nova import quota
 from nova.tests import fixtures as nova_fixtures
-from nova.tests.unit import conf_fixture
 from nova.tests.unit import matchers
-from nova.tests.unit import policy_fixture
 from nova import utils
 from nova.virt import images
 
@@ -206,7 +204,7 @@ class TestCase(base.BaseTestCase):
             self.fixture.config(lock_path=lock_path,
                                 group='oslo_concurrency')
 
-        self.useFixture(conf_fixture.ConfFixture(CONF))
+        self.useFixture(nova_fixtures.ConfFixture(CONF))
 
         if self.STUB_RPC:
             self.useFixture(nova_fixtures.RPCFixture('nova.test'))
@@ -264,7 +262,7 @@ class TestCase(base.BaseTestCase):
 
         self.addCleanup(self._clear_attrs)
         self.useFixture(fixtures.EnvironmentVariable('http_proxy'))
-        self.policy = self.useFixture(policy_fixture.PolicyFixture())
+        self.policy = self.useFixture(nova_fixtures.PolicyFixture())
 
         self.useFixture(nova_fixtures.PoisonFunctions())
 
@@ -384,18 +382,9 @@ class TestCase(base.BaseTestCase):
 
     def enforce_fk_constraints(self, engine=None):
         if engine is None:
-            engine = sqlalchemy_api.get_engine()
+            engine = db_api.get_engine()
         dialect = engine.url.get_dialect()
         if dialect == sqlite.dialect:
-            # We're seeing issues with foreign key support in SQLite 3.6.20
-            # SQLAlchemy doesn't support it at all with < SQLite 3.6.19
-            # It works fine in SQLite 3.7.
-            # So return early to skip this test if running SQLite < 3.7
-            import sqlite3
-            tup = sqlite3.sqlite_version_info
-            if tup[0] < 3 or (tup[0] == 3 and tup[1] < 7):
-                self.skipTest(
-                    'sqlite version too old for reliable SQLA foreign_keys')
             engine.connect().execute("PRAGMA foreign_keys = ON")
 
     def start_service(self, name, host=None, cell_name=None, **kwargs):
@@ -644,8 +633,8 @@ class TestCase(base.BaseTestCase):
 
         for name in sorted(implmethods.keys()):
             # NOTE(stephenfin): We ignore type annotations
-            baseargs = utils.getargspec(basemethods[name])[:-1]
-            implargs = utils.getargspec(implmethods[name])[:-1]
+            baseargs = inspect.getfullargspec(basemethods[name])[:-1]
+            implargs = inspect.getfullargspec(implmethods[name])[:-1]
 
             self.assertEqual(baseargs, implargs,
                              "%s args don't match base class %s" %
@@ -718,7 +707,7 @@ class SubclassSignatureTestCase(testtools.TestCase, metaclass=abc.ABCMeta):
                 # instead.
                 method = getattr(method, '__wrapped__')
 
-            argspecs[name] = utils.getargspec(method)
+            argspecs[name] = inspect.getfullargspec(method)
 
         return argspecs
 
@@ -754,9 +743,12 @@ class SubclassSignatureTestCase(testtools.TestCase, metaclass=abc.ABCMeta):
 class TimeOverride(fixtures.Fixture):
     """Fixture to start and remove time override."""
 
+    def __init__(self, override_time=None):
+        self.override_time = override_time
+
     def setUp(self):
         super(TimeOverride, self).setUp()
-        timeutils.set_time_override()
+        timeutils.set_time_override(override_time=self.override_time)
         self.addCleanup(timeutils.clear_time_override)
 
 

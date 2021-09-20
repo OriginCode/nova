@@ -167,7 +167,7 @@ class IronicDriver(virt_driver.ComputeDriver):
 
         # Image type support flags
         "supports_image_type_aki": False,
-        "supports_image_type_ami": False,
+        "supports_image_type_ami": True,
         "supports_image_type_ari": False,
         "supports_image_type_iso": False,
         "supports_image_type_qcow2": True,
@@ -733,10 +733,15 @@ class IronicDriver(virt_driver.ComputeDriver):
     def _refresh_cache(self):
         ctxt = nova_context.get_admin_context()
         self._refresh_hash_ring(ctxt)
-        instances = objects.InstanceList.get_uuids_by_host(ctxt, CONF.host)
         node_cache = {}
 
         def _get_node_list(**kwargs):
+            # NOTE(TheJulia): This call can take a substantial amount
+            # of time as it may be attempting to retrieve thousands of
+            # baremetal nodes. Depending on the version of Ironic,
+            # this can be as long as 2-10 seconds per every thousand
+            # nodes, and this call may retrieve all nodes in a deployment,
+            # depending on if any filter paramters are applied.
             return self._get_node_list(fields=_NODE_FIELDS, **kwargs)
 
         # NOTE(jroll) if partition_key is set, we need to limit nodes that
@@ -759,6 +764,15 @@ class IronicDriver(virt_driver.ComputeDriver):
                 nodes = _get_node_list()
         else:
             nodes = _get_node_list()
+
+        # NOTE(saga): As _get_node_list() will take a long
+        # time to return in large clusters we need to call it before
+        # get_uuids_by_host() method. Otherwise the instances list we get from
+        # get_uuids_by_host() method will become stale.
+        # A stale instances list can cause a node that is managed by this
+        # compute host to be excluded in error and cause the compute node
+        # to be orphaned and associated resource provider to be deleted.
+        instances = objects.InstanceList.get_uuids_by_host(ctxt, CONF.host)
 
         for node in nodes:
             # NOTE(jroll): we always manage the nodes for instances we manage
@@ -1263,7 +1277,8 @@ class IronicDriver(virt_driver.ComputeDriver):
         _sync_remove_cache_entry()
 
     def destroy(self, context, instance, network_info,
-                block_device_info=None, destroy_disks=True):
+                block_device_info=None, destroy_disks=True,
+                destroy_secrets=True):
         """Destroy the specified instance, if it can be found.
 
         :param context: The security context.
@@ -1272,6 +1287,8 @@ class IronicDriver(virt_driver.ComputeDriver):
         :param block_device_info: Instance block device
             information. Ignored by this driver.
         :param destroy_disks: Indicates if disks should be
+            destroyed. Ignored by this driver.
+        :param destroy_secrets: Indicates if secrets should be
             destroyed. Ignored by this driver.
         """
         LOG.debug('Destroy called for instance', instance=instance)
@@ -1875,10 +1892,6 @@ class IronicDriver(virt_driver.ComputeDriver):
                          'node': node.uuid},
                         instance=instance)
             raise exception.ConsoleTypeUnavailable(console_type='serial')
-
-    @property
-    def need_legacy_block_device_info(self):
-        return False
 
     def prepare_networks_before_block_device_mapping(self, instance,
                                                      network_info):

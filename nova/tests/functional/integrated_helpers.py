@@ -19,6 +19,7 @@ Provides common functionality for integrated unit tests
 
 import collections
 import random
+import re
 import string
 import time
 
@@ -31,7 +32,7 @@ from nova.compute import rpcapi as compute_rpcapi
 from nova.compute import utils as compute_utils
 import nova.conf
 from nova import context
-from nova.db import api as db
+from nova.db.main import api as db
 import nova.image.glance
 from nova import objects
 from nova.objects import base as objects_base
@@ -40,9 +41,6 @@ from nova import test
 from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional.api import client as api_client
 from nova.tests.functional import fixtures as func_fixtures
-from nova.tests.unit import cast_as_call
-from nova.tests.unit import fake_notifier
-from nova.tests.unit import policy_fixture
 from nova import utils
 
 
@@ -101,6 +99,27 @@ NOT_SPECIFIED = object()
 
 
 class InstanceHelperMixin:
+
+    def _wait_for_service_parameter(
+        self, service_hostname, service_binary, expected_params,
+        max_retries=10, api=None
+    ):
+        api = api or getattr(self, 'admin_api', self.api)
+
+        retry_count = 0
+        while True:
+            service = api.get_services(
+                host=service_hostname,
+                binary=service_binary)[0]
+            if all([service[attr] == expected_params[attr]
+                    for attr in expected_params]):
+                break
+            retry_count += 1
+            if retry_count == max_retries:
+                self.fail(
+                    f'Wait for service parameter change failed, '
+                    f'expected_params={expected_params}, service={service}')
+            time.sleep(0.5)
 
     def _wait_for_server_parameter(
             self, server, expected_params, max_retries=10, api=None):
@@ -183,6 +202,24 @@ class InstanceHelperMixin:
             'actions: %s. Events in the last matching action: %s'
             % (event_name, actions, events))
 
+    def _wait_for_volume_attach(self, server_id, volume_id):
+        timeout = 0.0
+        server = self.api.get_server(server_id)
+        attached_vols = [vol['id'] for vol in
+                         server['os-extended-volumes:volumes_attached']]
+
+        while volume_id not in attached_vols and timeout < 10.0:
+            time.sleep(.1)
+            timeout += .1
+            server = self.api.get_server(server_id)
+            attached_vols = [vol['id'] for vol in
+                             server['os-extended-volumes:volumes_attached']]
+
+        if volume_id not in attached_vols:
+            self.fail('Timed out waiting for volume %s to be attached to '
+                      'server %s. Currently attached volumes: %s' %
+                      (volume_id, server_id, attached_vols))
+
     def _assert_resize_migrate_action_fail(self, server, action, error_in_tb):
         """Waits for the conductor_migrate_server action event to fail for
         the given action and asserts the error is in the event traceback.
@@ -222,9 +259,9 @@ class InstanceHelperMixin:
                 server['id'], expected_statuses, actual_status,
             ))
 
-    def _wait_for_log(self, log_line):
+    def _wait_for_log(self, log_line_regex):
         for i in range(10):
-            if log_line in self.stdlog.logger.output:
+            if re.search(log_line_regex, self.stdlog.logger.output):
                 return
             time.sleep(0.5)
 
@@ -410,7 +447,7 @@ class InstanceHelperMixin:
         self.api.post_server_action(
             server['id'], {'reboot': {'type': 'HARD' if hard else 'SOFT'}},
         )
-        fake_notifier.wait_for_versioned_notifications('instance.reboot.end')
+        self.notifier.wait_for_versioned_notifications('instance.reboot.end')
         return self._wait_for_state_change(server, expected_state)
 
     def _attach_interface(self, server, port_uuid):
@@ -421,14 +458,14 @@ class InstanceHelperMixin:
             }
         }
         attachment = self.api.attach_interface(server['id'], body)
-        fake_notifier.wait_for_versioned_notifications(
+        self.notifier.wait_for_versioned_notifications(
             'instance.interface_attach.end')
         return attachment
 
     def _detach_interface(self, server, port_uuid):
         """detach a neutron port form a server."""
         self.api.detach_interface(server['id'], port_uuid)
-        fake_notifier.wait_for_versioned_notifications(
+        self.notifier.wait_for_versioned_notifications(
             'instance.interface_detach.end')
 
     def _rebuild_server(self, server, image_uuid, expected_state='ACTIVE'):
@@ -436,7 +473,7 @@ class InstanceHelperMixin:
         self.api.post_server_action(
             server['id'], {'rebuild': {'imageRef': image_uuid}},
         )
-        fake_notifier.wait_for_versioned_notifications('instance.rebuild.end')
+        self.notifier.wait_for_versioned_notifications('instance.rebuild.end')
         return self._wait_for_state_change(server, expected_state)
 
     def _migrate_server(self, server, host=None):
@@ -448,7 +485,7 @@ class InstanceHelperMixin:
     def _resize_server(self, server, flavor_id):
         self.api.post_server_action(
             server['id'], {'resize': {'flavorRef': flavor_id}})
-        fake_notifier.wait_for_versioned_notifications('instance.resize.end')
+        self.notifier.wait_for_versioned_notifications('instance.resize.end')
         return self._wait_for_state_change(server, 'VERIFY_RESIZE')
 
     def _confirm_resize(self, server, *, cross_cell=False):
@@ -471,7 +508,7 @@ class InstanceHelperMixin:
         # dest host revert_resize method but the allocations are cleaned up
         # in the source host finish_revert_resize method so we need to wait
         # for the finish_revert_resize method to complete.
-        fake_notifier.wait_for_versioned_notifications(
+        self.notifier.wait_for_versioned_notifications(
             'instance.resize_revert.end')
         return server
 
@@ -490,13 +527,13 @@ class InstanceHelperMixin:
     def _suspend_server(self, server, expected_state='SUSPENDED'):
         """Suspend a server."""
         self.api.post_server_action(server['id'], {'suspend': {}})
-        fake_notifier.wait_for_versioned_notifications('instance.suspend.end')
+        self.notifier.wait_for_versioned_notifications('instance.suspend.end')
         return self._wait_for_state_change(server, expected_state)
 
     def _resume_server(self, server, expected_state='ACTIVE'):
         """Resume a server."""
         self.api.post_server_action(server['id'], {'resume': {}})
-        fake_notifier.wait_for_versioned_notifications('instance.resume.end')
+        self.notifier.wait_for_versioned_notifications('instance.resume.end')
         return self._wait_for_state_change(server, expected_state)
 
     def _shelve_server(self, server, expected_state='SHELVED_OFFLOADED'):
@@ -561,6 +598,10 @@ class PlacementHelperMixin:
             '/resource_classes', version='1.2'
         ).body['resource_classes']
         return [d['name'] for d in resp]
+
+    def _create_resource_class(self, resource_class):
+        return self.placement.post(
+            '/resource_classes', {"name": resource_class}, version='1.6')
 
     def _get_all_providers(self):
         return self.placement.get(
@@ -790,6 +831,9 @@ class PlacementInstanceHelperMixin(InstanceHelperMixin, PlacementHelperMixin):
             '/allocations/%s' % server_uuid
         ).body['allocations']
 
+    def _delete_server_allocations(self, server_uuid):
+        self.placement.delete(f'/allocations/{server_uuid}')
+
     def _wait_for_server_allocations(self, consumer_id, max_retries=20):
         retry_count = 0
         while True:
@@ -916,7 +960,7 @@ class PlacementInstanceHelperMixin(InstanceHelperMixin, PlacementHelperMixin):
         # instance.delete.end notification as that is emitted after the
         # resources are freed.
 
-        fake_notifier.wait_for_versioned_notifications('instance.delete.end')
+        self.notifier.wait_for_versioned_notifications('instance.delete.end')
 
         for rp_uuid in [
             self._get_provider_uuid_by_host(hostname)
@@ -1109,16 +1153,16 @@ class _IntegratedTestBase(test.TestCase, PlacementInstanceHelperMixin):
     def setUp(self):
         super(_IntegratedTestBase, self).setUp()
 
-        self.useFixture(cast_as_call.CastAsCall(self))
+        self.useFixture(nova_fixtures.CastAsCallFixture(self))
 
         self.placement = self.useFixture(func_fixtures.PlacementFixture()).api
         self.neutron = self.useFixture(nova_fixtures.NeutronFixture(self))
         self.cinder = self.useFixture(nova_fixtures.CinderFixture(self))
         self.glance = self.useFixture(nova_fixtures.GlanceFixture(self))
-        self.policy = self.useFixture(policy_fixture.RealPolicyFixture())
+        self.policy = self.useFixture(nova_fixtures.RealPolicyFixture())
 
-        fake_notifier.stub_notifier(self)
-        self.addCleanup(fake_notifier.reset)
+        self.notifier = self.useFixture(
+            nova_fixtures.NotificationFixture(self))
 
         self._setup_services()
 
@@ -1182,14 +1226,14 @@ class ProviderUsageBaseTestCase(test.TestCase, PlacementInstanceHelperMixin):
         self.flags(compute_driver=self.compute_driver)
         super(ProviderUsageBaseTestCase, self).setUp()
 
-        self.policy = self.useFixture(policy_fixture.RealPolicyFixture())
+        self.policy = self.useFixture(nova_fixtures.RealPolicyFixture())
         self.neutron = self.useFixture(nova_fixtures.NeutronFixture(self))
         self.glance = self.useFixture(nova_fixtures.GlanceFixture(self))
         self.placement = self.useFixture(func_fixtures.PlacementFixture()).api
         self.useFixture(nova_fixtures.AllServicesCurrent())
 
-        fake_notifier.stub_notifier(self)
-        self.addCleanup(fake_notifier.reset)
+        self.notifier = self.useFixture(
+            nova_fixtures.NotificationFixture(self))
 
         self.api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
             api_version='v2.1'))

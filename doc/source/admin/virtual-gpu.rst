@@ -33,12 +33,12 @@ Enable GPU types (Compute)
 
 #. Specify which specific GPU type(s) the instances would get.
 
-   Edit :oslo.config:option:`devices.enabled_vgpu_types`:
+   Edit :oslo.config:option:`devices.enabled_mdev_types`:
 
    .. code-block:: ini
 
       [devices]
-      enabled_vgpu_types = nvidia-35
+      enabled_mdev_types = nvidia-35
 
    If you want to support more than a single GPU type, you need to provide a
    separate configuration section for each device. For example:
@@ -46,12 +46,12 @@ Enable GPU types (Compute)
    .. code-block:: ini
 
       [devices]
-      enabled_vgpu_types = nvidia-35, nvidia-36
+      enabled_mdev_types = nvidia-35, nvidia-36
 
-      [vgpu_nvidia-35]
+      [mdev_nvidia-35]
       device_addresses = 0000:84:00.0,0000:85:00.0
 
-      [vgpu_nvidia-36]
+      [mdev_nvidia-36]
       device_addresses = 0000:86:00.0
 
    where you have to define which physical GPUs are supported per GPU type.
@@ -110,11 +110,6 @@ provided by compute nodes.
 .. code-block:: console
 
    $ openstack server create --flavor vgpu_1 --image cirros-0.3.5-x86_64-uec --wait test-vgpu
-
-.. note::
-
-   As of the Queens release, only the *FilterScheduler* scheduler driver
-   uses the Placement API.
 
 
 How to discover a GPU type

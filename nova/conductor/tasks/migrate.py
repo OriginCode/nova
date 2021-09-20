@@ -60,10 +60,12 @@ def replace_allocation_with_migration(context, instance, migration):
         context, instance.uuid)['allocations']
     root_alloc = orig_alloc.get(source_cn.uuid, {}).get('resources', {})
     if not root_alloc:
-        LOG.debug('Unable to find existing allocations for instance on '
-                  'source compute node: %s. This is normal if you are not '
-                  'using the FilterScheduler.', source_cn.uuid,
-                  instance=instance)
+        # TODO(stephenfin): This was a valid code path when there was support
+        # for multiple schedulers, but it should probably be an error now
+        LOG.debug(
+            'Unable to find existing allocations for instance on '
+            'source compute node: %s',
+            source_cn.uuid, instance=instance)
         return None, None
 
     # FIXME(gibi): This method is flawed in that it does not handle allocations
@@ -247,12 +249,15 @@ class MigrationTask(base.TaskBase):
             scheduler_utils.populate_retry(legacy_props,
                                            self.instance.uuid)
 
-        port_res_req = self.network_api.get_requested_resource_for_instance(
-            self.context, self.instance.uuid)
+        port_res_req, req_lvl_params = (
+            self.network_api.get_requested_resource_for_instance(
+                self.context, self.instance.uuid)
+        )
         # NOTE(gibi): When cyborg or other module wants to handle similar
         # non-nova resources then here we have to collect all the external
         # resource requests in a single list and add them to the RequestSpec.
         self.request_spec.requested_resources = port_res_req
+        self.request_spec.request_level_params = req_lvl_params
 
         self._set_requested_destination_cell(legacy_props)
 

@@ -33,7 +33,7 @@ from nova.compute import flavors
 from nova.compute import vm_states
 import nova.conf
 from nova import context
-from nova.db.sqlalchemy import models
+from nova.db.main import models
 from nova import exception as exc
 from nova import objects
 from nova.objects import base
@@ -105,34 +105,12 @@ def stub_out_key_pair_funcs(testcase, have_key_pair=True, **kwargs):
         return []
 
     if have_key_pair:
-        testcase.stub_out('nova.db.api.key_pair_get_all_by_user', key_pair)
-        testcase.stub_out('nova.db.api.key_pair_get', one_key_pair)
+        testcase.stub_out(
+            'nova.db.main.api.key_pair_get_all_by_user', key_pair)
+        testcase.stub_out('nova.db.main.api.key_pair_get', one_key_pair)
     else:
-        testcase.stub_out('nova.db.api.key_pair_get_all_by_user', no_key_pair)
-
-
-def stub_out_trusted_certs(test, certs=None):
-    def fake_trusted_certs(cls, context, instance_uuid):
-        return objects.TrustedCerts(ids=trusted_certs)
-
-    def fake_instance_extra(context, instance_uuid, columns):
-        if columns is ['trusted_certs']:
-            return {'trusted_certs': trusted_certs}
-        else:
-            return {'numa_topology': None,
-                    'pci_requests': None,
-                    'flavor': None,
-                    'vcpu_model': None,
-                    'trusted_certs': trusted_certs,
-                    'migration_context': None}
-
-    trusted_certs = []
-    if certs:
-        trusted_certs = certs
-    test.stub_out('nova.objects.TrustedCerts.get_by_instance_uuid',
-                  fake_trusted_certs)
-    test.stub_out('nova.db.instance_extra_get_by_instance_uuid',
-                  fake_instance_extra)
+        testcase.stub_out(
+            'nova.db.main.api.key_pair_get_all_by_user', no_key_pair)
 
 
 def stub_out_instance_quota(test, allowed, quota, resource='instances'):
@@ -206,7 +184,7 @@ def stub_out_nw_api(test, cls=None, private=None, publics=None):
         def create_resource_requests(
                 self, context, requested_networks,
                 pci_requests=None, affinity_policy=None):
-            return None, []
+            return None, [], objects.RequestLevelParams()
 
     if cls is None:
         cls = Fake
@@ -428,7 +406,7 @@ def fake_compute_get_all(num_servers=5, **kwargs):
 
 def stub_instance(id=1, user_id=None, project_id=None, host=None,
                   node=None, vm_state=None, task_state=None,
-                  reservation_id="", uuid=FAKE_UUID, image_ref="10",
+                  reservation_id="", uuid=FAKE_UUID, image_ref=FAKE_UUID,
                   flavor_id="1", name=None, key_name='',
                   access_ipv4=None, access_ipv6=None, progress=0,
                   auto_disk_config=False, display_name=None,
@@ -441,7 +419,7 @@ def stub_instance(id=1, user_id=None, project_id=None, host=None,
                   terminated_at=timeutils.utcnow(),
                   availability_zone='', locked_by=None, cleaned=False,
                   memory_mb=0, vcpus=0, root_gb=0, ephemeral_gb=0,
-                  instance_type=None, launch_index=0, kernel_id="",
+                  flavor=None, launch_index=0, kernel_id="",
                   ramdisk_id="", user_data=None, system_metadata=None,
                   services=None, trusted_certs=None, hidden=False):
     if user_id is None:
@@ -456,8 +434,8 @@ def stub_instance(id=1, user_id=None, project_id=None, host=None,
     else:
         metadata = []
 
-    inst_type = flavors.get_flavor_by_flavor_id(int(flavor_id))
-    sys_meta = flavors.save_flavor_info({}, inst_type)
+    sys_meta = flavors.save_flavor_info(
+        {}, flavors.get_flavor_by_flavor_id(int(flavor_id)))
     sys_meta.update(system_metadata or {})
 
     if host is not None:
@@ -481,11 +459,11 @@ def stub_instance(id=1, user_id=None, project_id=None, host=None,
 
     info_cache = create_info_cache(nw_cache)
 
-    if instance_type is None:
-        instance_type = objects.Flavor.get_by_name(
+    if flavor is None:
+        flavor = objects.Flavor.get_by_name(
             context.get_admin_context(), 'm1.small')
     flavorinfo = jsonutils.dumps({
-        'cur': instance_type.obj_to_primitive(),
+        'cur': flavor.obj_to_primitive(),
         'old': None,
         'new': None,
     })
@@ -501,62 +479,60 @@ def stub_instance(id=1, user_id=None, project_id=None, host=None,
         "image_ref": image_ref,
         "kernel_id": kernel_id,
         "ramdisk_id": ramdisk_id,
+        "hostname": display_name or server_name,
         "launch_index": launch_index,
         "key_name": key_name,
         "key_data": key_data,
-        "config_drive": config_drive,
+        "power_state": power_state,
         "vm_state": vm_state or vm_states.ACTIVE,
         "task_state": task_state,
-        "power_state": power_state,
+        "services": services,
         "memory_mb": memory_mb,
         "vcpus": vcpus,
         "root_gb": root_gb,
         "ephemeral_gb": ephemeral_gb,
         "ephemeral_key_uuid": None,
-        "hostname": display_name or server_name,
         "host": host,
         "node": node,
-        "instance_type_id": 1,
-        "instance_type": inst_type,
+        "instance_type_id": flavor.id,
         "user_data": user_data,
         "reservation_id": reservation_id,
-        "mac_address": "",
         "launched_at": launched_at,
         "terminated_at": terminated_at,
         "availability_zone": availability_zone,
         "display_name": display_name or server_name,
         "display_description": display_description,
+        "launched_on": "",
         "locked": locked_by is not None,
         "locked_by": locked_by,
-        "metadata": metadata,
+        "os_type": "",
+        "architecture": "",
+        "vm_mode": "",
+        "uuid": uuid,
+        "root_device_name": root_device_name,
+        "default_ephemeral_device": "",
+        "default_swap_device": "",
+        "config_drive": config_drive,
         "access_ip_v4": access_ipv4,
         "access_ip_v6": access_ipv6,
-        "uuid": uuid,
-        "progress": progress,
         "auto_disk_config": auto_disk_config,
-        "name": "instance-%s" % id,
+        "progress": progress,
         "shutdown_terminate": True,
         "disable_terminate": False,
-        "security_groups": security_groups,
-        "root_device_name": root_device_name,
-        "system_metadata": utils.dict_to_metadata(sys_meta),
-        "pci_devices": [],
-        "vm_mode": "",
-        "default_swap_device": "",
-        "default_ephemeral_device": "",
-        "launched_on": "",
         "cell_name": "",
-        "architecture": "",
-        "os_type": "",
+        "metadata": metadata,
+        "system_metadata": utils.dict_to_metadata(sys_meta),
+        "security_groups": security_groups,
+        "cleaned": cleaned,
+        "pci_devices": [],
         "extra": {"numa_topology": None,
                   "pci_requests": None,
                   "flavor": flavorinfo,
                   "trusted_certs": trusted_certs,
                   },
-        "cleaned": cleaned,
-        "services": services,
         "tags": [],
         "hidden": hidden,
+        "name": "instance-%s" % id,
     }
 
     instance.update(info_cache)

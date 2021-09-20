@@ -25,7 +25,7 @@ from oslo_utils import uuidutils
 
 import nova.conf
 from nova import context
-from nova.db import api as db
+from nova.db import constants as db_const
 from nova import exception
 from nova.i18n import _
 from nova import objects
@@ -96,19 +96,21 @@ def create(name, memory, vcpus, root_gb, ephemeral_gb=0, flavorid=None,
     }
 
     for key, value in flavor_attributes.items():
-        kwargs[key] = utils.validate_integer(kwargs[key], value[0], value[1],
-                                             db.MAX_INT)
+        kwargs[key] = utils.validate_integer(
+            kwargs[key], value[0], value[1], db_const.MAX_INT,
+        )
 
     # rxtx_factor should be a positive float
     try:
         kwargs['rxtx_factor'] = float(kwargs['rxtx_factor'])
-        if (kwargs['rxtx_factor'] <= 0 or
-                kwargs['rxtx_factor'] > db.SQL_SP_FLOAT_MAX):
+        if (
+            kwargs['rxtx_factor'] <= 0 or
+            kwargs['rxtx_factor'] > db_const.SQL_SP_FLOAT_MAX
+        ):
             raise ValueError()
     except ValueError:
-        msg = (_("'rxtx_factor' argument must be a float between 0 and %g") %
-               db.SQL_SP_FLOAT_MAX)
-        raise exception.InvalidInput(reason=msg)
+        msg = _("'rxtx_factor' argument must be a float between 0 and %g")
+        raise exception.InvalidInput(reason=msg % db_const.SQL_SP_FLOAT_MAX)
 
     kwargs['name'] = name
     kwargs['flavorid'] = flavorid
@@ -173,26 +175,27 @@ def extract_flavor(instance, prefix=''):
 # NOTE(danms): This method is deprecated, do not use it!
 # Use instance.{old_,new_,}flavor instead, as instances no longer
 # have flavor information in system_metadata.
-def save_flavor_info(metadata, instance_type, prefix=''):
-    """Save properties from instance_type into instance's system_metadata,
+# NOTE(stephenfin): 'prefix' is unused and could be removed
+def save_flavor_info(metadata, flavor, prefix=''):
+    """Save properties from flavor into instance's system_metadata,
     in the format of:
 
       [prefix]instance_type_[key]
 
     This can be used to update system_metadata in place from a type, as well
-    as stash information about another instance_type for later use (such as
+    as stash information about another flavor for later use (such as
     during resize).
     """
 
     for key in system_metadata_flavor_props.keys():
         to_key = '%sinstance_type_%s' % (prefix, key)
-        metadata[to_key] = instance_type[key]
+        metadata[to_key] = flavor[key]
 
     # NOTE(danms): We do NOT save all of extra_specs here, but only the
     # NUMA-related ones that we need to avoid an uglier alternative. This
     # should be replaced by a general split-out of flavor information from
     # system_metadata very soon.
-    extra_specs = instance_type.get('extra_specs', {})
+    extra_specs = flavor.get('extra_specs', {})
     for extra_prefix in system_metadata_flavor_extra_props:
         for key in extra_specs:
             if key.startswith(extra_prefix):

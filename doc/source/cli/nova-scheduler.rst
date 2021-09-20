@@ -21,20 +21,26 @@ instance on.
 Options
 =======
 
-**General options**
+.. rubric:: General options
+
+.. include:: opts/common.rst
+
+.. rubric:: Debugger options
+
+.. include:: opts/debugger.rst
 
 Files
 =====
 
 * ``/etc/nova/nova.conf``
-* ``/etc/nova/policy.yaml``
 * ``/etc/nova/rootwrap.conf``
 * ``/etc/nova/rootwrap.d/``
 
 See Also
 ========
 
-* :nova-doc:`OpenStack Nova <>`
+:doc:`nova-compute(1) <nova-compute>`,
+:doc:`nova-conductor(1) <nova-conductor>`
 
 Bugs
 ====

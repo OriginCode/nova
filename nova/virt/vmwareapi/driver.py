@@ -136,7 +136,8 @@ class VMwareVCDriver(driver.ComputeDriver):
                                        "found in vCenter")
                                      % self._cluster_name)
         self._vcenter_uuid = self._get_vcenter_uuid()
-        self._nodename = self._create_nodename(self._cluster_ref.value)
+        self._nodename = \
+            self._create_nodename(vim_util.get_moref_value(self._cluster_ref))
         self._volumeops = volumeops.VMwareVolumeOps(self._session,
                                                     self._cluster_ref)
         self._vmops = vmops.VMwareVMOps(self._session,
@@ -170,10 +171,6 @@ class VMwareVCDriver(driver.ComputeDriver):
                         'minimum version of vCenter will be raised to '
                         '%(version)s in the 16.0.0 release.',
                         {'version': constants.NEXT_MIN_VC_VERSION})
-
-    @property
-    def need_legacy_block_device_info(self):
-        return False
 
     def _update_pbm_location(self):
         if CONF.vmware.pbm_wsdl_location:
@@ -224,7 +221,8 @@ class VMwareVCDriver(driver.ComputeDriver):
             LOG.debug('Extension %s already exists.', constants.EXTENSION_KEY)
 
     def cleanup(self, context, instance, network_info, block_device_info=None,
-                destroy_disks=True, migrate_data=None, destroy_vifs=True):
+                destroy_disks=True, migrate_data=None, destroy_vifs=True,
+                destroy_secrets=True):
         """Cleanup after instance being destroyed by Hypervisor."""
         pass
 
@@ -593,7 +591,7 @@ class VMwareVCDriver(driver.ComputeDriver):
                                   instance=instance)
 
     def destroy(self, context, instance, network_info, block_device_info=None,
-                destroy_disks=True):
+                destroy_disks=True, destroy_secrets=True):
         """Destroy VM instance."""
 
         # Destroy gets triggered when Resource Claim in resource_tracker

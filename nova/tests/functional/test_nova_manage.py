@@ -9,14 +9,19 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+
 import collections
+import datetime
 from io import StringIO
-import mock
+import os.path
 
 import fixtures
+import mock
 from neutronclient.common import exceptions as neutron_client_exc
 import os_resource_classes as orc
+from oslo_serialization import jsonutils
 from oslo_utils.fixture import uuidsentinel
+from oslo_utils import timeutils
 
 from nova.cmd import manage
 from nova import config
@@ -28,7 +33,8 @@ from nova import test
 from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional import fixtures as func_fixtures
 from nova.tests.functional import integrated_helpers
-from nova.tests.functional import test_servers
+from nova.tests.functional import test_servers_resource_request
+from nova import utils as nova_utils
 
 CONF = config.CONF
 INCOMPLETE_CONSUMER_ID = '00000000-0000-0000-0000-000000000000'
@@ -249,6 +255,233 @@ class NovaManageCellV2Test(test.TestCase):
         self.assertEqual(0, cns[0].mapped)
 
 
+class TestNovaManageVolumeAttachmentRefresh(
+    integrated_helpers._IntegratedTestBase
+):
+    """Functional tests for 'nova-manage volume_attachment refresh'."""
+
+    def setUp(self):
+        super().setUp()
+        self.tmpdir = self.useFixture(fixtures.TempDir()).path
+        self.ctxt = context.get_admin_context()
+        self.cli = manage.VolumeAttachmentCommands()
+        self.flags(my_ip='192.168.1.100')
+        self.fake_connector = {
+            'ip': '192.168.1.128',
+            'initiator': 'fake_iscsi.iqn',
+            'host': 'compute',
+        }
+        self.connector_path = os.path.join(self.tmpdir, 'fake_connector')
+        with open(self.connector_path, 'w') as fh:
+            jsonutils.dump(self.fake_connector, fh)
+
+    def _assert_instance_actions(self, server):
+        actions = self.api.get_instance_actions(server['id'])
+        self.assertEqual('unlock', actions[0]['action'])
+        self.assertEqual('refresh_volume_attachment', actions[1]['action'])
+        self.assertEqual('lock', actions[2]['action'])
+        self.assertEqual('stop', actions[3]['action'])
+        self.assertEqual('attach_volume', actions[4]['action'])
+        self.assertEqual('create', actions[5]['action'])
+
+    def test_refresh(self):
+        server = self._create_server()
+        volume_id = self.cinder.IMAGE_BACKED_VOL
+        self.api.post_server_volume(
+            server['id'], {'volumeAttachment': {'volumeId': volume_id}})
+        self._wait_for_volume_attach(server['id'], volume_id)
+        self._stop_server(server)
+
+        attachments = self.cinder.volume_to_attachment[volume_id]
+        original_attachment_id = list(attachments.keys())[0]
+
+        bdm = objects.BlockDeviceMapping.get_by_volume_and_instance(
+            self.ctxt, volume_id, server['id'])
+        self.assertEqual(original_attachment_id, bdm.attachment_id)
+
+        # The CinderFixture also stashes the attachment id in the
+        # connection_info of the attachment so we can assert when and if it is
+        # refreshed by recreating the attachments.
+        connection_info = jsonutils.loads(bdm.connection_info)
+        self.assertIn('attachment_id', connection_info['data'])
+        self.assertEqual(
+            original_attachment_id, connection_info['data']['attachment_id'])
+
+        result = self.cli.refresh(
+            volume_id=volume_id,
+            instance_uuid=server['id'],
+            connector_path=self.connector_path)
+        self.assertEqual(0, result)
+
+        bdm = objects.BlockDeviceMapping.get_by_volume_and_instance(
+            self.ctxt, volume_id, server['id'])
+
+        attachments = self.cinder.volume_to_attachment[volume_id]
+        new_attachment_id = list(attachments.keys())[0]
+
+        # Assert that the two attachment ids we have are not the same
+        self.assertNotEqual(original_attachment_id, new_attachment_id)
+
+        # Assert that we are using the new attachment id
+        self.assertEqual(new_attachment_id, bdm.attachment_id)
+
+        # Assert that this new attachment id is also in the saved
+        # connection_info of the bdm that has been refreshed
+        connection_info = jsonutils.loads(bdm.connection_info)
+        self.assertIn('attachment_id', connection_info['data'])
+        self.assertEqual(
+            new_attachment_id, connection_info['data']['attachment_id'])
+
+        # Assert that we have actions we expect against the instance
+        self._assert_instance_actions(server)
+
+    def test_refresh_rpcapi_remove_volume_connection_rollback(self):
+        server = self._create_server()
+        volume_id = self.cinder.IMAGE_BACKED_VOL
+        self.api.post_server_volume(
+            server['id'], {'volumeAttachment': {'volumeId': volume_id}})
+        self._wait_for_volume_attach(server['id'], volume_id)
+        self._stop_server(server)
+
+        attachments = self.cinder.volume_to_attachment[volume_id]
+        original_attachment_id = list(attachments.keys())[0]
+
+        bdm = objects.BlockDeviceMapping.get_by_volume_and_instance(
+            self.ctxt, volume_id, server['id'])
+        self.assertEqual(original_attachment_id, bdm.attachment_id)
+
+        connection_info = jsonutils.loads(bdm.connection_info)
+        self.assertIn('attachment_id', connection_info['data'])
+        self.assertEqual(
+            original_attachment_id, connection_info['data']['attachment_id'])
+
+        with (
+            mock.patch(
+                'nova.compute.rpcapi.ComputeAPI.remove_volume_connection',
+                side_effect=test.TestingException)
+        ) as (
+            mock_remove_volume_connection
+        ):
+            result = self.cli.refresh(
+                volume_id=volume_id,
+                instance_uuid=server['id'],
+                connector_path=self.connector_path)
+
+        # Assert that we hit our mock
+        mock_remove_volume_connection.assert_called_once()
+
+        # Assert that this is caught as an unknown exception
+        self.assertEqual(1, result)
+
+        # Assert that we still only have a single attachment
+        attachments = self.cinder.volume_to_attachment[volume_id]
+        self.assertEqual(1, len(attachments))
+        self.assertEqual(list(attachments.keys())[0], original_attachment_id)
+
+        # Assert that we have actions we expect against the instance
+        self._assert_instance_actions(server)
+
+    def test_refresh_cinder_attachment_update_rollback(self):
+        server = self._create_server()
+        volume_id = self.cinder.IMAGE_BACKED_VOL
+        self.api.post_server_volume(
+            server['id'], {'volumeAttachment': {'volumeId': volume_id}})
+        self._wait_for_volume_attach(server['id'], volume_id)
+        self._stop_server(server)
+
+        attachments = self.cinder.volume_to_attachment[volume_id]
+        original_attachment_id = list(attachments.keys())[0]
+
+        bdm = objects.BlockDeviceMapping.get_by_volume_and_instance(
+            self.ctxt, volume_id, server['id'])
+        self.assertEqual(original_attachment_id, bdm.attachment_id)
+
+        connection_info = jsonutils.loads(bdm.connection_info)
+        self.assertIn('attachment_id', connection_info['data'])
+        self.assertEqual(
+            original_attachment_id, connection_info['data']['attachment_id'])
+
+        with (
+            mock.patch(
+                'nova.volume.cinder.API.attachment_update',
+                side_effect=test.TestingException)
+        ) as (
+            mock_attachment_update
+        ):
+            result = self.cli.refresh(
+                volume_id=volume_id,
+                instance_uuid=server['id'],
+                connector_path=self.connector_path)
+
+        # Assert that we hit our mock
+        mock_attachment_update.assert_called_once()
+
+        # Assert that this is caught as an unknown exception
+        self.assertEqual(1, result)
+
+        # Assert that we still only have a single attachment
+        attachments = self.cinder.volume_to_attachment[volume_id]
+        new_attachment_id = list(attachments.keys())[0]
+        self.assertEqual(1, len(attachments))
+        self.assertNotEqual(new_attachment_id, original_attachment_id)
+
+        # Assert that this new attachment id is saved in the bdm and the stale
+        # connection_info associated with the original volume attachment has
+        # been cleared.
+        bdm = objects.BlockDeviceMapping.get_by_volume_and_instance(
+            self.ctxt, volume_id, server['id'])
+        self.assertEqual(new_attachment_id, bdm.attachment_id)
+        self.assertIsNone(bdm.connection_info)
+
+        # Assert that we have actions we expect against the instance
+        self._assert_instance_actions(server)
+
+    def test_refresh_pre_cinderv3_without_attachment_id(self):
+        """Test the refresh command when the bdm has no attachment_id.
+        """
+        server = self._create_server()
+        volume_id = self.cinder.IMAGE_BACKED_VOL
+        self.api.post_server_volume(
+            server['id'], {'volumeAttachment': {'volumeId': volume_id}})
+        self._wait_for_volume_attach(server['id'], volume_id)
+        self._stop_server(server)
+
+        bdm = objects.BlockDeviceMapping.get_by_volume_and_instance(
+            self.ctxt, volume_id, server['id'])
+
+        # Drop the attachment_id from the bdm before continuing and delete the
+        # attachment from the fixture to mimic this being attached via the
+        # legacy export style cinderv2 APIs.
+        del self.cinder.volume_to_attachment[volume_id]
+        bdm.attachment_id = None
+        bdm.save()
+
+        result = self.cli.refresh(
+            volume_id=volume_id,
+            instance_uuid=server['id'],
+            connector_path=self.connector_path)
+        self.assertEqual(0, result)
+
+        bdm = objects.BlockDeviceMapping.get_by_volume_and_instance(
+            self.ctxt, volume_id, server['id'])
+
+        attachments = self.cinder.volume_to_attachment[volume_id]
+        new_attachment_id = list(attachments.keys())[0]
+
+        # Assert that we are using the new attachment id
+        self.assertEqual(new_attachment_id, bdm.attachment_id)
+
+        # Assert that this new attachment id is also in the saved
+        # connection_info of the bdm that has been refreshed
+        connection_info = jsonutils.loads(bdm.connection_info)
+        self.assertIn('attachment_id', connection_info['data'])
+        self.assertEqual(
+            new_attachment_id, connection_info['data']['attachment_id'])
+
+        # Assert that we have actions we expect against the instance
+        self._assert_instance_actions(server)
+
+
 class TestNovaManagePlacementHealAllocations(
         integrated_helpers.ProviderUsageBaseTestCase):
     """Functional tests for nova-manage placement heal_allocations"""
@@ -274,28 +507,24 @@ class TestNovaManagePlacementHealAllocations(
         self.flavor = self.api.get_flavors()[0]
         self.output = StringIO()
         self.useFixture(fixtures.MonkeyPatch('sys.stdout', self.output))
-        # We need to mock the FilterScheduler to not use Placement so that
-        # allocations won't be created during scheduling and then we can heal
-        # them in the CLI.
-        self.scheduler_service.manager.driver.USES_ALLOCATION_CANDIDATES = \
-            False
 
-    def _boot_and_assert_no_allocations(self, flavor, hostname,
-                                        volume_backed=False):
-        """Creates a server on the given host and asserts neither have usage
+    def _boot_and_remove_allocations(
+        self, flavor, hostname, volume_backed=False,
+    ):
+        """Creates a server on the given host and remove all allocations.
 
         :param flavor: the flavor used to create the server
         :param hostname: the host on which to create the server
         :param volume_backed: True if the server should be volume-backed and
             as a result not have any DISK_GB allocation
         :returns: two-item tuple of the server and the compute node resource
-                  provider uuid
+            provider UUID
         """
         server_req = self._build_server(
             image_uuid='155d900f-4e14-4e4c-a73d-069cbf4541e6',
             flavor_id=flavor['id'],
-            networks='none')
-        server_req['availability_zone'] = 'nova:%s' % hostname
+            networks='none',
+            az=f'nova:{hostname}')
         if volume_backed:
             vol_id = nova_fixtures.CinderFixture.IMAGE_BACKED_VOL
             server_req['block_device_mapping_v2'] = [{
@@ -310,6 +539,9 @@ class TestNovaManagePlacementHealAllocations(
 
         # Verify that our source host is what the server ended up on
         self.assertEqual(hostname, server['OS-EXT-SRV-ATTR:host'])
+
+        # Delete the server's allocations
+        self._delete_server_allocations(server['id'])
 
         # Check that the compute node resource provider has no allocations.
         rp_uuid = self._get_provider_uuid_by_host(hostname)
@@ -347,9 +579,9 @@ class TestNovaManagePlacementHealAllocations(
           both instances now have allocations against their respective compute
           node resource providers.
         """
-        server1, rp_uuid1 = self._boot_and_assert_no_allocations(
+        server1, rp_uuid1 = self._boot_and_remove_allocations(
             self.flavor, 'cell1')
-        server2, rp_uuid2 = self._boot_and_assert_no_allocations(
+        server2, rp_uuid2 = self._boot_and_remove_allocations(
             self.flavor, 'cell2')
 
         # heal server1 and server2 in separate calls
@@ -379,9 +611,9 @@ class TestNovaManagePlacementHealAllocations(
         servers = []  # This is really a list of 2-item tuples.
         for x in range(2):
             servers.append(
-                self._boot_and_assert_no_allocations(self.flavor, 'cell1'))
+                self._boot_and_remove_allocations(self.flavor, 'cell1'))
         servers.append(
-            self._boot_and_assert_no_allocations(self.flavor, 'cell2'))
+            self._boot_and_remove_allocations(self.flavor, 'cell2'))
         result = self.cli.heal_allocations(max_count=10, verbose=True)
         self.assertEqual(0, result, self.output.getvalue())
         self.assertIn('Processed 3 instances.', self.output.getvalue())
@@ -395,10 +627,10 @@ class TestNovaManagePlacementHealAllocations(
         """
         servers = []  # This is really a list of 2-item tuples.
         servers.append(
-            self._boot_and_assert_no_allocations(self.flavor, 'cell1'))
+            self._boot_and_remove_allocations(self.flavor, 'cell1'))
         for x in range(2):
             servers.append(
-                self._boot_and_assert_no_allocations(self.flavor, 'cell2'))
+                self._boot_and_remove_allocations(self.flavor, 'cell2'))
         result = self.cli.heal_allocations(max_count=2, verbose=True)
         self.assertEqual(1, result, self.output.getvalue())
         self.assertIn('Max count reached. Processed 2 instances.',
@@ -422,9 +654,9 @@ class TestNovaManagePlacementHealAllocations(
         servers = []  # This is really a list of 2-item tuples.
         for x in range(2):
             servers.append(
-                self._boot_and_assert_no_allocations(self.flavor, 'cell1'))
+                self._boot_and_remove_allocations(self.flavor, 'cell1'))
         servers.append(
-            self._boot_and_assert_no_allocations(self.flavor, 'cell2'))
+            self._boot_and_remove_allocations(self.flavor, 'cell2'))
         result = self.cli.heal_allocations(verbose=True)
         self.assertEqual(0, result, self.output.getvalue())
         self.assertIn('Processed 3 instances.', self.output.getvalue())
@@ -435,7 +667,7 @@ class TestNovaManagePlacementHealAllocations(
         """Tests the scenario that an instance with no allocations is shelved
         so heal_allocations skips it (since the instance is not on a host).
         """
-        server, rp_uuid = self._boot_and_assert_no_allocations(
+        server, rp_uuid = self._boot_and_remove_allocations(
             self.flavor, 'cell1')
         self.api.post_server_action(server['id'], {'shelve': None})
         # The server status goes to SHELVED_OFFLOADED before the host/node
@@ -457,7 +689,7 @@ class TestNovaManagePlacementHealAllocations(
         """Tests the case that heal_allocations skips over an instance which
         is undergoing a task state transition (in this case pausing).
         """
-        server, rp_uuid = self._boot_and_assert_no_allocations(
+        server, rp_uuid = self._boot_and_remove_allocations(
             self.flavor, 'cell1')
 
         def fake_pause_instance(_self, ctxt, instance, *a, **kw):
@@ -483,9 +715,9 @@ class TestNovaManagePlacementHealAllocations(
         to make sure deleted servers are filtered out.
         """
         # Create a server that we'll leave alive
-        self._boot_and_assert_no_allocations(self.flavor, 'cell1')
+        self._boot_and_remove_allocations(self.flavor, 'cell1')
         # and another that we'll delete
-        server, _ = self._boot_and_assert_no_allocations(self.flavor, 'cell1')
+        server, _ = self._boot_and_remove_allocations(self.flavor, 'cell1')
         self._delete_server(server)
         result = self.cli.heal_allocations(verbose=True)
         self.assertEqual(0, result, self.output.getvalue())
@@ -501,7 +733,7 @@ class TestNovaManagePlacementHealAllocations(
         out-of-band and then run our heal routine to see they get updated with
         the instance project and user information.
         """
-        server, rp_uuid = self._boot_and_assert_no_allocations(
+        server, rp_uuid = self._boot_and_remove_allocations(
             self.flavor, 'cell1')
         # Now we'll create allocations using microversion < 1.8 to so that
         # placement creates the consumer record with the config-based project
@@ -554,7 +786,7 @@ class TestNovaManagePlacementHealAllocations(
     def test_heal_allocations_dry_run(self):
         """Tests to make sure the --dry-run option does not commit changes."""
         # Create a server with no allocations.
-        server, rp_uuid = self._boot_and_assert_no_allocations(
+        server, rp_uuid = self._boot_and_remove_allocations(
             self.flavor, 'cell1')
         result = self.cli.heal_allocations(verbose=True, dry_run=True)
         # Nothing changed so the return code should be 4.
@@ -570,10 +802,10 @@ class TestNovaManagePlacementHealAllocations(
         instance even though there are two which require processing.
         """
         # Create one that we won't process.
-        self._boot_and_assert_no_allocations(
+        self._boot_and_remove_allocations(
             self.flavor, 'cell1')
         # Create another that we will process specifically.
-        server, rp_uuid = self._boot_and_assert_no_allocations(
+        server, rp_uuid = self._boot_and_remove_allocations(
             self.flavor, 'cell1', volume_backed=True)
         # First do a dry run to make sure two instances need processing.
         result = self.cli.heal_allocations(
@@ -629,10 +861,10 @@ class TestNovaManagePlacementHealAllocations(
         cell even though there are two which require processing.
         """
         # Create one that we won't process.
-        server1, rp_uuid1 = self._boot_and_assert_no_allocations(
+        server1, rp_uuid1 = self._boot_and_remove_allocations(
             self.flavor, 'cell1')
         # Create another that we will process specifically.
-        server2, rp_uuid2 = self._boot_and_assert_no_allocations(
+        server2, rp_uuid2 = self._boot_and_remove_allocations(
             self.flavor, 'cell2')
 
         # Get Cell_id of cell2
@@ -679,7 +911,7 @@ class TestNovaManagePlacementHealAllocations(
            You should get rc=4 back since nothing changed.
         """
         # 1. Create server that we will forcefully heal specifically.
-        server, rp_uuid = self._boot_and_assert_no_allocations(
+        server, rp_uuid = self._boot_and_remove_allocations(
             self.flavor, 'cell1', volume_backed=True)
 
         # 2. heal allocations without forcing them
@@ -778,9 +1010,53 @@ class TestNovaManagePlacementHealAllocations(
         )
         self.assertEqual(4, result, self.output.getvalue())
 
+    def test_instance_with_vgpu_is_blocked(self):
+        # we cannot boot with VGPU in these tests so manipulate the
+        # instance.flavor directly after the boot to simulate an instance with
+        # VGPU request
+        server, _ = self._boot_and_remove_allocations(self.flavor, 'cell1')
+        instance = objects.Instance.get_by_uuid(
+            context.get_admin_context(), server['id'])
+        instance.flavor.extra_specs["resources:VGPU"] = 1
+        instance.save()
+
+        result = self.cli.heal_allocations(
+            verbose=True, instance_uuid=server['id'],
+            force=True
+        )
+
+        self.assertIn(
+            f"Healing allocation for instance {server['id']} with vGPU "
+            f"resource request is not supported.",
+            self.output.getvalue()
+        )
+        self.assertEqual(8, result, self.output.getvalue())
+
+    def test_instance_with_cyborg_dev_profile_is_blocked(self):
+        # we cannot boot with cyborg device in these tests so manipulate the
+        # instance.flavor directly after the boot to simulate an instance with
+        # cyborg request
+        server, _ = self._boot_and_remove_allocations(self.flavor, 'cell1')
+        instance = objects.Instance.get_by_uuid(
+            context.get_admin_context(), server['id'])
+        instance.flavor.extra_specs["accel:device_profile"] = "foo"
+        instance.save()
+
+        result = self.cli.heal_allocations(
+            verbose=True, instance_uuid=server['id'],
+            force=True
+        )
+
+        self.assertIn(
+            f"Healing allocation for instance {server['id']} with Cyborg "
+            f"device profile request is not supported.",
+            self.output.getvalue()
+        )
+        self.assertEqual(8, result, self.output.getvalue())
+
 
 class TestNovaManagePlacementHealPortAllocations(
-        test_servers.PortResourceRequestBasedSchedulingTestBase):
+    test_servers_resource_request.PortResourceRequestBasedSchedulingTestBase):
 
     def setUp(self):
         super(TestNovaManagePlacementHealPortAllocations, self).setUp()
@@ -1664,7 +1940,7 @@ class TestDBArchiveDeletedRows(integrated_helpers._IntegratedTestBase):
         server_req = {
             'server': server, 'os:scheduler_hints': {'group': group['id']}}
         # Since we don't pass return_reservation_id=True we get the first
-        # server back in the response. We're also using the CastAsCall fixture
+        # server back in the response. We're also using the CastAsCallFixture
         # (from the base class) fixture so we don't have to worry about the
         # server being ACTIVE.
         server = self.api.post_server(server_req)
@@ -1682,6 +1958,104 @@ class TestDBArchiveDeletedRows(integrated_helpers._IntegratedTestBase):
         # And that we still have one remaining group member.
         self.assertEqual(
             1, len(self.api.get_server_group(group['id'])['members']))
+
+
+class TestDBArchiveDeletedRowsTaskLog(integrated_helpers._IntegratedTestBase):
+    """Functional tests for the
+    "nova-manage db archive_deleted_rows --task-log" CLI.
+    """
+    api_major_version = 'v2.1'
+
+    def setUp(self):
+        # Override time to ensure we cross audit period boundaries in a
+        # predictable way.
+        self.faketoday = datetime.datetime(2021, 7, 1)
+        # This needs to be done before setUp() starts services, else they will
+        # be considered "down" by the ComputeFilter.
+        self.useFixture(test.TimeOverride(override_time=self.faketoday))
+        super(TestDBArchiveDeletedRowsTaskLog, self).setUp()
+        self.enforce_fk_constraints()
+        self.cli = manage.DbCommands()
+        self.output = StringIO()
+        self.useFixture(fixtures.MonkeyPatch('sys.stdout', self.output))
+
+    def test_archive_task_logs(self):
+        # Enable the generation of task_log records by the instance usage audit
+        # nova-compute periodic task.
+        self.flags(instance_usage_audit=True)
+        compute = self.computes['compute']
+
+        # Create a few servers for the periodic task to process.
+        for i in range(0, 3):
+            self._create_server()
+
+        ctxt = context.get_admin_context()
+
+        # The instance usage audit periodic task only processes servers that
+        # were active during the last audit period. The audit period defaults
+        # to 1 month, so the last audit period would be the previous calendar
+        # month. Advance time one month, two months, and three months to
+        # generate a task_log record for the servers we created, for each of
+        # three audit periods.
+        # July has 31 days, August has 31 days, September has 30 days.
+        for days in (31, 31 + 31, 31 + 31 + 30):
+            future = timeutils.utcnow() + datetime.timedelta(days=days)
+            timeutils.set_time_override(future)
+            # task_log records are generated by the _instance_usage_audit
+            # periodic task.
+            compute.manager._instance_usage_audit(ctxt)
+            # Audit period defaults to 1 month, the last audit period will
+            # be the previous calendar month.
+            begin, end = nova_utils.last_completed_audit_period()
+            # Verify that we have 1 task_log record per audit period.
+            task_logs = objects.TaskLogList.get_all(
+                ctxt, 'instance_usage_audit', begin, end)
+            self.assertEqual(1, len(task_logs))
+            # Restore original time override.
+            timeutils.set_time_override(self.faketoday)
+
+        # First try archiving without --task-log. Expect no task_log entries in
+        # the results.
+        self.cli.archive_deleted_rows(verbose=True)
+        self.assertNotIn('task_log', self.output.getvalue())
+        # Next try archiving with --task-log and --before.
+        # We'll archive records that were last updated before the second audit
+        # period.
+        # The task_log records were created/updated on 2021-08-01, 2021-09-01,
+        # and 2021-10-01. So to archive one record, we need to use
+        # before > 2021-08-01. 2021-07-01 + 31 + 1 = 2021-08-02
+        before = timeutils.utcnow() + datetime.timedelta(days=31 + 1)
+        self.cli.archive_deleted_rows(
+            task_log=True, before=before.isoformat(), verbose=True)
+        # Verify that only 1 task_log record was archived.
+        self.assertRegex(self.output.getvalue(), r'\| task_log\s+\| 1')
+        # Now archive all of the rest, there should be 2 left.
+        self.cli.archive_deleted_rows(task_log=True, verbose=True)
+        self.assertRegex(self.output.getvalue(), r'\| task_log\s+\| 2')
+
+    def test_archive_before(self):
+        """Test that no records are left over after archiving with --before"""
+        # Create and delete a server so we can archive.
+        server = self._build_server()
+        server = self.api.post_server({'server': server})
+        server = self.api.get_server(server['id'])
+        self._delete_server(server)
+        # First try archiving records before a past datetime. Nothing should be
+        # archived.
+        past = timeutils.utcnow() - datetime.timedelta(hours=1)
+        ret = self.cli.archive_deleted_rows(before=past.isoformat())
+        # Return code 0 means nothing was archived.
+        self.assertEqual(0, ret)
+        # Now try archiving records before a future datetime. Everything should
+        # have been archived.
+        future = timeutils.utcnow() + datetime.timedelta(hours=1)
+        ret = self.cli.archive_deleted_rows(before=future.isoformat())
+        # Return code 1 means something was archived.
+        self.assertEqual(1, ret)
+        # Now archive everything without specifying --before.
+        ret = self.cli.archive_deleted_rows()
+        # Return code 0 means nothing was archived.
+        self.assertEqual(0, ret)
 
 
 class TestDBArchiveDeletedRowsMultiCell(integrated_helpers.InstanceHelperMixin,
@@ -1768,3 +2142,116 @@ class TestDBArchiveDeletedRowsMultiCell(integrated_helpers.InstanceHelperMixin,
                 self.assertRaises(exception.InstanceNotFound,
                                   objects.Instance.get_by_uuid,
                                   cctxt, server_id)
+
+
+class TestDBArchiveDeletedRowsMultiCellTaskLog(
+        integrated_helpers.InstanceHelperMixin, test.TestCase):
+    """Functional tests for the "nova-manage db archive_deleted_rows
+    --all-cells --task-log" CLI.
+    """
+    NUMBER_OF_CELLS = 2
+
+    def setUp(self):
+        # Override time to ensure we cross audit period boundaries in a
+        # predictable way.
+        self.faketoday = datetime.datetime(2021, 7, 1)
+        # This needs to be done before setUp() starts services, else they will
+        # be considered "down" by the ComputeFilter.
+        self.useFixture(test.TimeOverride(override_time=self.faketoday))
+        super(TestDBArchiveDeletedRowsMultiCellTaskLog, self).setUp()
+        self.enforce_fk_constraints()
+        self.useFixture(nova_fixtures.NeutronFixture(self))
+        self.useFixture(nova_fixtures.GlanceFixture(self))
+        self.useFixture(func_fixtures.PlacementFixture())
+
+        api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
+            api_version='v2.1'))
+        # We need the admin api to forced_host for server create
+        self.api = api_fixture.admin_api
+
+        self.start_service('conductor')
+        self.start_service('scheduler')
+
+        self.context = context.RequestContext('fake-user', 'fake-project')
+        self.cli = manage.DbCommands()
+        self.output = StringIO()
+        self.useFixture(fixtures.MonkeyPatch('sys.stdout', self.output))
+
+        # Start two compute services, one per cell
+        self.compute1 = self.start_service('compute', host='host1',
+                                           cell_name='cell1')
+        self.compute2 = self.start_service('compute', host='host2',
+                                           cell_name='cell2')
+
+    def test_archive_task_logs(self):
+        # Enable the generation of task_log records by the instance usage audit
+        # nova-compute periodic task.
+        self.flags(instance_usage_audit=True)
+
+        # Create servers for the periodic task to process.
+        # Boot a server to cell1
+        server = self._build_server(az='nova:host1')
+        created_server = self.api.post_server({'server': server})
+        self._wait_for_state_change(created_server, 'ACTIVE')
+        # Boot a server to cell2
+        server = self._build_server(az='nova:host2')
+        created_server = self.api.post_server({'server': server})
+        self._wait_for_state_change(created_server, 'ACTIVE')
+
+        ctxt = context.get_admin_context()
+
+        # The instance usage audit periodic task only processes servers that
+        # were active during the last audit period. The audit period defaults
+        # to 1 month, so the last audit period would be the previous calendar
+        # month. Advance time one month, two months, and three months to
+        # generate a task_log record for the servers we created, for each of
+        # three audit periods.
+        # July has 31 days, August has 31 days, September has 30 days.
+        for days in (31, 31 + 31, 31 + 31 + 30):
+            future = timeutils.utcnow() + datetime.timedelta(days=days)
+            timeutils.set_time_override(future)
+            # task_log records are generated by the _instance_usage_audit
+            # periodic task.
+            with context.target_cell(
+                    ctxt, self.cell_mappings['cell1']) as cctxt:
+                self.compute1.manager._instance_usage_audit(cctxt)
+            with context.target_cell(
+                    ctxt, self.cell_mappings['cell2']) as cctxt:
+                self.compute2.manager._instance_usage_audit(ctxt)
+            # Audit period defaults to 1 month, the last audit period will
+            # be the previous calendar month.
+            begin, end = nova_utils.last_completed_audit_period()
+            # Restore original time override.
+            timeutils.set_time_override(self.faketoday)
+
+            for cell_name in ('cell1', 'cell2'):
+                with context.target_cell(
+                        ctxt, self.cell_mappings[cell_name]) as cctxt:
+                    task_logs = objects.TaskLogList.get_all(
+                        cctxt, 'instance_usage_audit', begin, end)
+                    self.assertEqual(1, len(task_logs))
+
+        # First try archiving without --task-log. Expect no task_log entries in
+        # the results.
+        self.cli.archive_deleted_rows(all_cells=True, verbose=True)
+        self.assertNotIn('task_log', self.output.getvalue())
+        # Next try archiving with --task-log and --before.
+        # We'll archive records that were last updated before the second audit
+        # period.
+        # The task_log records were created/updated on 2021-08-01, 2021-09-01,
+        # and 2021-10-01. So to archive one record, we need to use
+        # before > 2021-08-01. 2021-07-01 + 31 + 1 = 2021-08-02
+        before = timeutils.utcnow() + datetime.timedelta(days=31 + 1)
+        self.cli.archive_deleted_rows(
+            all_cells=True, task_log=True, before=before.isoformat(),
+            verbose=True)
+        # Verify that only 2 task_log records were archived, 1 in each cell.
+        for cell_name in ('cell1', 'cell2'):
+            self.assertRegex(
+                self.output.getvalue(), r'\| %s.task_log\s+\| 1' % cell_name)
+        # Now archive all of the rest, there should be 4 left, 2 in each cell.
+        self.cli.archive_deleted_rows(
+            all_cells=True, task_log=True, verbose=True)
+        for cell_name in ('cell1', 'cell2'):
+            self.assertRegex(
+                self.output.getvalue(), r'\| %s.task_log\s+\| 2' % cell_name)

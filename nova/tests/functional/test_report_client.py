@@ -245,8 +245,8 @@ class SchedulerReportClientTests(test.TestCase):
         self.assertEqual(2, vcpu_data)
 
         # Delete allocations with our instance
-        self.client.delete_allocation_for_instance(self.context,
-                                                   self.instance.uuid)
+        self.client.delete_allocation_for_instance(
+            self.context, self.instance.uuid, force=True)
 
         # No usage
         resp = self.client.get('/resource_providers/%s/usages' %
@@ -1285,7 +1285,7 @@ class SchedulerReportClientTests(test.TestCase):
              'CUSTOM_FOO'))
         acs, _, ver = self.client.get_allocation_candidates(
             self.context, utils.ResourceRequest.from_request_spec(req_spec))
-        self.assertEqual('1.35', ver)
+        self.assertEqual('1.36', ver)
         # This prints which ddt permutation we're using if it fails.
         self.assertEqual(data['expected_acs'], len(acs), data)
 

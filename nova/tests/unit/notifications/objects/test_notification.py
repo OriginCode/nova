@@ -137,7 +137,7 @@ class TestNotificationBase(test.NoDBTestCase):
     def setUp(self):
         super(TestNotificationBase, self).setUp()
         with mock.patch(
-                'nova.db.api.service_update') as mock_db_service_update:
+                'nova.db.main.api.service_update') as mock_db_service_update:
             self.service_obj = objects.Service(context=mock.sentinel.context,
                                                id=self.fake_service['id'])
             self.service_obj.obj_reset_changes(['version'])
@@ -387,7 +387,7 @@ notification_object_data = {
     # ImageMetaProps, so when you see a fail here for that reason, you must
     # *also* bump the version of ImageMetaPropsPayload. See its docstring for
     # more information.
-    'ImageMetaPropsPayload': '1.7-652a6048036c0d0cb8740ea62521c459',
+    'ImageMetaPropsPayload': '1.8-080bdcba9b96122eab57bf39d47348f7',
     'InstanceActionNotification': '1.0-a73147b93b520ff0061865849d3dfa56',
     'InstanceActionPayload': '1.8-4fa3da9cbf0761f1f700ae578f36dc2f',
     'InstanceActionRebuildNotification':

@@ -41,7 +41,7 @@ Root Disk GB
   The root disk is an ephemeral disk that the base image is copied into. When
   booting from a persistent volume it is not used. The ``0`` size is a special
   case which uses the native base image size as the size of the ephemeral root
-  volume. However, in this case the filter scheduler cannot select the compute
+  volume. However, in this case the scheduler cannot select the compute
   host based on the virtual image size. As a result, ``0`` should only be used
   for volume booted instances or for testing purposes. Volume-backed instances
   can be enforced for flavors with zero root disk via the
@@ -115,103 +115,6 @@ Hardware video RAM
   for more information on how this is used to set the ``videoRamSizeInKB`` attribute with
   the vmware driver.
 
-.. _extra-specs-watchdog-behavior:
-
-Watchdog behavior
-  For the libvirt driver, you can enable and set the behavior of a virtual
-  hardware watchdog device for each flavor. Watchdog devices keep an eye on the
-  guest server, and carry out the configured action, if the server hangs. The
-  watchdog uses the i6300esb device (emulating a PCI Intel 6300ESB). If
-  ``hw:watchdog_action`` is not specified, the watchdog is disabled.
-
-  To set the behavior, use:
-
-  .. code-block:: console
-
-     $ openstack flavor set FLAVOR-NAME --property hw:watchdog_action=ACTION
-
-  Valid ACTION values are:
-
-  - ``disabled``: (default) The device is not attached.
-  - ``reset``: Forcefully reset the guest.
-  - ``poweroff``: Forcefully power off the guest.
-  - ``pause``: Pause the guest.
-  - ``none``: Only enable the watchdog; do nothing if the server hangs.
-
-  .. note::
-
-     Watchdog behavior set using a specific image's properties will override
-     behavior set using flavors.
-
-.. _extra-specs-random-number-generator:
-
-Random-number generator
-  If a random-number generator device has been added to the instance through
-  its image properties, the device can be enabled and configured using:
-
-  .. code-block:: console
-
-     $ openstack flavor set FLAVOR-NAME \
-         --property hw_rng:allowed=True \
-         --property hw_rng:rate_bytes=RATE-BYTES \
-         --property hw_rng:rate_period=RATE-PERIOD
-
-  Where:
-
-  - RATE-BYTES: (integer) Allowed amount of bytes that the guest can read from
-    the host's entropy per period.
-  - RATE-PERIOD: (integer) Duration of the read period in milliseconds.
-
-.. _extra-specs-performance-monitoring-unit:
-
-Performance Monitoring Unit (vPMU)
-  If nova is deployed with the libvirt virt driver and
-  :oslo.config:option:`libvirt.virt_type` is set to ``qemu`` or ``kvm``, a
-  vPMU can be enabled or disabled for an instance using the ``hw:pmu``
-  extra_spec or the ``hw_pmu`` image property.
-  The supported values are ``True`` or ``False``. If the vPMU is not
-  explicitly enabled or disabled via the flavor or image, its presence is left
-  to QEMU to decide.
-
-  .. code-block:: console
-
-     $ openstack flavor set FLAVOR-NAME --property hw:pmu=True|False
-
-  The vPMU is used by tools like ``perf`` in the guest to provide more accurate
-  information for profiling application and monitoring guest performance.
-  For realtime workloads, the emulation of a vPMU can introduce additional
-  latency which may be undesirable. If the telemetry it provides is not
-  required, such workloads should set ``hw:pmu=False``. For most workloads
-  the default of unset or enabling the vPMU ``hw:pmu=True`` will be correct.
-
-.. _extra-specs-hiding-hypervisor-signature:
-
-Hiding hypervisor signature
-  Some hypervisors add a signature to their guests. While the presence
-  of the signature can enable some paravirtualization features on the
-  guest, it can also have the effect of preventing some drivers from
-  loading. Hiding the signature by setting this property to true may
-  allow such drivers to load and work.
-
-  .. note::
-
-     As of the 18.0.0 Rocky release, this is only supported by the libvirt
-     driver.
-
-     Prior to the 21.0.0 Ussuri release, this was called
-     ``hide_hypervisor_id``. An alias is provided to provide backwards
-     compatibility.
-
-  .. code:: console
-
-     $ openstack flavor set FLAVOR-NAME \
-         --property hw:hide_hypervisor_id=VALUE
-
-  Where:
-
-  - VALUE: (string) 'true' or 'false'. 'false' is equivalent to the
-    property not existing.
-
 .. _extra-specs-secure-boot:
 
 Secure Boot
@@ -282,9 +185,6 @@ Required traits
   below). Any other value will be considered
   invalid.
 
-  The FilterScheduler is currently the only scheduler driver that supports
-  this feature.
-
   Traits can be managed using the `osc-placement plugin`__.
 
   __ https://docs.openstack.org/osc-placement/latest/index.html
@@ -303,9 +203,6 @@ Forbidden traits
 
   - ``trait:HW_CPU_X86_AVX2=forbidden``
   - ``trait:STORAGE_DISK_SSD=forbidden``
-
-  The FilterScheduler is currently the only scheduler driver that supports
-  this feature.
 
   Traits can be managed using the `osc-placement plugin`__.
 

@@ -18,7 +18,7 @@ from oslo_utils import versionutils
 
 from nova import availability_zones
 from nova import context as nova_context
-from nova.db import api as db
+from nova.db.main import api as db
 from nova import exception
 from nova.notifications.objects import base as notification
 from nova.notifications.objects import service as service_notification
@@ -31,7 +31,7 @@ LOG = logging.getLogger(__name__)
 
 
 # NOTE(danms): This is the global service version counter
-SERVICE_VERSION = 56
+SERVICE_VERSION = 60
 
 
 # NOTE(danms): This is our SERVICE_VERSION history. The idea is that any
@@ -199,13 +199,29 @@ SERVICE_VERSION_HISTORY = (
     {'compute_rpc': '5.13'},
     # Version 56: Compute RPC v6.0:
     {'compute_rpc': '6.0'},
+    # Version 57: Compute RPC v6.0:
+    # Add support for vnic 'accelerator-direct'.
+    {'compute_rpc': '6.0'},
+    # Version 58: Compute RPC v6.0:
+    # Add support for booting with neutron extended resource request
+    {'compute_rpc': '6.0'},
+    # Version 59: Compute RPC v6.0:
+    # Add support for server move operations with neutron extended resource
+    # request
+    {'compute_rpc': '6.0'},
+    # Version 60: Compute RPC v6.0:
+    # Add support for interface attach operation with neutron extended resource
+    # request
+    {'compute_rpc': '6.0'},
 )
 
 # This is used to raise an error at service startup if older than N-1 computes
-# are detected. Update this at the beginning of every release cycle
-OLDEST_SUPPORTED_SERVICE_VERSION = 'Victoria'
+# are detected. Update this at the beginning of every release cycle to point to
+# the smallest service version that was added in N-1.
+OLDEST_SUPPORTED_SERVICE_VERSION = 'Wallaby'
 SERVICE_VERSION_ALIASES = {
     'Victoria': 52,
+    'Wallaby': 54,
 }
 
 

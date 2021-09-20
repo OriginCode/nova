@@ -16,7 +16,7 @@ from oslo_db import exception as db_exc
 from oslo_utils import uuidutils
 from oslo_utils import versionutils
 
-from nova.db import api as db
+from nova.db.main import api as db
 from nova import exception
 from nova.i18n import _
 from nova import objects
@@ -53,6 +53,8 @@ class Migration(base.NovaPersistentObject, base.NovaObject,
         'source_node': fields.StringField(nullable=True),     # source nodename
         'dest_node': fields.StringField(nullable=True),       # dest nodename
         'dest_host': fields.StringField(nullable=True),       # dest host IP
+        # TODO(stephenfin): Rename these to old_flavor_id, new_flavor_id in
+        # v2.0
         'old_instance_type_id': fields.IntegerField(nullable=True),
         'new_instance_type_id': fields.IntegerField(nullable=True),
         'instance_uuid': fields.StringField(nullable=True),

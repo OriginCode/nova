@@ -20,7 +20,6 @@ from nova.tests import fixtures
 from nova.tests.functional.notification_sample_tests \
     import notification_sample_base
 from nova.tests.unit.api.openstack.compute import test_services
-from nova.tests.unit import fake_notifier
 
 
 class TestServiceNotificationBase(
@@ -45,9 +44,9 @@ class TestServiceUpdateNotificationSamplev2_52(TestServiceNotificationBase):
 
     def setUp(self):
         super(TestServiceUpdateNotificationSamplev2_52, self).setUp()
-        self.stub_out("nova.db.api.service_get_by_host_and_binary",
+        self.stub_out("nova.db.main.api.service_get_by_host_and_binary",
                       test_services.fake_service_get_by_host_binary)
-        self.stub_out("nova.db.api.service_update",
+        self.stub_out("nova.db.main.api.service_update",
                       test_services.fake_service_update)
         # NOTE(gibi): enable / disable a compute service tries to call
         # the compute service via RPC to update placement. However in these
@@ -112,7 +111,7 @@ class TestServiceUpdateNotificationSampleLatest(
                 if svc['uuid'] == service_uuid:
                     return svc
             raise exception.ServiceNotFound(service_id=service_uuid)
-        self.stub_out('nova.db.api.service_get_by_uuid',
+        self.stub_out('nova.db.main.api.service_get_by_uuid',
                       db_service_get_by_uuid)
 
     def test_service_enable(self):
@@ -167,4 +166,4 @@ class TestServiceNotificationSample(TestServiceNotificationBase):
         self._verify_notification(
             'service-delete',
             replacements={'uuid': compute2_service_id},
-            actual=fake_notifier.VERSIONED_NOTIFICATIONS[1])
+            actual=self.notifier.versioned_notifications[1])

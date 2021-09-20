@@ -18,35 +18,17 @@
 """
 
 import argparse
-import traceback
+import inspect
 
 from oslo_log import log as logging
 
 import nova.conf
-import nova.db.api
+import nova.db.main.api
 from nova import exception
 from nova.i18n import _
-from nova import utils
 
 CONF = nova.conf.CONF
 LOG = logging.getLogger(__name__)
-
-
-def block_db_access(service_name):
-    """Blocks Nova DB access."""
-
-    class NoDB(object):
-        def __getattr__(self, attr):
-            return self
-
-        def __call__(self, *args, **kwargs):
-            stacktrace = "".join(traceback.format_stack())
-            LOG.error('No db access allowed in %(service_name)s: '
-                      '%(stacktrace)s',
-                      dict(service_name=service_name, stacktrace=stacktrace))
-            raise exception.DBNotAllowed(binary=service_name)
-
-    nova.db.api.IMPL = NoDB()
 
 
 def validate_args(fn, *args, **kwargs):
@@ -65,7 +47,7 @@ def validate_args(fn, *args, **kwargs):
     :param arg: the positional arguments supplied
     :param kwargs: the keyword arguments supplied
     """
-    argspec = utils.getargspec(fn)
+    argspec = inspect.getfullargspec(fn)
 
     num_defaults = len(argspec.defaults or [])
     required_args = argspec.args[:len(argspec.args) - num_defaults]

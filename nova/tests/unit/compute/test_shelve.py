@@ -24,7 +24,7 @@ from nova.compute import task_states
 from nova.compute import utils as compute_utils
 from nova.compute import vm_states
 import nova.conf
-from nova.db import api as db
+from nova.db.main import api as db
 from nova import exception
 from nova.network import neutron as neutron_api
 from nova import objects
@@ -1027,6 +1027,25 @@ class ShelveComputeAPITestCase(test_compute.BaseTestCase):
         self.assertRaises(exception.UnshelveInstanceInvalidState,
                           self.compute_api.unshelve,
                           self.context, instance, new_az=new_az)
+
+    @mock.patch(
+        'nova.objects.service.get_minimum_version_all_cells',
+        new=mock.Mock(return_value=58),
+    )
+    @mock.patch(
+        'nova.network.neutron.API.instance_has_extended_resource_request',
+        new=mock.Mock(return_value=True),
+    )
+    def test_unshelve_offloaded_with_extended_resource_request_old_compute(
+        self
+    ):
+        instance = self._get_specify_state_instance(
+            vm_states.SHELVED_OFFLOADED)
+
+        self.assertRaises(
+            exception.ExtendedResourceRequestOldCompute,
+            self.compute_api.unshelve, self.context, instance, new_az="az1"
+        )
 
     @mock.patch('nova.objects.BlockDeviceMappingList.get_by_instance_uuid',
                 new_callable=mock.NonCallableMock)

@@ -737,8 +737,10 @@ hostname_query_server:
   description: |
     Filter the server list result by the host name of server.
 
-    This parameter is only valid when specified by administrators.
-    If non-admin users specify this parameter, it is ignored.
+    This parameter is only valid when specified by administrators until
+    microversion 2.90, after which it can be specified by all users.
+    If non-admin users specify this parameter before microversion 2.90, it is
+    ignored.
   in: query
   required: false
   type: string
@@ -1244,7 +1246,7 @@ sort_dir_flavor:
     Sort direction. A valid value is ``asc`` (ascending) or ``desc`` (descending).
     Default is ``asc``. You can specify multiple pairs of sort key and sort direction
     query parameters. If you omit the sort direction in a pair, the API uses the natural
-    sorting direction of the direction of the flavor ``sort_key`` attribute.
+    sorting direction of the flavor ``sort_key`` attribute.
   in: query
   required: false
   type: string
@@ -1253,7 +1255,7 @@ sort_dir_server:
     Sort direction. A valid value is ``asc`` (ascending) or ``desc`` (descending).
     Default is ``desc``. You can specify multiple pairs of sort key and sort direction
     query parameters. If you omit the sort direction in a pair, the API uses the natural
-    sorting direction of the direction of the server ``sort_key`` attribute.
+    sorting direction of the server ``sort_key`` attribute.
   in: query
   required: false
   type: string
@@ -1776,6 +1778,13 @@ associate_host:
   in: body
   required: true
   type: string
+attachment_bdm_id_resp:
+  description: |
+    The UUID of the block device mapping record in Nova for the attachment.
+  in: body
+  required: true
+  type: string
+  min_version: 2.89
 attachment_device_put_req:
   description: |
     Name of the device in the attachment object, such as, ``/dev/vdb``.
@@ -1796,12 +1805,6 @@ attachment_id_put_req:
   required: false
   type: string
   min_version: 2.85
-attachment_id_required:
-  description: |
-    The UUID of the attachment.
-  in: body
-  required: true
-  type: string
 attachment_id_resp:
   description: |
     The UUID of the attachment.
@@ -1821,6 +1824,13 @@ attachment_server_id_resp:
   in: body
   required: false
   type: string
+attachment_volume_id_resp:
+  description: |
+    The UUID of the associated volume attachment in Cinder.
+  in: body
+  required: true
+  type: string
+  min_version: 2.89
 attachment_volumeId_resp:
   description: |
     The UUID of the attached volume.
@@ -3031,7 +3041,7 @@ flavor_disk:
   description: |
     The size of the root disk that will be created in GiB. If 0 the
     root disk will be set to exactly the size of the image used to
-    deploy the instance. However, in this case filter scheduler cannot
+    deploy the instance. However, in this case the scheduler cannot
     select the compute host based on the virtual image size. Therefore,
     0 should only be used for volume booted instances or for testing
     purposes. Volume-backed instances can be enforced for flavors with
@@ -6322,21 +6332,36 @@ server_host_create:
   required: false
   type: string
   min_version: 2.74
-server_hostname:
+server_hostname: &server_hostname
   in: body
   required: false
   type: string
   description: |
-    The hostname set on the instance when it is booted.
-    By default, it appears in the response for administrative users only.
+    The hostname of the instance reported in the metadata service.
+    This parameter only appears in responses for administrators until
+    microversion 2.90, after which it is shown for all users.
+
+    .. note::
+
+        This information is published via the metadata service and requires
+        application such as ``cloud-init`` to propogate it through to the
+        instance.
   min_version: 2.3
-server_hostname_update_rebuild:
+server_hostname_req:
   in: body
   required: false
   type: string
   description: |
-    The hostname set on the instance when it is booted.
-    By default, it appears in the response for administrative users only.
+    The hostname to configure for the instance in the metadata service.
+
+    .. note::
+
+        This information is published via the metadata service and requires
+        application such as ``cloud-init`` to propogate it through to the
+        instance.
+  min_version: 2.90
+server_hostname_update_rebuild:
+  <<: *server_hostname
   min_version: 2.75
 # This is the hypervisor_hostname in a POST (create instance) request body.
 server_hypervisor_hostname_create:
@@ -7368,6 +7393,13 @@ volume:
   in: body
   required: true
   type: object
+volume_attachment_id_resp:
+  description: |
+    The volume ID of the attachment.
+  in: body
+  required: true
+  type: string
+  max_version: 2.88
 volume_id:
   description: |
     The source volume ID.

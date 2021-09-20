@@ -23,6 +23,7 @@ import copy
 import functools
 
 from oslo_log import log as logging
+from oslo_service import loopingcall
 from oslo_utils import excutils
 from oslo_utils import units
 from oslo_vmware import exceptions as vexc
@@ -276,7 +277,7 @@ def get_vm_create_spec(client_factory, instance, data_store_name,
     # enable to provide info needed by udev to generate /dev/disk/by-id
     opt = client_factory.create('ns0:OptionValue')
     opt.key = "disk.EnableUUID"
-    opt.value = True
+    opt.value = 'true'
     extra_config.append(opt)
 
     port_index = 0
@@ -744,9 +745,6 @@ def get_scsi_adapter_type(hardware_devices):
     """Selects a proper iscsi adapter type from the existing
        hardware devices
     """
-    if hardware_devices.__class__.__name__ == "ArrayOfVirtualDevice":
-        hardware_devices = hardware_devices.VirtualDevice
-
     for device in hardware_devices:
         if device.__class__.__name__ in scsi_controller_classes:
             # find the controllers which still have available slots
@@ -840,9 +838,6 @@ def allocate_controller_key_and_unit_number(client_factory, devices,
 
 def get_rdm_disk(hardware_devices, uuid):
     """Gets the RDM disk key."""
-    if hardware_devices.__class__.__name__ == "ArrayOfVirtualDevice":
-        hardware_devices = hardware_devices.VirtualDevice
-
     for device in hardware_devices:
         if (device.__class__.__name__ == "VirtualDisk" and
             device.backing.__class__.__name__ ==
@@ -1067,41 +1062,33 @@ def _get_allocated_vnc_ports(session):
     vnc_ports = set()
     result = session._call_method(vim_util, "get_objects",
                                   "VirtualMachine", [VNC_CONFIG_KEY])
-    while result:
-        for obj in result.objects:
-            if not hasattr(obj, 'propSet'):
+    with vutil.WithRetrieval(session.vim, result) as objects:
+        for obj in objects:
+            if not hasattr(obj, 'propSet') or not obj.propSet:
                 continue
             dynamic_prop = obj.propSet[0]
             option_value = dynamic_prop.val
             vnc_port = option_value.value
             vnc_ports.add(int(vnc_port))
-        result = session._call_method(vutil, 'continue_retrieval',
-                                      result)
     return vnc_ports
 
 
-def _get_object_for_value(results, value):
-    for object in results.objects:
+def _get_object_for_value(objects, value):
+    for object in objects:
         if object.propSet[0].val == value:
             return object.obj
 
 
-def _get_object_for_optionvalue(results, value):
-    for object in results.objects:
+def _get_object_for_optionvalue(objects, value):
+    for object in objects:
         if hasattr(object, "propSet") and object.propSet:
             if object.propSet[0].val.value == value:
                 return object.obj
 
 
 def _get_object_from_results(session, results, value, func):
-    while results:
-        object = func(results, value)
-        if object:
-            session._call_method(vutil, 'cancel_retrieval',
-                                 results)
-            return object
-        results = session._call_method(vutil, 'continue_retrieval',
-                                       results)
+    with vutil.WithRetrieval(session.vim, results) as objects:
+        return func(objects, value)
 
 
 def _get_vm_ref_from_name(session, vm_name):
@@ -1213,13 +1200,15 @@ def get_stats_from_cluster(session, cluster):
                          "HostSystem", host_mors,
                          ["summary.hardware", "summary.runtime",
                           "summary.quickStats"])
-            for obj in result.objects:
-                host_props = propset_dict(obj.propSet)
-                hardware_summary = host_props['summary.hardware']
-                runtime_summary = host_props['summary.runtime']
-                stats_summary = host_props['summary.quickStats']
-                if (runtime_summary.inMaintenanceMode is False and
-                    runtime_summary.connectionState == "connected"):
+            with vutil.WithRetrieval(session.vim, result) as objects:
+                for obj in objects:
+                    host_props = propset_dict(obj.propSet)
+                    runtime_summary = host_props['summary.runtime']
+                    if (runtime_summary.inMaintenanceMode is not False or
+                            runtime_summary.connectionState != "connected"):
+                        continue
+                    hardware_summary = host_props['summary.hardware']
+                    stats_summary = host_props['summary.quickStats']
                     # Total vcpus is the sum of all pCPUs of individual hosts
                     # The overcommitment ratio is factored in by the scheduler
                     threads = hardware_summary.numCpuThreads
@@ -1277,9 +1266,6 @@ def propset_dict(propset):
 
 
 def get_vmdk_backed_disk_device(hardware_devices, uuid):
-    if hardware_devices.__class__.__name__ == "ArrayOfVirtualDevice":
-        hardware_devices = hardware_devices.VirtualDevice
-
     for device in hardware_devices:
         if (device.__class__.__name__ == "VirtualDisk" and
                 device.backing.__class__.__name__ ==
@@ -1289,9 +1275,6 @@ def get_vmdk_backed_disk_device(hardware_devices, uuid):
 
 
 def get_vmdk_volume_disk(hardware_devices, path=None):
-    if hardware_devices.__class__.__name__ == "ArrayOfVirtualDevice":
-        hardware_devices = hardware_devices.VirtualDevice
-
     for device in hardware_devices:
         if (device.__class__.__name__ == "VirtualDisk"):
             if not path or path == device.backing.fileName:
@@ -1313,13 +1296,8 @@ def get_all_cluster_mors(session):
     try:
         results = session._call_method(vim_util, "get_objects",
                                         "ClusterComputeResource", ["name"])
-        session._call_method(vutil, 'cancel_retrieval',
-                             results)
-        if results.objects is None:
-            return []
-        else:
-            return results.objects
-
+        with vutil.WithRetrieval(session.vim, results) as objects:
+            return list(objects)
     except Exception as excep:
         LOG.warning("Failed to get cluster references %s", excep)
 
@@ -1328,7 +1306,7 @@ def get_cluster_ref_by_name(session, cluster_name):
     """Get reference to the vCenter cluster with the specified name."""
     all_clusters = get_all_cluster_mors(session)
     for cluster in all_clusters:
-        if (hasattr(cluster, 'propSet') and
+        if (hasattr(cluster, 'propSet') and cluster.propSet and
                     cluster.propSet[0].val == cluster_name):
             return cluster.obj
 
@@ -1348,6 +1326,9 @@ def get_vmdk_adapter_type(adapter_type):
     return vmdk_adapter_type
 
 
+@loopingcall.RetryDecorator(
+    max_retry_count=20, inc_sleep_time=2, max_sleep_time=20,
+    exceptions=(vexc.VimFaultException,))
 def create_vm(session, instance, vm_folder, config_spec, res_pool_ref):
     """Create VM on ESX host."""
     LOG.debug("Creating VM on the ESX host", instance=instance)
@@ -1544,7 +1525,7 @@ def find_rescue_device(hardware_devices, instance):
     :param instance: nova.objects.instance.Instance object
     :return: the rescue disk device object
     """
-    for device in hardware_devices.VirtualDevice:
+    for device in hardware_devices:
         if (device.__class__.__name__ == "VirtualDisk" and
                 device.backing.__class__.__name__ ==
                 'VirtualDiskFlatVer2BackingInfo' and
@@ -1583,13 +1564,7 @@ def detach_devices_from_vm(session, vm_ref, devices):
 
 def get_ephemerals(session, vm_ref):
     devices = []
-    hardware_devices = session._call_method(vutil,
-                                            "get_object_property",
-                                            vm_ref,
-                                            "config.hardware.device")
-
-    if hardware_devices.__class__.__name__ == "ArrayOfVirtualDevice":
-        hardware_devices = hardware_devices.VirtualDevice
+    hardware_devices = get_hardware_devices(session, vm_ref)
 
     for device in hardware_devices:
         if device.__class__.__name__ == "VirtualDisk":
@@ -1601,11 +1576,7 @@ def get_ephemerals(session, vm_ref):
 
 
 def get_swap(session, vm_ref):
-    hardware_devices = session._call_method(vutil, "get_object_property",
-                                            vm_ref, "config.hardware.device")
-
-    if hardware_devices.__class__.__name__ == "ArrayOfVirtualDevice":
-        hardware_devices = hardware_devices.VirtualDevice
+    hardware_devices = get_hardware_devices(session, vm_ref)
 
     for device in hardware_devices:
         if (device.__class__.__name__ == "VirtualDisk" and
@@ -1623,15 +1594,18 @@ def create_folder(session, parent_folder_ref, name):
     """
 
     LOG.debug("Creating folder: %(name)s. Parent ref: %(parent)s.",
-              {'name': name, 'parent': parent_folder_ref.value})
+              {'name': name,
+               'parent': vutil.get_moref_value(parent_folder_ref)})
     try:
         folder = session._call_method(session.vim, "CreateFolder",
                                       parent_folder_ref, name=name)
         LOG.info("Created folder: %(name)s in parent %(parent)s.",
-                 {'name': name, 'parent': parent_folder_ref.value})
+                 {'name': name,
+                  'parent': vutil.get_moref_value(parent_folder_ref)})
     except vexc.DuplicateName as e:
         LOG.debug("Folder already exists: %(name)s. Parent ref: %(parent)s.",
-                  {'name': name, 'parent': parent_folder_ref.value})
+                  {'name': name,
+                   'parent': vutil.get_moref_value(parent_folder_ref)})
         val = e.details['object']
         folder = vutil.get_moref(val, 'Folder')
     return folder

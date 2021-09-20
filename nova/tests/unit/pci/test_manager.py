@@ -150,7 +150,7 @@ class PciDevTrackerTestCase(test.NoDBTestCase):
         super(PciDevTrackerTestCase, self).setUp()
         self.fake_context = context.get_admin_context()
         self.fake_devs = fake_db_devs[:]
-        self.stub_out('nova.db.api.pci_device_get_all_by_node',
+        self.stub_out('nova.db.main.api.pci_device_get_all_by_node',
             self._fake_get_pci_devices)
         # The fake_pci_whitelist must be called before creating the fake
         # devices
@@ -252,8 +252,10 @@ class PciDevTrackerTestCase(test.NoDBTestCase):
         fake_pci_devs_json = jsonutils.dumps(fake_pci_devs)
         tracker = manager.PciDevTracker(
             self.fake_context, objects.ComputeNode(id=1, numa_topology=None))
+        # At this point we should have the original 3 fake devs
+        self.assertEqual(3, len(tracker.pci_devs))
         # We expect that the device with 32bit PCI domain is ignored, so we'll
-        # have only the 3 original fake devs
+        # still have the same 3 original fake devs.
         tracker.update_devices_from_hypervisor_resources(fake_pci_devs_json)
         self.assertEqual(3, len(tracker.pci_devs))
         mock_debug.assert_called_once_with(
@@ -448,10 +450,11 @@ class PciDevTrackerTestCase(test.NoDBTestCase):
         self.inst.numa_topology = objects.InstanceNUMATopology(
                     cells=[objects.InstanceNUMACell(
                         id=1, cpuset=set([1, 2]), memory=512)])
-        self.assertIsNone(self.tracker.claim_instance(
-                            mock.sentinel.context,
-                            pci_requests_obj,
-                            self.inst.numa_topology))
+        claims = self.tracker.claim_instance(
+            mock.sentinel.context,
+            pci_requests_obj,
+            self.inst.numa_topology)
+        self.assertEqual([], claims)
 
     def test_update_pci_for_instance_deleted(self):
         pci_requests_obj = self._create_pci_requests_object(fake_pci_requests)
@@ -471,7 +474,7 @@ class PciDevTrackerTestCase(test.NoDBTestCase):
                        return_value=False)
     def test_save(self, migrate_mock):
         self.stub_out(
-                'nova.db.api.pci_device_update',
+                'nova.db.main.api.pci_device_update',
                 self._fake_pci_device_update)
         fake_pci_v3 = dict(fake_pci, address='0000:00:00.2', vendor_id='v3')
         fake_pci_devs = [copy.deepcopy(fake_pci), copy.deepcopy(fake_pci_2),
@@ -483,10 +486,10 @@ class PciDevTrackerTestCase(test.NoDBTestCase):
 
     def test_save_removed(self):
         self.stub_out(
-                'nova.db.api.pci_device_update',
+                'nova.db.main.api.pci_device_update',
                 self._fake_pci_device_update)
         self.stub_out(
-                'nova.db.api.pci_device_destroy',
+                'nova.db.main.api.pci_device_destroy',
                 self._fake_pci_device_destroy)
         self.destroy_called = 0
         self.assertEqual(len(self.tracker.pci_devs), 3)

@@ -20,10 +20,8 @@ import mock
 
 from nova import test
 from nova.tests import fixtures as nova_fixtures
+from nova.tests.fixtures import libvirt as fakelibvirt
 from nova.tests.functional import fixtures as func_fixtures
-from nova.tests.unit import cast_as_call
-from nova.tests.unit import policy_fixture
-from nova.tests.unit.virt.libvirt import fakelibvirt
 from nova.virt.libvirt import guest as libvirt_guest
 
 
@@ -32,7 +30,7 @@ class TestSerialConsoleLiveMigrate(test.TestCase):
 
     def setUp(self):
         super(TestSerialConsoleLiveMigrate, self).setUp()
-        self.useFixture(policy_fixture.RealPolicyFixture())
+        self.useFixture(nova_fixtures.RealPolicyFixture())
         self.useFixture(nova_fixtures.NeutronFixture(self))
         self.useFixture(nova_fixtures.GlanceFixture(self))
         self.useFixture(func_fixtures.PlacementFixture())
@@ -48,7 +46,7 @@ class TestSerialConsoleLiveMigrate(test.TestCase):
         self.useFixture(fixtures.MonkeyPatch(
            'nova.virt.libvirt.guest.libvirt',
            fakelibvirt))
-        self.useFixture(fakelibvirt.FakeLibvirtFixture())
+        self.useFixture(nova_fixtures.LibvirtFixture())
 
         self.admin_api = api_fixture.admin_api
         self.api = api_fixture.api
@@ -62,7 +60,7 @@ class TestSerialConsoleLiveMigrate(test.TestCase):
         self.start_service('scheduler')
         self.compute = self.start_service('compute', host='test_compute1')
 
-        self.useFixture(cast_as_call.CastAsCall(self))
+        self.useFixture(nova_fixtures.CastAsCallFixture(self))
 
         self.image_id = self.api.get_images()[0]['id']
         self.flavor_id = self.api.get_flavors()[0]['id']

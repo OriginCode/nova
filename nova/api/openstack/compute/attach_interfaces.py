@@ -176,10 +176,12 @@ class InterfaceAttachmentController(wsgi.Controller):
                 exception.NetworkInterfaceTaggedAttachNotSupported,
                 exception.NetworksWithQoSPolicyNotSupported,
                 exception.InterfaceAttachPciClaimFailed,
-                exception.InterfaceAttachResourceAllocationFailed) as e:
+                exception.InterfaceAttachResourceAllocationFailed,
+                exception.ForbiddenPortsWithAccelerator,
+                exception.ExtendedResourceRequestOldCompute,
+                ) as e:
             raise exc.HTTPBadRequest(explanation=e.format_message())
         except (
-            exception.OperationNotSupportedForVDPAInterface,
             exception.InstanceIsLocked,
             exception.FixedIpAlreadyInUse,
             exception.PortInUse,
@@ -200,7 +202,7 @@ class InterfaceAttachmentController(wsgi.Controller):
         return self.show(req, server_id, vif['id'])
 
     @wsgi.response(202)
-    @wsgi.expected_errors((404, 409, 501))
+    @wsgi.expected_errors((400, 404, 409, 501))
     def delete(self, req, server_id, id):
         """Detach an interface from an instance."""
         context = req.environ['nova.context']
@@ -217,13 +219,12 @@ class InterfaceAttachmentController(wsgi.Controller):
                 instance, port_id=port_id)
         except exception.PortNotFound as e:
             raise exc.HTTPNotFound(explanation=e.format_message())
-        except (
-            exception.OperationNotSupportedForVDPAInterface,
-            exception.InstanceIsLocked,
-        ) as e:
+        except exception.InstanceIsLocked as e:
             raise exc.HTTPConflict(explanation=e.format_message())
         except NotImplementedError:
             common.raise_feature_not_supported()
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
                     'detach_interface', server_id)
+        except exception.ForbiddenPortsWithAccelerator as e:
+            raise exc.HTTPBadRequest(explanation=e.format_message())

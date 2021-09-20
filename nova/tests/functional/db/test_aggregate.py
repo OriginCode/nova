@@ -18,8 +18,8 @@ from oslo_utils.fixture import uuidsentinel
 from oslo_utils import timeutils
 
 from nova import context
-from nova.db.sqlalchemy import api as db_api
-from nova.db.sqlalchemy import api_models
+from nova.db.api import api as api_db_api
+from nova.db.api import models as api_models
 from nova import exception
 import nova.objects.aggregate as aggregate_obj
 from nova import test
@@ -59,7 +59,7 @@ def _get_fake_metadata(db_id):
             'unique_key': 'unique_value_' + str(db_id)}
 
 
-@db_api.api_context_manager.writer
+@api_db_api.context_manager.writer
 def _create_aggregate(context, values=_get_fake_aggregate(1, result=False),
                                metadata=_get_fake_metadata(1)):
     aggregate = api_models.Aggregate()
@@ -77,7 +77,7 @@ def _create_aggregate(context, values=_get_fake_aggregate(1, result=False),
     return aggregate
 
 
-@db_api.api_context_manager.writer
+@api_db_api.context_manager.writer
 def _create_aggregate_with_hosts(context,
                                  values=_get_fake_aggregate(1, result=False),
                                  metadata=_get_fake_metadata(1),
@@ -92,13 +92,13 @@ def _create_aggregate_with_hosts(context,
     return aggregate
 
 
-@db_api.api_context_manager.reader
+@api_db_api.context_manager.reader
 def _aggregate_host_get_all(context, aggregate_id):
     return context.session.query(api_models.AggregateHost).\
                        filter_by(aggregate_id=aggregate_id).all()
 
 
-@db_api.api_context_manager.reader
+@api_db_api.context_manager.reader
 def _aggregate_metadata_get_all(context, aggregate_id):
     results = context.session.query(api_models.AggregateMetadata).\
                                 filter_by(aggregate_id=aggregate_id).all()
@@ -401,8 +401,9 @@ class AggregateObjectDbTestCase(test.TestCase):
 
     def test_aggregate_metadata_add_retry(self):
         result = _create_aggregate(self.context, metadata=None)
-        with mock.patch('nova.db.sqlalchemy.api_models.'
-                        'AggregateMetadata.__table__.insert') as insert_mock:
+        with mock.patch(
+            'nova.db.api.models.AggregateMetadata.__table__.insert'
+        ) as insert_mock:
             insert_mock.side_effect = db_exc.DBDuplicateEntry
             self.assertRaises(db_exc.DBDuplicateEntry,
                               aggregate_obj._metadata_add_to_db,

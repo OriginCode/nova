@@ -17,6 +17,7 @@
 import collections
 
 import mock
+from oslo_service import fixture as oslo_svc_fixture
 from oslo_utils import units
 from oslo_utils import uuidutils
 from oslo_vmware import exceptions as vexc
@@ -376,9 +377,8 @@ class VMwareVMUtilTestCase(test.NoDBTestCase):
         devices.append(ide_controller)
         fake._update_object("VirtualMachine", vm)
         # return the scsi type, not ide
-        hardware_device = vm.get("config.hardware.device")
         self.assertEqual(constants.DEFAULT_ADAPTER_TYPE,
-                         vm_util.get_scsi_adapter_type(hardware_device))
+                         vm_util.get_scsi_adapter_type(devices))
 
     def test_get_scsi_adapter_type_with_error(self):
         vm = fake.VirtualMachine()
@@ -392,10 +392,9 @@ class VMwareVMUtilTestCase(test.NoDBTestCase):
         # has exceeded SCSI_MAX_CONNECT_NUMBER
         for i in range(0, constants.SCSI_MAX_CONNECT_NUMBER):
             scsi_controller.device.append('device' + str(i))
-        hardware_device = vm.get("config.hardware.device")
         self.assertRaises(exception.StorageError,
                           vm_util.get_scsi_adapter_type,
-                          hardware_device)
+                          devices)
 
     def test_find_allocated_slots(self):
         disk1 = fake.VirtualDisk(200, 0)
@@ -637,7 +636,7 @@ class VMwareVMUtilTestCase(test.NoDBTestCase):
         extra_config.key = 'nvp.vm-uuid'
         spec.extraConfig.append(extra_config)
         extra_config = fake_factory.create("ns0:OptionValue")
-        extra_config.value = True
+        extra_config.value = 'true'
         extra_config.key = 'disk.EnableUUID'
         spec.extraConfig.append(extra_config)
         spec.files = fake_factory.create('ns0:VirtualMachineFileInfo')
@@ -738,7 +737,7 @@ class VMwareVMUtilTestCase(test.NoDBTestCase):
         extra_config.value = self._instance.uuid
         expected.extraConfig.append(extra_config)
         extra_config = fake_factory.create("ns0:OptionValue")
-        extra_config.value = True
+        extra_config.value = 'true'
         extra_config.key = 'disk.EnableUUID'
         expected.extraConfig.append(extra_config)
         self.assertEqual(expected, result)
@@ -764,7 +763,7 @@ class VMwareVMUtilTestCase(test.NoDBTestCase):
         extra_config.key = 'nvp.vm-uuid'
         expected.extraConfig.append(extra_config)
         extra_config = fake_factory.create("ns0:OptionValue")
-        extra_config.value = True
+        extra_config.value = 'true'
         extra_config.key = 'disk.EnableUUID'
         expected.extraConfig.append(extra_config)
 
@@ -818,7 +817,7 @@ class VMwareVMUtilTestCase(test.NoDBTestCase):
         extra_config.key = 'nvp.vm-uuid'
         expected.extraConfig.append(extra_config)
         extra_config = fake_factory.create("ns0:OptionValue")
-        extra_config.value = True
+        extra_config.value = 'true'
         extra_config.key = 'disk.EnableUUID'
         expected.extraConfig.append(extra_config)
 
@@ -871,7 +870,7 @@ class VMwareVMUtilTestCase(test.NoDBTestCase):
         extra_config.value = self._instance.uuid
         expected.extraConfig.append(extra_config)
         extra_config = fake_factory.create("ns0:OptionValue")
-        extra_config.value = True
+        extra_config.value = 'true'
         extra_config.key = 'disk.EnableUUID'
         expected.extraConfig.append(extra_config)
 
@@ -925,7 +924,7 @@ class VMwareVMUtilTestCase(test.NoDBTestCase):
         extra_config.key = 'nvp.vm-uuid'
         expected.extraConfig.append(extra_config)
         extra_config = fake_factory.create("ns0:OptionValue")
-        extra_config.value = True
+        extra_config.value = 'true'
         extra_config.key = 'disk.EnableUUID'
         expected.extraConfig.append(extra_config)
         expected.files = fake_factory.create('ns0:VirtualMachineFileInfo')
@@ -968,7 +967,7 @@ class VMwareVMUtilTestCase(test.NoDBTestCase):
         extra_config.key = 'nvp.vm-uuid'
         expected.extraConfig.append(extra_config)
         extra_config = fake_factory.create("ns0:OptionValue")
-        extra_config.value = True
+        extra_config.value = 'true'
         extra_config.key = 'disk.EnableUUID'
         expected.extraConfig.append(extra_config)
         expected.files = fake_factory.create('ns0:VirtualMachineFileInfo')
@@ -1025,6 +1024,8 @@ class VMwareVMUtilTestCase(test.NoDBTestCase):
         """Ensure we warn when create_vm() fails after we passed an
         unrecognised guestId
         """
+        # avoid real sleeps during test due to te retry decorator on create_vm
+        self.useFixture(oslo_svc_fixture.SleepFixture())
 
         found = [False]
 
@@ -1715,10 +1716,7 @@ class VMwareVMUtilTestCase(test.NoDBTestCase):
         self.assertEqual(expected, result)
 
     def _get_devices(self, filename):
-        devices = fake._create_array_of_type('VirtualDevice')
-        devices.VirtualDevice = self._vmdk_path_and_adapter_type_devices(
-            filename)
-        return devices
+        return self._vmdk_path_and_adapter_type_devices(filename)
 
     def test_find_rescue_device(self):
         filename = '[test_datastore] uuid/uuid-rescue.vmdk'
@@ -1768,7 +1766,7 @@ class VMwareVMUtilTestCase(test.NoDBTestCase):
         extra_config.key = 'nvp.vm-uuid'
         expected.extraConfig.append(extra_config)
         extra_config = fake_factory.create("ns0:OptionValue")
-        extra_config.value = True
+        extra_config.value = 'true'
         extra_config.key = 'disk.EnableUUID'
         expected.extraConfig.append(extra_config)
         extra_config = fake_factory.create("ns0:OptionValue")
@@ -1828,7 +1826,7 @@ class VMwareVMUtilTestCase(test.NoDBTestCase):
         extra_config.value = self._instance.uuid
         expected.extraConfig.append(extra_config)
         extra_config = fake_factory.create("ns0:OptionValue")
-        extra_config.value = True
+        extra_config.value = 'true'
         extra_config.key = 'disk.EnableUUID'
         expected.extraConfig.append(extra_config)
         self.assertEqual(expected, result)
@@ -1879,7 +1877,7 @@ class VMwareVMUtilTestCase(test.NoDBTestCase):
         extra_config.value = self._instance.uuid
         expected.extraConfig.append(extra_config)
         extra_config = fake_factory.create("ns0:OptionValue")
-        extra_config.value = True
+        extra_config.value = 'true'
         extra_config.key = 'disk.EnableUUID'
         expected.extraConfig.append(extra_config)
         self.assertEqual(expected, result)

@@ -12,17 +12,15 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-
 from oslo_serialization import jsonutils
 from oslo_utils import uuidutils
 from oslo_utils import versionutils
-from sqlalchemy import or_
-from sqlalchemy.sql import null
+import sqlalchemy as sa
+from sqlalchemy import sql
 
 import nova.conf
-from nova.db import api as db
-from nova.db.sqlalchemy import api as sa_api
-from nova.db.sqlalchemy import models
+from nova.db.main import api as db
+from nova.db.main import models
 from nova import exception
 from nova import objects
 from nova.objects import base
@@ -360,7 +358,20 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject):
 
     @base.remotable
     def destroy(self):
-        db.compute_node_delete(self._context, self.id)
+        if self.obj_attr_is_set('host') and self.host:
+            # NOTE(melwitt): If our host is set, avoid a race between
+            # nova-computes during ironic driver node rebalances which can
+            # change node ownership.
+            constraint = db.constraint(host=db.equal_any(self.host))
+        else:
+            constraint = None
+
+        try:
+            db.compute_node_delete(
+                self._context, self.id, constraint=constraint)
+        except exception.ConstraintNotMet:
+            raise exception.ObjectActionError(action='destroy',
+                                              reason='host changed')
 
     def update_from_virt_driver(self, resources):
         # NOTE(pmurray): the virt driver provides a dict of values that
@@ -470,7 +481,7 @@ class ComputeNodeList(base.ObjectListBase, base.NovaObject):
     @staticmethod
     @db.select_db_reader_mode
     def _db_compute_node_get_all_by_uuids(context, compute_uuids):
-        db_computes = sa_api.model_query(context, models.ComputeNode).filter(
+        db_computes = db.model_query(context, models.ComputeNode).filter(
             models.ComputeNode.uuid.in_(compute_uuids)).all()
         return db_computes
 
@@ -500,17 +511,17 @@ def _get_node_empty_ratio(context, max_count):
 
     Results are limited by ``max_count``.
     """
-    return context.session.query(models.ComputeNode).filter(or_(
+    return context.session.query(models.ComputeNode).filter(sa.or_(
         models.ComputeNode.ram_allocation_ratio == '0.0',
         models.ComputeNode.cpu_allocation_ratio == '0.0',
         models.ComputeNode.disk_allocation_ratio == '0.0',
-        models.ComputeNode.ram_allocation_ratio == null(),
-        models.ComputeNode.cpu_allocation_ratio == null(),
-        models.ComputeNode.disk_allocation_ratio == null()
+        models.ComputeNode.ram_allocation_ratio == sql.null(),
+        models.ComputeNode.cpu_allocation_ratio == sql.null(),
+        models.ComputeNode.disk_allocation_ratio == sql.null()
     )).filter(models.ComputeNode.deleted == 0).limit(max_count).all()
 
 
-@sa_api.pick_context_manager_writer
+@db.pick_context_manager_writer
 def migrate_empty_ratio(context, max_count):
     cns = _get_node_empty_ratio(context, max_count)
 

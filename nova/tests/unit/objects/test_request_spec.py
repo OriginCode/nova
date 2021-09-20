@@ -412,13 +412,17 @@ class _TestRequestSpecObject(object):
         filter_properties = {'fake': 'property'}
 
         rg = request_spec.RequestGroup()
+        req_lvl_params = request_spec.RequestLevelParams()
 
-        spec = objects.RequestSpec.from_components(ctxt, instance.uuid, image,
-                flavor, instance.numa_topology, instance.pci_requests,
-                filter_properties, None, instance.availability_zone,
-                port_resource_requests=[rg])
+        spec = objects.RequestSpec.from_components(
+            ctxt, instance.uuid, image,
+            flavor, instance.numa_topology, instance.pci_requests,
+            filter_properties, None, instance.availability_zone,
+            port_resource_requests=[rg], request_level_params=req_lvl_params
+        )
 
         self.assertListEqual([rg], spec.requested_resources)
+        self.assertEqual(req_lvl_params, spec.request_level_params)
 
     def test_get_scheduler_hint(self):
         spec_obj = objects.RequestSpec(scheduler_hints={'foo_single': ['1'],
@@ -674,6 +678,9 @@ class _TestRequestSpecObject(object):
         req_obj.retry = expected_retry
         nr = objects.NetworkRequest()
         req_obj.requested_networks = objects.NetworkRequestList(objects=[nr])
+        req_lvl_params = objects.RequestLevelParams(
+            root_required={"CUSTOM_FOO"})
+        req_obj.request_level_params = req_lvl_params
 
         orig_create_in_db = request_spec.RequestSpec._create_in_db
         with mock.patch.object(request_spec.RequestSpec, '_create_in_db') \
@@ -688,13 +695,16 @@ class _TestRequestSpecObject(object):
             # 3. requested_resources
             # 4. retry
             # 5. requested_networks
+            # 6. request_level_params
             data = jsonutils.loads(updates['spec'])['nova_object.data']
             self.assertNotIn('network_metadata', data)
             self.assertIsNone(data['requested_destination'])
             self.assertIsNone(data['requested_resources'])
             self.assertIsNone(data['retry'])
-            self.assertIsNotNone(data['instance_uuid'])
             self.assertNotIn('requested_networks', data)
+            self.assertNotIn('request_level_params', data)
+
+            self.assertIsNotNone(data['instance_uuid'])
 
         # also we expect that the following fields are not reset after create
         # 1. network_metadata
@@ -702,6 +712,7 @@ class _TestRequestSpecObject(object):
         # 3. requested_resources
         # 4. retry
         # 5. requested_networks
+        # 6. request_level_params
         self.assertIsNotNone(req_obj.network_metadata)
         self.assertJsonEqual(expected_network_metadata.obj_to_primitive(),
                              req_obj.network_metadata.obj_to_primitive())
@@ -717,6 +728,10 @@ class _TestRequestSpecObject(object):
         self.assertIsNotNone(req_obj.requested_networks)
         self.assertJsonEqual(nr.obj_to_primitive(),
                              req_obj.requested_networks[0].obj_to_primitive())
+        self.assertIsNotNone(req_obj.request_level_params)
+        self.assertJsonEqual(
+            req_lvl_params.obj_to_primitive(),
+            req_obj.request_level_params.obj_to_primitive())
 
     def test_save_does_not_persist_requested_fields(self):
         req_obj = fake_request_spec.fake_spec_obj(remove_id=True)
@@ -1032,6 +1047,64 @@ class TestRequestGroupObject(test.NoDBTestCase):
         self.assertEqual(set(), rg.forbidden_traits)
         self.assertEqual([], rg.aggregates)
         self.assertEqual([], rg.provider_uuids)
+
+    def test_from_extended_port_request(self):
+        port_resource_request = {
+            "request_groups": [
+                {
+                    "id": uuids.group_id1,
+                    "resources": {
+                        "NET_BW_IGR_KILOBIT_PER_SEC": 1000,
+                        "NET_BW_EGR_KILOBIT_PER_SEC": 1000},
+                    "required": [
+                        "CUSTOM_PHYSNET2", "CUSTOM_VNIC_TYPE_NORMAL"]
+                },
+                {
+                    "id": uuids.group_id2,
+                    "resources": {
+                        "NET_PACKET_RATE_KILOPACKET_PER_SEC": 1000
+                    },
+                    "required": ["CUSTOM_VNIC_TYPE_NORMAL"]
+                }
+            ],
+            "same_subtree": [
+                uuids.group_id1,
+                uuids.group_id2,
+            ],
+        }
+
+        rgs = request_spec.RequestGroup.from_extended_port_request(
+            self.context, port_resource_request)
+
+        # two separate groups are returned
+        self.assertEqual(2, len(rgs))
+
+        self.assertTrue(rgs[0].use_same_provider)
+        self.assertEqual(
+            {"NET_BW_IGR_KILOBIT_PER_SEC": 1000,
+             "NET_BW_EGR_KILOBIT_PER_SEC": 1000},
+            rgs[0].resources)
+        self.assertEqual(
+            {"CUSTOM_PHYSNET2", "CUSTOM_VNIC_TYPE_NORMAL"},
+            rgs[0].required_traits)
+        self.assertEqual(uuids.group_id1, rgs[0].requester_id)
+        # and the rest is defaulted
+        self.assertEqual(set(), rgs[0].forbidden_traits)
+        self.assertEqual([], rgs[0].aggregates)
+        self.assertEqual([], rgs[0].provider_uuids)
+
+        self.assertTrue(rgs[1].use_same_provider)
+        self.assertEqual(
+            {"NET_PACKET_RATE_KILOPACKET_PER_SEC": 1000},
+            rgs[1].resources)
+        self.assertEqual(
+            {"CUSTOM_VNIC_TYPE_NORMAL"},
+            rgs[1].required_traits)
+        self.assertEqual(uuids.group_id2, rgs[1].requester_id)
+        # and the rest is defaulted
+        self.assertEqual(set(), rgs[1].forbidden_traits)
+        self.assertEqual([], rgs[1].aggregates)
+        self.assertEqual([], rgs[1].provider_uuids)
 
     def test_compat_requester_and_provider(self):
         req_obj = objects.RequestGroup(
@@ -1681,3 +1754,54 @@ class TestMappingRequestGroupsToProviders(test.NoDBTestCase):
             allocations, provider_traits)
 
         self.assertIn('allocations leftover', mock_debug.mock_calls[3][1][0])
+
+
+class TestRequestLevelParams(test.NoDBTestCase):
+    def setUp(self):
+        super().setUp()
+        self.user_id = uuids.user_id
+        self.project_id = uuids.project_id
+        self.context = context.RequestContext(uuids.user_id, uuids.project_id)
+
+    def test_obj_make_compatible(self):
+        obj = request_spec.RequestLevelParams(
+            self.context,
+            root_required={"CUSTOM_FOO", "CUSTOM_BAR"},
+            root_forbidden={"CUSTOM_BAZ"},
+            same_subtree=[["group1", "group2"], ["group3", "group4"]])
+
+        manifest = ovo_base.obj_tree_get_versions(obj.obj_name())
+
+        obj_primitive = obj.obj_to_primitive(
+            target_version='1.1',
+            version_manifest=manifest)['nova_object.data']
+        self.assertIn('root_required', obj_primitive)
+        self.assertIn('root_forbidden', obj_primitive)
+        self.assertIn('same_subtree', obj_primitive)
+
+        obj_primitive = obj.obj_to_primitive(
+            target_version='1.0',
+            version_manifest=manifest)['nova_object.data']
+        self.assertIn('root_required', obj_primitive)
+        self.assertIn('root_forbidden', obj_primitive)
+        self.assertNotIn('same_subtree', obj_primitive)
+
+    def test_extend_with(self):
+        obj1 = request_spec.RequestLevelParams(
+            self.context,
+            root_required={"CUSTOM_FOO"},
+            root_forbidden={"CUSTOM_BAZ"},
+            same_subtree=[["group1", "group2"]])
+        obj2 = request_spec.RequestLevelParams(
+            self.context,
+            root_required={"CUSTOM_BAR"},
+            root_forbidden={"CUSTOM_FOOBAR"},
+            same_subtree=[["group3", "group4"]])
+
+        obj1.extend_with(obj2)
+
+        self.assertEqual({"CUSTOM_FOO", "CUSTOM_BAR"}, obj1.root_required)
+        self.assertEqual({"CUSTOM_BAZ", "CUSTOM_FOOBAR"}, obj1.root_forbidden)
+        self.assertEqual(
+            [["group1", "group2"], ["group3", "group4"]],
+            obj1.same_subtree)

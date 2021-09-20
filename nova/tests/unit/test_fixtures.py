@@ -34,7 +34,8 @@ import testtools
 from nova.compute import rpcapi as compute_rpcapi
 from nova import conductor
 from nova import context
-from nova.db.sqlalchemy import api as session
+from nova.db.api import api as api_db_api
+from nova.db.main import api as main_db_api
 from nova import exception
 from nova.network import neutron as neutron_api
 from nova import objects
@@ -42,7 +43,6 @@ from nova.objects import base as obj_base
 from nova.objects import service as service_obj
 from nova import test
 from nova.tests import fixtures
-from nova.tests.unit import conf_fixture
 from nova.tests.unit import fake_instance
 from nova import utils
 
@@ -95,7 +95,7 @@ class TestOSAPIFixture(testtools.TestCase):
         """Ensure the OSAPI server responds to calls sensibly."""
         self.useFixture(output.CaptureOutput())
         self.useFixture(fixtures.StandardLogging())
-        self.useFixture(conf_fixture.ConfFixture())
+        self.useFixture(fixtures.ConfFixture())
         self.useFixture(fixtures.RPCFixture('nova.test'))
         api = self.useFixture(fixtures.OSAPIFixture()).api
 
@@ -120,9 +120,9 @@ class TestOSAPIFixture(testtools.TestCase):
 class TestDatabaseFixture(testtools.TestCase):
     def test_fixture_reset(self):
         # because this sets up reasonable db connection strings
-        self.useFixture(conf_fixture.ConfFixture())
+        self.useFixture(fixtures.ConfFixture())
         self.useFixture(fixtures.Database())
-        engine = session.get_engine()
+        engine = main_db_api.get_engine()
         conn = engine.connect()
         result = conn.execute("select * from instance_types")
         rows = result.fetchall()
@@ -151,9 +151,9 @@ class TestDatabaseFixture(testtools.TestCase):
 
     def test_api_fixture_reset(self):
         # This sets up reasonable db connection strings
-        self.useFixture(conf_fixture.ConfFixture())
+        self.useFixture(fixtures.ConfFixture())
         self.useFixture(fixtures.Database(database='api'))
-        engine = session.get_api_engine()
+        engine = api_db_api.get_engine()
         conn = engine.connect()
         result = conn.execute("select * from cell_mappings")
         rows = result.fetchall()
@@ -179,7 +179,7 @@ class TestDatabaseFixture(testtools.TestCase):
 
     def test_fixture_cleanup(self):
         # because this sets up reasonable db connection strings
-        self.useFixture(conf_fixture.ConfFixture())
+        self.useFixture(fixtures.ConfFixture())
         fix = fixtures.Database()
         self.useFixture(fix)
 
@@ -187,19 +187,19 @@ class TestDatabaseFixture(testtools.TestCase):
         fix.cleanup()
 
         # ensure the db contains nothing
-        engine = session.get_engine()
+        engine = main_db_api.get_engine()
         conn = engine.connect()
         schema = "".join(line for line in conn.connection.iterdump())
         self.assertEqual(schema, "BEGIN TRANSACTION;COMMIT;")
 
     def test_api_fixture_cleanup(self):
         # This sets up reasonable db connection strings
-        self.useFixture(conf_fixture.ConfFixture())
+        self.useFixture(fixtures.ConfFixture())
         fix = fixtures.Database(database='api')
         self.useFixture(fix)
 
         # No data inserted by migrations so we need to add a row
-        engine = session.get_api_engine()
+        engine = api_db_api.get_engine()
         conn = engine.connect()
         uuid = uuidutils.generate_uuid()
         conn.execute("insert into cell_mappings (uuid, name) VALUES "
@@ -212,7 +212,7 @@ class TestDatabaseFixture(testtools.TestCase):
         fix.cleanup()
 
         # Ensure the db contains nothing
-        engine = session.get_api_engine()
+        engine = api_db_api.get_engine()
         conn = engine.connect()
         schema = "".join(line for line in conn.connection.iterdump())
         self.assertEqual("BEGIN TRANSACTION;COMMIT;", schema)
@@ -221,11 +221,11 @@ class TestDatabaseFixture(testtools.TestCase):
 class TestDefaultFlavorsFixture(testtools.TestCase):
     @mock.patch("nova.objects.flavor.Flavor._send_notification")
     def test_flavors(self, mock_send_notification):
-        self.useFixture(conf_fixture.ConfFixture())
+        self.useFixture(fixtures.ConfFixture())
         self.useFixture(fixtures.Database())
         self.useFixture(fixtures.Database(database='api'))
 
-        engine = session.get_api_engine()
+        engine = api_db_api.get_engine()
         conn = engine.connect()
         result = conn.execute("select * from flavors")
         rows = result.fetchall()

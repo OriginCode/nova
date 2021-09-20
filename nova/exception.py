@@ -155,8 +155,24 @@ class Forbidden(NovaException):
     code = 403
 
 
-class ForbiddenWithAccelerators(Forbidden):
-    msg_fmt = _("Forbidden with instances that have accelerators.")
+class NotSupported(NovaException):
+    # This exception use return code as 400 and can be used
+    # directly or as base exception for operations whihc are not
+    # supported in Nova. Any feature that is not yet implemented
+    # but plan to implement in future (example: Cyborg
+    # integration operations), should use this exception as base
+    # and override the msg_fmt with feature details.
+    # Example: MultiattachNotSupportedByVirtDriver exception.
+    msg_fmt = _("Bad Request - Feature is not supported in Nova")
+    code = 400
+
+
+class ForbiddenWithAccelerators(NotSupported):
+    msg_fmt = _("Feature not supported with instances that have accelerators.")
+
+
+class ForbiddenPortsWithAccelerator(NotSupported):
+    msg_fmt = _("Feature not supported with Ports that have accelerators.")
 
 
 class AdminRequired(Forbidden):
@@ -272,14 +288,18 @@ class VolumeDetachFailed(Invalid):
                 "Reason: %(reason)s")
 
 
-class MultiattachNotSupportedByVirtDriver(NovaException):
+class VolumeExtendFailed(Invalid):
+    msg_fmt = _("Volume %(volume_id)s could not be extended. "
+                "Reason: %(reason)s")
+
+
+class MultiattachNotSupportedByVirtDriver(NotSupported):
     # This exception indicates the compute hosting the instance does not
     # support multiattach volumes. This should generally be considered a
-    # 409 HTTPConflict error in the API since we expect all virt drivers to
+    # 400 HTTPBadRequest error in the API since we expect all virt drivers to
     # eventually support multiattach volumes.
     msg_fmt = _("Volume %(volume_id)s has 'multiattach' set, "
                 "which is not supported for this instance.")
-    code = 409
 
 
 class MultiattachNotSupportedOldMicroversion(Invalid):
@@ -492,6 +512,10 @@ class MultiplePortsNotApplicable(Invalid):
     msg_fmt = _("Failed to launch instances: %(reason)s")
 
 
+class AmbiguousHostnameForMultipleInstances(Invalid):
+    msg_fmt = _("Unable to allocate a single hostname to multiple instances")
+
+
 class InvalidFixedIpAndMaxCountRequest(Invalid):
     msg_fmt = _("Failed to launch instances: %(reason)s")
 
@@ -525,24 +549,21 @@ class UnableToMigrateToSelf(Invalid):
                 "to current host (%(host)s).")
 
 
-class OperationNotSupportedForSEV(NovaException):
+class OperationNotSupportedForSEV(NotSupported):
     msg_fmt = _("Operation '%(operation)s' not supported for SEV-enabled "
                 "instance (%(instance_uuid)s).")
-    code = 409
 
 
-class OperationNotSupportedForVTPM(NovaException):
+class OperationNotSupportedForVTPM(NotSupported):
     msg_fmt = _("Operation '%(operation)s' not supported for vTPM-enabled "
                 "instance (%(instance_uuid)s).")
-    code = 409
 
 
-class OperationNotSupportedForVDPAInterface(NovaException):
+class OperationNotSupportedForVDPAInterface(NotSupported):
     msg_fmt = _(
         "Operation '%(operation)s' not supported for instance with "
         "vDPA ports ((instance_uuid)s)."
     )
-    code = 409
 
 
 class InvalidHypervisorType(Invalid):
@@ -816,13 +837,13 @@ class PortBindingFailed(Invalid):
 
 
 class PortBindingDeletionFailed(NovaException):
-    msg_fmt = _("Failed to delete binding for port %(port_id)s and host "
-                "%(host)s.")
+    msg_fmt = _("Failed to delete binding for port(s) %(port_id)s on host "
+                "%(host)s; please check neutron logs for more information")
 
 
 class PortBindingActivationFailed(NovaException):
-    msg_fmt = _("Failed to activate binding for port %(port_id)s and host "
-                "%(host)s.")
+    msg_fmt = _("Failed to activate binding for port %(port_id)s on host "
+                "%(host)s; please check neutron logs for more information")
 
 
 class PortUpdateFailed(Invalid):
@@ -1442,10 +1463,6 @@ class RescheduledException(NovaException):
                 "%(reason)s")
 
 
-class ShadowTableExists(NovaException):
-    msg_fmt = _("Shadow table with name %(name)s already exists.")
-
-
 class InstanceFaultRollback(NovaException):
     def __init__(self, inner_exception=None):
         message = _("Instance rollback performed due to: %s")
@@ -1939,6 +1956,13 @@ class AttachInterfaceWithQoSPolicyNotSupported(AttachInterfaceNotSupported):
                 "instance %(instance_uuid)s.")
 
 
+class AttachWithExtendedQoSPolicyNotSupported(AttachInterfaceNotSupported):
+    msg_fmt = _(
+        "The interface attach server operation with port having extended "
+        "resource request, like a port with both QoS minimum bandwidth and "
+        "packet rate policies, is not yet supported.")
+
+
 class NetworksWithQoSPolicyNotSupported(Invalid):
     msg_fmt = _("Using networks with QoS policy is not supported for "
                 "instance %(instance_uuid)s. (Network ID is %(network_id)s)")
@@ -1948,6 +1972,12 @@ class CreateWithPortResourceRequestOldVersion(Invalid):
     msg_fmt = _("Creating servers with ports having resource requests, like a "
                 "port with a QoS minimum bandwidth policy, is not supported "
                 "until microversion 2.72.")
+
+
+class ExtendedResourceRequestOldCompute(Invalid):
+    msg_fmt = _("The port-resource-request-groups neutron API extension is "
+                "not supported by old nova compute service. Upgrade your "
+                "compute services to Xena (24.0.0) or later.")
 
 
 class InvalidReservedMemoryPagesOption(Invalid):
@@ -2239,6 +2269,24 @@ class MissingDomainCapabilityFeatureException(NovaException):
                 "including <%(feature)s> feature.")
 
 
+class HealAllocationException(NovaException):
+    msg_fmt = _("Healing instance allocation failed.")
+
+
+class HealvGPUAllocationNotSupported(HealAllocationException):
+    msg_fmt = _(
+        "Healing allocation for instance %(instance_uuid)s with vGPU resource "
+        "request is not supported."
+    )
+
+
+class HealDeviceProfileAllocationNotSupported(HealAllocationException):
+    msg_fmt = _(
+        "Healing allocation for instance %(instance_uuid)s with Cyborg device "
+        "profile request is not supported."
+    )
+
+
 class HealPortAllocationException(NovaException):
     msg_fmt = _("Healing port allocation failed.")
 
@@ -2341,8 +2389,8 @@ class AcceleratorRequestBindingFailed(NovaException):
         self.arqs = arqs or []
 
 
-class InvalidLibvirtGPUConfig(NovaException):
-    msg_fmt = _('Invalid configuration for GPU devices: %(reason)s')
+class InvalidLibvirtMdevConfig(NovaException):
+    msg_fmt = _('Invalid configuration for mdev-capable devices: %(reason)s')
 
 
 class RequiredMixedInstancePolicy(Invalid):
