@@ -3,6 +3,8 @@ nova (2:24.0.0~rc1-1) experimental; urgency=medium
   * New upstream release.
   * Fixed (build-)depends for this release.
   * Fixed oslo.config namespaces when generating config file.
+  * Do touch nova/db/api/__init__.py in d/rules until
+    https://review.opendev.org/c/openstack/nova/+/809980 is merged.
 
  -- Thomas Goirand <zigo@debian.org>  Mon, 20 Sep 2021 10:56:12 +0200
 
