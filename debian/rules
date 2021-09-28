@@ -97,6 +97,9 @@ endif
 		--format yaml \
 		--namespace nova
 
+	# Comment out deprecated policies, otherwise, Nova doesn't work
+	sed -i 's/^"/#"/' $(CURDIR)/debian/nova-common/etc/nova/policy.d/00_default_policy.yaml
+
 	# Use the policy.d folder
 	pkgos-fix-config-default $(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf oslo_policy policy_dirs /etc/nova/policy.d
 
