@@ -1,3 +1,9 @@
+nova (2:24.0.0~rc1-4) unstable; urgency=medium
+
+  * Uploading to unstable.
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 29 Sep 2021 21:30:54 +0200
+
 nova (2:24.0.0~rc1-3) experimental; urgency=medium
 
   * Comment out deprecated policies, otherwise, Nova doesn't work.
