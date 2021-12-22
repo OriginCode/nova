@@ -2,6 +2,7 @@ nova (2:24.0.0-2) unstable; urgency=medium
 
   * Blacklist test_temporary_chown which is expected to fail under a packaging
     environement (Closes: #1002426).
+  * Add remove-dataclasses-requirements.txt.patch.
 
  -- Thomas Goirand <zigo@debian.org>  Wed, 22 Dec 2021 17:00:35 +0100
 

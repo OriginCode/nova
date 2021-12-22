@@ -2,3 +2,4 @@ Install-missed-files.patch
 remove-crashing-blockdiag-doc-line.patch
 remove-svg-converter-from-doc-conf.py.patch
 Add-a-healtcheck-url.patch
+remove-dataclasses-requirements.txt.patch
