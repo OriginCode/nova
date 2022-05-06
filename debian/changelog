@@ -1,3 +1,10 @@
+nova (2:25.0.0-4) unstable; urgency=medium
+
+  * Autopkgtest: also blacklist test that fails on s390x:
+    - LibvirtISERVolumeDriverTestCase\.test_get_transport
+
+ -- Thomas Goirand <zigo@debian.org>  Fri, 06 May 2022 10:33:09 +0200
+
 nova (2:25.0.0-3) unstable; urgency=medium
 
   * Autopkgtest: blacklist some unit tests that are failing.
