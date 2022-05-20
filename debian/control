@@ -271,6 +271,7 @@ Depends:
  python3-libvirt,
  qemu-block-extra,
  qemu-system-x86,
+ swtpm,
  ${misc:Depends},
 Provides:
  nova-compute-hypervisor,
@@ -341,6 +342,7 @@ Depends:
  python3-libvirt,
  qemu-system,
  qemu-block-extra,
+ swtpm,
  ${misc:Depends},
 Provides:
  nova-compute-hypervisor,

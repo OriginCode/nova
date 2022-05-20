@@ -1,3 +1,9 @@
+nova (2:25.0.0-5) UNRELEASED; urgency=medium
+
+  * Add swtpm as dependency of nova-compute-{kvm,qemu}.
+
+ -- Thomas Goirand <zigo@debian.org>  Fri, 20 May 2022 10:33:41 +0200
+
 nova (2:25.0.0-4) unstable; urgency=medium
 
   * Autopkgtest: also blacklist test that fails on s390x:
