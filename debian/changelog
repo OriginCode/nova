@@ -1,6 +1,8 @@
-nova (2:25.0.0-5) UNRELEASED; urgency=medium
+nova (2:25.0.0-5) unstable; urgency=medium
 
   * Add swtpm as dependency of nova-compute-{kvm,qemu}.
+  * Add Make_test_wait_for_instance_event_test_time_independent.patch
+    (Closes: #1013410).
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 20 May 2022 10:33:41 +0200
 
