@@ -1,3 +1,9 @@
+nova (2:25.0.0-6) unstable; urgency=medium
+
+  * Add Add_a_proper_schema_version_to_network_data.json.patch.
+
+ -- Thomas Goirand <zigo@debian.org>  Thu, 14 Jul 2022 20:49:45 +0200
+
 nova (2:25.0.0-5) unstable; urgency=medium
 
   * Add swtpm as dependency of nova-compute-{kvm,qemu}.

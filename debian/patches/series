@@ -4,3 +4,4 @@ remove-svg-converter-from-doc-conf.py.patch
 Add-a-healtcheck-url.patch
 remove-dataclasses-requirements.txt.patch
 Make_test_wait_for_instance_event_test_time_independent.patch
+Add_a_proper_schema_version_to_network_data.json.patch
