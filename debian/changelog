@@ -1,6 +1,7 @@
 nova (2:25.0.0-6) unstable; urgency=medium
 
   * Add Add_a_proper_schema_version_to_network_data.json.patch.
+  * Add Fix_compatibility_with_jsonschema_4.x.patch.
 
  -- Thomas Goirand <zigo@debian.org>  Thu, 14 Jul 2022 20:49:45 +0200
 
