@@ -1,3 +1,9 @@
+nova (2:25.0.1-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Thomas Goirand <zigo@debian.org>  Thu, 04 Aug 2022 13:34:15 +0200
+
 nova (2:25.0.0-6) unstable; urgency=medium
 
   * Add Add_a_proper_schema_version_to_network_data.json.patch.
