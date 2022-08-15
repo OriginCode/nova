@@ -1,3 +1,11 @@
+nova (2:25.0.1-2) unstable; urgency=medium
+
+  * Skip open redirect tests, as this is affected by a change in the Python
+    3.10.6 standard library. Note I reported the issue upstream in launchpad
+    with the ID 1986545 (Closes: #1017217).
+
+ -- Thomas Goirand <zigo@debian.org>  Mon, 15 Aug 2022 15:40:10 +0200
+
 nova (2:25.0.1-1) unstable; urgency=medium
 
   * New upstream release.
