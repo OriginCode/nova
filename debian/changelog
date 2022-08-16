@@ -1,3 +1,9 @@
+nova (2:25.0.1-3) unstable; urgency=medium
+
+  * Also skip open redirect tests in autopkgtest.
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 17 Aug 2022 00:57:19 +0200
+
 nova (2:25.0.1-2) unstable; urgency=medium
 
   * Skip open redirect tests, as this is affected by a change in the Python
