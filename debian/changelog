@@ -9,6 +9,8 @@ nova (2:26.0.0~rc1-1) experimental; urgency=medium
     applied upstream.
   * Removed Add_a_proper_schema_version_to_network_data.json.patch applied
     upstream.
+  * Removed debian/patches/Fix_compatibility_with_jsonschema_4.x.patch
+    applied upstream.
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 16 Sep 2022 15:24:28 +0200
 

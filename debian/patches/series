@@ -1,4 +1,3 @@
 Install-missed-files.patch
 remove-svg-converter-from-doc-conf.py.patch
 Add-a-healtcheck-url.patch
-Fix_compatibility_with_jsonschema_4.x.patch
