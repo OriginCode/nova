@@ -10,7 +10,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import mock
+from unittest import mock
+
 from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova.api.openstack.compute import networks
@@ -72,9 +73,9 @@ class NetworksNoLegacyNoScopePolicyTest(NetworksPolicyTest):
     without_deprecated_rules = True
     rules_without_deprecation = {
         policies.POLICY_ROOT % 'list':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
         policies.POLICY_ROOT % 'show':
-            base_policy.PROJECT_READER}
+            base_policy.PROJECT_READER_OR_ADMIN}
 
     def setUp(self):
         super(NetworksNoLegacyNoScopePolicyTest, self).setUp()
@@ -119,9 +120,9 @@ class NetworksScopeTypeNoLegacyPolicyTest(NetworksScopeTypePolicyTest):
     without_deprecated_rules = True
     rules_without_deprecation = {
         policies.POLICY_ROOT % 'list':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
         policies.POLICY_ROOT % 'show':
-            base_policy.PROJECT_READER}
+            base_policy.PROJECT_READER_OR_ADMIN}
 
     def setUp(self):
         super(NetworksScopeTypeNoLegacyPolicyTest, self).setUp()

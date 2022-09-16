@@ -10,8 +10,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from unittest import mock
+
 import fixtures
-import mock
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 
@@ -82,11 +83,6 @@ class MigrateServerNoLegacyNoScopeTest(MigrateServerPolicyTest):
 
     without_deprecated_rules = True
 
-    def setUp(self):
-        super(MigrateServerNoLegacyNoScopeTest, self).setUp()
-        self.project_admin_authorized_contexts = [
-            self.project_admin_context]
-
 
 class MigrateServerScopeTypePolicyTest(MigrateServerPolicyTest):
     """Test Migrate Server APIs policies with system scope enabled.
@@ -114,12 +110,6 @@ class MigrateServerScopeTypeNoLegacyPolicyTest(
     """
     without_deprecated_rules = True
 
-    def setUp(self):
-        super(MigrateServerScopeTypeNoLegacyPolicyTest, self).setUp()
-        # with no legacy rule and scope enable., only project admin is able to
-        # migrate the server.
-        self.project_admin_authorized_contexts = [self.project_admin_context]
-
 
 class MigrateServerOverridePolicyTest(
         MigrateServerScopeTypeNoLegacyPolicyTest):
@@ -134,7 +124,7 @@ class MigrateServerOverridePolicyTest(
         rule_migrate = ms_policies.POLICY_ROOT % 'migrate'
         rule_live_migrate = ms_policies.POLICY_ROOT % 'migrate_live'
         # NOTE(gmann): override the rule to project member and verify it
-        # work as policy is system and projct scoped.
+        # work as policy is system and project scoped.
         self.policy.set_rules({
             rule_migrate: base_policy.PROJECT_MEMBER,
             rule_live_migrate: base_policy.PROJECT_MEMBER},

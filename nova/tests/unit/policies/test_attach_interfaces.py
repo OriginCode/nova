@@ -10,8 +10,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from unittest import mock
+
 import fixtures
-import mock
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 
@@ -116,22 +117,21 @@ class AttachInterfacesNoLegacyNoScopePolicyTest(AttachInterfacesPolicyTest):
     without_deprecated_rules = True
     rules_without_deprecation = {
         ai_policies.POLICY_ROOT % 'list':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
         ai_policies.POLICY_ROOT % 'show':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
         ai_policies.POLICY_ROOT % 'create':
-            base_policy.PROJECT_MEMBER,
+            base_policy.PROJECT_MEMBER_OR_ADMIN,
         ai_policies.POLICY_ROOT % 'delete':
-            base_policy.PROJECT_MEMBER}
+            base_policy.PROJECT_MEMBER_OR_ADMIN}
 
     def setUp(self):
         super(AttachInterfacesNoLegacyNoScopePolicyTest, self).setUp()
         # With no legacy rule, legacy admin loose power.
-        self.project_member_authorized_contexts = [
-            self.project_admin_context, self.project_member_context]
-        self.project_reader_authorized_contexts = [
-            self.project_admin_context, self.project_member_context,
-            self.project_reader_context]
+        self.project_member_authorized_contexts = (
+            self.project_member_or_admin_with_no_scope_no_legacy)
+        self.project_reader_authorized_contexts = (
+            self.project_reader_or_admin_with_no_scope_no_legacy)
 
 
 class AttachInterfacesScopeTypePolicyTest(AttachInterfacesPolicyTest):
@@ -148,12 +148,10 @@ class AttachInterfacesScopeTypePolicyTest(AttachInterfacesPolicyTest):
         super(AttachInterfacesScopeTypePolicyTest, self).setUp()
         self.flags(enforce_scope=True, group="oslo_policy")
         # With Scope enable, system users no longer allowed.
-        self.project_member_authorized_contexts = [
-            self.legacy_admin_context,
-            self.project_admin_context, self.project_member_context,
-            self.project_reader_context, self.project_foo_context]
+        self.project_member_authorized_contexts = (
+            self.project_m_r_or_admin_with_scope_and_legacy)
         self.project_reader_authorized_contexts = (
-            self.project_member_authorized_contexts)
+            self.project_m_r_or_admin_with_scope_and_legacy)
 
 
 class AttachInterfacesDeprecatedPolicyTest(base.BasePolicyTest):
@@ -189,12 +187,12 @@ class AttachInterfacesDeprecatedPolicyTest(base.BasePolicyTest):
     @mock.patch('nova.network.neutron.API.list_ports')
     def test_deprecated_policy_overridden_rule_is_checked(self, mock_port,
                                                           mock_get):
-        # Test to verify if deprecatd overridden policy is working.
+        # Test to verify if deprecated overridden policy is working.
 
         # check for success as admin role. Deprecated rule
         # has been overridden with admin checks in policy.yaml
         # If admin role pass it means overridden rule is enforced by
-        # olso.policy because new default is system or project reader and the
+        # oslo.policy because new default is system or project reader and the
         # old default is admin.
         self.controller.index(self.admin_req, uuids.fake_id)
 
@@ -216,20 +214,19 @@ class AttachInterfacesScopeTypeNoLegacyPolicyTest(
     without_deprecated_rules = True
     rules_without_deprecation = {
         ai_policies.POLICY_ROOT % 'list':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
         ai_policies.POLICY_ROOT % 'show':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
         ai_policies.POLICY_ROOT % 'create':
-            base_policy.PROJECT_MEMBER,
+            base_policy.PROJECT_MEMBER_OR_ADMIN,
         ai_policies.POLICY_ROOT % 'delete':
-            base_policy.PROJECT_MEMBER}
+            base_policy.PROJECT_MEMBER_OR_ADMIN}
 
     def setUp(self):
         super(AttachInterfacesScopeTypeNoLegacyPolicyTest, self).setUp()
         # With no legacy and scope enable, only project admin, member,
         # and reader will be able to allowed operation on server interface.
-        self.project_member_authorized_contexts = [
-            self.project_admin_context, self.project_member_context]
-        self.project_reader_authorized_contexts = [
-            self.project_admin_context, self.project_member_context,
-            self.project_reader_context]
+        self.project_member_authorized_contexts = (
+            self.project_member_or_admin_with_scope_no_legacy)
+        self.project_reader_authorized_contexts = (
+            self.project_reader_or_admin_with_scope_no_legacy)

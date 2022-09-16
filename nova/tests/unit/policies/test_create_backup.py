@@ -10,8 +10,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from unittest import mock
+
 import fixtures
-import mock
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 
@@ -80,8 +81,8 @@ class CreateBackupNoLegacyNoScopePolicyTest(CreateBackupPolicyTest):
         super(CreateBackupNoLegacyNoScopePolicyTest, self).setUp()
         # With no legacy rule, only project admin or member will be
         # able to create the server backup.
-        self.project_member_authorized_contexts = [
-            self.project_admin_context, self.project_member_context]
+        self.project_member_authorized_contexts = (
+            self.project_member_or_admin_with_no_scope_no_legacy)
 
 
 class CreateBackupScopeTypePolicyTest(CreateBackupPolicyTest):
@@ -99,10 +100,8 @@ class CreateBackupScopeTypePolicyTest(CreateBackupPolicyTest):
         super(CreateBackupScopeTypePolicyTest, self).setUp()
         self.flags(enforce_scope=True, group="oslo_policy")
         # Scope enable will not allow system users to create the server.
-        self.project_member_authorized_contexts = [
-            self.legacy_admin_context,
-            self.project_admin_context, self.project_member_context,
-            self.project_reader_context, self.project_foo_context]
+        self.project_member_authorized_contexts = (
+            self.project_m_r_or_admin_with_scope_and_legacy)
 
 
 class CreateBackupScopeTypeNoLegacyPolicyTest(CreateBackupScopeTypePolicyTest):
@@ -115,5 +114,5 @@ class CreateBackupScopeTypeNoLegacyPolicyTest(CreateBackupScopeTypePolicyTest):
         super(CreateBackupScopeTypeNoLegacyPolicyTest, self).setUp()
         # With scope enable and no legacy rule, only project admin/member
         # will be able to create the server backup.
-        self.project_member_authorized_contexts = [
-            self.project_admin_context, self.project_member_context]
+        self.project_member_authorized_contexts = (
+            self.project_member_or_admin_with_scope_no_legacy)

@@ -14,12 +14,12 @@
 #    under the License.
 
 import copy
+from unittest import mock
 from urllib import parse as urlparse
 
 import ddt
 import fixtures
 from lxml import etree
-import mock
 from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
@@ -28,6 +28,7 @@ from oslo_utils import units
 
 import nova
 from nova import context
+from nova import exception
 from nova.network import constants
 from nova import objects
 from nova.objects import fields
@@ -47,9 +48,11 @@ class _PCIServersTestBase(base.ServersTestBase):
 
     def setUp(self):
         self.ctxt = context.get_admin_context()
-        self.flags(passthrough_whitelist=self.PCI_PASSTHROUGH_WHITELIST,
-                   alias=self.PCI_ALIAS,
-                   group='pci')
+        self.flags(
+            device_spec=self.PCI_DEVICE_SPEC,
+            alias=self.PCI_ALIAS,
+            group='pci'
+        )
 
         super(_PCIServersTestBase, self).setUp()
 
@@ -71,6 +74,101 @@ class _PCIServersTestBase(base.ServersTestBase):
         )
         self.assertEqual(total, len(devices))
         self.assertEqual(free, len([d for d in devices if d.is_available()]))
+
+    def _get_rp_by_name(self, name, rps):
+        for rp in rps:
+            if rp["name"] == name:
+                return rp
+        self.fail(f'RP {name} is not found in Placement {rps}')
+
+    def assert_placement_pci_view(
+        self, hostname, inventories, traits, usages=None, allocations=None
+    ):
+        if not usages:
+            usages = {}
+
+        if not allocations:
+            allocations = {}
+
+        compute_rp_uuid = self.compute_rp_uuids[hostname]
+        rps = self._get_all_rps_in_a_tree(compute_rp_uuid)
+
+        # rps also contains the root provider so we subtract 1
+        self.assertEqual(
+            len(inventories),
+            len(rps) - 1,
+            f"Number of RPs on {hostname} doesn't match. "
+            f"Expected {list(inventories)} actual {[rp['name'] for rp in rps]}"
+        )
+
+        for rp_name, inv in inventories.items():
+            real_rp_name = f'{hostname}_{rp_name}'
+            rp = self._get_rp_by_name(real_rp_name, rps)
+            rp_inv = self._get_provider_inventory(rp['uuid'])
+
+            self.assertEqual(
+                len(inv),
+                len(rp_inv),
+                f"Number of inventories on {real_rp_name} are not as "
+                f"expected. Expected {inv}, actual {rp_inv}"
+            )
+            for rc, total in inv.items():
+                self.assertEqual(
+                    total,
+                    rp_inv[rc]["total"])
+                self.assertEqual(
+                    total,
+                    rp_inv[rc]["max_unit"])
+
+            rp_traits = self._get_provider_traits(rp['uuid'])
+            self.assertEqual(
+                # COMPUTE_MANAGED_PCI_DEVICE is automatically reported on
+                # PCI device RPs by nova
+                set(traits[rp_name]) | {"COMPUTE_MANAGED_PCI_DEVICE"},
+                set(rp_traits),
+                f"Traits on RP {real_rp_name} does not match with expectation"
+            )
+
+        for rp_name, usage in usages.items():
+            real_rp_name = f'{hostname}_{rp_name}'
+            rp = self._get_rp_by_name(real_rp_name, rps)
+            rp_usage = self._get_provider_usages(rp['uuid'])
+            self.assertEqual(
+                usage,
+                rp_usage,
+                f"Usage on RP {real_rp_name} does not match with expectation"
+            )
+
+        for consumer, expected_allocations in allocations.items():
+            actual_allocations = self._get_allocations_by_server_uuid(consumer)
+            self.assertEqual(
+                len(expected_allocations),
+                # actual_allocations also contains allocations against the
+                # root provider for VCPU, MEMORY_MB, and DISK_GB so subtract
+                # one
+                len(actual_allocations) - 1,
+                f"The consumer {consumer} allocates from different number of "
+                f"RPs than expected. Expected: {expected_allocations}, "
+                f"Actual: {actual_allocations}"
+            )
+            for rp_name, expected_rp_allocs in expected_allocations.items():
+                real_rp_name = f'{hostname}_{rp_name}'
+                rp = self._get_rp_by_name(real_rp_name, rps)
+                self.assertIn(
+                    rp['uuid'],
+                    actual_allocations,
+                    f"The consumer {consumer} expected to allocate from "
+                    f"{rp['uuid']}. Expected: {expected_allocations}, "
+                    f"Actual: {actual_allocations}"
+                )
+                actual_rp_allocs = actual_allocations[rp['uuid']]['resources']
+                self.assertEqual(
+                    expected_rp_allocs,
+                    actual_rp_allocs,
+                    f"The consumer {consumer} expected to have allocation "
+                    f"{expected_rp_allocs} on {rp_name} but it has "
+                    f"{actual_rp_allocs} instead."
+                )
 
 
 class _PCIServersWithMigrationTestBase(_PCIServersTestBase):
@@ -123,7 +221,7 @@ class SRIOVServersTest(_PCIServersWithMigrationTestBase):
     VFS_ALIAS_NAME = 'vfs'
     PFS_ALIAS_NAME = 'pfs'
 
-    PCI_PASSTHROUGH_WHITELIST = [jsonutils.dumps(x) for x in (
+    PCI_DEVICE_SPEC = [jsonutils.dumps(x) for x in (
         {
             'vendor_id': fakelibvirt.PCI_VEND_ID,
             'product_id': fakelibvirt.PF_PROD_ID,
@@ -294,8 +392,6 @@ class SRIOVServersTest(_PCIServersWithMigrationTestBase):
                 'pci_vendor_info': '8086:1515',
                 'pci_slot': '0000:81:00.2',
                 'physical_network': 'physnet4',
-                'pf_mac_address': '52:54:00:1e:59:c6',
-                'vf_num': 1,
             },
             port['binding:profile'],
         )
@@ -366,31 +462,66 @@ class SRIOVServersTest(_PCIServersWithMigrationTestBase):
                                           expect_fail=False):
         # The purpose here is to force an observable PCI slot update when
         # moving from source to dest. This is accomplished by having a single
-        # PCI device on the source, 2 PCI devices on the test, and relying on
-        # the fact that our fake HostPCIDevicesInfo creates predictable PCI
-        # addresses. The PCI device on source and the first PCI device on dest
-        # will have identical PCI addresses. By sticking a "placeholder"
-        # instance on that first PCI device on the dest, the incoming instance
-        # from source will be forced to consume the second dest PCI device,
-        # with a different PCI address.
+        # PCI VF device on the source, 2 PCI VF devices on the dest, and
+        # relying on the fact that our fake HostPCIDevicesInfo creates
+        # predictable PCI addresses. The PCI VF device on source and the first
+        # PCI VF device on dest will have identical PCI addresses. By sticking
+        # a "placeholder" instance on that first PCI VF device on the dest, the
+        # incoming instance from source will be forced to consume the second
+        # dest PCI VF device, with a different PCI address.
+        # We want to test server operations with SRIOV VFs and SRIOV PFs so
+        # the config of the compute hosts also have one extra PCI PF devices
+        # without any VF children. But the two compute has different PCI PF
+        # addresses and MAC so that the test can observe the slot update as
+        # well as the MAC updated during migration and after revert.
+        source_pci_info = fakelibvirt.HostPCIDevicesInfo(num_pfs=1, num_vfs=1)
+        # add an extra PF without VF to be used by direct-physical ports
+        source_pci_info.add_device(
+            dev_type='PF',
+            bus=0x82,  # the HostPCIDevicesInfo use the 0x81 by default
+            slot=0x0,
+            function=0,
+            iommu_group=42,
+            numa_node=0,
+            vf_ratio=0,
+            mac_address='b4:96:91:34:f4:aa',
+        )
         self.start_compute(
             hostname='source',
-            pci_info=fakelibvirt.HostPCIDevicesInfo(
-                num_pfs=1, num_vfs=1))
+            pci_info=source_pci_info)
+
+        dest_pci_info = fakelibvirt.HostPCIDevicesInfo(num_pfs=1, num_vfs=2)
+        # add an extra PF without VF to be used by direct-physical ports
+        dest_pci_info.add_device(
+            dev_type='PF',
+            bus=0x82,  # the HostPCIDevicesInfo use the 0x81 by default
+            slot=0x6,  # make it different from the source host
+            function=0,
+            iommu_group=42,
+            numa_node=0,
+            vf_ratio=0,
+            mac_address='b4:96:91:34:f4:bb',
+        )
         self.start_compute(
             hostname='dest',
-            pci_info=fakelibvirt.HostPCIDevicesInfo(
-                num_pfs=1, num_vfs=2))
+            pci_info=dest_pci_info)
 
         source_port = self.neutron.create_port(
             {'port': self.neutron.network_4_port_1})
+        source_pf_port = self.neutron.create_port(
+            {'port': self.neutron.network_4_port_pf})
         dest_port1 = self.neutron.create_port(
             {'port': self.neutron.network_4_port_2})
         dest_port2 = self.neutron.create_port(
             {'port': self.neutron.network_4_port_3})
 
         source_server = self._create_server(
-            networks=[{'port': source_port['port']['id']}], host='source')
+            networks=[
+                {'port': source_port['port']['id']},
+                {'port': source_pf_port['port']['id']}
+            ],
+            host='source',
+        )
         dest_server1 = self._create_server(
             networks=[{'port': dest_port1['port']['id']}], host='dest')
         dest_server2 = self._create_server(
@@ -398,6 +529,7 @@ class SRIOVServersTest(_PCIServersWithMigrationTestBase):
 
         # Refresh the ports.
         source_port = self.neutron.show_port(source_port['port']['id'])
+        source_pf_port = self.neutron.show_port(source_pf_port['port']['id'])
         dest_port1 = self.neutron.show_port(dest_port1['port']['id'])
         dest_port2 = self.neutron.show_port(dest_port2['port']['id'])
 
@@ -413,10 +545,23 @@ class SRIOVServersTest(_PCIServersWithMigrationTestBase):
             same_slot_port = dest_port2
             self._delete_server(dest_server1)
 
-        # Before moving, explictly assert that the servers on source and dest
+        # Before moving, explicitly assert that the servers on source and dest
         # have the same pci_slot in their port's binding profile
         self.assertEqual(source_port['port']['binding:profile']['pci_slot'],
                          same_slot_port['port']['binding:profile']['pci_slot'])
+
+        # Assert that the direct-physical port got the pci_slot information
+        # according to the source host PF PCI device.
+        self.assertEqual(
+            '0000:82:00.0',  # which is in sync with the source host pci_info
+            source_pf_port['port']['binding:profile']['pci_slot']
+        )
+        # Assert that the direct-physical port is updated with the MAC address
+        # of the PF device from the source host
+        self.assertEqual(
+            'b4:96:91:34:f4:aa',
+            source_pf_port['port']['binding:profile']['device_mac_address']
+        )
 
         # Before moving, assert that the servers on source and dest have the
         # same PCI source address in their XML for their SRIOV nic.
@@ -434,13 +579,27 @@ class SRIOVServersTest(_PCIServersWithMigrationTestBase):
         move_operation(source_server)
 
         # Refresh the ports again, keeping in mind the source_port is now bound
-        # on the dest after unshelving.
+        # on the dest after the move.
         source_port = self.neutron.show_port(source_port['port']['id'])
         same_slot_port = self.neutron.show_port(same_slot_port['port']['id'])
+        source_pf_port = self.neutron.show_port(source_pf_port['port']['id'])
 
         self.assertNotEqual(
             source_port['port']['binding:profile']['pci_slot'],
             same_slot_port['port']['binding:profile']['pci_slot'])
+
+        # Assert that the direct-physical port got the pci_slot information
+        # according to the dest host PF PCI device.
+        self.assertEqual(
+            '0000:82:06.0',  # which is in sync with the dest host pci_info
+            source_pf_port['port']['binding:profile']['pci_slot']
+        )
+        # Assert that the direct-physical port is updated with the MAC address
+        # of the PF device from the dest host
+        self.assertEqual(
+            'b4:96:91:34:f4:bb',
+            source_pf_port['port']['binding:profile']['device_mac_address']
+        )
 
         conn = self.computes['dest'].driver._host.get_connection()
         vms = [vm._def for vm in conn._vms.values()]
@@ -469,6 +628,169 @@ class SRIOVServersTest(_PCIServersWithMigrationTestBase):
             self._confirm_resize(source_server)
         self._test_move_operation_with_neutron(move_operation)
 
+    def test_cold_migrate_and_rever_server_with_neutron(self):
+        # The purpose here is to force an observable PCI slot update when
+        # moving from source to dest and the from dest to source after the
+        # revert. This is accomplished by having a single
+        # PCI VF device on the source, 2 PCI VF devices on the dest, and
+        # relying on the fact that our fake HostPCIDevicesInfo creates
+        # predictable PCI addresses. The PCI VF device on source and the first
+        # PCI VF device on dest will have identical PCI addresses. By sticking
+        # a "placeholder" instance on that first PCI VF device on the dest, the
+        # incoming instance from source will be forced to consume the second
+        # dest PCI VF device, with a different PCI address.
+        # We want to test server operations with SRIOV VFs and SRIOV PFs so
+        # the config of the compute hosts also have one extra PCI PF devices
+        # without any VF children. But the two compute has different PCI PF
+        # addresses and MAC so that the test can observe the slot update as
+        # well as the MAC updated during migration and after revert.
+        source_pci_info = fakelibvirt.HostPCIDevicesInfo(num_pfs=1, num_vfs=1)
+        # add an extra PF without VF to be used by direct-physical ports
+        source_pci_info.add_device(
+            dev_type='PF',
+            bus=0x82,  # the HostPCIDevicesInfo use the 0x81 by default
+            slot=0x0,
+            function=0,
+            iommu_group=42,
+            numa_node=0,
+            vf_ratio=0,
+            mac_address='b4:96:91:34:f4:aa',
+        )
+        self.start_compute(
+            hostname='source',
+            pci_info=source_pci_info)
+        dest_pci_info = fakelibvirt.HostPCIDevicesInfo(num_pfs=1, num_vfs=2)
+        # add an extra PF without VF to be used by direct-physical ports
+        dest_pci_info.add_device(
+            dev_type='PF',
+            bus=0x82,  # the HostPCIDevicesInfo use the 0x81 by default
+            slot=0x6,  # make it different from the source host
+            function=0,
+            iommu_group=42,
+            numa_node=0,
+            vf_ratio=0,
+            mac_address='b4:96:91:34:f4:bb',
+        )
+        self.start_compute(
+            hostname='dest',
+            pci_info=dest_pci_info)
+        source_port = self.neutron.create_port(
+            {'port': self.neutron.network_4_port_1})
+        source_pf_port = self.neutron.create_port(
+            {'port': self.neutron.network_4_port_pf})
+        dest_port1 = self.neutron.create_port(
+            {'port': self.neutron.network_4_port_2})
+        dest_port2 = self.neutron.create_port(
+            {'port': self.neutron.network_4_port_3})
+        source_server = self._create_server(
+            networks=[
+                {'port': source_port['port']['id']},
+                {'port': source_pf_port['port']['id']}
+            ],
+            host='source',
+        )
+        dest_server1 = self._create_server(
+            networks=[{'port': dest_port1['port']['id']}], host='dest')
+        dest_server2 = self._create_server(
+            networks=[{'port': dest_port2['port']['id']}], host='dest')
+        # Refresh the ports.
+        source_port = self.neutron.show_port(source_port['port']['id'])
+        source_pf_port = self.neutron.show_port(source_pf_port['port']['id'])
+        dest_port1 = self.neutron.show_port(dest_port1['port']['id'])
+        dest_port2 = self.neutron.show_port(dest_port2['port']['id'])
+        # Find the server on the dest compute that's using the same pci_slot as
+        # the server on the source compute, and delete the other one to make
+        # room for the incoming server from the source.
+        source_pci_slot = source_port['port']['binding:profile']['pci_slot']
+        dest_pci_slot1 = dest_port1['port']['binding:profile']['pci_slot']
+        if dest_pci_slot1 == source_pci_slot:
+            same_slot_port = dest_port1
+            self._delete_server(dest_server2)
+        else:
+            same_slot_port = dest_port2
+            self._delete_server(dest_server1)
+        # Before moving, explicitly assert that the servers on source and dest
+        # have the same pci_slot in their port's binding profile
+        self.assertEqual(source_port['port']['binding:profile']['pci_slot'],
+                         same_slot_port['port']['binding:profile']['pci_slot'])
+        # Assert that the direct-physical port got the pci_slot information
+        # according to the source host PF PCI device.
+        self.assertEqual(
+            '0000:82:00.0',  # which is in sync with the source host pci_info
+            source_pf_port['port']['binding:profile']['pci_slot']
+        )
+        # Assert that the direct-physical port is updated with the MAC address
+        # of the PF device from the source host
+        self.assertEqual(
+            'b4:96:91:34:f4:aa',
+            source_pf_port['port']['binding:profile']['device_mac_address']
+        )
+        # Before moving, assert that the servers on source and dest have the
+        # same PCI source address in their XML for their SRIOV nic.
+        source_conn = self.computes['source'].driver._host.get_connection()
+        dest_conn = self.computes['source'].driver._host.get_connection()
+        source_vms = [vm._def for vm in source_conn._vms.values()]
+        dest_vms = [vm._def for vm in dest_conn._vms.values()]
+        self.assertEqual(1, len(source_vms))
+        self.assertEqual(1, len(dest_vms))
+        self.assertEqual(1, len(source_vms[0]['devices']['nics']))
+        self.assertEqual(1, len(dest_vms[0]['devices']['nics']))
+        self.assertEqual(source_vms[0]['devices']['nics'][0]['source'],
+                         dest_vms[0]['devices']['nics'][0]['source'])
+
+        # TODO(stephenfin): The mock of 'migrate_disk_and_power_off' should
+        # probably be less...dumb
+        with mock.patch('nova.virt.libvirt.driver.LibvirtDriver'
+                        '.migrate_disk_and_power_off', return_value='{}'):
+            self._migrate_server(source_server)
+
+        # Refresh the ports again, keeping in mind the ports are now bound
+        # on the dest after migrating.
+        source_port = self.neutron.show_port(source_port['port']['id'])
+        same_slot_port = self.neutron.show_port(same_slot_port['port']['id'])
+        source_pf_port = self.neutron.show_port(source_pf_port['port']['id'])
+        self.assertNotEqual(
+            source_port['port']['binding:profile']['pci_slot'],
+            same_slot_port['port']['binding:profile']['pci_slot'])
+        # Assert that the direct-physical port got the pci_slot information
+        # according to the dest host PF PCI device.
+        self.assertEqual(
+            '0000:82:06.0',  # which is in sync with the dest host pci_info
+            source_pf_port['port']['binding:profile']['pci_slot']
+        )
+        # Assert that the direct-physical port is updated with the MAC address
+        # of the PF device from the dest host
+        self.assertEqual(
+            'b4:96:91:34:f4:bb',
+            source_pf_port['port']['binding:profile']['device_mac_address']
+        )
+        conn = self.computes['dest'].driver._host.get_connection()
+        vms = [vm._def for vm in conn._vms.values()]
+        self.assertEqual(2, len(vms))
+        for vm in vms:
+            self.assertEqual(1, len(vm['devices']['nics']))
+        self.assertNotEqual(vms[0]['devices']['nics'][0]['source'],
+                            vms[1]['devices']['nics'][0]['source'])
+
+        self._revert_resize(source_server)
+
+        # Refresh the ports again, keeping in mind the ports are now bound
+        # on the source as the migration is reverted
+        source_pf_port = self.neutron.show_port(source_pf_port['port']['id'])
+
+        # Assert that the direct-physical port got the pci_slot information
+        # according to the source host PF PCI device.
+        self.assertEqual(
+            '0000:82:00.0',  # which is in sync with the source host pci_info
+            source_pf_port['port']['binding:profile']['pci_slot']
+        )
+        # Assert that the direct-physical port is updated with the MAC address
+        # of the PF device from the source host
+        self.assertEqual(
+            'b4:96:91:34:f4:aa',
+            source_pf_port['port']['binding:profile']['device_mac_address']
+        )
+
     def test_evacuate_server_with_neutron(self):
         def move_operation(source_server):
             # Down the source compute to enable the evacuation
@@ -486,17 +808,44 @@ class SRIOVServersTest(_PCIServersWithMigrationTestBase):
         """
 
         # start two compute services with differing PCI device inventory
-        self.start_compute(
-            hostname='test_compute0',
-            pci_info=fakelibvirt.HostPCIDevicesInfo(
-                num_pfs=2, num_vfs=8, numa_node=0))
-        self.start_compute(
-            hostname='test_compute1',
-            pci_info=fakelibvirt.HostPCIDevicesInfo(
-                num_pfs=1, num_vfs=2, numa_node=1))
+        source_pci_info = fakelibvirt.HostPCIDevicesInfo(
+            num_pfs=2, num_vfs=8, numa_node=0)
+        # add an extra PF without VF to be used by direct-physical ports
+        source_pci_info.add_device(
+            dev_type='PF',
+            bus=0x82,  # the HostPCIDevicesInfo use the 0x81 by default
+            slot=0x0,
+            function=0,
+            iommu_group=42,
+            numa_node=0,
+            vf_ratio=0,
+            mac_address='b4:96:91:34:f4:aa',
+        )
+        self.start_compute(hostname='test_compute0', pci_info=source_pci_info)
 
-        # create the port
-        self.neutron.create_port({'port': self.neutron.network_4_port_1})
+        dest_pci_info = fakelibvirt.HostPCIDevicesInfo(
+            num_pfs=1, num_vfs=2, numa_node=1)
+        # add an extra PF without VF to be used by direct-physical ports
+        dest_pci_info.add_device(
+            dev_type='PF',
+            bus=0x82,  # the HostPCIDevicesInfo use the 0x81 by default
+            slot=0x6,  # make it different from the source host
+            function=0,
+            iommu_group=42,
+            # numa node needs to be aligned with the other pci devices in this
+            # host as the instance needs to fit into a single host numa node
+            numa_node=1,
+            vf_ratio=0,
+            mac_address='b4:96:91:34:f4:bb',
+        )
+
+        self.start_compute(hostname='test_compute1', pci_info=dest_pci_info)
+
+        # create the ports
+        port = self.neutron.create_port(
+            {'port': self.neutron.network_4_port_1})['port']
+        pf_port = self.neutron.create_port(
+            {'port': self.neutron.network_4_port_pf})['port']
 
         # create a server using the VF via neutron
         extra_spec = {'hw:cpu_policy': 'dedicated'}
@@ -504,7 +853,8 @@ class SRIOVServersTest(_PCIServersWithMigrationTestBase):
         server = self._create_server(
             flavor_id=flavor_id,
             networks=[
-                {'port': base.LibvirtNeutronFixture.network_4_port_1['id']},
+                {'port': port['id']},
+                {'port': pf_port['id']},
             ],
             host='test_compute0',
         )
@@ -512,8 +862,8 @@ class SRIOVServersTest(_PCIServersWithMigrationTestBase):
         # our source host should have marked two PCI devices as used, the VF
         # and the parent PF, while the future destination is currently unused
         self.assertEqual('test_compute0', server['OS-EXT-SRV-ATTR:host'])
-        self.assertPCIDeviceCounts('test_compute0', total=10, free=8)
-        self.assertPCIDeviceCounts('test_compute1', total=3, free=3)
+        self.assertPCIDeviceCounts('test_compute0', total=11, free=8)
+        self.assertPCIDeviceCounts('test_compute1', total=4, free=4)
 
         # the instance should be on host NUMA node 0, since that's where our
         # PCI devices are
@@ -538,10 +888,21 @@ class SRIOVServersTest(_PCIServersWithMigrationTestBase):
                 # matching one)
                 'pci_slot': '0000:81:01.4',
                 'physical_network': 'physnet4',
-                'pf_mac_address': '52:54:00:1e:59:c6',
-                'vf_num': 1,
             },
             port['binding:profile'],
+        )
+
+        # ensure the binding details sent to "neutron" are correct
+        pf_port = self.neutron.show_port(pf_port['id'],)['port']
+        self.assertIn('binding:profile', pf_port)
+        self.assertEqual(
+            {
+                'pci_vendor_info': '8086:1528',
+                'pci_slot': '0000:82:00.0',
+                'physical_network': 'physnet4',
+                'device_mac_address': 'b4:96:91:34:f4:aa',
+            },
+            pf_port['binding:profile'],
         )
 
         # now live migrate that server
@@ -549,8 +910,8 @@ class SRIOVServersTest(_PCIServersWithMigrationTestBase):
 
         # we should now have transitioned our usage to the destination, freeing
         # up the source in the process
-        self.assertPCIDeviceCounts('test_compute0', total=10, free=10)
-        self.assertPCIDeviceCounts('test_compute1', total=3, free=1)
+        self.assertPCIDeviceCounts('test_compute0', total=11, free=11)
+        self.assertPCIDeviceCounts('test_compute1', total=4, free=1)
 
         # the instance should now be on host NUMA node 1, since that's where
         # our PCI devices are for this second host
@@ -572,10 +933,20 @@ class SRIOVServersTest(_PCIServersWithMigrationTestBase):
                 'pci_vendor_info': '8086:1515',
                 'pci_slot': '0000:81:00.2',
                 'physical_network': 'physnet4',
-                'pf_mac_address': '52:54:00:1e:59:c6',
-                'vf_num': 1,
             },
             port['binding:profile'],
+        )
+        # ensure the binding details sent to "neutron" are correct
+        pf_port = self.neutron.show_port(pf_port['id'],)['port']
+        self.assertIn('binding:profile', pf_port)
+        self.assertEqual(
+            {
+                'pci_vendor_info': '8086:1528',
+                'pci_slot': '0000:82:06.0',
+                'physical_network': 'physnet4',
+                'device_mac_address': 'b4:96:91:34:f4:bb',
+            },
+            pf_port['binding:profile'],
         )
 
     def test_get_server_diagnostics_server_with_VF(self):
@@ -635,11 +1006,8 @@ class SRIOVServersTest(_PCIServersWithMigrationTestBase):
         # Disable SRIOV capabilties in PF and delete the VFs
         self._disable_sriov_in_pf(pci_info_no_sriov)
 
-        fake_connection = self._get_connection(pci_info=pci_info_no_sriov,
-                                               hostname='test_compute0')
-        self.mock_conn.return_value = fake_connection
-
-        self.compute = self.start_service('compute', host='test_compute0')
+        self.start_compute('test_compute0', pci_info=pci_info_no_sriov)
+        self.compute = self.computes['test_compute0']
 
         ctxt = context.get_admin_context()
         pci_devices = objects.PciDeviceList.get_by_compute_node(
@@ -651,13 +1019,9 @@ class SRIOVServersTest(_PCIServersWithMigrationTestBase):
         self.assertEqual(1, len(pci_devices))
         self.assertEqual('type-PCI', pci_devices[0].dev_type)
 
-        # Update connection with original pci info with sriov PFs
-        fake_connection = self._get_connection(pci_info=pci_info,
-                                               hostname='test_compute0')
-        self.mock_conn.return_value = fake_connection
-
-        # Restart the compute service
-        self.restart_compute_service(self.compute)
+        # Restart the compute service with sriov PFs
+        self.restart_compute_service(
+            self.compute.host, pci_info=pci_info, keep_hypervisor_state=False)
 
         # Verify if PCI devices are of type type-PF or type-VF
         pci_devices = objects.PciDeviceList.get_by_compute_node(
@@ -679,12 +1043,92 @@ class SRIOVServersTest(_PCIServersWithMigrationTestBase):
             ],
         )
 
+    def test_change_bound_port_vnic_type_kills_compute_at_restart(self):
+        """Create a server with a direct port and change the vnic_type of the
+        bound port to macvtap. Then restart the compute service.
+
+        As the vnic_type is changed on the port but the vif_type is hwveb
+        instead of macvtap the vif plug logic will try to look up the netdev
+        of the parent VF. Howvere that VF consumed by the instance so the
+        netdev does not exists. This causes that the compute service will fail
+        with an exception during startup
+        """
+        pci_info = fakelibvirt.HostPCIDevicesInfo(num_pfs=1, num_vfs=2)
+        self.start_compute(pci_info=pci_info)
+
+        # create a direct port
+        port = self.neutron.network_4_port_1
+        self.neutron.create_port({'port': port})
+
+        # create a server using the VF via neutron
+        server = self._create_server(networks=[{'port': port['id']}])
+
+        # update the vnic_type of the port in neutron
+        port = copy.deepcopy(port)
+        port['binding:vnic_type'] = 'macvtap'
+        self.neutron.update_port(port['id'], {"port": port})
+
+        compute = self.computes['compute1']
+
+        # Force an update on the instance info cache to ensure nova gets the
+        # information about the updated port
+        with context.target_cell(
+            context.get_admin_context(),
+            self.host_mappings['compute1'].cell_mapping
+        ) as cctxt:
+            compute.manager._heal_instance_info_cache(cctxt)
+            self.assertIn(
+                'The vnic_type of the bound port %s has been changed in '
+                'neutron from "direct" to "macvtap". Changing vnic_type of a '
+                'bound port is not supported by Nova. To avoid breaking the '
+                'connectivity of the instance please change the port '
+                'vnic_type back to "direct".' % port['id'],
+                self.stdlog.logger.output,
+            )
+
+        def fake_get_ifname_by_pci_address(pci_addr: str, pf_interface=False):
+            # we want to fail the netdev lookup only if the pci_address is
+            # already consumed by our instance. So we look into the instance
+            # definition to see if the device is attached to the instance as VF
+            conn = compute.manager.driver._host.get_connection()
+            dom = conn.lookupByUUIDString(server['id'])
+            dev = dom._def['devices']['nics'][0]
+            lookup_addr = pci_addr.replace(':', '_').replace('.', '_')
+            if (
+                dev['type'] == 'hostdev' and
+                dev['source'] == 'pci_' + lookup_addr
+            ):
+                # nova tried to look up the netdev of an already consumed VF.
+                # So we have to fail
+                raise exception.PciDeviceNotFoundById(id=pci_addr)
+
+        # We need to simulate the actual failure manually as in our functional
+        # environment all the PCI lookup is mocked. In reality nova tries to
+        # look up the netdev of the pci device on the host used by the port as
+        # the parent of the macvtap. However, as the originally direct port is
+        # bound to the instance, the VF pci device is already consumed by the
+        # instance and therefore there is no netdev for the VF.
+        self.libvirt.mock_get_ifname_by_pci_address.side_effect = (
+            fake_get_ifname_by_pci_address
+        )
+        # Nova cannot prevent the vnic_type change on a bound port. Neutron
+        # should prevent that instead. But the nova-compute should still
+        # be able to start up and only log an ERROR for this instance in
+        # inconsistent state.
+        self.restart_compute_service('compute1')
+        self.assertIn(
+            'Virtual interface plugging failed for instance. Probably the '
+            'vnic_type of the bound port has been changed. Nova does not '
+            'support such change.',
+            self.stdlog.logger.output,
+        )
+
 
 class SRIOVAttachDetachTest(_PCIServersTestBase):
     # no need for aliases as these test will request SRIOV via neutron
     PCI_ALIAS = []
 
-    PCI_PASSTHROUGH_WHITELIST = [jsonutils.dumps(x) for x in (
+    PCI_DEVICE_SPEC = [jsonutils.dumps(x) for x in (
         {
             'vendor_id': fakelibvirt.PCI_VEND_ID,
             'product_id': fakelibvirt.PF_PROD_ID,
@@ -742,10 +1186,9 @@ class SRIOVAttachDetachTest(_PCIServersTestBase):
         host_info = fakelibvirt.HostInfo(cpu_nodes=2, cpu_sockets=1,
                                          cpu_cores=2, cpu_threads=2)
         pci_info = fakelibvirt.HostPCIDevicesInfo(num_pfs=1, num_vfs=1)
-        fake_connection = self._get_connection(host_info, pci_info)
-        self.mock_conn.return_value = fake_connection
-
-        self.compute = self.start_service('compute', host='test_compute0')
+        self.start_compute(
+            'test_compute0', host_info=host_info, pci_info=pci_info)
+        self.compute = self.computes['test_compute0']
 
         # Create server with a port
         server = self._create_server(networks=[{'port': first_port_id}])
@@ -795,7 +1238,7 @@ class SRIOVAttachDetachTest(_PCIServersTestBase):
             self.neutron.sriov_pf_port2['id'])
 
 
-class VDPAServersTest(_PCIServersTestBase):
+class VDPAServersTest(_PCIServersWithMigrationTestBase):
 
     # this is needed for os_compute_api:os-migrate-server:migrate policy
     ADMIN_API = True
@@ -804,7 +1247,7 @@ class VDPAServersTest(_PCIServersTestBase):
     # Whitelist both the PF and VF; in reality, you probably wouldn't do this
     # but we want to make sure that the PF is correctly taken off the table
     # once any VF is used
-    PCI_PASSTHROUGH_WHITELIST = [jsonutils.dumps(x) for x in (
+    PCI_DEVICE_SPEC = [jsonutils.dumps(x) for x in (
         {
             'vendor_id': '15b3',
             'product_id': '101d',
@@ -827,14 +1270,13 @@ class VDPAServersTest(_PCIServersTestBase):
 
     def setUp(self):
         super().setUp()
-
         # The ultimate base class _IntegratedTestBase uses NeutronFixture but
         # we need a bit more intelligent neutron for these tests. Applying the
         # new fixture here means that we re-stub what the previous neutron
         # fixture already stubbed.
         self.neutron = self.useFixture(base.LibvirtNeutronFixture(self))
 
-    def start_compute(self):
+    def start_vdpa_compute(self, hostname='compute-0'):
         vf_ratio = self.NUM_VFS // self.NUM_PFS
 
         pci_info = fakelibvirt.HostPCIDevicesInfo(
@@ -872,7 +1314,7 @@ class VDPAServersTest(_PCIServersTestBase):
                 driver_name='mlx5_core')
             vdpa_info.add_device(f'vdpa_vdpa{idx}', idx, vf)
 
-        return super().start_compute(
+        return super().start_compute(hostname=hostname,
             pci_info=pci_info, vdpa_info=vdpa_info,
             libvirt_version=self.FAKE_LIBVIRT_VERSION,
             qemu_version=self.FAKE_QEMU_VERSION)
@@ -913,7 +1355,6 @@ class VDPAServersTest(_PCIServersTestBase):
             expected = """
                 <interface type="vdpa">
                   <mac address="b5:bc:2e:e7:51:ee"/>
-                  <model type="virtio"/>
                   <source dev="/dev/vhost-vdpa-3"/>
                 </interface>"""
             actual = etree.tostring(elem, encoding='unicode')
@@ -927,7 +1368,7 @@ class VDPAServersTest(_PCIServersTestBase):
             fake_create,
         )
 
-        hostname = self.start_compute()
+        hostname = self.start_vdpa_compute()
         num_pci = self.NUM_PFS + self.NUM_VFS
 
         # both the PF and VF with vDPA capabilities (dev_type=vdpa) should have
@@ -960,12 +1401,16 @@ class VDPAServersTest(_PCIServersTestBase):
             port['binding:profile'],
         )
 
-    def _test_common(self, op, *args, **kwargs):
-        self.start_compute()
-
+    def _create_port_and_server(self):
         # create the port and a server, with the port attached to the server
         vdpa_port = self.create_vdpa_port()
         server = self._create_server(networks=[{'port': vdpa_port['id']}])
+        return vdpa_port, server
+
+    def _test_common(self, op, *args, **kwargs):
+        self.start_vdpa_compute()
+
+        vdpa_port, server = self._create_port_and_server()
 
         # attempt the unsupported action and ensure it fails
         ex = self.assertRaises(
@@ -975,40 +1420,384 @@ class VDPAServersTest(_PCIServersTestBase):
             'not supported for instance with vDPA ports',
             ex.response.text)
 
-    def test_attach_interface(self):
-        self.start_compute()
+    def test_attach_interface_service_version_61(self):
+        with mock.patch(
+                "nova.objects.service.get_minimum_version_all_cells",
+                return_value=61
+        ):
+            self._test_common(self._attach_interface, uuids.vdpa_port)
 
+    def test_attach_interface(self):
+        hostname = self.start_vdpa_compute()
         # create the port and a server, but don't attach the port to the server
         # yet
-        vdpa_port = self.create_vdpa_port()
         server = self._create_server(networks='none')
-
+        vdpa_port = self.create_vdpa_port()
         # attempt to attach the port to the server
-        ex = self.assertRaises(
-            client.OpenStackApiException,
-            self._attach_interface, server, vdpa_port['id'])
-        self.assertIn(
-            'not supported for instance with vDPA ports',
-            ex.response.text)
+        self._attach_interface(server, vdpa_port['id'])
+        # ensure the binding details sent to "neutron" were correct
+        port = self.neutron.show_port(vdpa_port['id'])['port']
+        self.assertIn('binding:profile', port)
+        self.assertEqual(
+            {
+                'pci_vendor_info': '15b3:101e',
+                'pci_slot': '0000:06:00.4',
+                'physical_network': 'physnet4',
+            },
+            port['binding:profile'],
+        )
+        self.assertEqual(hostname, port['binding:host_id'])
+        self.assertEqual(server['id'], port['device_id'])
+
+    def test_detach_interface_service_version_61(self):
+        with mock.patch(
+                "nova.objects.service.get_minimum_version_all_cells",
+                return_value=61
+        ):
+            self._test_common(self._detach_interface, uuids.vdpa_port)
 
     def test_detach_interface(self):
-        self._test_common(self._detach_interface, uuids.vdpa_port)
+        self.start_vdpa_compute()
+        vdpa_port, server = self._create_port_and_server()
+        # ensure the binding details sent to "neutron" were correct
+        port = self.neutron.show_port(vdpa_port['id'])['port']
+        self.assertEqual(server['id'], port['device_id'])
+        self._detach_interface(server, vdpa_port['id'])
+        # ensure the port is no longer owned by the vm
+        port = self.neutron.show_port(vdpa_port['id'])['port']
+        self.assertEqual('', port['device_id'])
+        self.assertEqual({}, port['binding:profile'])
 
-    def test_shelve(self):
-        self._test_common(self._shelve_server)
+    def test_shelve_offload(self):
+        hostname = self.start_vdpa_compute()
+        vdpa_port, server = self._create_port_and_server()
+        # assert the port is bound to the vm and the compute host
+        port = self.neutron.show_port(vdpa_port['id'])['port']
+        self.assertEqual(server['id'], port['device_id'])
+        self.assertEqual(hostname, port['binding:host_id'])
+        num_pci = self.NUM_PFS + self.NUM_VFS
+        # -2 we claim the vdpa device which make the parent PF unavailable
+        self.assertPCIDeviceCounts(hostname, total=num_pci, free=num_pci - 2)
+        server = self._shelve_server(server)
+        # now that the vm is shelve offloaded it should not be bound
+        # to any host but should still be owned by the vm
+        port = self.neutron.show_port(vdpa_port['id'])['port']
+        self.assertEqual(server['id'], port['device_id'])
+        # FIXME(sean-k-mooney): we should be unbinding the port from
+        # the host when we shelve offload but we don't today.
+        # This is unrelated to vdpa port and is a general issue.
+        self.assertEqual(hostname, port['binding:host_id'])
+        self.assertIn('binding:profile', port)
+        self.assertIsNone(server['OS-EXT-SRV-ATTR:hypervisor_hostname'])
+        self.assertIsNone(server['OS-EXT-SRV-ATTR:host'])
+        self.assertPCIDeviceCounts(hostname, total=num_pci, free=num_pci)
 
-    def test_suspend(self):
-        self._test_common(self._suspend_server)
+    def test_unshelve_to_same_host(self):
+        hostname = self.start_vdpa_compute()
+        num_pci = self.NUM_PFS + self.NUM_VFS
+        self.assertPCIDeviceCounts(hostname, total=num_pci, free=num_pci)
+
+        vdpa_port, server = self._create_port_and_server()
+        self.assertPCIDeviceCounts(hostname, total=num_pci, free=num_pci - 2)
+        self.assertEqual(
+            hostname, server['OS-EXT-SRV-ATTR:hypervisor_hostname'])
+        port = self.neutron.show_port(vdpa_port['id'])['port']
+        self.assertEqual(hostname, port['binding:host_id'])
+
+        server = self._shelve_server(server)
+        self.assertPCIDeviceCounts(hostname, total=num_pci, free=num_pci)
+        self.assertIsNone(server['OS-EXT-SRV-ATTR:hypervisor_hostname'])
+        port = self.neutron.show_port(vdpa_port['id'])['port']
+        # FIXME(sean-k-mooney): shelve  offload should unbind the port
+        # self.assertEqual('', port['binding:host_id'])
+        self.assertEqual(hostname, port['binding:host_id'])
+
+        server = self._unshelve_server(server)
+        self.assertPCIDeviceCounts(hostname, total=num_pci, free=num_pci - 2)
+        self.assertEqual(
+            hostname, server['OS-EXT-SRV-ATTR:hypervisor_hostname'])
+        port = self.neutron.show_port(vdpa_port['id'])['port']
+        self.assertEqual(hostname, port['binding:host_id'])
+
+    def test_unshelve_to_different_host(self):
+        source = self.start_vdpa_compute(hostname='source')
+        dest = self.start_vdpa_compute(hostname='dest')
+
+        num_pci = self.NUM_PFS + self.NUM_VFS
+        self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci)
+        self.assertPCIDeviceCounts(dest, total=num_pci, free=num_pci)
+
+        # ensure we boot the vm on the "source" compute
+        self.api.put_service(
+            self.computes['dest'].service_ref.uuid, {'status': 'disabled'})
+        vdpa_port, server = self._create_port_and_server()
+        self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci - 2)
+        self.assertEqual(
+            source, server['OS-EXT-SRV-ATTR:hypervisor_hostname'])
+        port = self.neutron.show_port(vdpa_port['id'])['port']
+        self.assertEqual(source, port['binding:host_id'])
+
+        server = self._shelve_server(server)
+        self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci)
+        self.assertIsNone(server['OS-EXT-SRV-ATTR:hypervisor_hostname'])
+        port = self.neutron.show_port(vdpa_port['id'])['port']
+        # FIXME(sean-k-mooney): shelve should unbind the port
+        # self.assertEqual('', port['binding:host_id'])
+        self.assertEqual(source, port['binding:host_id'])
+
+        # force the unshelve to the other host
+        self.api.put_service(
+            self.computes['source'].service_ref.uuid, {'status': 'disabled'})
+        self.api.put_service(
+            self.computes['dest'].service_ref.uuid, {'status': 'enabled'})
+        self.assertPCIDeviceCounts(dest, total=num_pci, free=num_pci)
+        server = self._unshelve_server(server)
+        # the dest devices should be claimed
+        self.assertPCIDeviceCounts(dest, total=num_pci, free=num_pci - 2)
+        # and the source host devices should still be free
+        self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci)
+        self.assertEqual(
+            dest, server['OS-EXT-SRV-ATTR:hypervisor_hostname'])
+        port = self.neutron.show_port(vdpa_port['id'])['port']
+        self.assertEqual(dest, port['binding:host_id'])
 
     def test_evacute(self):
-        self._test_common(self._evacuate_server)
+        source = self.start_vdpa_compute(hostname='source')
+        dest = self.start_vdpa_compute(hostname='dest')
 
-    def test_resize(self):
-        flavor_id = self._create_flavor()
-        self._test_common(self._resize_server, flavor_id)
+        num_pci = self.NUM_PFS + self.NUM_VFS
+        self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci)
+        self.assertPCIDeviceCounts(dest, total=num_pci, free=num_pci)
+
+        # ensure we boot the vm on the "source" compute
+        self.api.put_service(
+            self.computes['dest'].service_ref.uuid, {'status': 'disabled'})
+        vdpa_port, server = self._create_port_and_server()
+        self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci - 2)
+        self.assertEqual(
+            source, server['OS-EXT-SRV-ATTR:hypervisor_hostname'])
+        port = self.neutron.show_port(vdpa_port['id'])['port']
+        self.assertEqual(source, port['binding:host_id'])
+
+        # stop the source compute and enable the dest
+        self.api.put_service(
+            self.computes['dest'].service_ref.uuid, {'status': 'enabled'})
+        self.computes['source'].stop()
+        # Down the source compute to enable the evacuation
+        self.api.put_service(
+            self.computes['source'].service_ref.uuid, {'forced_down': True})
+
+        self.assertPCIDeviceCounts(dest, total=num_pci, free=num_pci)
+        server = self._evacuate_server(server)
+        self.assertPCIDeviceCounts(dest, total=num_pci, free=num_pci - 2)
+        self.assertEqual(
+            dest, server['OS-EXT-SRV-ATTR:hypervisor_hostname'])
+        port = self.neutron.show_port(vdpa_port['id'])['port']
+        self.assertEqual(dest, port['binding:host_id'])
+
+        # as the source compute is offline the pci claims will not be cleaned
+        # up on the source compute.
+        self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci - 2)
+        # but if you fix/restart the source node the allocations for evacuated
+        # instances should be released.
+        self.restart_compute_service(source)
+        self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci)
+
+    def test_resize_same_host(self):
+        self.flags(allow_resize_to_same_host=True)
+        num_pci = self.NUM_PFS + self.NUM_VFS
+        source = self.start_vdpa_compute()
+        vdpa_port, server = self._create_port_and_server()
+        # before we resize the vm should be using 1 VF but that will mark
+        # the PF as unavailable so we assert 2 devices are in use.
+        self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci - 2)
+        flavor_id = self._create_flavor(name='new-flavor')
+        self.assertNotEqual(server['flavor']['original_name'], 'new-flavor')
+        with mock.patch(
+            'nova.virt.libvirt.driver.LibvirtDriver'
+            '.migrate_disk_and_power_off', return_value='{}',
+        ):
+            server = self._resize_server(server, flavor_id)
+            self.assertEqual(
+                server['flavor']['original_name'], 'new-flavor')
+            # in resize verify the VF claims should be doubled even
+            # for same host resize so assert that 3 are in devices in use
+            # 1 PF and 2 VFs .
+            self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci - 3)
+            server = self._confirm_resize(server)
+            # but once we confrim it should be reduced back to 1 PF and 1 VF
+            self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci - 2)
+            # assert the hostname has not have changed as part
+            # of the resize.
+            self.assertEqual(
+                source, server['OS-EXT-SRV-ATTR:hypervisor_hostname'])
+
+    def test_resize_different_host(self):
+        self.flags(allow_resize_to_same_host=False)
+        source = self.start_vdpa_compute(hostname='source')
+        dest = self.start_vdpa_compute(hostname='dest')
+
+        num_pci = self.NUM_PFS + self.NUM_VFS
+        self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci)
+        self.assertPCIDeviceCounts(dest, total=num_pci, free=num_pci)
+
+        # ensure we boot the vm on the "source" compute
+        self.api.put_service(
+            self.computes['dest'].service_ref.uuid, {'status': 'disabled'})
+        vdpa_port, server = self._create_port_and_server()
+        self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci - 2)
+        flavor_id = self._create_flavor(name='new-flavor')
+        self.assertNotEqual(server['flavor']['original_name'], 'new-flavor')
+        # disable the source compute and enable the dest
+        self.api.put_service(
+            self.computes['source'].service_ref.uuid, {'status': 'disabled'})
+        self.api.put_service(
+            self.computes['dest'].service_ref.uuid, {'status': 'enabled'})
+        with mock.patch(
+            'nova.virt.libvirt.driver.LibvirtDriver'
+            '.migrate_disk_and_power_off', return_value='{}',
+        ):
+            server = self._resize_server(server, flavor_id)
+            self.assertEqual(
+                server['flavor']['original_name'], 'new-flavor')
+            self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci - 2)
+            self.assertPCIDeviceCounts(dest, total=num_pci, free=num_pci - 2)
+            server = self._confirm_resize(server)
+            self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci)
+            self.assertPCIDeviceCounts(dest, total=num_pci, free=num_pci - 2)
+            self.assertEqual(
+                dest, server['OS-EXT-SRV-ATTR:hypervisor_hostname'])
+
+    def test_resize_revert(self):
+        self.flags(allow_resize_to_same_host=False)
+        source = self.start_vdpa_compute(hostname='source')
+        dest = self.start_vdpa_compute(hostname='dest')
+
+        num_pci = self.NUM_PFS + self.NUM_VFS
+        self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci)
+        self.assertPCIDeviceCounts(dest, total=num_pci, free=num_pci)
+
+        # ensure we boot the vm on the "source" compute
+        self.api.put_service(
+            self.computes['dest'].service_ref.uuid, {'status': 'disabled'})
+        vdpa_port, server = self._create_port_and_server()
+        self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci - 2)
+        flavor_id = self._create_flavor(name='new-flavor')
+        self.assertNotEqual(server['flavor']['original_name'], 'new-flavor')
+        # disable the source compute and enable the dest
+        self.api.put_service(
+            self.computes['source'].service_ref.uuid, {'status': 'disabled'})
+        self.api.put_service(
+            self.computes['dest'].service_ref.uuid, {'status': 'enabled'})
+        with mock.patch(
+            'nova.virt.libvirt.driver.LibvirtDriver'
+            '.migrate_disk_and_power_off', return_value='{}',
+        ):
+            server = self._resize_server(server, flavor_id)
+            self.assertEqual(
+                server['flavor']['original_name'], 'new-flavor')
+            # in resize verify both the dest and source pci claims should be
+            # present.
+            self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci - 2)
+            self.assertPCIDeviceCounts(dest, total=num_pci, free=num_pci - 2)
+            server = self._revert_resize(server)
+            # but once we revert the dest claims should be freed.
+            self.assertPCIDeviceCounts(dest, total=num_pci, free=num_pci)
+            self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci - 2)
+            self.assertEqual(
+                source, server['OS-EXT-SRV-ATTR:hypervisor_hostname'])
 
     def test_cold_migrate(self):
-        self._test_common(self._migrate_server)
+        source = self.start_vdpa_compute(hostname='source')
+        dest = self.start_vdpa_compute(hostname='dest')
+
+        num_pci = self.NUM_PFS + self.NUM_VFS
+        self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci)
+        self.assertPCIDeviceCounts(dest, total=num_pci, free=num_pci)
+
+        # ensure we boot the vm on the "source" compute
+        self.api.put_service(
+            self.computes['dest'].service_ref.uuid, {'status': 'disabled'})
+        vdpa_port, server = self._create_port_and_server()
+        self.assertEqual(
+            source, server['OS-EXT-SRV-ATTR:hypervisor_hostname'])
+
+        self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci - 2)
+        # enable the dest we do not need to disable the source since cold
+        # migrate wont happen to the same host in the libvirt driver
+        self.api.put_service(
+            self.computes['dest'].service_ref.uuid, {'status': 'enabled'})
+        with mock.patch(
+            'nova.virt.libvirt.driver.LibvirtDriver'
+            '.migrate_disk_and_power_off', return_value='{}',
+        ):
+            server = self._migrate_server(server)
+            self.assertEqual(
+                dest, server['OS-EXT-SRV-ATTR:hypervisor_hostname'])
+            self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci - 2)
+            self.assertPCIDeviceCounts(dest, total=num_pci, free=num_pci - 2)
+            server = self._confirm_resize(server)
+            self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci)
+            self.assertPCIDeviceCounts(dest, total=num_pci, free=num_pci - 2)
+            self.assertEqual(
+                dest, server['OS-EXT-SRV-ATTR:hypervisor_hostname'])
+
+    def test_suspend_and_resume_service_version_62(self):
+        with mock.patch(
+                "nova.objects.service.get_minimum_version_all_cells",
+                return_value=62
+        ):
+            self._test_common(self._suspend_server)
+
+    def test_suspend_and_resume(self):
+        source = self.start_vdpa_compute(hostname='source')
+        vdpa_port, server = self._create_port_and_server()
+        num_pci = self.NUM_PFS + self.NUM_VFS
+        self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci - 2)
+        server = self._suspend_server(server)
+        self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci - 2)
+        self.assertEqual('SUSPENDED', server['status'])
+        server = self._resume_server(server)
+        self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci - 2)
+        self.assertEqual('ACTIVE', server['status'])
+
+    def test_live_migrate_service_version_62(self):
+        with mock.patch(
+                "nova.objects.service.get_minimum_version_all_cells",
+                return_value=62
+        ):
+            self._test_common(self._live_migrate)
+
+    def test_live_migrate(self):
+        source = self.start_vdpa_compute(hostname='source')
+        dest = self.start_vdpa_compute(hostname='dest')
+
+        num_pci = self.NUM_PFS + self.NUM_VFS
+        self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci)
+        self.assertPCIDeviceCounts(dest, total=num_pci, free=num_pci)
+
+        # ensure we boot the vm on the "source" compute
+        self.api.put_service(
+            self.computes['dest'].service_ref.uuid, {'status': 'disabled'})
+        vdpa_port, server = self._create_port_and_server()
+        self.assertEqual(
+            source, server['OS-EXT-SRV-ATTR:hypervisor_hostname'])
+
+        self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci - 2)
+        # enable the dest we do not need to disable the source since cold
+        # migrate wont happen to the same host in the libvirt driver
+        self.api.put_service(
+            self.computes['dest'].service_ref.uuid, {'status': 'enabled'})
+
+        with mock.patch(
+                'nova.virt.libvirt.LibvirtDriver.'
+                '_detach_direct_passthrough_vifs'
+        ):
+            server = self._live_migrate(server)
+        self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci)
+        self.assertPCIDeviceCounts(dest, total=num_pci, free=num_pci - 2)
+        self.assertEqual(
+            dest, server['OS-EXT-SRV-ATTR:hypervisor_hostname'])
 
 
 class PCIServersTest(_PCIServersTestBase):
@@ -1017,7 +1806,7 @@ class PCIServersTest(_PCIServersTestBase):
     microversion = 'latest'
 
     ALIAS_NAME = 'a1'
-    PCI_PASSTHROUGH_WHITELIST = [jsonutils.dumps(
+    PCI_DEVICE_SPEC = [jsonutils.dumps(
         {
             'vendor_id': fakelibvirt.PCI_VEND_ID,
             'product_id': fakelibvirt.PCI_PROD_ID,
@@ -1030,6 +1819,11 @@ class PCIServersTest(_PCIServersTestBase):
             'name': ALIAS_NAME,
         }
     )]
+    PCI_RC = f"CUSTOM_PCI_{fakelibvirt.PCI_VEND_ID}_{fakelibvirt.PCI_PROD_ID}"
+
+    def setUp(self):
+        super().setUp()
+        self.flags(group="pci", report_in_placement=True)
 
     def test_create_server_with_pci_dev_and_numa(self):
         """Verifies that an instance can be booted with cpu pinning and with an
@@ -1040,6 +1834,12 @@ class PCIServersTest(_PCIServersTestBase):
 
         pci_info = fakelibvirt.HostPCIDevicesInfo(num_pci=1, numa_node=1)
         self.start_compute(pci_info=pci_info)
+
+        self.assert_placement_pci_view(
+            "compute1",
+            inventories={"0000:81:00.0": {self.PCI_RC: 1}},
+            traits={"0000:81:00.0": []},
+        )
 
         # create a flavor
         extra_spec = {
@@ -1059,6 +1859,12 @@ class PCIServersTest(_PCIServersTestBase):
 
         pci_info = fakelibvirt.HostPCIDevicesInfo(num_pci=1, numa_node=0)
         self.start_compute(pci_info=pci_info)
+
+        self.assert_placement_pci_view(
+            "compute1",
+            inventories={"0000:81:00.0": {self.PCI_RC: 1}},
+            traits={"0000:81:00.0": []},
+        )
 
         # boot one instance with no PCI device to "fill up" NUMA node 0
         extra_spec = {'hw:cpu_policy': 'dedicated'}
@@ -1082,9 +1888,22 @@ class PCIServersTest(_PCIServersTestBase):
         self.start_compute(
             hostname='test_compute0',
             pci_info=fakelibvirt.HostPCIDevicesInfo(num_pci=1))
+
+        self.assert_placement_pci_view(
+            "test_compute0",
+            inventories={"0000:81:00.0": {self.PCI_RC: 1}},
+            traits={"0000:81:00.0": []},
+        )
+
         self.start_compute(
             hostname='test_compute1',
             pci_info=fakelibvirt.HostPCIDevicesInfo(num_pci=1))
+
+        self.assert_placement_pci_view(
+            "test_compute1",
+            inventories={"0000:81:00.0": {self.PCI_RC: 1}},
+            traits={"0000:81:00.0": []},
+        )
 
         # create a server
         extra_spec = {'pci_passthrough:alias': f'{self.ALIAS_NAME}:1'}
@@ -1107,7 +1926,17 @@ class PCIServersTest(_PCIServersTestBase):
         self.start_compute(
             hostname='test_compute0',
             pci_info=fakelibvirt.HostPCIDevicesInfo(num_pci=1))
+        self.assert_placement_pci_view(
+            "test_compute0",
+            inventories={"0000:81:00.0": {self.PCI_RC: 1}},
+            traits={"0000:81:00.0": []},
+        )
         self.start_compute(hostname='test_compute1')
+        self.assert_placement_pci_view(
+            "test_compute1",
+            inventories={},
+            traits={},
+        )
 
         # Boot a server with a single PCI device.
         extra_spec = {'pci_passthrough:alias': f'{self.ALIAS_NAME}:1'}
@@ -1116,13 +1945,16 @@ class PCIServersTest(_PCIServersTestBase):
 
         # Resize it to a flavor without PCI devices. We expect this to work, as
         # test_compute1 is available.
-        # FIXME(artom) This is bug 1941005.
         flavor_id = self._create_flavor()
-        ex = self.assertRaises(client.OpenStackApiException,
-                               self._resize_server, server, flavor_id)
-        self.assertEqual(500, ex.response.status_code)
-        self.assertIn('NoValidHost', str(ex))
-        # self._confirm_resize(server)
+        with mock.patch(
+            'nova.virt.libvirt.driver.LibvirtDriver'
+            '.migrate_disk_and_power_off',
+            return_value='{}',
+        ):
+            self._resize_server(server, flavor_id)
+        self._confirm_resize(server)
+        self.assertPCIDeviceCounts('test_compute0', total=1, free=1)
+        self.assertPCIDeviceCounts('test_compute1', total=0, free=0)
 
     def _confirm_resize(self, server, host='host1'):
         # NOTE(sbauza): Unfortunately, _cleanup_resize() in libvirt checks the
@@ -1166,6 +1998,17 @@ class PCIServersTest(_PCIServersTestBase):
         for hostname in ('test_compute0', 'test_compute1'):
             pci_info = fakelibvirt.HostPCIDevicesInfo(num_pci=2)
             self.start_compute(hostname=hostname, pci_info=pci_info)
+            self.assert_placement_pci_view(
+                hostname,
+                inventories={
+                    "0000:81:00.0": {self.PCI_RC: 1},
+                    "0000:81:01.0": {self.PCI_RC: 1},
+                },
+                traits={
+                    "0000:81:00.0": [],
+                    "0000:81:01.0": [],
+                },
+            )
 
         # boot an instance with a PCI device on each host
         extra_spec = {
@@ -1211,11 +2054,40 @@ class PCIServersTest(_PCIServersTestBase):
         self.assertPCIDeviceCounts('test_compute0', total=2, free=2)
         self.assertPCIDeviceCounts('test_compute1', total=2, free=0)
 
+    def test_request_two_pci_but_host_has_one(self):
+        # simulate a single type-PCI device on the host
+        self.start_compute(pci_info=fakelibvirt.HostPCIDevicesInfo(num_pci=1))
+        self.assertPCIDeviceCounts('compute1', total=1, free=1)
+
+        alias = [jsonutils.dumps(x) for x in (
+            {
+                'vendor_id': fakelibvirt.PCI_VEND_ID,
+                'product_id': fakelibvirt.PCI_PROD_ID,
+                'name': 'a1',
+            },
+            {
+                'vendor_id': fakelibvirt.PCI_VEND_ID,
+                'product_id': fakelibvirt.PCI_PROD_ID,
+                'name': 'a2',
+            },
+        )]
+        self.flags(group='pci', alias=alias)
+        # request two PCI devices both are individually matching with the
+        # single available device on the host
+        extra_spec = {'pci_passthrough:alias': 'a1:1,a2:1'}
+        flavor_id = self._create_flavor(extra_spec=extra_spec)
+        # so we expect that the boot fails with no valid host error as only
+        # one of the requested PCI device can be allocated
+        server = self._create_server(
+            flavor_id=flavor_id, networks="none", expected_state='ERROR')
+        self.assertIn('fault', server)
+        self.assertIn('No valid host', server['fault']['message'])
+
 
 class PCIServersWithPreferredNUMATest(_PCIServersTestBase):
 
     ALIAS_NAME = 'a1'
-    PCI_PASSTHROUGH_WHITELIST = [jsonutils.dumps(
+    PCI_DEVICE_SPEC = [jsonutils.dumps(
         {
             'vendor_id': fakelibvirt.PCI_VEND_ID,
             'product_id': fakelibvirt.PCI_PROD_ID,
@@ -1279,7 +2151,7 @@ class PCIServersWithRequiredNUMATest(PCIServersWithPreferredNUMATest):
 class PCIServersWithSRIOVAffinityPoliciesTest(_PCIServersTestBase):
 
     ALIAS_NAME = 'a1'
-    PCI_PASSTHROUGH_WHITELIST = [jsonutils.dumps(
+    PCI_DEVICE_SPEC = [jsonutils.dumps(
         {
             'vendor_id': fakelibvirt.PCI_VEND_ID,
             'product_id': fakelibvirt.PCI_PROD_ID,
@@ -1309,7 +2181,7 @@ class PCIServersWithSRIOVAffinityPoliciesTest(_PCIServersTestBase):
             num_pci=1, numa_node=pci_numa_node)
         self.start_compute(pci_info=pci_info)
 
-        # request cpu pinning to create a numa toplogy and allow the test to
+        # request cpu pinning to create a numa topology and allow the test to
         # force which numa node the vm would have to be pinned too.
         extra_spec = {
             'hw:cpu_policy': 'dedicated',
@@ -1384,9 +2256,11 @@ class PCIServersWithSRIOVAffinityPoliciesTest(_PCIServersTestBase):
             }
         )]
 
-        self.flags(passthrough_whitelist=self.PCI_PASSTHROUGH_WHITELIST,
-                   alias=alias,
-                   group='pci')
+        self.flags(
+            device_spec=self.PCI_DEVICE_SPEC,
+            alias=alias,
+            group='pci'
+        )
 
         self._test_policy(pci_numa_node, status, 'required')
 
@@ -1464,7 +2338,7 @@ class PCIServersWithSRIOVAffinityPoliciesTest(_PCIServersTestBase):
 class PCIServersWithPortNUMAPoliciesTest(_PCIServersTestBase):
 
     ALIAS_NAME = 'a1'
-    PCI_PASSTHROUGH_WHITELIST = [jsonutils.dumps(x) for x in (
+    PCI_DEVICE_SPEC = [jsonutils.dumps(x) for x in (
         {
             'vendor_id': fakelibvirt.PCI_VEND_ID,
             'product_id': fakelibvirt.PF_PROD_ID,
@@ -1520,7 +2394,7 @@ class PCIServersWithPortNUMAPoliciesTest(_PCIServersTestBase):
             num_pfs=1, num_vfs=2, numa_node=pci_numa_node)
         self.start_compute(pci_info=pci_info)
 
-        # request cpu pinning to create a numa toplogy and allow the test to
+        # request cpu pinning to create a numa topology and allow the test to
         # force which numa node the vm would have to be pinned too.
         extra_spec = {
             'hw:cpu_policy': 'dedicated',
@@ -1602,9 +2476,11 @@ class PCIServersWithPortNUMAPoliciesTest(_PCIServersTestBase):
             }
         )]
 
-        self.flags(passthrough_whitelist=self.PCI_PASSTHROUGH_WHITELIST,
-                   alias=alias,
-                   group='pci')
+        self.flags(
+            device_spec=self.PCI_DEVICE_SPEC,
+            alias=alias,
+            group='pci'
+        )
 
         self._test_policy(pci_numa_node, status, 'required')
 
@@ -1700,7 +2576,7 @@ class RemoteManagedServersTest(_PCIServersWithMigrationTestBase):
     ADMIN_API = True
     microversion = 'latest'
 
-    PCI_PASSTHROUGH_WHITELIST = [jsonutils.dumps(x) for x in (
+    PCI_DEVICE_SPEC = [jsonutils.dumps(x) for x in (
         # A PF with access to physnet4.
         {
             'vendor_id': '15b3',

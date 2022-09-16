@@ -11,8 +11,7 @@
 #    under the License.
 
 import functools
-
-import mock
+from unittest import mock
 
 from nova.api.openstack.compute import limits
 import nova.conf
@@ -96,7 +95,7 @@ class LimitsNoLegacyNoScopeTest(LimitsPolicyTest):
     without_deprecated_rules = True
     rules_without_deprecation = {
         limits_policies.OTHER_PROJECT_LIMIT_POLICY_NAME:
-            base_policy.PROJECT_ADMIN}
+            base_policy.ADMIN}
 
     def setUp(self):
         super(LimitsNoLegacyNoScopeTest, self).setUp()
@@ -142,7 +141,7 @@ class LimitsScopeTypeNoLegacyPolicyTest(LimitsScopeTypePolicyTest):
     without_deprecated_rules = True
     rules_without_deprecation = {
         limits_policies.OTHER_PROJECT_LIMIT_POLICY_NAME:
-            base_policy.PROJECT_ADMIN}
+            base_policy.ADMIN}
 
     def setUp(self):
         super(LimitsScopeTypeNoLegacyPolicyTest, self).setUp()

@@ -9,13 +9,15 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+
 import copy
+import ddt
 import time
+from unittest import mock
 from urllib import parse
 
 import fixtures
 from keystoneauth1 import exceptions as ks_exc
-import mock
 import os_resource_classes as orc
 from oslo_serialization import jsonutils
 from oslo_utils.fixture import uuidsentinel as uuids
@@ -41,8 +43,14 @@ class SafeConnectedTestCase(test.NoDBTestCase):
         super(SafeConnectedTestCase, self).setUp()
         self.context = context.get_admin_context()
 
-        with mock.patch('keystoneauth1.loading.load_auth_from_conf_options'):
-            self.client = report.SchedulerReportClient()
+        # need to mock this globally as SchedulerReportClient._create_client
+        # is called again when EndpointNotFound is raised
+        self.useFixture(
+            fixtures.MonkeyPatch(
+                'keystoneauth1.loading.load_auth_from_conf_options',
+                mock.MagicMock()))
+
+        self.client = report.SchedulerReportClient()
 
     @mock.patch('keystoneauth1.session.Session.request')
     def test_missing_endpoint(self, req):
@@ -148,6 +156,60 @@ class SafeConnectedTestCase(test.NoDBTestCase):
         req.reset_mock()
         self.client._get_resource_provider(self.context, "fake")
         self.assertTrue(req.called)
+
+
+@ddt.ddt
+class TestSingleton(test.NoDBTestCase):
+    def test_singleton(self):
+        # Make sure we start with a clean slate
+        self.assertIsNone(report.PLACEMENTCLIENT)
+
+        # Make sure the first call creates the singleton, sets it
+        # globally, and returns it
+        client = report.report_client_singleton()
+        self.assertEqual(client, report.PLACEMENTCLIENT)
+
+        # Make sure that a subsequent call returns the same thing
+        # again and that the global is unchanged
+        self.assertEqual(client, report.report_client_singleton())
+        self.assertEqual(client, report.PLACEMENTCLIENT)
+
+    @ddt.data(ks_exc.EndpointNotFound,
+              ks_exc.MissingAuthPlugin,
+              ks_exc.Unauthorized,
+              ks_exc.DiscoveryFailure,
+              ks_exc.ConnectFailure,
+              ks_exc.RequestTimeout,
+              ks_exc.GatewayTimeout,
+              test.TestingException)
+    def test_errors(self, exc):
+        self._test_error(exc)
+
+    @mock.patch.object(report, 'LOG')
+    def _test_error(self, exc, mock_log):
+        with mock.patch.object(report.SchedulerReportClient, '_create_client',
+                               side_effect=exc):
+            self.assertRaises(exc, report.report_client_singleton)
+        mock_log.error.assert_called_once()
+
+    def test_error_then_success(self):
+        # Simulate an error
+        self._test_error(ks_exc.ConnectFailure)
+
+        # Ensure we did not set the global client
+        self.assertIsNone(report.PLACEMENTCLIENT)
+
+        # Call again, with no error
+        client = report.report_client_singleton()
+
+        # Make sure we got a client and that it was set as the global
+        # one
+        self.assertIsNotNone(client)
+        self.assertEqual(client, report.PLACEMENTCLIENT)
+
+        # Make sure we keep getting the same one
+        client2 = report.report_client_singleton()
+        self.assertEqual(client, client2)
 
 
 class TestConstructor(test.NoDBTestCase):

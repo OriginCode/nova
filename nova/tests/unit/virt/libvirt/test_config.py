@@ -16,6 +16,7 @@ from lxml import etree
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import units
 
+from nova import exception
 from nova.objects import fields as obj_fields
 from nova import test
 from nova.tests.fixtures import libvirt_data as fake_libvirt_data
@@ -69,6 +70,23 @@ class LibvirtConfigTest(LibvirtConfigBaseTest):
         inxml = "<demo><foo/></demo>"
         obj = config.LibvirtConfigObject(root_name="demo")
         obj.parse_str(inxml)
+
+    def test_parse_on_off_str(self):
+        obj = config.LibvirtConfigObject(root_name="demo")
+        self.assertTrue(obj.parse_on_off_str('on'))
+        self.assertFalse(obj.parse_on_off_str('off'))
+        self.assertFalse(obj.parse_on_off_str(None))
+        self.assertRaises(exception.InvalidInput, obj.parse_on_off_str, 'foo')
+
+    def test_get_yes_no_str(self):
+        obj = config.LibvirtConfigObject(root_name="demo")
+        self.assertEqual('yes', obj.get_yes_no_str(True))
+        self.assertEqual('no', obj.get_yes_no_str(False))
+
+    def test_get_on_off_str(self):
+        obj = config.LibvirtConfigObject(root_name="demo")
+        self.assertEqual('on', obj.get_on_off_str(True))
+        self.assertEqual('off', obj.get_on_off_str(False))
 
 
 class LibvirtConfigCapsTest(LibvirtConfigBaseTest):
@@ -1535,7 +1553,10 @@ class LibvirtConfigGuestGraphicsTest(LibvirtConfigBaseTest):
 class LibvirtConfigGuestHostdev(LibvirtConfigBaseTest):
 
     def test_config_pci_guest_host_dev(self):
-        obj = config.LibvirtConfigGuestHostdev(mode='subsystem', type='pci')
+        obj = config.LibvirtConfigGuestHostdev()
+        obj.mode = 'subsystem'
+        obj.type = 'pci'
+
         xml = obj.to_xml()
         expected = """
             <hostdev mode="subsystem" type="pci" managed="yes"/>
@@ -2318,6 +2339,15 @@ class LibvirtConfigGuestFeatureTest(LibvirtConfigBaseTest):
         obj.vapic = True
         obj.spinlocks = True
         obj.vendorid_spoof = True
+        obj.vpindex = True
+        obj.runtime = True
+        obj.synic = True
+        obj.reset = True
+        obj.frequencies = True
+        obj.reenlightenment = True
+        obj.tlbflush = True
+        obj.ipi = True
+        obj.evmcs = True
 
         xml = obj.to_xml()
         self.assertXmlEqual(xml, """
@@ -2326,6 +2356,15 @@ class LibvirtConfigGuestFeatureTest(LibvirtConfigBaseTest):
             <vapic state="on"/>
             <spinlocks state="on" retries="4095"/>
             <vendor_id state="on" value="1234567890ab"/>
+            <vpindex state='on'/>
+            <runtime state='on'/>
+            <synic state='on'/>
+            <reset state='on'/>
+            <frequencies state='on'/>
+            <reenlightenment state='on'/>
+            <tlbflush state='on'/>
+            <ipi state='on'/>
+            <evmcs state='on'/>
           </hyperv>""")
 
     def test_feature_pmu(self):
@@ -2343,6 +2382,13 @@ class LibvirtConfigGuestFeatureTest(LibvirtConfigBaseTest):
             obj = config.LibvirtConfigGuestFeaturePMU(val)
             xml = obj.to_xml()
             self.assertXmlEqual(xml, "<pmu state='off'/>")
+
+    def test_feature_ioapic(self):
+        obj = config.LibvirtConfigGuestFeatureIOAPIC()
+        obj.driver = "libvirt"
+
+        xml = obj.to_xml()
+        self.assertXmlEqual(xml, "<ioapic driver='libvirt'/>")
 
 
 class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
@@ -3949,8 +3995,10 @@ class LibvirtConfigSecretTest(LibvirtConfigBaseTest):
 
 class LibvirtConfigGuestVPMEMTest(LibvirtConfigBaseTest):
     def test_config_vpmem(self):
-        obj = config.LibvirtConfigGuestVPMEM(
-                devpath='/dev/dax0.0', size_kb=4096 * units.Ki, align_kb=2048)
+        obj = config.LibvirtConfigGuestVPMEM()
+        obj.source_path = '/dev/dax0.0'
+        obj.target_size = 4096 * units.Ki
+        obj.align_size = 2048
 
         xml = obj.to_xml()
         self.assertXmlEqual(xml, """
@@ -3968,6 +4016,28 @@ class LibvirtConfigGuestVPMEMTest(LibvirtConfigBaseTest):
                 </label>
             </target>
           </memory>""")
+
+
+class LibvirtConfigGuestIOMMUTest(LibvirtConfigBaseTest):
+
+    def test_config_iommu(self):
+        obj = config.LibvirtConfigGuestIOMMU()
+        obj.model = "intel"
+        obj.interrupt_remapping = True
+        obj.caching_mode = True
+        obj.aw_bits = 48
+        obj.eim = True
+        obj.iotlb = True
+
+        xml = obj.to_xml()
+        self.assertXmlEqual(
+            xml,
+            """
+<iommu model='intel'>
+  <driver intremap='on' caching_mode='on' aw_bits='48' eim='on' iotlb='on'/>
+</iommu>
+            """,
+        )
 
 
 class LibvirtConfigDomainCapsVideoModelsTests(LibvirtConfigBaseTest):
@@ -4086,7 +4156,8 @@ class LibvirtConfigDomainCapsDevicesTests(LibvirtConfigBaseTest):
         obj.parse_str(xml)
         # we only use the video and disk devices today.
         device_types = [config.LibvirtConfigDomainCapsDiskBuses,
-                        config.LibvirtConfigDomainCapsVideoModels]
+                        config.LibvirtConfigDomainCapsVideoModels,
+                        ]
         # so we assert there are only two device types parsed
         self.assertEqual(2, len(obj.devices))
         # we then assert that the parsed devices are of the correct type

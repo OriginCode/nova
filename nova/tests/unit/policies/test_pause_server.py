@@ -10,8 +10,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from unittest import mock
+
 import fixtures
-import mock
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 
@@ -108,8 +109,8 @@ class PauseServerNoLegacyNoScopePolicyTest(PauseServerPolicyTest):
         super(PauseServerNoLegacyNoScopePolicyTest, self).setUp()
         # With no legacy rule, only project admin or member will be
         # able to pause/unpause the server.
-        self.project_action_authorized_contexts = [
-            self.project_admin_context, self.project_member_context]
+        self.project_action_authorized_contexts = (
+            self.project_member_or_admin_with_no_scope_no_legacy)
 
 
 class PauseServerScopeTypePolicyTest(PauseServerPolicyTest):
@@ -126,10 +127,8 @@ class PauseServerScopeTypePolicyTest(PauseServerPolicyTest):
         super(PauseServerScopeTypePolicyTest, self).setUp()
         self.flags(enforce_scope=True, group="oslo_policy")
         # Scope enable will not allow system admin to pause/unpause the server.
-        self.project_action_authorized_contexts = [
-            self.legacy_admin_context,
-            self.project_admin_context, self.project_member_context,
-            self.project_reader_context, self.project_foo_context]
+        self.project_action_authorized_contexts = (
+            self.project_m_r_or_admin_with_scope_and_legacy)
 
 
 class PauseServerScopeTypeNoLegacyPolicyTest(PauseServerScopeTypePolicyTest):
@@ -142,5 +141,5 @@ class PauseServerScopeTypeNoLegacyPolicyTest(PauseServerScopeTypePolicyTest):
         super(PauseServerScopeTypeNoLegacyPolicyTest, self).setUp()
         # With scope enable and no legacy rule, only project admin/member
         # will be able to pause/unpause the server.
-        self.project_action_authorized_contexts = [
-            self.project_admin_context, self.project_member_context]
+        self.project_action_authorized_contexts = (
+            self.project_member_or_admin_with_scope_no_legacy)

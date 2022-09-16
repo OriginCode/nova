@@ -14,8 +14,8 @@
 #    under the License.
 
 import copy
+from unittest import mock
 
-import mock
 from oslo_serialization import jsonutils
 from oslo_utils.fixture import uuidsentinel
 
@@ -235,7 +235,7 @@ class PciDevTrackerTestCase(test.NoDBTestCase):
             self, mock_debug):
         self.flags(
             group='pci',
-            passthrough_whitelist=[
+            device_spec=[
                 '{"product_id":"2032", "vendor_id":"8086"}'])
         # There are systems where 32 bit PCI domain is used. See bug 1897528
         # for example. While nova (and qemu) does not support assigning such
@@ -651,8 +651,13 @@ class PciDevTrackerTestCase(test.NoDBTestCase):
         pci_requests = copy.deepcopy(fake_pci_requests)
         pci_requests[0]['count'] = 4
         pci_requests_obj = self._create_pci_requests_object(pci_requests)
-        self.tracker.claim_instance(mock.sentinel.context,
-                                    pci_requests_obj, None)
+        self.assertRaises(
+            exception.PciDeviceRequestFailed,
+            self.tracker.claim_instance,
+            mock.sentinel.context,
+            pci_requests_obj,
+            None
+        )
         self.assertEqual(len(self.tracker.claims[self.inst['uuid']]), 0)
         devs = self.tracker.update_pci_for_instance(None,
                                                     self.inst,
@@ -687,11 +692,13 @@ class PciDevTrackerTestCase(test.NoDBTestCase):
         self.inst.numa_topology = objects.InstanceNUMATopology(
                     cells=[objects.InstanceNUMACell(
                         id=1, cpuset=set([1, 2]), memory=512)])
-        claims = self.tracker.claim_instance(
+        self.assertRaises(
+            exception.PciDeviceRequestFailed,
+            self.tracker.claim_instance,
             mock.sentinel.context,
             pci_requests_obj,
-            self.inst.numa_topology)
-        self.assertEqual([], claims)
+            self.inst.numa_topology
+        )
 
     def test_update_pci_for_instance_deleted(self):
         pci_requests_obj = self._create_pci_requests_object(fake_pci_requests)
@@ -739,7 +746,10 @@ class PciDevTrackerTestCase(test.NoDBTestCase):
     def test_clean_usage(self):
         inst_2 = copy.copy(self.inst)
         inst_2.uuid = uuidsentinel.instance2
-        migr = {'instance_uuid': 'uuid2', 'vm_state': vm_states.BUILDING}
+        migr = objects.Migration(
+            instance_uuid='uuid2',
+            vm_state=vm_states.BUILDING,
+        )
 
         pci_requests_obj = self._create_pci_requests_object(
             [{'count': 1, 'spec': [{'vendor_id': 'v'}]}])
@@ -800,7 +810,7 @@ class PciDevTrackerTestCase(test.NoDBTestCase):
         free_pci_device_ids = (
             [dev.id for dev in self.tracker.pci_stats.get_free_devs()])
         self.assertEqual(2, len(free_pci_device_ids))
-        allocated_devs = manager.get_instance_pci_devs(self.inst)
+        allocated_devs = self.inst.get_pci_devices()
         pci_device = allocated_devs[0]
         self.assertNotIn(pci_device.id, free_pci_device_ids)
         instance_uuid = self.inst['uuid']
@@ -863,24 +873,3 @@ class PciDevTrackerTestCase(test.NoDBTestCase):
         self.assertIsNone(self.tracker.allocations.get(instance_uuid))
         free_devs = self.tracker.pci_stats.get_free_devs()
         self.assertEqual(len(fake_db_devs), len(free_devs))
-
-
-class PciGetInstanceDevs(test.NoDBTestCase):
-
-    def test_get_devs_object(self):
-        def _fake_obj_load_attr(foo, attrname):
-            if attrname == 'pci_devices':
-                self.load_attr_called = True
-                foo.pci_devices = objects.PciDeviceList()
-
-        self.stub_out(
-                'nova.objects.Instance.obj_load_attr',
-                _fake_obj_load_attr)
-
-        self.load_attr_called = False
-        manager.get_instance_pci_devs(objects.Instance())
-        self.assertTrue(self.load_attr_called)
-
-    def test_get_devs_no_pci_devices(self):
-        inst = objects.Instance(pci_devices=None)
-        self.assertEqual([], manager.get_instance_pci_devs(inst))

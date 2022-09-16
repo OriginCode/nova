@@ -10,8 +10,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from unittest import mock
+
 import fixtures
-import mock
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 
@@ -77,12 +78,6 @@ class AdminActionsNoLegacyNoScopePolicyTest(AdminActionsPolicyTest):
 
     without_deprecated_rules = True
 
-    def setUp(self):
-        super(AdminActionsNoLegacyNoScopePolicyTest, self).setUp()
-        # With no legacy rule and scope diable, only project admin
-        # is able to perform server admin actions.
-        self.project_action_authorized_contexts = [self.project_admin_context]
-
 
 class AdminActionsScopeTypePolicyTest(AdminActionsPolicyTest):
     """Test Admin Actions APIs policies with system scope enabled.
@@ -110,10 +105,3 @@ class AdminActionsScopeTypeNoLegacyPolicyTest(AdminActionsScopeTypePolicyTest):
     only project admin is able to perform admin action on their server.
     """
     without_deprecated_rules = True
-
-    def setUp(self):
-        super(AdminActionsScopeTypeNoLegacyPolicyTest, self).setUp()
-        # This is how our RBAC will looks like. With no legacy rule
-        # and scope enable, only project admin is able to perform
-        # server admin actions.
-        self.project_action_authorized_contexts = [self.project_admin_context]

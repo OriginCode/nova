@@ -17,10 +17,11 @@ import collections
 import copy
 import datetime
 import time
+from unittest import mock
 import zlib
 
+from cinderclient import exceptions as cinder_exception
 from keystoneauth1 import adapter
-import mock
 from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_serialization import base64
@@ -764,7 +765,7 @@ class ServersTest(integrated_helpers._IntegratedTestBase):
         LOG.info('Attaching volume %s to server %s', volume_id, server_id)
 
         # The fake driver doesn't implement get_device_name_for_instance, so
-        # we'll just raise the exception directly here, instead of simuluating
+        # we'll just raise the exception directly here, instead of simulating
         # an instance with 26 disk devices already attached.
         with mock.patch.object(self.compute.driver,
                                'get_device_name_for_instance') as mock_get:
@@ -1253,9 +1254,7 @@ class ServerTestV269(integrated_helpers._IntegratedTestBase):
     def test_get_servers_detail_filters(self):
         # We get the results only from the up cells, this ignoring the down
         # cells if list_records_by_skipping_down_cells config option is True.
-        api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
-            api_version='v2.1'))
-        self.admin_api = api_fixture.admin_api
+        self.admin_api = self.api_fixture.admin_api
         self.admin_api.microversion = '2.69'
         servers = self.admin_api.get_servers(
             search_opts={'hostname': "cell3-inst0"})
@@ -1263,9 +1262,7 @@ class ServerTestV269(integrated_helpers._IntegratedTestBase):
         self.assertEqual(self.up_cell_insts[2], servers[0]['id'])
 
     def test_get_servers_detail_all_tenants_with_down_cells(self):
-        api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
-            api_version='v2.1'))
-        self.admin_api = api_fixture.admin_api
+        self.admin_api = self.api_fixture.admin_api
         self.admin_api.microversion = '2.69'
         servers = self.admin_api.get_servers(search_opts={'all_tenants': True})
         # 4 servers from the up cells and 4 servers from the down cells
@@ -1518,15 +1515,97 @@ class ServerRebuildTestCase(integrated_helpers._IntegratedTestBase):
                       'volume-backed server', str(resp))
 
 
+class ServerRebuildTestCaseV293(integrated_helpers._IntegratedTestBase):
+    api_major_version = 'v2.1'
+
+    def setUp(self):
+        super(ServerRebuildTestCaseV293, self).setUp()
+        self.cinder = nova_fixtures.CinderFixture(self)
+        self.useFixture(self.cinder)
+
+    def _bfv_server(self):
+        server_req_body = {
+            # There is no imageRef because this is boot from volume.
+            'server': {
+                'flavorRef': '1',  # m1.tiny from DefaultFlavorsFixture,
+                'name': 'test_volume_backed_rebuild_different_image',
+                'networks': [],
+                'block_device_mapping_v2': [{
+                    'boot_index': 0,
+                    'uuid':
+                    nova_fixtures.CinderFixture.IMAGE_BACKED_VOL,
+                    'source_type': 'volume',
+                    'destination_type': 'volume'
+                }]
+            }
+        }
+        server = self.api.post_server(server_req_body)
+        return self._wait_for_state_change(server, 'ACTIVE')
+
+    def _test_rebuild(self, server):
+        self.api.microversion = '2.93'
+        # Now rebuild the server with a different image than was used to create
+        # our fake volume.
+        rebuild_image_ref = self.glance.auto_disk_config_enabled_image['id']
+        rebuild_req_body = {'rebuild': {'imageRef': rebuild_image_ref}}
+
+        with mock.patch.object(self.compute.manager.virtapi,
+                               'wait_for_instance_event'):
+            self.api.api_post('/servers/%s/action' % server['id'],
+                              rebuild_req_body,
+                              check_response_status=[202])
+
+    def test_volume_backed_rebuild_root_v293(self):
+        server = self._bfv_server()
+        self._test_rebuild(server)
+
+    def test_volume_backed_rebuild_root_create_failed(self):
+        server = self._bfv_server()
+        error = cinder_exception.ClientException(code=500)
+        with mock.patch.object(volume.cinder.API, 'attachment_create',
+                               side_effect=error):
+            # We expect this to fail because we are doing cast-as-call
+            self.assertRaises(client.OpenStackApiException,
+                              self._test_rebuild, server)
+            server = self.api.get_server(server['id'])
+            self.assertIn('Failed to rebuild volume backed instance',
+                          server['fault']['message'])
+            self.assertEqual('ERROR', server['status'])
+
+    def test_volume_backed_rebuild_root_instance_deleted(self):
+        server = self._bfv_server()
+        error = exception.InstanceNotFound(instance_id=server['id'])
+        with mock.patch.object(self.compute.manager, '_detach_root_volume',
+                               side_effect=error):
+            # We expect this to fail because we are doing cast-as-call
+            self.assertRaises(client.OpenStackApiException,
+                              self._test_rebuild, server)
+            server = self.api.get_server(server['id'])
+            self.assertIn('Failed to rebuild volume backed instance',
+                          server['fault']['message'])
+            self.assertEqual('ERROR', server['status'])
+
+    def test_volume_backed_rebuild_root_delete_old_failed(self):
+        server = self._bfv_server()
+        error = cinder_exception.ClientException(code=500)
+        with mock.patch.object(volume.cinder.API, 'attachment_delete',
+                               side_effect=error):
+            # We expect this to fail because we are doing cast-as-call
+            self.assertRaises(client.OpenStackApiException,
+                              self._test_rebuild, server)
+            server = self.api.get_server(server['id'])
+            self.assertIn('Failed to rebuild volume backed instance',
+                          server['fault']['message'])
+            self.assertEqual('ERROR', server['status'])
+
+
 class ServersTestV280(integrated_helpers._IntegratedTestBase):
     api_major_version = 'v2.1'
 
     def setUp(self):
         super(ServersTestV280, self).setUp()
-        api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
-            api_version='v2.1'))
-        self.api = api_fixture.api
-        self.admin_api = api_fixture.admin_api
+        self.api = self.api_fixture.api
+        self.admin_api = self.api_fixture.admin_api
 
         self.api.microversion = '2.80'
         self.admin_api.microversion = '2.80'
@@ -1585,9 +1664,8 @@ class ServersTestV280(integrated_helpers._IntegratedTestBase):
 
         project_id_1 = '4906260553374bf0a5d566543b320516'
         project_id_2 = 'c850298c1b6b4796a8f197ac310b2469'
-        new_api_fixture = self.useFixture(nova_fixtures.OSAPIFixture(
-            api_version=self.api_major_version, project_id=project_id_1))
-        new_admin_api = new_api_fixture.admin_api
+        new_admin_api = self.api_fixture.alternative_admin_api
+        new_admin_api.project_id = project_id_1
         new_admin_api.microversion = '2.80'
 
         post = {
@@ -2518,6 +2596,57 @@ class ServerMovingTests(integrated_helpers.ProviderUsageBaseTestCase):
                                            source_rp_uuid)
 
         self._delete_and_check_allocations(server)
+
+    def test_shelve_unshelve_to_host(self):
+        source_hostname = self.compute1.host
+        dest_hostname = self.compute2.host
+        source_rp_uuid = self._get_provider_uuid_by_host(source_hostname)
+        dest_rp_uuid = \
+            self._get_provider_uuid_by_host(dest_hostname)
+
+        server = self._boot_then_shelve_and_check_allocations(
+            source_hostname, source_rp_uuid)
+
+        self._shelve_offload_and_check_allocations(server, source_rp_uuid)
+
+        req = {
+            'unshelve': {'host': dest_hostname}
+        }
+
+        self.api.post_server_action(server['id'], req)
+        self._wait_for_server_parameter(
+            server, {'OS-EXT-SRV-ATTR:host': dest_hostname, 'status': 'ACTIVE'}
+        )
+
+        self.assertFlavorMatchesUsage(dest_rp_uuid, self.flavor1)
+
+        # the server has an allocation on only the dest node
+        self.assertFlavorMatchesAllocation(
+                self.flavor1, server['id'], dest_rp_uuid)
+
+        self._delete_and_check_allocations(server)
+
+    def test_shelve_unshelve_to_host_instance_not_offloaded(self):
+        source_hostname = self.compute1.host
+        dest_hostname = self.compute2.host
+        source_rp_uuid = self._get_provider_uuid_by_host(source_hostname)
+
+        server = self._boot_then_shelve_and_check_allocations(
+            source_hostname, source_rp_uuid)
+
+        req = {
+            'unshelve': {'host': dest_hostname}
+        }
+
+        ex = self.assertRaises(
+                client.OpenStackApiException,
+                self.api.post_server_action,
+                server['id'], req
+                )
+        self.assertEqual(409, ex.response.status_code)
+        self.assertIn(
+                "The server status must be SHELVED_OFFLOADED",
+                ex.response.text)
 
     def _shelve_offload_and_check_allocations(self, server, source_rp_uuid):
         req = {

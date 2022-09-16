@@ -247,6 +247,27 @@ class InstanceHelperMixin:
         self.assertIn(error_in_tb, event['traceback'])
         return event
 
+    def _assert_build_request_success(self, server_request):
+        server = self.api.post_server({'server': server_request})
+        self._wait_for_state_change(server, 'ACTIVE')
+        return server['id']
+
+    def _assert_build_request_schedule_failure(self, server_request):
+        server = self.api.post_server({'server': server_request})
+        self._wait_for_state_change(server, 'ERROR')
+
+    def _assert_bad_build_request_error(self, server_request):
+        ex = self.assertRaises(
+            api_client.OpenStackApiException, self.api.post_server,
+            {'server': server_request})
+        self.assertEqual(400, ex.response.status_code)
+
+    def _assert_build_request_error(self, server_request):
+        ex = self.assertRaises(
+            api_client.OpenStackApiException, self.api.post_server,
+            {'server': server_request})
+        self.assertEqual(500, ex.response.status_code)
+
     def _wait_for_migration_status(self, server, expected_statuses):
         """Waits for a migration record with the given statuses to be found
         for the given server, else the test fails. The migration record, if
@@ -540,8 +561,8 @@ class InstanceHelperMixin:
         self.api.post_server_action(
             server['id'],
             {'os-migrateLive': {'host': None, 'block_migration': 'auto'}})
-        self._wait_for_state_change(server, server_expected_state)
         self._wait_for_migration_status(server, [migration_expected_state])
+        return self._wait_for_state_change(server, server_expected_state)
 
     _live_migrate_server = _live_migrate
 
@@ -606,9 +627,11 @@ class InstanceHelperMixin:
         self.api.post_server_action(server['id'], {'os-start': None})
         return self._wait_for_state_change(server, 'ACTIVE')
 
-    def _stop_server(self, server):
+    def _stop_server(self, server, wait_for_stop=True):
         self.api.post_server_action(server['id'], {'os-stop': None})
-        return self._wait_for_state_change(server, 'SHUTOFF')
+        if wait_for_stop:
+            return self._wait_for_state_change(server, 'SHUTOFF')
+        return server
 
 
 class PlacementHelperMixin:
@@ -629,12 +652,16 @@ class PlacementHelperMixin:
             '/resource_providers', version='1.14'
         ).body['resource_providers']
 
-    def _get_all_rp_uuids_in_a_tree(self, in_tree_rp_uuid):
+    def _get_all_rps_in_a_tree(self, in_tree_rp_uuid):
         rps = self.placement.get(
             '/resource_providers?in_tree=%s' % in_tree_rp_uuid,
             version='1.20',
         ).body['resource_providers']
-        return [rp['uuid'] for rp in rps]
+        return rps
+
+    def _get_all_rp_uuids_in_a_tree(self, in_tree_rp_uuid):
+        return [
+            rp['uuid'] for rp in self._get_all_rps_in_a_tree(in_tree_rp_uuid)]
 
     def _post_resource_provider(self, rp_name):
         return self.placement.post(

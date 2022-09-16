@@ -31,12 +31,12 @@ LOG = logging.getLogger(__name__)
 
 
 # NOTE(danms): This is the global service version counter
-SERVICE_VERSION = 61
+SERVICE_VERSION = 64
 
 
 # NOTE(danms): This is our SERVICE_VERSION history. The idea is that any
 # time we bump the version, we will put an entry here to record the change,
-# along with any pertinent data. For things that we can programatically
+# along with any pertinent data. For things that we can programmatically
 # detect that need a bump, we put something in _collect_things() below to
 # assemble a dict of things we can check. For example, we pretty much always
 # want to consider the compute RPC API version a thing that requires a service
@@ -216,16 +216,26 @@ SERVICE_VERSION_HISTORY = (
     # Version 61: Compute RPC v6.0:
     # Add support for remotely-managed ports (vnic-type 'remote-managed')
     {'compute_rpc': '6.0'},
+    # Version 62: Compute RPC v6.0:
+    # Add support for VDPA port attach/detach
+    {'compute_rpc': '6.0'},
+    # Version 63: Compute RPC v6.0:
+    # Add support for VDPA hotplug live migration and suspend/resume
+    {'compute_rpc': '6.0'},
+    # Version 64: Compute RPC v6.1:
+    # Add reimage_boot_volume parameter to rebuild_instance()
+    {'compute_rpc': '6.1'},
 )
 
 # This is used to raise an error at service startup if older than N-1 computes
 # are detected. Update this at the beginning of every release cycle to point to
 # the smallest service version that was added in N-1.
-OLDEST_SUPPORTED_SERVICE_VERSION = 'Xena'
+OLDEST_SUPPORTED_SERVICE_VERSION = 'Yoga'
 SERVICE_VERSION_ALIASES = {
     'Victoria': 52,
     'Wallaby': 54,
     'Xena': 57,
+    'Yoga': 61,
 }
 
 

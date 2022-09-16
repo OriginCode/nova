@@ -31,6 +31,7 @@ from collections import defaultdict
 import fnmatch
 import glob
 import inspect
+from lxml import etree
 import operator
 import os
 import queue
@@ -46,6 +47,7 @@ from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import excutils
 from oslo_utils import importutils
+from oslo_utils import strutils
 from oslo_utils import units
 from oslo_utils import versionutils
 
@@ -488,7 +490,7 @@ class Host(object):
         LOG.debug("Starting native event thread")
         self._event_thread = native_threading.Thread(
             target=self._native_thread)
-        self._event_thread.setDaemon(True)
+        self._event_thread.daemon = True
         self._event_thread.start()
 
         LOG.debug("Starting green dispatch thread")
@@ -1197,6 +1199,25 @@ class Host(object):
         stats["frequency"] = self._get_hardware_info()[3]
         return stats
 
+    def _check_machine_type(self, caps, mach_type):
+        """Validate if hw machine type is in capabilities of the host
+
+        :param caps: host capabilities
+        :param mach_type: machine type
+        """
+        possible_machine_types = []
+
+        caps_tree = etree.fromstring(str(caps))
+        for guest in caps_tree.findall('guest'):
+            for machine in guest.xpath('arch/machine'):
+                possible_machine_types.append(machine.text)
+
+        if mach_type not in possible_machine_types:
+            raise exception.InvalidMachineType(
+                message="'%s' is not valid/supported machine type, "
+                    "Supported machine types are: %s" % (
+                        mach_type, possible_machine_types))
+
     def write_instance_config(self, xml):
         """Defines a domain, but does not start it.
 
@@ -1267,6 +1288,20 @@ class Host(object):
             return None
         return vpd_cap.card_serial_number
 
+    def _get_pf_details(self, device: dict, pci_address: str) -> dict:
+        if device.get('dev_type') != fields.PciDeviceType.SRIOV_PF:
+            return {}
+
+        try:
+            return {
+                'mac_address': pci_utils.get_mac_by_pci_address(pci_address)
+            }
+        except exception.PciDeviceNotFoundById:
+            LOG.debug(
+                'Cannot get MAC address of the PF %s. It is probably attached '
+                'to a guest already', pci_address)
+            return {}
+
     def _get_pcidev_info(
         self,
         devname: str,
@@ -1336,31 +1371,11 @@ class Host(object):
 
             return {'dev_type': fields.PciDeviceType.STANDARD}
 
-        def _get_device_capabilities(
-            device_dict: dict,
-            device: 'libvirt.virNodeDevice',
-            net_devs: ty.List['libvirt.virNodeDevice']
-        ) -> ty.Dict[str, ty.Dict[str, ty.Any]]:
-            """Get PCI VF device's additional capabilities.
-
-            If a PCI device is a virtual function, this function reads the PCI
-            parent's network capabilities (must be always a NIC device) and
-            appends this information to the device's dictionary.
-            """
-            caps: ty.Dict[str, ty.Dict[str, ty.Any]] = {}
-
-            if device_dict.get('dev_type') == fields.PciDeviceType.SRIOV_VF:
-                pcinet_info = self._get_pcinet_info(device, net_devs)
-                if pcinet_info:
-                    return {'capabilities': {'network': pcinet_info}}
-
-            return caps
-
         def _get_vpd_details(
             device_dict: dict,
             device: 'libvirt.virNodeDevice',
             pci_devs: ty.List['libvirt.virNodeDevice']
-        ) -> ty.Dict[str, ty.Dict[str, ty.Any]]:
+        ) -> ty.Dict[str, ty.Any]:
             """Get information from PCI VPD (if present).
 
             PCI/PCIe devices may include the optional VPD capability. It may
@@ -1373,7 +1388,7 @@ class Host(object):
             the VPD capability or not may be controlled via a vendor-specific
             firmware setting.
             """
-            caps: ty.Dict[str, ty.Dict[str, ty.Any]] = {}
+            vpd_info: ty.Dict[str, ty.Any] = {}
             # At the time of writing only the serial number had a clear
             # use-case. However, the set of fields may be extended.
             card_serial_number = self._get_vpd_card_serial_number(device)
@@ -1388,7 +1403,7 @@ class Host(object):
                     LOG.warning("A VF device dict does not have a parent PF "
                                 "address in it which is unexpected. Skipping "
                                 "serial number retrieval")
-                    return caps
+                    return vpd_info
 
                 formatted_addr = pf_addr.replace('.', '_').replace(':', '_')
                 vpd_cap = self._get_vf_parent_pci_vpd_info(
@@ -1397,8 +1412,71 @@ class Host(object):
                     card_serial_number = vpd_cap.card_serial_number
 
             if card_serial_number:
-                caps = {'capabilities': {
-                    'vpd': {"card_serial_number": card_serial_number}}}
+                vpd_info = {'card_serial_number': card_serial_number}
+            return vpd_info
+
+        def _get_sriov_netdev_details(
+            device_dict: dict,
+            device: 'libvirt.virNodeDevice',
+        ) -> ty.Dict[str, ty.Dict[str, ty.Any]]:
+            """Get SR-IOV related information"""
+            sriov_info: ty.Dict[str, ty.Any] = {}
+
+            if device_dict.get('dev_type') != fields.PciDeviceType.SRIOV_VF:
+                return sriov_info
+
+            pf_addr = device_dict['parent_addr']
+
+            # A netdev VF may be associated with a PF which does not have a
+            # netdev as described in LP #1915255.
+            try:
+                sriov_info.update({
+                    'pf_mac_address': pci_utils.get_mac_by_pci_address(pf_addr)
+                })
+            except exception.PciDeviceNotFoundById:
+                LOG.debug(f'Could not get a PF mac for {pf_addr}')
+                # For the purposes Nova uses this information currently,
+                # having both a PF MAC and a VF number is needed so we return
+                # an empty dict if a PF MAC is not available.
+                return {}
+
+            vf_num = pci_utils.get_vf_num_by_pci_address(
+                device_dict['address'])
+
+            sriov_info.update({'vf_num': vf_num})
+            return sriov_info
+
+        def _get_device_capabilities(
+            device_dict: dict,
+            device: 'libvirt.virNodeDevice',
+            pci_devs: ty.List['libvirt.virNodeDevice'],
+            net_devs: ty.List['libvirt.virNodeDevice']
+        ) -> ty.Dict[str, ty.Any]:
+            """Get PCI VF device's additional capabilities.
+
+            If a PCI device is a virtual function, this function reads the PCI
+            parent's network capabilities (must be always a NIC device) and
+            appends this information to the device's dictionary.
+            """
+            caps: ty.Dict[str, ty.Any] = {}
+
+            if device_dict.get('dev_type') == fields.PciDeviceType.SRIOV_VF:
+                pcinet_info = self._get_pcinet_info(device, net_devs)
+                if pcinet_info:
+                    caps['network'] = pcinet_info
+                    # Only attempt to get SR-IOV details if a VF is a netdev
+                    # because there are no use cases for other dev types yet.
+                sriov_caps = _get_sriov_netdev_details(device_dict, dev)
+                if sriov_caps:
+                    caps['sriov'] = sriov_caps
+
+            vpd_info = _get_vpd_details(device_dict, device, pci_devs)
+            if vpd_info:
+                caps['vpd'] = vpd_info
+
+            if caps:
+                return {'capabilities': caps}
+
             return caps
 
         xmlstr = dev.XMLDesc(0)
@@ -1424,8 +1502,9 @@ class Host(object):
         device['label'] = 'label_%(vendor_id)s_%(product_id)s' % device
         device.update(
             _get_device_type(cfgdev, address, dev, net_devs, vdpa_devs))
-        device.update(_get_device_capabilities(device, dev, net_devs))
-        device.update(_get_vpd_details(device, dev, pci_devs))
+        device.update(_get_device_capabilities(device, dev,
+                                               pci_devs, net_devs))
+        device.update(self._get_pf_details(device, address))
         return device
 
     def get_vdpa_nodedev_by_address(
@@ -1656,9 +1735,9 @@ class Host(object):
             return False
 
         with open(SEV_KERNEL_PARAM_FILE) as f:
-            contents = f.read()
-            LOG.debug("%s contains [%s]", SEV_KERNEL_PARAM_FILE, contents)
-            return contents == "1\n"
+            content = f.read()
+            LOG.debug("%s contains [%s]", SEV_KERNEL_PARAM_FILE, content)
+            return strutils.bool_from_string(content)
 
     @property
     def supports_amd_sev(self) -> bool:

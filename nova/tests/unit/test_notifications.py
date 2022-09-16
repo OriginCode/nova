@@ -17,8 +17,8 @@
 
 import copy
 import datetime
+from unittest import mock
 
-import mock
 from oslo_config import cfg
 from oslo_context import fixture as o_fixture
 from oslo_utils.fixture import uuidsentinel as uuids
@@ -112,7 +112,7 @@ class NotificationsTestCase(test.TestCase):
         # test config disable of just the task state notifications
         self.flags(notify_on_state_change="vm_state", group='notifications')
 
-        # we should not get a notification on task stgate chagne now
+        # we should not get a notification on task state change now
         old = copy.copy(self.instance)
         self.instance.task_state = task_states.SPAWNING
 

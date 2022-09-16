@@ -16,8 +16,10 @@
 """Tests for the conductor service."""
 
 import copy
+import ddt
+from unittest import mock
 
-import mock
+from keystoneauth1 import exceptions as ks_exc
 from oslo_db import exception as db_exc
 from oslo_limit import exception as limit_exceptions
 import oslo_messaging as messaging
@@ -52,6 +54,7 @@ from nova.objects import block_device as block_device_obj
 from nova.objects import fields
 from nova.objects import request_spec
 from nova.scheduler.client import query
+from nova.scheduler.client import report
 from nova.scheduler import utils as scheduler_utils
 from nova import test
 from nova.tests import fixtures
@@ -385,7 +388,8 @@ class _BaseTaskTestCase(object):
                         'on_shared_storage': False,
                         'preserve_ephemeral': False,
                         'host': 'compute-host',
-                        'request_spec': None}
+                        'request_spec': None,
+                        'reimage_boot_volume': False}
         if update_args:
             rebuild_args.update(update_args)
         compute_rebuild_args = copy.deepcopy(rebuild_args)
@@ -2402,7 +2406,7 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
              '1', None, None, dp_name)
         arq_uuid = arq_in_list[0]['uuid']
 
-        # muliti device request
+        # multi device request
         mock_create.return_value = [arq_in_list[0], arq_in_list[0]]
         rp_map = {"request_group_0" + str(port_id): rp_uuid}
         request_tuples = [('123', '1.2.3.4', port_id,
@@ -4747,6 +4751,42 @@ class ConductorTaskRPCAPITestCase(_BaseTaskTestCase,
                               mock.sentinel.migration)
         can_send_version.assert_called_once_with('1.23')
 
+    def test_rebuild_instance_volume_backed(self):
+        inst_obj = self._create_fake_instance_obj()
+        version = '1.24'
+        cctxt_mock = mock.MagicMock()
+        rebuild_args, compute_args = self._prepare_rebuild_args(
+            {'host': inst_obj.host})
+        rebuild_args['reimage_boot_volume'] = True
+
+        @mock.patch.object(self.conductor.client, 'prepare',
+                          return_value=cctxt_mock)
+        @mock.patch.object(self.conductor.client, 'can_send_version',
+                   return_value=True)
+        def _test(mock_can_send_ver, prepare_mock):
+            self.conductor.rebuild_instance(
+                self.context, inst_obj, **rebuild_args)
+            prepare_mock.assert_called_once_with(version=version)
+            kw = {'instance': inst_obj, **rebuild_args}
+            cctxt_mock.cast.assert_called_once_with(
+                self.context, 'rebuild_instance', **kw)
+        _test()
+
+    def test_rebuild_instance_volume_backed_old_service(self):
+        """Tests rebuild_instance_volume_backed when the service is too old"""
+        inst_obj = mock.MagicMock()
+        rebuild_args, compute_args = self._prepare_rebuild_args(
+            {'host': inst_obj.host})
+        rebuild_args['reimage_boot_volume'] = True
+        with mock.patch.object(
+                self.conductor.client, 'can_send_version',
+                return_value=False) as can_send_version:
+            self.assertRaises(exc.NovaException,
+                              self.conductor.rebuild_instance,
+                              self.context, inst_obj,
+                              **rebuild_args)
+        can_send_version.assert_called_once_with('1.24')
+
 
 class ConductorTaskAPITestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
     """Compute task API Tests."""
@@ -4869,3 +4909,35 @@ class ConductorTaskAPITestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
             logtext)
         self.assertIn('host3\' because it is not up', logtext)
         self.assertIn('image1 failed 1 times', logtext)
+
+
+@ddt.ddt
+class TestConductorTaskManager(test.NoDBTestCase):
+    def test_placement_client_startup(self):
+        self.assertIsNone(report.PLACEMENTCLIENT)
+        conductor_manager.ComputeTaskManager()
+        self.assertIsNotNone(report.PLACEMENTCLIENT)
+
+    @ddt.data(ks_exc.MissingAuthPlugin,
+              ks_exc.Unauthorized,
+              test.TestingException)
+    def test_placement_client_startup_fatals(self, exc):
+        self.assertRaises(exc,
+                          self._test_placement_client_startup_exception, exc)
+
+    @ddt.data(ks_exc.EndpointNotFound,
+              ks_exc.DiscoveryFailure,
+              ks_exc.RequestTimeout,
+              ks_exc.GatewayTimeout,
+              ks_exc.ConnectFailure)
+    def test_placement_client_startup_non_fatal(self, exc):
+        self._test_placement_client_startup_exception(exc)
+
+    @mock.patch.object(report, 'LOG')
+    def _test_placement_client_startup_exception(self, exc, mock_log):
+        with mock.patch.object(report.SchedulerReportClient, '_create_client',
+                               side_effect=exc):
+            try:
+                conductor_manager.ComputeTaskManager()
+            finally:
+                mock_log.error.assert_called_once()

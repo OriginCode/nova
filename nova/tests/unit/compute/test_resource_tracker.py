@@ -12,12 +12,14 @@
 
 import copy
 import datetime
+import ddt
+from unittest import mock
 
 from keystoneauth1 import exceptions as ks_exc
-import mock
 import os_resource_classes as orc
 import os_traits
 from oslo_config import cfg
+from oslo_serialization import jsonutils
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 from oslo_utils import units
@@ -1511,6 +1513,7 @@ class TestInitComputeNode(BaseTestCase):
         self.assertNotIn(_NODENAME, self.rt.old_resources)
 
 
+@ddt.ddt
 class TestUpdateComputeNode(BaseTestCase):
     @mock.patch('nova.compute.resource_tracker.ResourceTracker.'
                 '_sync_compute_service_disabled_trait', new=mock.Mock())
@@ -1707,12 +1710,18 @@ class TestUpdateComputeNode(BaseTestCase):
         self.assertEqual(exp_inv, ptree.data(new_compute.uuid).inventory)
         mock_sync_disabled.assert_called_once()
 
+    @ddt.data(
+        exc.ResourceProviderUpdateConflict(
+            uuid='uuid', generation=42, error='error'),
+        exc.PlacementReshapeConflict(error='error'),
+    )
     @mock.patch('nova.compute.resource_tracker.ResourceTracker.'
                 '_sync_compute_service_disabled_trait')
     @mock.patch('nova.compute.resource_tracker.ResourceTracker.'
                 '_resource_change', return_value=False)
-    def test_update_retry_success(self, mock_resource_change,
-                                  mock_sync_disabled):
+    def test_update_retry_success(
+        self, exc, mock_resource_change, mock_sync_disabled
+    ):
         self._setup_rt()
         orig_compute = _COMPUTE_NODE_FIXTURES[0].obj_clone()
         self.rt.compute_nodes[_NODENAME] = orig_compute
@@ -1726,9 +1735,7 @@ class TestUpdateComputeNode(BaseTestCase):
         self.driver_mock.update_provider_tree.side_effect = lambda *a: None
 
         ufpt_mock = self.rt.reportclient.update_from_provider_tree
-        ufpt_mock.side_effect = (
-            exc.ResourceProviderUpdateConflict(
-                uuid='uuid', generation=42, error='error'), None)
+        ufpt_mock.side_effect = (exc, None)
 
         self.rt._update(mock.sentinel.ctx, new_compute)
 
@@ -1767,6 +1774,220 @@ class TestUpdateComputeNode(BaseTestCase):
         self.assertEqual(4, mock_sync_disabled.call_count)
         # The retry is restricted to _update_to_placement
         self.assertEqual(1, mock_resource_change.call_count)
+
+    @mock.patch(
+        'nova.compute.resource_tracker.ResourceTracker.'
+        '_sync_compute_service_disabled_trait',
+        new=mock.Mock()
+    )
+    @mock.patch(
+        'nova.compute.resource_tracker.ResourceTracker._resource_change',
+        new=mock.Mock(return_value=False)
+    )
+    @mock.patch(
+        'nova.compute.pci_placement_translator.update_provider_tree_for_pci')
+    def test_update_pci_reporting(self, mock_update_provider_tree_for_pci):
+        """Assert that resource tracker calls update_provider_tree_for_pci
+        and that call did not change any allocations so
+        update_from_provider_tree called without triggering reshape
+        """
+        compute_obj = _COMPUTE_NODE_FIXTURES[0].obj_clone()
+        self._setup_rt()
+        ptree = self._setup_ptree(compute_obj)
+        # simulate that pci reporting did not touch allocations
+        mock_update_provider_tree_for_pci.return_value = False
+
+        self.rt._update(mock.sentinel.ctx, compute_obj)
+
+        mock_get_allocs = (
+            self.report_client_mock.get_allocations_for_provider_tree)
+        mock_get_allocs.assert_called_once_with(
+            mock.sentinel.ctx, compute_obj.hypervisor_hostname)
+        mock_update_provider_tree_for_pci.assert_called_once_with(
+            ptree,
+            compute_obj.hypervisor_hostname,
+            self.rt.pci_tracker,
+            mock_get_allocs.return_value,
+            [],
+        )
+        upt = self.rt.reportclient.update_from_provider_tree
+        upt.assert_called_once_with(mock.sentinel.ctx, ptree, allocations=None)
+
+    @mock.patch(
+        'nova.compute.resource_tracker.ResourceTracker.'
+        '_sync_compute_service_disabled_trait',
+        new=mock.Mock()
+    )
+    @mock.patch(
+        'nova.compute.resource_tracker.ResourceTracker._resource_change',
+        new=mock.Mock(return_value=False)
+    )
+    @mock.patch(
+        'nova.compute.pci_placement_translator.update_provider_tree_for_pci')
+    def test_update_pci_reporting_reshape(
+        self, mock_update_provider_tree_for_pci
+    ):
+        """Assert that resource tracker calls update_provider_tree_for_pci
+        and that call changed allocations so
+        update_from_provider_tree called with allocations to trigger reshape
+        """
+        compute_obj = _COMPUTE_NODE_FIXTURES[0].obj_clone()
+        self._setup_rt()
+        ptree = self._setup_ptree(compute_obj)
+        # simulate that pci reporting changed some allocations
+        mock_update_provider_tree_for_pci.return_value = True
+
+        self.rt._update(mock.sentinel.ctx, compute_obj)
+
+        mock_get_allocs = (
+            self.report_client_mock.get_allocations_for_provider_tree)
+        mock_get_allocs.assert_called_once_with(
+            mock.sentinel.ctx, compute_obj.hypervisor_hostname)
+        mock_update_provider_tree_for_pci.assert_called_once_with(
+            ptree,
+            compute_obj.hypervisor_hostname,
+            self.rt.pci_tracker,
+            mock_get_allocs.return_value,
+            [],
+        )
+        upt = self.rt.reportclient.update_from_provider_tree
+        upt.assert_called_once_with(
+            mock.sentinel.ctx, ptree, allocations=mock_get_allocs.return_value)
+
+    @ddt.data(True, False)
+    @mock.patch(
+        'nova.compute.resource_tracker.ResourceTracker.'
+        '_sync_compute_service_disabled_trait',
+        new=mock.Mock()
+    )
+    @mock.patch(
+        'nova.compute.resource_tracker.ResourceTracker._resource_change',
+        new=mock.Mock(return_value=False)
+    )
+    @mock.patch(
+        'nova.compute.pci_placement_translator.update_provider_tree_for_pci')
+    def test_update_pci_reporting_driver_reshape(
+        self, pci_reshape, mock_update_provider_tree_for_pci
+    ):
+        """Assert that resource tracker first called the
+        driver.update_provider_tree and that needed reshape so the allocations
+        are pulled. Then independently of update_provider_tree_for_pci the
+        update_from_provider_tree is called with the allocations to trigger
+        reshape in placement
+        """
+        compute_obj = _COMPUTE_NODE_FIXTURES[0].obj_clone()
+        self._setup_rt()
+        ptree = self._setup_ptree(compute_obj)
+        # simulate that the driver requests reshape
+        self.driver_mock.update_provider_tree.side_effect = [
+            exc.ReshapeNeeded, None]
+        mock_update_provider_tree_for_pci.return_value = pci_reshape
+
+        self.rt._update(mock.sentinel.ctx, compute_obj, startup=True)
+
+        mock_get_allocs = (
+            self.report_client_mock.get_allocations_for_provider_tree)
+        mock_get_allocs.assert_called_once_with(
+            mock.sentinel.ctx, compute_obj.hypervisor_hostname)
+        mock_update_provider_tree_for_pci.assert_called_once_with(
+            ptree,
+            compute_obj.hypervisor_hostname,
+            self.rt.pci_tracker,
+            mock_get_allocs.return_value,
+            [],
+        )
+        upt = self.rt.reportclient.update_from_provider_tree
+        upt.assert_called_once_with(
+            mock.sentinel.ctx, ptree, allocations=mock_get_allocs.return_value)
+
+    @mock.patch(
+        'nova.compute.resource_tracker.ResourceTracker.'
+        '_sync_compute_service_disabled_trait',
+        new=mock.Mock()
+    )
+    @mock.patch(
+        'nova.compute.resource_tracker.ResourceTracker._resource_change',
+        new=mock.Mock(return_value=False)
+    )
+    @mock.patch(
+        'nova.compute.pci_placement_translator.update_provider_tree_for_pci')
+    def test_update_pci_reporting_same_host_resize(
+        self, mock_update_provider_tree_for_pci
+    ):
+        """Assert that resource tracker calls update_provider_tree_for_pci
+        and with the list of instances that are being resized to the same
+        host.
+        """
+        compute_obj = _COMPUTE_NODE_FIXTURES[0].obj_clone()
+        self._setup_rt()
+        ptree = self._setup_ptree(compute_obj)
+        # simulate that pci reporting did not touch allocations
+        mock_update_provider_tree_for_pci.return_value = False
+        self.rt.tracked_migrations = {
+            uuids.inst1: objects.Migration(
+                migration_type="resize",
+                source_node="fake-node",
+                dest_node="fake-node",
+                instance_uuid=uuids.inst1,
+            ),
+            uuids.inst2: objects.Migration(
+                migration_type="evacuation",
+                source_node="fake-node",
+                dest_node="fake-node",
+                instance_uuid=uuids.inst2,
+            ),
+            uuids.inst3: objects.Migration(
+                migration_type="resize",
+                source_node="fake-node1",
+                dest_node="fake-node2",
+                instance_uuid=uuids.inst3,
+            ),
+        }
+
+        self.rt._update(mock.sentinel.ctx, compute_obj)
+
+        mock_get_allocs = (
+            self.report_client_mock.get_allocations_for_provider_tree)
+        mock_get_allocs.assert_called_once_with(
+            mock.sentinel.ctx, compute_obj.hypervisor_hostname)
+        mock_update_provider_tree_for_pci.assert_called_once_with(
+            ptree,
+            compute_obj.hypervisor_hostname,
+            self.rt.pci_tracker,
+            mock_get_allocs.return_value,
+            [uuids.inst1],
+        )
+        upt = self.rt.reportclient.update_from_provider_tree
+        upt.assert_called_once_with(mock.sentinel.ctx, ptree, allocations=None)
+
+    @mock.patch(
+        'nova.compute.resource_tracker.ResourceTracker.'
+        '_sync_compute_service_disabled_trait',
+        new=mock.Mock()
+    )
+    @mock.patch(
+        'nova.compute.resource_tracker.ResourceTracker._resource_change',
+        new=mock.Mock(return_value=False)
+    )
+    def test_update_pci_reporting_allocation_in_use_error_propagated(self):
+        """Assert that if the pci placement reporting code tries to remove
+        inventory with allocation from placement due to invalid hypervisor
+        or [pci]device_spec reconfiguration then the InventoryInUse error from
+        placement is propagated and makes the compute startup fail.
+        """
+        compute_obj = _COMPUTE_NODE_FIXTURES[0].obj_clone()
+        self._setup_rt()
+        self.rt.reportclient.update_from_provider_tree.side_effect = (
+            exc.InventoryInUse(
+                resource_class="FOO", resource_provider="bar"))
+
+        self.assertRaises(
+            exc.PlacementPciException,
+            self.rt._update,
+            mock.sentinel.ctx,
+            compute_obj,
+            startup=True,
+        )
 
     @mock.patch('nova.objects.Service.get_by_compute_host',
                 return_value=objects.Service(disabled=True))
@@ -2124,26 +2345,45 @@ class TestInstanceClaim(BaseTestCase):
         # PCI devices on the host and sends an updated pci_device_pools
         # attribute of the ComputeNode object.
 
+        self.flags(
+            group="pci",
+            device_spec=[
+                jsonutils.dumps({"vendor_id": "0001", "product_id": "0002"})
+            ],
+        )
+        pci_dev = pci_device.PciDevice.create(
+            None,
+            dev_dict={
+                "compute_node_id": 1,
+                "address": "0000:81:00.0",
+                "product_id": "0002",
+                "vendor_id": "0001",
+                "numa_node": 0,
+                "dev_type": obj_fields.PciDeviceType.STANDARD,
+                "status": obj_fields.PciDeviceStatus.AVAILABLE,
+                "parent_addr": None,
+            },
+        )
+
+        pci_dev.instance_uuid = None
+        pci_devs = [pci_dev]
+
         # TODO(jaypipes): Remove once the PCI tracker is always created
         # upon the resource tracker being initialized...
         with mock.patch.object(
             objects.PciDeviceList, 'get_by_compute_node',
-            return_value=objects.PciDeviceList()
+            return_value=objects.PciDeviceList(objects=pci_devs)
         ):
             self.rt.pci_tracker = pci_manager.PciDevTracker(
                 mock.sentinel.ctx, _COMPUTE_NODE_FIXTURES[0])
 
-        pci_dev = pci_device.PciDevice.create(
-            None, fake_pci_device.dev_dict)
-        pci_devs = [pci_dev]
-        self.rt.pci_tracker.pci_devs = objects.PciDeviceList(objects=pci_devs)
-
         request = objects.InstancePCIRequest(count=1,
-            spec=[{'vendor_id': 'v', 'product_id': 'p'}])
+            spec=[{'vendor_id': '0001', 'product_id': '0002'}])
         pci_requests = objects.InstancePCIRequests(
                 requests=[request],
                 instance_uuid=self.instance.uuid)
         self.instance.pci_requests = pci_requests
+        self.instance.pci_devices = objects.PciDeviceList()
         check_bfv_mock.return_value = False
 
         disk_used = self.instance.root_gb + self.instance.ephemeral_gb
@@ -2155,7 +2395,17 @@ class TestInstanceClaim(BaseTestCase):
             "free_ram_mb": expected.memory_mb - self.instance.memory_mb,
             'running_vms': 1,
             'vcpus_used': 1,
-            'pci_device_pools': objects.PciDevicePoolList(),
+            'pci_device_pools': objects.PciDevicePoolList(
+                objects=[
+                    objects.PciDevicePool(
+                        vendor_id='0001',
+                        product_id='0002',
+                        numa_node=0,
+                        tags={'dev_type': 'type-PCI'},
+                        count=0
+                    )
+                ]
+            ),
             'stats': {
                 'io_workload': 0,
                 'num_instances': 1,
@@ -4059,7 +4309,7 @@ class ProviderConfigTestCases(BaseTestCase):
 
         # add the same trait in p_tree and provider config
         # for testing ignoring CUSTOM trait code logic.
-        # If a programmer accidently forgets to ignore (substract)
+        # If a programmer accidentally forgets to ignore (subtract)
         # existing custom traits, this test case will fail as we only expect
         # "EXCEPTION_TRAIT" showed in ValueError exception rather than
         # "EXCEPTION_TRAIT,CUSTOM_IGNORE_TRAIT"
@@ -4069,7 +4319,7 @@ class ProviderConfigTestCases(BaseTestCase):
 
         expected = ("Provider config 'test_provider_config.yaml' attempts to "
                     "define a trait that is owned by the virt driver or "
-                    "specified via the placment api. Invalid traits '" +
+                    "specified via the placement api. Invalid traits '" +
                     ex_trait + "' must be removed from "
                     "'test_provider_config.yaml'.")
 
@@ -4205,9 +4455,9 @@ class TestCleanComputeNodeCache(BaseTestCase):
         invalid_nodename = "invalid-node"
         self.rt.compute_nodes[_NODENAME] = self.compute
         self.rt.compute_nodes[invalid_nodename] = mock.sentinel.compute
-        with mock.patch.object(
-            self.rt.reportclient, "invalidate_resource_provider",
-        ) as mock_invalidate:
-            self.rt.clean_compute_node_cache([self.compute])
-            mock_remove.assert_called_once_with(invalid_nodename)
-            mock_invalidate.assert_called_once_with(invalid_nodename)
+        mock_invalidate = self.rt.reportclient.invalidate_resource_provider
+
+        self.rt.clean_compute_node_cache([self.compute])
+
+        mock_remove.assert_called_once_with(invalid_nodename)
+        mock_invalidate.assert_called_once_with(invalid_nodename)

@@ -52,6 +52,7 @@ AGGREGATE_GENERATION_VERSION = '1.19'
 NESTED_PROVIDER_API_VERSION = '1.14'
 POST_ALLOCATIONS_API_VERSION = '1.13'
 GET_USAGES_VERSION = '1.9'
+PLACEMENTCLIENT = None
 
 AggInfo = collections.namedtuple('AggInfo', ['aggregates', 'generation'])
 TraitInfo = collections.namedtuple('TraitInfo', ['traits', 'generation'])
@@ -65,6 +66,51 @@ def warn_limit(self, msg):
     else:
         self._warn_count = WARN_EVERY
         LOG.warning(msg)
+
+
+def report_client_singleton():
+    """Return a reference to the global placement client singleton.
+
+    This initializes the placement client once and returns a reference
+    to that singleton on subsequent calls. Errors are raised
+    (particularly ks_exc.*) but context-specific error messages are
+    logged for consistency.
+    """
+    # NOTE(danms): The report client maintains internal state in the
+    # form of the provider tree, which will be shared across all users
+    # of this global client. That is not a problem now, but in the
+    # future it may be beneficial to fix that. One idea would be to
+    # change the behavior of the client such that the static-config
+    # pieces of the actual keystone client are separate from the
+    # internal state, so that we can return a new object here with a
+    # context-specific local state object, but with the client bits
+    # shared.
+    global PLACEMENTCLIENT
+    if PLACEMENTCLIENT is None:
+        try:
+            PLACEMENTCLIENT = SchedulerReportClient()
+        except ks_exc.EndpointNotFound:
+            LOG.error('The placement API endpoint was not found.')
+            raise
+        except ks_exc.MissingAuthPlugin:
+            LOG.error('No authentication information found for placement API.')
+            raise
+        except ks_exc.Unauthorized:
+            LOG.error('Placement service credentials do not work.')
+            raise
+        except ks_exc.DiscoveryFailure:
+            LOG.error('Discovering suitable URL for placement API failed.')
+            raise
+        except (ks_exc.ConnectFailure,
+                ks_exc.RequestTimeout,
+                ks_exc.GatewayTimeout):
+            LOG.error('Placement API service is not responding.')
+            raise
+        except Exception:
+            LOG.error('Failed to initialize placement client '
+                      '(is keystone available?)')
+            raise
+    return PLACEMENTCLIENT
 
 
 def safe_connect(f):
@@ -1231,6 +1277,11 @@ class SchedulerReportClient(object):
         resp = self.post('/reshaper', payload, version=RESHAPER_VERSION,
                          global_request_id=context.global_id)
         if not resp:
+            if resp.status_code == 409:
+                err = resp.json()['errors'][0]
+                if err['code'] == 'placement.concurrent_update':
+                    raise exception.PlacementReshapeConflict(error=resp.text)
+
             raise exception.ReshapeFailed(error=resp.text)
 
         return resp
@@ -1264,7 +1315,7 @@ class SchedulerReportClient(object):
         # failure here to be fatal to the caller.
         try:
             self._reshape(context, inventories, allocations)
-        except exception.ReshapeFailed:
+        except (exception.ReshapeFailed, exception.PlacementReshapeConflict):
             raise
         except Exception as e:
             # Make sure the original stack trace gets logged.
@@ -1322,7 +1373,6 @@ class SchedulerReportClient(object):
             # can inherit.
             helper_exceptions = (
                 exception.InvalidResourceClass,
-                exception.InventoryInUse,
                 exception.ResourceProviderAggregateRetrievalFailed,
                 exception.ResourceProviderDeletionFailed,
                 exception.ResourceProviderInUse,
@@ -1341,8 +1391,8 @@ class SchedulerReportClient(object):
                 # the conflict exception. This signals the resource tracker to
                 # redrive the update right away rather than waiting until the
                 # next periodic.
-                with excutils.save_and_reraise_exception():
-                    self._clear_provider_cache_for_tree(rp_uuid)
+                self._clear_provider_cache_for_tree(rp_uuid)
+                raise
             except helper_exceptions:
                 # Invalidate the relevant part of the cache. It gets rebuilt on
                 # the next pass.
@@ -1383,8 +1433,16 @@ class SchedulerReportClient(object):
         if allocations is not None:
             # NOTE(efried): We do not catch_all here, because ReshapeFailed
             # needs to bubble up right away and be handled specially.
-            self._set_up_and_do_reshape(context, old_tree, new_tree,
-                                        allocations)
+            try:
+                self._set_up_and_do_reshape(
+                    context, old_tree, new_tree, allocations)
+            except exception.PlacementReshapeConflict:
+                # The conflict means we need to invalidate the local caches and
+                # let the retry mechanism in _update_to_placement to re-drive
+                # the reshape top of the fresh data
+                with excutils.save_and_reraise_exception():
+                    self.clear_provider_cache()
+
             # The reshape updated provider generations, so the ones we have in
             # the cache are now stale. The inventory update below will short
             # out, but we would still bounce with a provider generation

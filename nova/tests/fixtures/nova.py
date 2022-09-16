@@ -23,12 +23,12 @@ import functools
 import logging as std_logging
 import os
 import time
+from unittest import mock
 import warnings
 
 import eventlet
 import fixtures
 import futurist
-import mock
 from openstack import service_description
 from oslo_concurrency import lockutils
 from oslo_config import cfg
@@ -806,7 +806,7 @@ class WarningsFixture(fixtures.Fixture):
     """Filters out warnings during test runs."""
 
     def setUp(self):
-        super(WarningsFixture, self).setUp()
+        super().setUp()
 
         self._original_warning_filters = warnings.filters[:]
 
@@ -819,15 +819,19 @@ class WarningsFixture(fixtures.Fixture):
         # forward on is_admin, the deprecation is definitely really premature.
         warnings.filterwarnings(
             'ignore',
-            message='Policy enforcement is depending on the value of is_admin.'
-                    ' This key is deprecated. Please update your policy '
-                    'file to use the standard policy values.')
+            message=(
+                'Policy enforcement is depending on the value of is_admin. '
+                'This key is deprecated. Please update your policy '
+                'file to use the standard policy values.'
+            ),
+        )
 
         # NOTE(mriedem): Ignore scope check UserWarnings from oslo.policy.
         warnings.filterwarnings(
             'ignore',
             message="Policy .* failed scope check",
-            category=UserWarning)
+            category=UserWarning,
+        )
 
         # NOTE(gibi): The UUIDFields emits a warning if the value is not a
         # valid UUID. Let's escalate that to an exception in the test to
@@ -839,70 +843,36 @@ class WarningsFixture(fixtures.Fixture):
         # how to handle (or isn't given a fallback callback).
         warnings.filterwarnings(
             'error',
-            message="Cannot convert <oslo_db.sqlalchemy.enginefacade"
-                    "._Default object at ",
-            category=UserWarning)
-
-        warnings.filterwarnings(
-            'error', message='Evaluating non-mapped column expression',
-            category=sqla_exc.SAWarning)
+            message=(
+                'Cannot convert <oslo_db.sqlalchemy.enginefacade._Default '
+                'object at '
+            ),
+            category=UserWarning,
+        )
 
         # Enable deprecation warnings for nova itself to capture upcoming
         # SQLAlchemy changes
 
         warnings.filterwarnings(
             'ignore',
-            category=sqla_exc.SADeprecationWarning)
+            category=sqla_exc.SADeprecationWarning,
+        )
 
         warnings.filterwarnings(
             'error',
             module='nova',
-            category=sqla_exc.SADeprecationWarning)
+            category=sqla_exc.SADeprecationWarning,
+        )
 
-        # ...but filter everything out until we get around to fixing them
-        # TODO(stephenfin): Fix all of these
+        # Enable general SQLAlchemy warnings also to ensure we're not doing
+        # silly stuff. It's possible that we'll need to filter things out here
+        # with future SQLAlchemy versions, but that's a good thing
 
         warnings.filterwarnings(
-            'ignore',
+            'error',
             module='nova',
-            message=r'The current statement is being autocommitted .*',
-            category=sqla_exc.SADeprecationWarning)
-
-        warnings.filterwarnings(
-            'ignore',
-            module='nova',
-            message=r'The Column.copy\(\) method is deprecated .*',
-            category=sqla_exc.SADeprecationWarning)
-
-        warnings.filterwarnings(
-            'ignore',
-            module='nova',
-            message=r'The Connection.connect\(\) method is considered .*',
-            category=sqla_exc.SADeprecationWarning)
-
-        warnings.filterwarnings(
-            'ignore',
-            module='nova',
-            message=r'Using strings to indicate column or relationship .*',
-            category=sqla_exc.SADeprecationWarning)
-
-        warnings.filterwarnings(
-            'ignore',
-            module='nova',
-            message=r'Using strings to indicate relationship names .*',
-            category=sqla_exc.SADeprecationWarning)
-
-        warnings.filterwarnings(
-            'ignore',
-            module='nova',
-            message=r'Invoking and_\(\) without arguments is deprecated, .*',
-            category=sqla_exc.SADeprecationWarning)
-
-        # TODO(stephenfin): Remove once we fix this in placement 5.0.2 or 6.0.0
-        warnings.filterwarnings(
-            'ignore',
-            message='Implicit coercion of SELECT and textual SELECT .*',
-            category=sqla_exc.SADeprecationWarning)
+            category=sqla_exc.SAWarning,
+        )
 
         self.addCleanup(self._reset_warning_filters)
 
@@ -1032,7 +1002,13 @@ class OSAPIFixture(fixtures.Fixture):
         self.api = client.TestOpenStackClient(
             'fake', base_url, project_id=self.project_id,
             roles=['reader', 'member'])
+        self.alternative_api = client.TestOpenStackClient(
+            'fake', base_url, project_id=self.project_id,
+            roles=['reader', 'member'])
         self.admin_api = client.TestOpenStackClient(
+            'admin', base_url, project_id=self.project_id,
+            roles=['reader', 'member', 'admin'])
+        self.alternative_admin_api = client.TestOpenStackClient(
             'admin', base_url, project_id=self.project_id,
             roles=['reader', 'member', 'admin'])
         self.reader_api = client.TestOpenStackClient(
@@ -1130,9 +1106,9 @@ class PoisonFunctions(fixtures.Fixture):
         # Don't poison the function if it's already mocked
         import nova.virt.libvirt.host
         if not isinstance(nova.virt.libvirt.host.Host._init_events, mock.Mock):
-            self.useFixture(fixtures.MockPatch(
+            self.useFixture(fixtures.MonkeyPatch(
                 'nova.virt.libvirt.host.Host._init_events',
-                side_effect=evloop))
+                evloop))
 
 
 class IndirectionAPIFixture(fixtures.Fixture):
@@ -1485,7 +1461,7 @@ class AvailabilityZoneFixture(fixtures.Fixture):
     ``get_availability_zones``.
 
     ``get_instance_availability_zone`` will return the availability_zone
-    requested when creating a server otherwise the instance.availabilty_zone
+    requested when creating a server otherwise the instance.availability_zone
     or default_availability_zone is returned.
     """
 
@@ -1637,7 +1613,11 @@ class GenericPoisonFixture(fixtures.Fixture):
                 current = __import__(components[0], {}, {})
                 for component in components[1:]:
                     current = getattr(current, component)
-                if not isinstance(getattr(current, attribute), mock.Mock):
+
+                # NOTE(stephenfin): There are a couple of mock libraries in use
+                # (including mocked versions of mock from oslotest) so we can't
+                # use isinstance checks here
+                if 'mock' not in str(type(getattr(current, attribute))):
                     self.useFixture(fixtures.MonkeyPatch(
                         meth, poison_configure(meth, why)))
             except ImportError:
@@ -1759,3 +1739,62 @@ class ReaderWriterLock(lockutils.ReaderWriterLock):
             'threading.current_thread', eventlet.getcurrent)
         with mpatch if eventlet_patched else contextlib.ExitStack():
             super().__init__(*a, **kw)
+
+
+class SysFsPoisonFixture(fixtures.Fixture):
+
+    def inject_poison(self, module_name, function_name):
+        import importlib
+        mod = importlib.import_module(module_name)
+        orig_f = getattr(mod, function_name)
+        if (
+            isinstance(orig_f, mock.Mock) or
+            # FIXME(gibi): Is this a bug in unittest.mock? If I remove this
+            # then LibvirtReportSevTraitsTests fails as builtins.open is mocked
+            # there at import time via @test.patch_open. That injects a
+            # MagicMock instance to builtins.open which we check here against
+            # Mock (or even MagicMock) via isinstance and that check says it is
+            # not a mock. More interestingly I cannot reproduce the same
+            # issue with @test.patch_open and isinstance in a simple python
+            # interpreter. So to make progress I'm checking the class name
+            # here instead as that works.
+            orig_f.__class__.__name__ == "MagicMock"
+        ):
+            # the target is already mocked, probably via a decorator run at
+            # import time, so we don't need to inject our poison
+            return
+
+        full_name = module_name + "." + function_name
+
+        def toxic_wrapper(*args, **kwargs):
+            path = args[0]
+            if isinstance(path, bytes):
+                pattern = b'/sys'
+            elif isinstance(path, str):
+                pattern = '/sys'
+            else:
+                # we ignore the rest of the potential pathlike types for now
+                pattern = None
+
+            if pattern and path.startswith(pattern):
+                raise Exception(
+                    'This test invokes %s on %s. It is bad, you '
+                    'should mock it.'
+                    % (full_name, path)
+                )
+            else:
+                return orig_f(*args, **kwargs)
+
+        self.useFixture(fixtures.MonkeyPatch(full_name, toxic_wrapper))
+
+    def setUp(self):
+        super().setUp()
+        self.inject_poison("os.path", "isdir")
+        self.inject_poison("builtins", "open")
+        self.inject_poison("glob", "iglob")
+        self.inject_poison("os", "listdir")
+        self.inject_poison("glob", "glob")
+        # TODO(gibi): Would be good to poison these too but that makes
+        # a bunch of test to fail
+        # self.inject_poison("os.path", "exists")
+        # self.inject_poison("os", "stat")

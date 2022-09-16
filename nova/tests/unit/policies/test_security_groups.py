@@ -10,8 +10,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from unittest import mock
+
 import fixtures
-import mock
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 
@@ -103,22 +104,20 @@ class ServerSecurityGroupsNoLegacyNoScopePolicyTest(
     without_deprecated_rules = True
     rules_without_deprecation = {
         policies.POLICY_NAME % 'list':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
         policies.POLICY_NAME % 'add':
-            base_policy.PROJECT_MEMBER,
+            base_policy.PROJECT_MEMBER_OR_ADMIN,
         policies.POLICY_NAME % 'remove':
-            base_policy.PROJECT_MEMBER}
+            base_policy.PROJECT_MEMBER_OR_ADMIN}
 
     def setUp(self):
         super(ServerSecurityGroupsNoLegacyNoScopePolicyTest, self).setUp()
         # With no legacy rule, only project admin or member will be
         # able to add/remove SG to server and reader to get SG.
-        self.project_member_authorized_contexts = [
-            self.project_admin_context, self.project_member_context]
-        self.project_reader_authorized_contexts = [
-            self.project_admin_context, self.project_member_context,
-            self.project_reader_context,
-        ]
+        self.project_member_authorized_contexts = (
+            self.project_member_or_admin_with_no_scope_no_legacy)
+        self.project_reader_authorized_contexts = (
+            self.project_reader_or_admin_with_no_scope_no_legacy)
 
 
 class SecurityGroupsPolicyTest(base.BasePolicyTest):
@@ -216,7 +215,7 @@ class SecurityGroupsPolicyTest(base.BasePolicyTest):
         body = {'security_group_rule': {
             'ip_protocol': 'test', 'group_id': uuids.fake_id,
             'parent_group_id': uuids.fake_id,
-            'from_port': 22, 'from_port': 22}}
+            'from_port': 22}}
         self.common_policy_auth(self.project_member_authorized_contexts,
                                 rule_name,
                                 self.rule_ctr.create,
@@ -242,19 +241,19 @@ class SecurityGroupsNoLegacyNoScopePolicyTest(
     without_deprecated_rules = True
     rules_without_deprecation = {
         policies.POLICY_NAME % 'get':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
         policies.POLICY_NAME % 'show':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
         policies.POLICY_NAME % 'create':
-            base_policy.PROJECT_MEMBER,
+            base_policy.PROJECT_MEMBER_OR_ADMIN,
         policies.POLICY_NAME % 'update':
-            base_policy.PROJECT_MEMBER,
+            base_policy.PROJECT_MEMBER_OR_ADMIN,
         policies.POLICY_NAME % 'delete':
-            base_policy.PROJECT_MEMBER,
+            base_policy.PROJECT_MEMBER_OR_ADMIN,
             policies.POLICY_NAME % 'rule:create':
-            base_policy.PROJECT_MEMBER,
+            base_policy.PROJECT_MEMBER_OR_ADMIN,
             policies.POLICY_NAME % 'rule:delete':
-            base_policy.PROJECT_MEMBER}
+            base_policy.PROJECT_MEMBER_OR_ADMIN}
 
     def setUp(self):
         super(SecurityGroupsNoLegacyNoScopePolicyTest, self).setUp()
@@ -320,15 +319,10 @@ class ServerSecurityGroupsScopeTypePolicyTest(ServerSecurityGroupsPolicyTest):
         super(ServerSecurityGroupsScopeTypePolicyTest, self).setUp()
         self.flags(enforce_scope=True, group="oslo_policy")
         # Scope enable will not allow system users.
-        self.project_member_authorized_contexts = [
-            self.legacy_admin_context,
-            self.project_admin_context, self.project_member_context,
-            self.project_reader_context, self.project_foo_context]
-        self.project_reader_authorized_contexts = [
-            self.legacy_admin_context, self.project_admin_context,
-            self.project_member_context, self.project_reader_context,
-            self.project_foo_context
-        ]
+        self.project_member_authorized_contexts = (
+            self.project_m_r_or_admin_with_scope_and_legacy)
+        self.project_reader_authorized_contexts = (
+            self.project_m_r_or_admin_with_scope_and_legacy)
 
 
 class ServerSecurityGroupsScopeTypeNoLegacyPolicyTest(
@@ -339,23 +333,21 @@ class ServerSecurityGroupsScopeTypeNoLegacyPolicyTest(
     without_deprecated_rules = True
     rules_without_deprecation = {
         policies.POLICY_NAME % 'list':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
         policies.POLICY_NAME % 'add':
-            base_policy.PROJECT_MEMBER,
+            base_policy.PROJECT_MEMBER_OR_ADMIN,
         policies.POLICY_NAME % 'remove':
-            base_policy.PROJECT_MEMBER}
+            base_policy.PROJECT_MEMBER_OR_ADMIN}
 
     def setUp(self):
         super(ServerSecurityGroupsScopeTypeNoLegacyPolicyTest, self).setUp()
         # With scope enable and no legacy rule, only project admin/member
         # will be able to add/remove the SG to their server and reader
         # will get SG of server.
-        self.project_member_authorized_contexts = [
-            self.project_admin_context, self.project_member_context]
-        self.project_reader_authorized_contexts = [
-            self.project_admin_context, self.project_member_context,
-            self.project_reader_context
-        ]
+        self.project_member_authorized_contexts = (
+            self.project_member_or_admin_with_scope_no_legacy)
+        self.project_reader_authorized_contexts = (
+            self.project_reader_or_admin_with_scope_no_legacy)
 
 
 class SecurityGroupsNoLegacyPolicyTest(SecurityGroupsScopeTypePolicyTest):
@@ -365,19 +357,19 @@ class SecurityGroupsNoLegacyPolicyTest(SecurityGroupsScopeTypePolicyTest):
     without_deprecated_rules = True
     rules_without_deprecation = {
         policies.POLICY_NAME % 'get':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
         policies.POLICY_NAME % 'show':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
         policies.POLICY_NAME % 'create':
-            base_policy.PROJECT_MEMBER,
+            base_policy.PROJECT_MEMBER_OR_ADMIN,
         policies.POLICY_NAME % 'update':
-            base_policy.PROJECT_MEMBER,
+            base_policy.PROJECT_MEMBER_OR_ADMIN,
         policies.POLICY_NAME % 'delete':
-            base_policy.PROJECT_MEMBER,
+            base_policy.PROJECT_MEMBER_OR_ADMIN,
             policies.POLICY_NAME % 'rule:create':
-            base_policy.PROJECT_MEMBER,
+            base_policy.PROJECT_MEMBER_OR_ADMIN,
             policies.POLICY_NAME % 'rule:delete':
-            base_policy.PROJECT_MEMBER}
+            base_policy.PROJECT_MEMBER_OR_ADMIN}
 
     def setUp(self):
         super(SecurityGroupsNoLegacyPolicyTest, self).setUp()

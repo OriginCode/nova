@@ -752,15 +752,7 @@ class CellV2Commands(object):
             # worry about parsing and splitting a URL which could have special
             # characters in the password, which makes parsing a nightmare.
             url = sqla_url.make_url(connection)
-
-            # TODO(gibi): remove hasattr() conditional in favor of "url.set()"
-            # when SQLAlchemy 1.4 is the minimum version in requirements
-            if hasattr(url, "set"):
-                url = url.set(database=url.database + '_cell0')
-            else:
-                # TODO(zzzeek): remove when SQLAlchemy 1.4
-                # is the minimum version in requirements
-                url.database = url.database + '_cell0'
+            url = url.set(database=url.database + '_cell0')
 
             return urlparse.unquote(str(url))
 
@@ -2217,7 +2209,7 @@ class PlacementCommands(object):
                 output(_('No cells to process.'))
                 return 4
 
-        placement = report.SchedulerReportClient()
+        placement = report.report_client_singleton()
 
         neutron = None
         if heal_port_allocations:
@@ -2718,7 +2710,7 @@ class PlacementCommands(object):
         if verbose:
             output = lambda msg: print(msg)
 
-        placement = report.SchedulerReportClient()
+        placement = report.report_client_singleton()
         # Resets two in-memory dicts for knowing instances per compute node
         self.cn_uuid_mapping = collections.defaultdict(tuple)
         self.instances_mapping = collections.defaultdict(list)
@@ -3192,7 +3184,7 @@ class VolumeAttachmentCommands(object):
             return 1
 
 
-class ImagePropertyCommands():
+class ImagePropertyCommands:
 
     @action_description(_("Show the value of an instance image property."))
     @args(

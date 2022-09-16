@@ -188,14 +188,25 @@ class ImageMetaProps(base.NovaObject):
     # Version 1.29: Added 'hw_input_bus' field
     # Version 1.30: Added 'bochs' as an option to 'hw_video_model'
     # Version 1.31: Added 'hw_emulation_architecture' field
+    # Version 1.32: Added 'hw_ephemeral_encryption' and
+    #                     'hw_ephemeral_encryption_format' fields
+    # Version 1.33: Added 'hw_locked_memory' field
+    # Version 1.34: Added 'hw_viommu_model' field
     # NOTE(efried): When bumping this version, the version of
     # ImageMetaPropsPayload must also be bumped. See its docstring for details.
-    VERSION = '1.31'
+    VERSION = '1.34'
 
     def obj_make_compatible(self, primitive, target_version):
         super(ImageMetaProps, self).obj_make_compatible(primitive,
                                                         target_version)
         target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 34):
+            primitive.pop('hw_viommu_model', None)
+        if target_version < (1, 33):
+            primitive.pop('hw_locked_memory', None)
+        if target_version < (1, 32):
+            primitive.pop('hw_ephemeral_encryption', None)
+            primitive.pop('hw_ephemeral_encryption_format', None)
         if target_version < (1, 31):
             primitive.pop('hw_emulation_architecture', None)
         if target_version < (1, 30):
@@ -363,6 +374,10 @@ class ImageMetaProps(base.NovaObject):
         # image with a network boot image
         'hw_ipxe_boot': fields.FlexibleBooleanField(),
 
+        # string - make sure ``locked`` element is present in the
+        # ``memoryBacking``.
+        'hw_locked_memory': fields.FlexibleBooleanField(),
+
         # There are sooooooooooo many possible machine types in
         # QEMU - several new ones with each new release - that it
         # is not practical to enumerate them all. So we use a free
@@ -434,6 +449,9 @@ class ImageMetaProps(base.NovaObject):
         # name of a NIC device model eg virtio, e1000, rtl8139
         'hw_vif_model': fields.VIFModelField(),
 
+        # name of IOMMU device model eg virtio, intel, smmuv3, or auto
+        'hw_viommu_model': fields.VIOMMUModelField(),
+
         # "xen" vs "hvm"
         'hw_vm_mode': fields.VMModeField(),
 
@@ -448,6 +466,12 @@ class ImageMetaProps(base.NovaObject):
         'hw_tpm_model': fields.TPMModelField(),
         # version of emulated TPM to use.
         'hw_tpm_version': fields.TPMVersionField(),
+
+        # boolean - if true will enable ephemeral encryption for instance
+        'hw_ephemeral_encryption': fields.FlexibleBooleanField(),
+        # encryption format to be used when ephemeral encryption is enabled
+        'hw_ephemeral_encryption_format':
+            fields.BlockDeviceEncryptionFormatTypeField(),
 
         # if true download using bittorrent
         'img_bittorrent': fields.FlexibleBooleanField(),

@@ -11,9 +11,9 @@
 #    under the License.
 
 import functools
+from unittest import mock
 
 import fixtures
-import mock
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 
@@ -1229,10 +1229,9 @@ class ServersPolicyTest(base.BasePolicyTest):
     @mock.patch('nova.compute.api.API._allow_resize_to_same_host')
     @mock.patch('nova.objects.RequestSpec.get_by_instance_uuid')
     @mock.patch('nova.objects.Instance.save')
-    @mock.patch('nova.api.openstack.common.get_instance')
     @mock.patch('nova.conductor.ComputeTaskAPI.resize_instance')
     def test_cross_cell_resize_server_policy(
-        self, mock_resize, mock_get, mock_save, mock_rs, mock_allow, m_net
+        self, mock_resize, mock_save, mock_rs, mock_allow, m_net
     ):
 
         # 'migrate' policy is checked before 'resize:cross_cell' so
@@ -1262,7 +1261,7 @@ class ServersPolicyTest(base.BasePolicyTest):
             )
             return inst
 
-        mock_get.side_effect = fake_get
+        self.mock_get.side_effect = fake_get
 
         def fake_validate(context, instance,
             host_name, allow_cross_cell_resize):
@@ -1325,7 +1324,7 @@ class ServersNoLegacyNoScopeTest(ServersPolicyTest):
     without_deprecated_rules = True
     rules_without_deprecation = {
         policies.SERVERS % 'show:flavor-extra-specs':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
     }
 
     def setUp(self):
@@ -1333,23 +1332,14 @@ class ServersNoLegacyNoScopeTest(ServersPolicyTest):
 
         # Disabling legacy rule support means that we no longer allow
         # random roles on our project to take action on our
-        # resources. We also do not allow admin on other projects
-        # (i.e. legacy_admin), nor system (because it's admin on no
-        # project).
-        self.reduce_set('project_action_authorized', set([
-            self.project_admin_context, self.project_member_context,
-        ]))
-
-        self.reduce_set('project_admin_authorized', set([
-            self.project_admin_context
-        ]))
+        # resources. Legacy admin will have access.
+        self.project_action_authorized_contexts = (
+            self.project_member_or_admin_with_no_scope_no_legacy)
 
         # The only additional role that can read our resources is our
         # own project_reader.
         self.project_reader_authorized_contexts = (
-            self.project_action_authorized_contexts |
-            set([self.project_reader_context])
-        )
+            self.project_reader_or_admin_with_no_scope_no_legacy)
 
         # Disabling legacy support means random roles lose power to
         # see everything in their project.
@@ -1439,7 +1429,7 @@ class ServersNoLegacyPolicyTest(ServersScopeTypePolicyTest):
     without_deprecated_rules = True
     rules_without_deprecation = {
         policies.SERVERS % 'show:flavor-extra-specs':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
     }
 
     def setUp(self):
@@ -1449,15 +1439,8 @@ class ServersNoLegacyPolicyTest(ServersScopeTypePolicyTest):
         # powerful on our project. Also, we drop the "any role on the
         # project means you can do stuff" behavior, so project_reader
         # and project_foo lose power.
-        self.reduce_set('project_action_authorized', set([
-            self.project_admin_context,
-            self.project_member_context,
-        ]))
-
-        # With no legacy rule and scope checks enable, only project
-        # admin can do admin things on project resource.
-        self.reduce_set('project_admin_authorized',
-                        set([self.project_admin_context]))
+        self.project_action_authorized_contexts = (
+            self.project_member_or_admin_with_scope_no_legacy)
 
         # Only project_reader has additional read access to our
         # project resources.

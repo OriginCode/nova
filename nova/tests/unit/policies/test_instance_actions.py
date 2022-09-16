@@ -11,8 +11,9 @@
 #    under the License.
 
 import copy
+from unittest import mock
+
 import fixtures
-import mock
 
 from nova.api.openstack import api_version_request
 from oslo_policy import policy as oslo_policy
@@ -139,20 +140,17 @@ class InstanceActionsNoLegacyNoScopePolicyTest(InstanceActionsPolicyTest):
     without_deprecated_rules = True
     rules_without_deprecation = {
         ia_policies.BASE_POLICY_NAME % 'list':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
         ia_policies.BASE_POLICY_NAME % 'show':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
         ia_policies.BASE_POLICY_NAME % 'events':
-            base_policy.PROJECT_ADMIN,
+            base_policy.ADMIN,
     }
 
     def setUp(self):
         super(InstanceActionsNoLegacyNoScopePolicyTest, self).setUp()
-        # With no legacy rule, legacy admin loose power.
-        self.project_admin_authorized_contexts = [self.project_admin_context]
-        self.project_reader_authorized_contexts = [
-            self.project_admin_context, self.project_member_context,
-            self.project_reader_context]
+        self.project_reader_authorized_contexts = (
+            self.project_reader_or_admin_with_no_scope_no_legacy)
 
 
 class InstanceActionsDeprecatedPolicyTest(base.BasePolicyTest):
@@ -191,7 +189,7 @@ class InstanceActionsDeprecatedPolicyTest(base.BasePolicyTest):
     @mock.patch('nova.api.openstack.common.get_instance')
     def test_deprecated_policy_overridden_rule_is_checked(
             self, mock_instance_get, mock_actions_get):
-        # Test to verify if deprecatd overridden policy is working.
+        # Test to verify if deprecated overridden policy is working.
 
         instance = fake_instance.fake_instance_obj(
             self.admin_or_owner_req.environ['nova.context'])
@@ -199,7 +197,7 @@ class InstanceActionsDeprecatedPolicyTest(base.BasePolicyTest):
         # Check for success as admin_or_owner role. Deprecated rule
         # has been overridden with admin checks in policy.yaml
         # If admin role pass it means overridden rule is enforced by
-        # olso.policy because new default is system reader and the old
+        # oslo.policy because new default is system reader and the old
         # default is admin.
         self.controller.index(self.admin_or_owner_req, instance['uuid'])
 
@@ -230,10 +228,8 @@ class InstanceActionsScopeTypePolicyTest(InstanceActionsPolicyTest):
         # With Scope enable, system users no longer allowed.
         self.project_admin_authorized_contexts = [
             self.legacy_admin_context, self.project_admin_context]
-        self.project_reader_authorized_contexts = [
-            self.legacy_admin_context,
-            self.project_admin_context, self.project_member_context,
-            self.project_reader_context, self.project_foo_context]
+        self.project_reader_authorized_contexts = (
+            self.project_m_r_or_admin_with_scope_and_legacy)
 
     @mock.patch('nova.objects.InstanceActionEventList.get_by_action')
     @mock.patch('nova.objects.InstanceAction.get_by_request_id')
@@ -279,27 +275,25 @@ class InstanceActionsScopeTypePolicyTest(InstanceActionsPolicyTest):
                 self.assertNotIn('details', event)
 
 
-class InstanceActionsScopeTypeNoLegacyPolicyTest(InstanceActionsPolicyTest):
+class InstanceActionsScopeTypeNoLegacyPolicyTest(
+    InstanceActionsScopeTypePolicyTest):
     """Test os-instance-actions APIs policies with system scope enabled,
     and no more deprecated rules.
     """
     without_deprecated_rules = True
     rules_without_deprecation = {
         ia_policies.BASE_POLICY_NAME % 'list':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
         ia_policies.BASE_POLICY_NAME % 'show':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
         ia_policies.BASE_POLICY_NAME % 'events':
-            base_policy.PROJECT_ADMIN,
+            base_policy.ADMIN,
     }
 
     def setUp(self):
         super(InstanceActionsScopeTypeNoLegacyPolicyTest, self).setUp()
-        self.flags(enforce_scope=True, group="oslo_policy")
         # With no legacy and scope enable, only project admin, member,
         # and reader will be able to get server action and only admin
         # with event details.
-        self.project_admin_authorized_contexts = [self.project_admin_context]
-        self.project_reader_authorized_contexts = [
-            self.project_admin_context, self.project_member_context,
-            self.project_reader_context]
+        self.project_reader_authorized_contexts = (
+            self.project_reader_or_admin_with_scope_no_legacy)

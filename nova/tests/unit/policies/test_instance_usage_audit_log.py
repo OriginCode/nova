@@ -10,7 +10,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import mock
+from unittest import mock
 
 from nova.api.openstack.compute import instance_usage_audit_log as iual
 from nova.policies import base as base_policy
@@ -85,7 +85,8 @@ class InstanceUsageScopeTypePolicyTest(InstanceUsageAuditLogPolicyTest):
 
         # Scope checks remove project users power.
         self.admin_authorized_contexts = [
-            self.system_admin_context]
+            self.legacy_admin_context,
+            self.project_admin_context]
 
 
 class InstanceUsageScopeTypeNoLegacyPolicyTest(

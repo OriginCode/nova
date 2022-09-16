@@ -10,8 +10,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from unittest import mock
+
 import fixtures
-import mock
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 
@@ -65,11 +66,6 @@ class ServerDiagnosticsNoLegacyNoScopeTest(ServerDiagnosticsPolicyTest):
 
     without_deprecated_rules = True
 
-    def setUp(self):
-        super(ServerDiagnosticsNoLegacyNoScopeTest, self).setUp()
-        self.project_admin_authorized_contexts = [
-            self.project_admin_context]
-
 
 class ServerDiagnosticsScopeTypePolicyTest(ServerDiagnosticsPolicyTest):
     """Test Server Diagnostics APIs policies with system scope enabled.
@@ -97,12 +93,6 @@ class ServerDiagnosticsScopeTypeNoLegacyPolicyTest(
     """
     without_deprecated_rules = True
 
-    def setUp(self):
-        super(ServerDiagnosticsScopeTypeNoLegacyPolicyTest, self).setUp()
-        # with no legacy rule and scope enable., only project admin is able to
-        # get server diagnostics.
-        self.project_admin_authorized_contexts = [self.project_admin_context]
-
 
 class ServerDiagnosticsOverridePolicyTest(
     ServerDiagnosticsScopeTypeNoLegacyPolicyTest):
@@ -116,7 +106,7 @@ class ServerDiagnosticsOverridePolicyTest(
         super(ServerDiagnosticsOverridePolicyTest, self).setUp()
         rule = policies.BASE_POLICY_NAME
         # NOTE(gmann): override the rule to project member and verify it
-        # work as policy is projct scoped.
+        # work as policy is project scoped.
         self.policy.set_rules({
             rule: base_policy.PROJECT_MEMBER},
             overwrite=False)

@@ -1337,6 +1337,48 @@ def _get_constraint_mappings_from_flavor(flavor, key, func):
     return hw_numa_map or None
 
 
+def get_locked_memory_constraint(
+    flavor: 'objects.Flavor',
+    image_meta: 'objects.ImageMeta',
+) -> ty.Optional[bool]:
+    """Validate and return the requested locked memory.
+
+    :param flavor: ``nova.objects.Flavor`` instance
+    :param image_meta: ``nova.objects.ImageMeta`` instance
+    :raises: exception.LockMemoryForbidden if mem_page_size is not set
+        while provide locked_memory value in image or flavor.
+    :returns: The locked memory flag requested.
+    """
+    mem_page_size_flavor, mem_page_size_image = _get_flavor_image_meta(
+        'mem_page_size', flavor, image_meta)
+
+    locked_memory_flavor, locked_memory_image = _get_flavor_image_meta(
+        'locked_memory', flavor, image_meta)
+
+    if locked_memory_flavor is not None:
+        # locked_memory_image is boolean type already
+        locked_memory_flavor = strutils.bool_from_string(locked_memory_flavor)
+
+        if locked_memory_image is not None and (
+                locked_memory_flavor != locked_memory_image
+        ):
+            # We don't allow provide different value to flavor and image
+            raise exception.FlavorImageLockedMemoryConflict(
+                image=locked_memory_image, flavor=locked_memory_flavor)
+
+        locked_memory = locked_memory_flavor
+
+    else:
+        locked_memory = locked_memory_image
+
+    if locked_memory and not (
+            mem_page_size_flavor or mem_page_size_image
+    ):
+        raise exception.LockMemoryForbidden()
+
+    return locked_memory
+
+
 def _get_numa_cpu_constraint(
     flavor: 'objects.Flavor',
     image_meta: 'objects.ImageMeta',
@@ -2107,6 +2149,8 @@ def numa_get_constraints(flavor, image_meta):
     pagesize = _get_numa_pagesize_constraint(flavor, image_meta)
     vpmems = get_vpmems(flavor)
 
+    get_locked_memory_constraint(flavor, image_meta)
+
     # If 'hw:cpu_dedicated_mask' is not found in flavor extra specs, the
     # 'dedicated_cpus' variable is None, while we hope it being an empty set.
     dedicated_cpus = dedicated_cpus or set()
@@ -2357,12 +2401,37 @@ def numa_fit_instance_to_host(
                     host_cells,
                     key=lambda cell: total_pci_in_cell.get(cell.id, 0))
 
+    # a set of host_cell.id, instance_cell.id pairs where we already checked
+    # that the instance cell does not fit
+    not_fit_cache = set()
+    # a set of host_cell.id, instance_cell.id pairs where we already checked
+    # that the instance cell does fit
+    fit_cache = set()
     for host_cell_perm in itertools.permutations(
             host_cells, len(instance_topology)):
         chosen_instance_cells: ty.List['objects.InstanceNUMACell'] = []
         chosen_host_cells: ty.List['objects.NUMACell'] = []
         for host_cell, instance_cell in zip(
                 host_cell_perm, instance_topology.cells):
+
+            cell_pair = (host_cell.id, instance_cell.id)
+
+            # if we already checked this pair, and they did not fit then no
+            # need to check again just move to the next permutation
+            if cell_pair in not_fit_cache:
+                break
+
+            # if we already checked this pair, and they fit before that they
+            # will fit now too. So no need to check again. Just continue with
+            # the next cell pair in the permutation
+            if cell_pair in fit_cache:
+                chosen_host_cells.append(host_cell)
+                # Normally this would have done by _numa_fit_instance_cell
+                # but we optimized that out here based on the cache
+                instance_cell.id = host_cell.id
+                chosen_instance_cells.append(instance_cell)
+                continue
+
             try:
                 cpuset_reserved = 0
                 if (instance_topology.emulator_threads_isolated and
@@ -2379,11 +2448,18 @@ def numa_fit_instance_to_host(
                 # This exception will been raised if instance cell's
                 # custom pagesize is not supported with host cell in
                 # _numa_cell_supports_pagesize_request function.
+
+                # cache the result
+                not_fit_cache.add(cell_pair)
                 break
             if got_cell is None:
+                # cache the result
+                not_fit_cache.add(cell_pair)
                 break
             chosen_host_cells.append(host_cell)
             chosen_instance_cells.append(got_cell)
+            # cache the result
+            fit_cache.add(cell_pair)
 
         if len(chosen_instance_cells) != len(host_cell_perm):
             continue
@@ -2566,3 +2642,73 @@ def check_hw_rescue_props(image_meta):
     """
     hw_rescue_props = ['hw_rescue_device', 'hw_rescue_bus']
     return any(key in image_meta.properties for key in hw_rescue_props)
+
+
+def get_ephemeral_encryption_constraint(
+    flavor: 'objects.Flavor',
+    image_meta: 'objects.ImageMeta',
+) -> bool:
+    """Get the ephemeral encryption constrants based on the flavor and image.
+
+    :param flavor: an objects.Flavor object
+    :param image_meta: an objects.ImageMeta object
+    :raises: nova.exception.FlavorImageConflict
+    :returns: boolean indicating whether encryption of guest ephemeral storage
+              was requested
+    """
+    flavor_eph_encryption_str, image_eph_encryption = _get_flavor_image_meta(
+        'ephemeral_encryption', flavor, image_meta)
+
+    flavor_eph_encryption = None
+    if flavor_eph_encryption_str is not None:
+        flavor_eph_encryption = strutils.bool_from_string(
+            flavor_eph_encryption_str)
+
+    # Check for conflicts between explicit requirements regarding
+    # ephemeral encryption.
+    # TODO(layrwood): make _check_for_mem_encryption_requirement_conflicts
+    # generic and reuse here
+    if (
+        flavor_eph_encryption is not None and
+        image_eph_encryption is not None and
+        flavor_eph_encryption != image_eph_encryption
+    ):
+        emsg = _(
+            "Flavor %(flavor_name)s has hw:ephemeral_encryption extra spec "
+            "explicitly set to %(flavor_val)s, conflicting with "
+            "image %(image_name)s which has hw_eph_encryption property "
+            "explicitly set to %(image_val)s"
+        )
+        data = {
+            'flavor_name': flavor.name,
+            'flavor_val': flavor_eph_encryption_str,
+            'image_name': image_meta.name,
+            'image_val': image_eph_encryption,
+        }
+        raise exception.FlavorImageConflict(emsg % data)
+
+    return flavor_eph_encryption or image_eph_encryption
+
+
+def get_ephemeral_encryption_format(
+    flavor: 'objects.Flavor',
+    image_meta: 'objects.ImageMeta',
+) -> ty.Optional[str]:
+    """Get the ephemeral encryption format.
+
+    :param flavor: an objects.Flavor object
+    :param image_meta: an objects.ImageMeta object
+    :raises: nova.exception.FlavorImageConflict or nova.exception.Invalid
+    :returns: BlockDeviceEncryptionFormatType or None
+    """
+    eph_format = _get_unique_flavor_image_meta(
+        'ephemeral_encryption_format', flavor, image_meta)
+    if eph_format:
+        if eph_format not in fields.BlockDeviceEncryptionFormatType.ALL:
+            allowed = fields.BlockDeviceEncryptionFormatType.ALL
+            raise exception.Invalid(
+                f"Invalid ephemeral encryption format {eph_format}. "
+                f"Allowed values: {', '.join(allowed)}"
+            )
+        return eph_format
+    return None

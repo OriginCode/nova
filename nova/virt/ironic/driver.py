@@ -20,13 +20,13 @@ bare metal resources.
 """
 
 import base64
-from distutils import version
 import gzip
 import shutil
 import tempfile
 import time
 from urllib import parse as urlparse
 
+import microversion_parse
 from openstack import exceptions as sdk_exc
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
@@ -742,7 +742,7 @@ class IronicDriver(virt_driver.ComputeDriver):
             # baremetal nodes. Depending on the version of Ironic,
             # this can be as long as 2-10 seconds per every thousand
             # nodes, and this call may retrieve all nodes in a deployment,
-            # depending on if any filter paramters are applied.
+            # depending on if any filter parameters are applied.
             return self._get_node_list(fields=_NODE_FIELDS, **kwargs)
 
         # NOTE(jroll) if partition_key is set, we need to limit nodes that
@@ -1630,7 +1630,8 @@ class IronicDriver(virt_driver.ComputeDriver):
                 admin_password, allocations, bdms, detach_block_devices,
                 attach_block_devices, network_info=None,
                 evacuate=False, block_device_info=None,
-                preserve_ephemeral=False, accel_uuids=None):
+                preserve_ephemeral=False, accel_uuids=None,
+                reimage_boot_volume=False):
         """Rebuild/redeploy an instance.
 
         This version of rebuild() allows for supporting the option to
@@ -1671,7 +1672,13 @@ class IronicDriver(virt_driver.ComputeDriver):
         :param preserve_ephemeral: Boolean value; if True the ephemeral
             must be preserved on rebuild.
         :param accel_uuids: Accelerator UUIDs. Ignored by this driver.
+        :param reimage_boot_volume: Re-image the volume backed instance.
         """
+        if reimage_boot_volume:
+            raise exception.NovaException(
+                _("Ironic doesn't support rebuilding volume backed "
+                  "instances."))
+
         LOG.debug('Rebuild called for instance', instance=instance)
 
         instance.task_state = task_states.REBUILD_SPAWNING
@@ -2057,7 +2064,7 @@ class IronicDriver(virt_driver.ComputeDriver):
         return None
 
     def _can_send_version(self, min_version=None, max_version=None):
-        """Validate if the suppplied version is available in the API."""
+        """Validate if the supplied version is available in the API."""
         # NOTE(TheJulia): This will effectively just be a pass if no
         # version negotiation has occured, since there is no way for
         # us to know without explicitly otherwise requesting that
@@ -2067,13 +2074,17 @@ class IronicDriver(virt_driver.ComputeDriver):
         if self.ironicclient.is_api_version_negotiated:
             current_api_version = self.ironicclient.current_api_version
             if (min_version and
-                    version.StrictVersion(current_api_version) <
-                    version.StrictVersion(min_version)):
+                    microversion_parse.parse_version_string(
+                        current_api_version) <
+                    microversion_parse.parse_version_string(
+                        min_version)):
                 raise exception.IronicAPIVersionNotAvailable(
                     version=min_version)
             if (max_version and
-                    version.StrictVersion(current_api_version) >
-                    version.StrictVersion(max_version)):
+                    microversion_parse.parse_version_string(
+                        current_api_version) >
+                    microversion_parse.parse_version_string(
+                        max_version)):
                 raise exception.IronicAPIVersionNotAvailable(
                     version=max_version)
 

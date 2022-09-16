@@ -16,8 +16,8 @@
 """Test of Policy Engine For Nova."""
 
 import os.path
+from unittest import mock
 
-import mock
 from oslo_policy import policy as oslo_policy
 from oslo_serialization import jsonutils
 import requests_mock
@@ -358,6 +358,7 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
 "os_compute_api:os-services:update",
 "os_compute_api:os-services:delete",
 "os_compute_api:os-shelve:shelve_offload",
+"os_compute_api:os-shelve:unshelve_to_host",
 "os_compute_api:os-availability-zone:detail",
 "os_compute_api:os-assisted-volume-snapshots:create",
 "os_compute_api:os-assisted-volume-snapshots:delete",
@@ -553,7 +554,8 @@ class RealRolePolicyTestCase(test.NoDBTestCase):
         special_rules = ('admin_api', 'admin_or_owner', 'context_is_admin',
                          'os_compute_api:os-quota-class-sets:show',
                          'project_admin_api', 'project_member_api',
-                         'project_reader_api', 'project_reader_or_admin')
+                         'project_reader_api', 'project_member_or_admin',
+                         'project_reader_or_admin')
         result = set(rules.keys()) - set(self.admin_only_rules +
             self.admin_or_owner_rules +
             self.allow_all_rules +

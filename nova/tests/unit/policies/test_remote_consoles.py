@@ -10,8 +10,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from unittest import mock
+
 import fixtures
-import mock
 from nova.policies import remote_consoles as rc_policies
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
@@ -78,8 +79,8 @@ class RemoteConsolesNoLegacyNoScopePolicyTest(RemoteConsolesPolicyTest):
         super(RemoteConsolesNoLegacyNoScopePolicyTest, self).setUp()
         # With no legacy rule, only project admin or member will be
         # able get server remote consoles.
-        self.project_action_authorized_contexts = [
-            self.project_admin_context, self.project_member_context]
+        self.project_action_authorized_contexts = (
+            self.project_member_or_admin_with_no_scope_no_legacy)
 
 
 class RemoteConsolesScopeTypePolicyTest(RemoteConsolesPolicyTest):
@@ -97,10 +98,8 @@ class RemoteConsolesScopeTypePolicyTest(RemoteConsolesPolicyTest):
         self.flags(enforce_scope=True, group="oslo_policy")
         # Scope enable will not allow system admin to get server
         # remote console.
-        self.project_action_authorized_contexts = [
-            self.legacy_admin_context,
-            self.project_admin_context, self.project_member_context,
-            self.project_reader_context, self.project_foo_context]
+        self.project_action_authorized_contexts = (
+            self.project_m_r_or_admin_with_scope_and_legacy)
 
 
 class RemoteConsolesScopeTypeNoLegacyPolicyTest(
@@ -115,5 +114,5 @@ class RemoteConsolesScopeTypeNoLegacyPolicyTest(
         super(RemoteConsolesScopeTypeNoLegacyPolicyTest, self).setUp()
         # With scope enable and no legacy rule, only project admin/member
         # will be able to get server remote console.
-        self.project_action_authorized_contexts = [
-            self.project_admin_context, self.project_member_context]
+        self.project_action_authorized_contexts = (
+            self.project_member_or_admin_with_scope_no_legacy)

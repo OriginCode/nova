@@ -207,6 +207,16 @@ class Invalid(NovaException):
     code = 400
 
 
+class InvalidVIOMMUMachineType(Invalid):
+    msg_fmt = _("vIOMMU is not supported by Current machine type %(mtype)s "
+                "(Architecture: %(arch)s).")
+
+
+class InvalidVIOMMUArchitecture(Invalid):
+    msg_fmt = _("vIOMMU required either x86 or AArch64 architecture, "
+                "but given architecture %(arch)s.")
+
+
 class InvalidConfiguration(Invalid):
     msg_fmt = _("Configuration is Invalid.")
 
@@ -1570,8 +1580,8 @@ class PciRequestAliasNotDefined(NovaException):
     msg_fmt = _("PCI alias %(alias)s is not defined")
 
 
-class PciConfigInvalidWhitelist(Invalid):
-    msg_fmt = _("Invalid PCI devices Whitelist config: %(reason)s")
+class PciConfigInvalidSpec(Invalid):
+    msg_fmt = _("Invalid [pci]device_spec config: %(reason)s")
 
 
 class PciRequestFromVIFNotFound(NotFound):
@@ -1676,9 +1686,15 @@ class MismatchVolumeAZException(Invalid):
 
 
 class UnshelveInstanceInvalidState(InstanceInvalidState):
-    msg_fmt = _('Specifying an availability zone when unshelving server '
-                '%(instance_uuid)s with status "%(state)s" is not supported. '
-                'The server status must be SHELVED_OFFLOADED.')
+    msg_fmt = _('Specifying an availability zone or a host when unshelving '
+                'server "%(instance_uuid)s" with status "%(state)s" is not '
+                'supported. The server status must be SHELVED_OFFLOADED.')
+    code = 409
+
+
+class UnshelveHostNotInAZ(Invalid):
+    msg_fmt = _('Host "%(host)s" is not in the availability zone '
+                '"%(availability_zone)s".')
     code = 409
 
 
@@ -1853,6 +1869,17 @@ class MemoryPageSizeForbidden(Invalid):
 
 class MemoryPageSizeNotSupported(Invalid):
     msg_fmt = _("Page size %(pagesize)s is not supported by the host.")
+
+
+class LockMemoryForbidden(Forbidden):
+    msg_fmt = _("locked_memory value in image or flavor is forbidden when "
+                "mem_page_size is not set.")
+
+
+class FlavorImageLockedMemoryConflict(NovaException):
+    msg_fmt = _("locked_memory value in image (%(image)s) and flavor "
+                "(%(flavor)s) conflict. A consistent value is expected if "
+                "both specified.")
 
 
 class CPUPinningInvalid(Invalid):
@@ -2071,6 +2098,16 @@ class ResourceProviderUpdateConflict(PlacementAPIConflict):
                 "provider %(uuid)s (generation %(generation)d): %(error)s")
 
 
+class PlacementReshapeConflict(PlacementAPIConflict):
+    """A 409 caused by generation mismatch from attempting to reshape a
+    provider tree.
+    """
+    msg_fmt = _(
+        "A conflict was encountered attempting to reshape a provider tree: "
+        "$(error)s"
+    )
+
+
 class InvalidResourceClass(Invalid):
     msg_fmt = _("Resource class '%(resource_class)s' invalid.")
 
@@ -2132,11 +2169,6 @@ class InvalidNetworkNUMAAffinity(Invalid):
 
 class InvalidPCINUMAAffinity(Invalid):
     msg_fmt = _("Invalid PCI NUMA affinity configured: %(policy)s")
-
-
-class PowerVMAPIFailed(NovaException):
-    msg_fmt = _("PowerVM API failed to complete for instance=%(inst_name)s.  "
-                "%(reason)s")
 
 
 class TraitRetrievalFailed(NovaException):
@@ -2426,3 +2458,36 @@ class ProviderConfigException(NovaException):
     """
     msg_fmt = _("An error occurred while processing "
                 "a provider config file: %(error)s")
+
+
+class PlacementPciException(NovaException):
+    msg_fmt = _(
+        "Failed to gather or report PCI resources to Placement: %(error)s")
+
+
+class PlacementPciDependentDeviceException(PlacementPciException):
+    msg_fmt = _(
+        "Configuring both %(parent_dev)s and %(children_devs)s in "
+        "[pci]device_spec is not supported. Either the parent PF or its "
+        "children VFs can be configured."
+    )
+
+
+class PlacementPciMixedResourceClassException(PlacementPciException):
+    msg_fmt = _(
+        "VFs from the same PF cannot be configured with different "
+        "'resource_class' values in [pci]device_spec. We got %(new_rc)s "
+        "for %(new_dev)s and %(current_rc)s for %(current_devs)s."
+    )
+
+
+class PlacementPciMixedTraitsException(PlacementPciException):
+    msg_fmt = _(
+        "VFs from the same PF cannot be configured with different set "
+        "of 'traits' in [pci]device_spec. We got %(new_traits)s for "
+        "%(new_dev)s and %(current_traits)s for %(current_devs)s."
+    )
+
+
+class ReimageException(NovaException):
+    msg_fmt = _("Reimaging volume failed.")

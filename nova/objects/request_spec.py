@@ -248,9 +248,9 @@ class RequestSpec(base.NovaObject):
 
     def _from_instance_pci_requests(self, pci_requests):
         if isinstance(pci_requests, dict):
-            pci_req_cls = objects.InstancePCIRequests
-            self.pci_requests = pci_req_cls.from_request_spec_instance_props(
-                pci_requests)
+            self.pci_requests = objects.InstancePCIRequests.obj_from_primitive(
+                pci_requests,
+            )
         else:
             self.pci_requests = pci_requests
 
@@ -645,6 +645,7 @@ class RequestSpec(base.NovaObject):
             except exception.InstanceGroupNotFound:
                 # NOTE(danms): Instance group may have been deleted
                 spec.instance_group = None
+                spec.scheduler_hints.pop('group', None)
 
         if data_migrated:
             spec.save()

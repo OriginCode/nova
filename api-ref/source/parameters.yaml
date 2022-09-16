@@ -1858,8 +1858,11 @@ availability_zone_state:
 availability_zone_unshelve:
   description: |
     The availability zone name. Specifying an availability zone is only
-    allowed when the server status is ``SHELVED_OFFLOADED`` otherwise a
-    409 HTTPConflict response is returned.
+    allowed when the server status is ``SHELVED_OFFLOADED`` otherwise
+    HTTP 409 conflict response is returned.
+
+    Since microversion 2.91 ``"availability_zone":null`` allows unpinning the
+    instance from any availability_zone it is pinned to.
   in: body
   required: false
   type: string
@@ -3690,6 +3693,15 @@ host_status_update_rebuild:
   required: false
   type: string
   min_version: 2.75
+host_unshelve:
+  description: |
+    The destination host name. Specifying a destination host is by default only
+    allowed to project_admin, if it not the case HTTP 403 forbidden response
+    is returned.
+  in: body
+  required: false
+  type: string
+  min_version: 2.91
 host_zone:
   description: |
     The available zone of the host.
@@ -4007,14 +4019,15 @@ imageRef:
   type: string
 imageRef_rebuild:
   description: |
-    The UUID of the image to rebuild for your server instance.
-    It must be a valid UUID otherwise API will return 400.
-    If rebuilding a volume-backed server with a new image
-    (an image different from the image used when creating the volume),
-    the API will return 400.
-    For non-volume-backed servers, specifying a new image will result
-    in validating that the image is acceptable for the current compute host
-    on which the server exists. If the new image is not valid,
+    The UUID of the image to rebuild for your server instance.  It
+    must be a valid UUID otherwise API will return 400.  To rebuild a
+    volume-backed server with a new image, at least microversion 2.93
+    needs to be provided in the request else the request will fall
+    back to old behaviour i.e. the API will return 400 (for an image
+    different from the image used when creating the volume).  For
+    non-volume-backed servers, specifying a new image will result in
+    validating that the image is acceptable for the current compute
+    host on which the server exists. If the new image is not valid,
     the server will go into ``ERROR`` status.
   in: body
   required: true
@@ -4402,7 +4415,19 @@ keypair_name:
   required: true
   type: string
   description: |
+    The name for the keypair.
+keypair_name_in:
+  in: body
+  required: true
+  type: string
+  description: |
     A name for the keypair which will be used to reference it later.
+
+    .. note::
+
+      Since microversion 2.92, allowed characters are ASCII letters
+      ``[a-zA-Z]``, digits ``[0-9]`` and the following special
+      characters: ``[@._- ]``.
 keypair_private_key:
   description: |
     If you do not provide a public key on create, a new keypair will
@@ -4412,6 +4437,7 @@ keypair_private_key:
   in: body
   required: false
   type: string
+  max_version: 2.91
 keypair_public_key:
   description: |
     The keypair public key.
@@ -4420,10 +4446,11 @@ keypair_public_key:
   type: string
 keypair_public_key_in:
   description: |
-    The public ssh key to import. If you omit this value, a keypair is
-    generated for you.
+    The public ssh key to import.
+    Was optional before microversion 2.92 : if you were omitting this value, a
+    keypair was generated for you.
   in: body
-  required: false
+  required: true
   type: string
 keypair_type:
   in: body

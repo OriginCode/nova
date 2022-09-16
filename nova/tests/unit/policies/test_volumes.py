@@ -10,8 +10,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from unittest import mock
+
 import fixtures
-import mock
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 
@@ -214,14 +215,12 @@ class VolumeAttachNoLegacyNoScopePolicyTest(VolumeAttachPolicyTest):
 
     def setUp(self):
         super(VolumeAttachNoLegacyNoScopePolicyTest, self).setUp()
-        # With no legacy rule, only project admin, member, or reader will be
+        # With no legacy rule, only admin, member, or reader will be
         # able to perform volume attachment operation on its own project.
-        self.project_reader_authorized_contexts = [
-            self.project_admin_context, self.project_member_context,
-            self.project_reader_context]
-
-        self.project_member_authorized_contexts = [
-            self.project_admin_context, self.project_member_context]
+        self.project_member_authorized_contexts = (
+            self.project_member_or_admin_with_no_scope_no_legacy)
+        self.project_reader_authorized_contexts = (
+            self.project_reader_or_admin_with_no_scope_no_legacy)
 
 
 class VolumeAttachScopeTypePolicyTest(VolumeAttachPolicyTest):
@@ -241,15 +240,10 @@ class VolumeAttachScopeTypePolicyTest(VolumeAttachPolicyTest):
 
         # Scope enable will not allow system admin to perform the
         # volume attachments.
-        self.project_member_authorized_contexts = [
-            self.legacy_admin_context,
-            self.project_admin_context, self.project_member_context,
-            self.project_reader_context, self.project_foo_context]
-
-        self.project_reader_authorized_contexts = [
-            self.legacy_admin_context,
-            self.project_admin_context, self.project_member_context,
-            self.project_reader_context, self.project_foo_context]
+        self.project_member_authorized_contexts = (
+            self.project_m_r_or_admin_with_scope_and_legacy)
+        self.project_reader_authorized_contexts = (
+            self.project_m_r_or_admin_with_scope_and_legacy)
 
         self.project_admin_authorized_contexts = [
             self.legacy_admin_context, self.project_admin_context]
@@ -267,11 +261,10 @@ class VolumeAttachScopeTypeNoLegacyPolicyTest(VolumeAttachScopeTypePolicyTest):
         # With scope enable and no legacy rule, it will not allow
         # system users and project admin/member/reader will be able to
         # perform volume attachment operation on its own project.
-        self.project_reader_authorized_contexts = [
-            self.project_admin_context, self.project_member_context,
-            self.project_reader_context]
-        self.project_member_authorized_contexts = [
-            self.project_admin_context, self.project_member_context]
+        self.project_member_authorized_contexts = (
+            self.project_member_or_admin_with_scope_no_legacy)
+        self.project_reader_authorized_contexts = (
+            self.project_reader_or_admin_with_scope_no_legacy)
 
 
 class VolumesPolicyTest(base.BasePolicyTest):
@@ -402,25 +395,25 @@ class VolumesNoLegacyNoScopePolicyTest(VolumesPolicyTest):
     without_deprecated_rules = True
     rules_without_deprecation = {
         v_policies.POLICY_NAME % 'list':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
         v_policies.POLICY_NAME % 'detail':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
         v_policies.POLICY_NAME % 'show':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
         v_policies.POLICY_NAME % 'create':
-            base_policy.PROJECT_MEMBER,
+            base_policy.PROJECT_MEMBER_OR_ADMIN,
         v_policies.POLICY_NAME % 'delete':
-            base_policy.PROJECT_MEMBER,
+            base_policy.PROJECT_MEMBER_OR_ADMIN,
         v_policies.POLICY_NAME % 'snapshots:list':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
         v_policies.POLICY_NAME % 'snapshots:detail':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
         v_policies.POLICY_NAME % 'snapshots:delete':
-            base_policy.PROJECT_MEMBER,
+            base_policy.PROJECT_MEMBER_OR_ADMIN,
         v_policies.POLICY_NAME % 'snapshots:create':
-            base_policy.PROJECT_MEMBER,
+            base_policy.PROJECT_MEMBER_OR_ADMIN,
         v_policies.POLICY_NAME % 'snapshots:show':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
     }
 
     def setUp(self):
@@ -481,25 +474,25 @@ class VolumesScopeTypeNoLegacyPolicyTest(VolumesScopeTypePolicyTest):
 
     rules_without_deprecation = {
         v_policies.POLICY_NAME % 'list':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
         v_policies.POLICY_NAME % 'detail':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
         v_policies.POLICY_NAME % 'show':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
         v_policies.POLICY_NAME % 'create':
-            base_policy.PROJECT_MEMBER,
+            base_policy.PROJECT_MEMBER_OR_ADMIN,
         v_policies.POLICY_NAME % 'delete':
-            base_policy.PROJECT_MEMBER,
+            base_policy.PROJECT_MEMBER_OR_ADMIN,
         v_policies.POLICY_NAME % 'snapshots:list':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
         v_policies.POLICY_NAME % 'snapshots:detail':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
         v_policies.POLICY_NAME % 'snapshots:delete':
-            base_policy.PROJECT_MEMBER,
+            base_policy.PROJECT_MEMBER_OR_ADMIN,
         v_policies.POLICY_NAME % 'snapshots:create':
-            base_policy.PROJECT_MEMBER,
+            base_policy.PROJECT_MEMBER_OR_ADMIN,
         v_policies.POLICY_NAME % 'snapshots:show':
-            base_policy.PROJECT_READER,
+            base_policy.PROJECT_READER_OR_ADMIN,
     }
 
     def setUp(self):

@@ -18,9 +18,9 @@
 
 import os.path
 import tempfile
+from unittest import mock
 import uuid
 
-import mock
 from oslo_log import log as logging
 import oslo_messaging as messaging
 
@@ -358,21 +358,6 @@ class PatchExistsTestCase(test.NoDBTestCase):
         without changing other file existence checks.
         """
         self.assertFalse(os.path.exists(__file__))
-        self.assertTrue(os.path.exists(os.path.dirname(__file__)))
-        self.assertFalse(os.path.exists('non-existent/file'))
-
-    @test.patch_exists('fake_file1', True)
-    @test.patch_exists('fake_file2', True)
-    @test.patch_exists(__file__, False)
-    def test_patch_exists_multiple_decorators(self):
-        """Test that @patch_exists can be used multiple times on the
-        same method.
-        """
-        self.assertTrue(os.path.exists('fake_file1'))
-        self.assertTrue(os.path.exists('fake_file2'))
-        self.assertFalse(os.path.exists(__file__))
-
-        # Check non-patched parameters
         self.assertTrue(os.path.exists(os.path.dirname(__file__)))
         self.assertFalse(os.path.exists('non-existent/file'))
 

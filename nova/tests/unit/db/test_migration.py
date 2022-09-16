@@ -14,12 +14,12 @@
 
 import glob
 import os
+from unittest import mock
 import urllib
 
 from alembic.runtime import migration as alembic_migration
 from migrate import exceptions as migrate_exceptions
 from migrate.versioning import api as migrate_api
-import mock
 
 from nova.db.api import api as api_db_api
 from nova.db.main import api as main_db_api
@@ -56,7 +56,7 @@ class TestDBURL(test.NoDBTestCase):
 
 class TestDBSync(test.NoDBTestCase):
 
-    def test_db_sync_invalid_databse(self):
+    def test_db_sync_invalid_database(self):
         """We only have two databases."""
         self.assertRaises(
             exception.Invalid, migration.db_sync, database='invalid')
@@ -152,7 +152,7 @@ class TestDBSync(test.NoDBTestCase):
 @mock.patch.object(migration, '_find_migrate_repo')
 class TestDBVersion(test.NoDBTestCase):
 
-    def test_db_version_invalid_databse(
+    def test_db_version_invalid_database(
         self, mock_find_repo, mock_get_engine, mock_is_migrate,
         mock_is_alembic, mock_migrate_version, mock_m_context_configure,
     ):

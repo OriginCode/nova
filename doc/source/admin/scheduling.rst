@@ -108,8 +108,8 @@ The Filter Scheduler
 
 .. versionchanged:: 23.0.0 (Wallaby)
 
-    Support for custom filters was removed. Only the filter scheduler is now
-    supported by nova.
+    Support for custom scheduler drivers was removed. Only the filter scheduler
+    is now supported by nova.
 
 Nova's scheduler, known as the *filter scheduler*, supports filtering and
 weighting to make informed decisions on where a new instance should be created.
@@ -406,7 +406,7 @@ Some of attributes that can be used as useful key and their values contains:
 * ``free_ram_mb`` (compared with a number, values like ``>= 4096``)
 * ``free_disk_mb`` (compared with a number, values like ``>= 10240``)
 * ``host`` (compared with a string, values like ``<in> compute``, ``s== compute_01``)
-* ``hypervisor_type`` (compared with a string, values like ``s== QEMU``, ``s== powervm``)
+* ``hypervisor_type`` (compared with a string, values like ``s== QEMU``, ``s== ironic``)
 * ``hypervisor_version`` (compared with a number, values like ``>= 1005003``, ``== 2000000``)
 * ``num_instances`` (compared with a number, values like ``<= 10``)
 * ``num_io_ops`` (compared with a number, values like ``<= 5``)

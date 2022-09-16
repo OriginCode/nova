@@ -20,7 +20,9 @@ Driver base-classes:
     types that support that contract
 """
 
+import itertools
 import sys
+import typing as ty
 
 import os_resource_classes as orc
 import os_traits
@@ -44,6 +46,7 @@ def get_block_device_info(instance, block_device_mapping):
     of a dict containing the following keys:
 
     - root_device_name: device name of the root disk
+    - image: An instance of DriverImageBlockDevice or None
     - ephemerals: a (potentially empty) list of DriverEphemeralBlockDevice
                   instances
     - swap: An instance of DriverSwapBlockDevice or None
@@ -52,18 +55,18 @@ def get_block_device_info(instance, block_device_mapping):
                             specialized subclasses.
     """
     from nova.virt import block_device as virt_block_device
-
-    block_device_info = {
+    return {
         'root_device_name': instance.root_device_name,
+        'image': virt_block_device.convert_local_images(
+            block_device_mapping),
         'ephemerals': virt_block_device.convert_ephemerals(
             block_device_mapping),
         'block_device_mapping':
-            virt_block_device.convert_all_volumes(*block_device_mapping)
+            virt_block_device.convert_all_volumes(*block_device_mapping),
+        'swap':
+            virt_block_device.get_swap(
+                virt_block_device.convert_swap(block_device_mapping))
     }
-    swap_list = virt_block_device.convert_swap(block_device_mapping)
-    block_device_info['swap'] = virt_block_device.get_swap(swap_list)
-
-    return block_device_info
 
 
 def block_device_info_get_root_device(block_device_info):
@@ -81,6 +84,14 @@ def swap_is_usable(swap):
     return swap and swap['device_name'] and swap['swap_size'] > 0
 
 
+def block_device_info_get_image(block_device_info):
+    block_device_info = block_device_info or {}
+    # get_disk_mapping() supports block_device_info=None and thus requires that
+    # we return a list here.
+    image = block_device_info.get('image') or []
+    return image
+
+
 def block_device_info_get_ephemerals(block_device_info):
     block_device_info = block_device_info or {}
     ephemerals = block_device_info.get('ephemerals') or []
@@ -91,6 +102,19 @@ def block_device_info_get_mapping(block_device_info):
     block_device_info = block_device_info or {}
     block_device_mapping = block_device_info.get('block_device_mapping') or []
     return block_device_mapping
+
+
+def block_device_info_get_encrypted_disks(
+    block_device_info: ty.Mapping[str, ty.Any],
+) -> ty.List['nova.virt.block_device.DriverBlockDevice']:
+    block_device_info = block_device_info or {}
+    return [
+        driver_bdm for driver_bdm in itertools.chain(
+            block_device_info.get('image', []),
+            block_device_info.get('ephemerals', []),
+        )
+        if driver_bdm.get('encrypted')
+    ]
 
 
 # NOTE(aspiers): When adding new capabilities, ensure they are
@@ -127,11 +151,16 @@ CAPABILITY_TRAITS_MAP = {
     "supports_socket_pci_numa_affinity":
         os_traits.COMPUTE_SOCKET_PCI_NUMA_AFFINITY,
     "supports_remote_managed_ports": os_traits.COMPUTE_REMOTE_MANAGED_PORTS,
+    "supports_ephemeral_encryption": os_traits.COMPUTE_EPHEMERAL_ENCRYPTION,
+    "supports_ephemeral_encryption_luks":
+        os_traits.COMPUTE_EPHEMERAL_ENCRYPTION_LUKS,
+    "supports_ephemeral_encryption_plain":
+        os_traits.COMPUTE_EPHEMERAL_ENCRYPTION_PLAIN,
 }
 
 
 def _check_image_type_exclude_list(capability, supported):
-    """Enforce the exclusion list on image_type capabilites.
+    """Enforce the exclusion list on image_type capabilities.
 
     :param capability: The supports_image_type_foo capability being checked
     :param supported: The flag indicating whether the virt driver *can*
@@ -196,6 +225,11 @@ class ComputeDriver(object):
         "supports_secure_boot": False,
         "supports_socket_pci_numa_affinity": False,
         "supports_remote_managed_ports": False,
+
+        # Ephemeral encryption support flags
+        "supports_ephemeral_encryption": False,
+        "supports_ephemeral_encryption_luks": False,
+        "supports_ephemeral_encryption_plain": False,
 
         # Image type support flags
         "supports_image_type_aki": False,
@@ -299,7 +333,8 @@ class ComputeDriver(object):
                 admin_password, allocations, bdms, detach_block_devices,
                 attach_block_devices, network_info=None,
                 evacuate=False, block_device_info=None,
-                preserve_ephemeral=False, accel_uuids=None):
+                preserve_ephemeral=False, accel_uuids=None,
+                reimage_boot_volume=False):
         """Destroy and re-make this instance.
 
         A 'rebuild' effectively purges all existing data from the system and
@@ -337,6 +372,7 @@ class ComputeDriver(object):
         :param preserve_ephemeral: True if the default ephemeral storage
                                    partition must be preserved on rebuild
         :param accel_uuids: Accelerator UUIDs.
+        :param reimage_boot_volume: Re-image the volume backed instance.
         """
         raise NotImplementedError()
 

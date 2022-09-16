@@ -10,7 +10,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import mock
+from unittest import mock
 
 from nova.api.openstack.compute import simple_tenant_usage
 from nova.policies import simple_tenant_usage as policies
@@ -70,10 +70,8 @@ class SimpleTenantUsageNoLegacyNoScopePolicyTest(SimpleTenantUsagePolicyTest):
         super(SimpleTenantUsageNoLegacyNoScopePolicyTest, self).setUp()
         # With no legacy, project other roles like foo will not be able
         # to get tenant usage.
-        self.project_reader_authorized_contexts = [
-            self.project_admin_context, self.project_member_context,
-            self.project_reader_context,
-        ]
+        self.project_reader_authorized_contexts = (
+            self.project_reader_or_admin_with_no_scope_no_legacy)
 
 
 class SimpleTenantUsageScopeTypePolicyTest(SimpleTenantUsagePolicyTest):
@@ -92,11 +90,8 @@ class SimpleTenantUsageScopeTypePolicyTest(SimpleTenantUsagePolicyTest):
         # With Scope enable, system users no longer allowed.
         self.project_admin_authorized_contexts = [
             self.legacy_admin_context, self.project_admin_context]
-        self.project_reader_authorized_contexts = [
-            self.legacy_admin_context, self.project_admin_context,
-            self.project_member_context, self.project_reader_context,
-            self.project_foo_context,
-        ]
+        self.project_reader_authorized_contexts = (
+            self.project_m_r_or_admin_with_scope_and_legacy)
 
 
 class SimpleTenantUsageScopeTypeNoLegacyPolicyTest(
@@ -109,7 +104,5 @@ class SimpleTenantUsageScopeTypeNoLegacyPolicyTest(
 
     def setUp(self):
         super(SimpleTenantUsageScopeTypeNoLegacyPolicyTest, self).setUp()
-        self.project_reader_authorized_contexts = [
-            self.project_admin_context,
-            self.project_member_context, self.project_reader_context,
-        ]
+        self.project_reader_authorized_contexts = (
+            self.project_reader_or_admin_with_scope_no_legacy)

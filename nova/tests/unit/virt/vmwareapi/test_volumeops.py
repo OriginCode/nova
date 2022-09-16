@@ -12,8 +12,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from unittest import mock
+
 import ddt
-import mock
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_vmware import exceptions as oslo_vmw_exceptions
 from oslo_vmware import vim_util as vutil
@@ -27,7 +28,7 @@ from nova.tests.unit import fake_instance
 from nova.tests.unit.virt.vmwareapi import fake as vmwareapi_fake
 from nova.tests.unit.virt.vmwareapi import stubs
 from nova.virt.vmwareapi import constants
-from nova.virt.vmwareapi import driver
+from nova.virt.vmwareapi import session
 from nova.virt.vmwareapi import vm_util
 from nova.virt.vmwareapi import volumeops
 
@@ -40,7 +41,7 @@ class VMwareVolumeOpsTestCase(test.NoDBTestCase):
         super(VMwareVolumeOpsTestCase, self).setUp()
         vmwareapi_fake.reset()
         stubs.set_stubs(self)
-        self._session = driver.VMwareAPISession()
+        self._session = session.VMwareAPISession()
         self._context = context.RequestContext('fake_user', 'fake_project')
 
         self._volumeops = volumeops.VMwareVolumeOps(self._session)
@@ -143,8 +144,7 @@ class VMwareVolumeOpsTestCase(test.NoDBTestCase):
 
             get_vm_ref.assert_called_once_with(self._volumeops._session,
                                                instance)
-            get_volume_ref.assert_called_once_with(
-                connection_info['data']['volume'])
+            get_volume_ref.assert_called_once_with(connection_info['data'])
             self.assertTrue(get_vmdk_info.called)
             get_vm_state.assert_called_once_with(self._volumeops._session,
                                                  instance)
@@ -267,8 +267,7 @@ class VMwareVolumeOpsTestCase(test.NoDBTestCase):
 
             get_vm_ref.assert_called_once_with(self._volumeops._session,
                                                instance)
-            get_volume_ref.assert_called_once_with(
-                connection_info['data']['volume'])
+            get_volume_ref.assert_called_once_with(connection_info['data'])
             get_vmdk_backed_disk_device.assert_called_once_with(
                 mock.sentinel.vm_ref, connection_info['data'])
             adapter_type = vm_util.CONTROLLER_TO_ADAPTER_TYPE.get(
@@ -317,8 +316,7 @@ class VMwareVolumeOpsTestCase(test.NoDBTestCase):
 
             get_vm_ref.assert_called_once_with(self._volumeops._session,
                                                instance)
-            get_volume_ref.assert_called_once_with(
-                connection_info['data']['volume'])
+            get_volume_ref.assert_called_once_with(connection_info['data'])
             get_vmdk_backed_disk_device.assert_called_once_with(
                 mock.sentinel.vm_ref, connection_info['data'])
             get_vm_state.assert_called_once_with(self._volumeops._session,
@@ -497,8 +495,7 @@ class VMwareVolumeOpsTestCase(test.NoDBTestCase):
 
             get_vm_ref.assert_called_once_with(self._volumeops._session,
                                                self._instance)
-            get_volume_ref.assert_called_once_with(
-                connection_info['data']['volume'])
+            get_volume_ref.assert_called_once_with(connection_info['data'])
             self.assertTrue(get_vmdk_info.called)
             attach_disk_to_vm.assert_called_once_with(
                 vm_ref, self._instance, adapter_type,

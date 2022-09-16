@@ -30,6 +30,7 @@ import retrying
 
 from nova.compute import claims
 from nova.compute import monitors
+from nova.compute import pci_placement_translator
 from nova.compute import provider_config
 from nova.compute import stats as compute_stats
 from nova.compute import task_states
@@ -103,7 +104,7 @@ class ResourceTracker(object):
         monitor_handler = monitors.MonitorHandler(self)
         self.monitors = monitor_handler.monitors
         self.old_resources = collections.defaultdict(objects.ComputeNode)
-        self.reportclient = reportclient or report.SchedulerReportClient()
+        self.reportclient = reportclient or report.report_client_singleton()
         self.ram_allocation_ratio = CONF.ram_allocation_ratio
         self.cpu_allocation_ratio = CONF.cpu_allocation_ratio
         self.disk_allocation_ratio = CONF.disk_allocation_ratio
@@ -1194,9 +1195,16 @@ class ResourceTracker(object):
 
         return list(traits)
 
-    @retrying.retry(stop_max_attempt_number=4,
-                    retry_on_exception=lambda e: isinstance(
-                        e, exception.ResourceProviderUpdateConflict))
+    @retrying.retry(
+        stop_max_attempt_number=4,
+        retry_on_exception=lambda e: isinstance(
+            e,
+            (
+                exception.ResourceProviderUpdateConflict,
+                exception.PlacementReshapeConflict,
+            ),
+        ),
+    )
     def _update_to_placement(self, context, compute_node, startup):
         """Send resource and inventory changes to placement."""
         # NOTE(jianghuaw): Some resources(e.g. VGPU) are not saved in the
@@ -1216,7 +1224,9 @@ class ResourceTracker(object):
             context, compute_node.uuid, name=compute_node.hypervisor_hostname)
         # Let the virt driver rearrange the provider tree and set/update
         # the inventory, traits, and aggregates throughout.
-        allocs = None
+        allocs = self.reportclient.get_allocations_for_provider_tree(
+            context, nodename)
+        driver_reshaped = False
         try:
             self.driver.update_provider_tree(prov_tree, nodename)
         except exception.ReshapeNeeded:
@@ -1227,10 +1237,9 @@ class ResourceTracker(object):
             LOG.info("Performing resource provider inventory and "
                      "allocation data migration during compute service "
                      "startup or fast-forward upgrade.")
-            allocs = self.reportclient.get_allocations_for_provider_tree(
-                context, nodename)
-            self.driver.update_provider_tree(prov_tree, nodename,
-                                             allocations=allocs)
+            self.driver.update_provider_tree(
+                prov_tree, nodename, allocations=allocs)
+            driver_reshaped = True
 
         # Inject driver capabilities traits into the provider
         # tree.  We need to determine the traits that the virt
@@ -1251,15 +1260,57 @@ class ResourceTracker(object):
             context, nodename, provider_tree=prov_tree)
         prov_tree.update_traits(nodename, traits)
 
+        instances_under_same_host_resize = [
+            migration.instance_uuid
+            for migration in self.tracked_migrations.values()
+            if migration.is_same_host_resize
+        ]
+        # NOTE(gibi): Tracking PCI in placement is different from other
+        # resources.
+        #
+        # While driver.update_provider_tree is used to let the virt driver
+        # create any kind of placement model for a resource the PCI data
+        # modelling is done virt driver independently by the PCI tracker.
+        # So the placement reporting needs to be also done here in the resource
+        # tracker independently of the virt driver.
+        #
+        # Additionally, when PCI tracking in placement was introduced there was
+        # already PCI allocations in nova. So both the PCI inventories and
+        # allocations needs to be healed. Moreover, to support rolling upgrade
+        # the placement prefilter for PCI devices was not turned on by default
+        # at the first release of this feature. Therefore, there could be new
+        # PCI allocation without placement being involved until the prefilter
+        # is enabled. So we need to be ready to heal PCI allocations at
+        # every call not just at startup.
+        pci_reshaped = pci_placement_translator.update_provider_tree_for_pci(
+            prov_tree,
+            nodename,
+            self.pci_tracker,
+            allocs,
+            instances_under_same_host_resize,
+        )
+
         self.provider_tree = prov_tree
 
         # This merges in changes from the provider config files loaded in init
         self._merge_provider_configs(self.provider_configs, prov_tree)
 
-        # Flush any changes. If we processed ReshapeNeeded above, allocs is not
-        # None, and this will hit placement's POST /reshaper route.
-        self.reportclient.update_from_provider_tree(context, prov_tree,
-                                                    allocations=allocs)
+        try:
+            # Flush any changes. If we either processed ReshapeNeeded above or
+            # update_provider_tree_for_pci did reshape, then we need to pass
+            # allocs to update_from_provider_tree to hit placement's POST
+            # /reshaper route.
+            self.reportclient.update_from_provider_tree(
+                context,
+                prov_tree,
+                allocations=allocs if driver_reshaped or pci_reshaped else None
+            )
+        except exception.InventoryInUse as e:
+            # This means an inventory reconfiguration (e.g.: removing a parent
+            # PF and adding a VF under that parent) was not possible due to
+            # existing allocations. Translate the exception to prevent the
+            # compute service to start
+            raise exception.PlacementPciException(error=str(e))
 
     def _update(self, context, compute_node, startup=False):
         """Update partial stats locally and populate them to Scheduler."""
@@ -1856,7 +1907,7 @@ class ResourceTracker(object):
                         raise ValueError(_(
                             "Provider config '%(source_file_name)s' attempts "
                             "to define a trait that is owned by the "
-                            "virt driver or specified via the placment api. "
+                            "virt driver or specified via the placement api. "
                             "Invalid traits '%(invalid)s' must be removed "
                             "from '%(source_file_name)s'.") % {
                                 'source_file_name': source_file_name,

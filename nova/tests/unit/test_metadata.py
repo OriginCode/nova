@@ -22,10 +22,10 @@ import hmac
 import os
 import pickle
 import re
+from unittest import mock
 
 from keystoneauth1 import exceptions as ks_exceptions
 from keystoneauth1 import session
-import mock
 from oslo_config import cfg
 from oslo_serialization import base64
 from oslo_serialization import jsonutils
@@ -1200,7 +1200,7 @@ class MetadataHandlerTestCase(test.TestCase):
 
     def _fake_x_get_metadata(self, self_app, instance_id, remote_address):
         if remote_address is None:
-            raise Exception('Expected X-Forwared-For header')
+            raise Exception('Expected X-Forwarded-For header')
 
         if encodeutils.to_utf8(instance_id) == self.expected_instance_id:
             return self.mdinst
@@ -1458,20 +1458,17 @@ class MetadataHandlerTestCase(test.TestCase):
                        for c in range(ord('a'), ord('z'))]
         mock_client.list_subnets.return_value = {
             'subnets': subnet_list}
+        mock_client.list_ports.side_effect = fake_list_ports
 
-        with mock.patch.object(
-                mock_client, 'list_ports',
-                side_effect=fake_list_ports) as mock_list_ports:
+        response = fake_request(
+            self, self.mdinst,
+            relpath="/2009-04-04/user-data",
+            address="192.192.192.2",
+            fake_get_metadata_by_instance_id=self._fake_x_get_metadata,
+            headers={'X-Forwarded-For': '192.192.192.2',
+                     'X-Metadata-Provider': proxy_lb_id})
 
-            response = fake_request(
-                self, self.mdinst,
-                relpath="/2009-04-04/user-data",
-                address="192.192.192.2",
-                fake_get_metadata_by_instance_id=self._fake_x_get_metadata,
-                headers={'X-Forwarded-For': '192.192.192.2',
-                         'X-Metadata-Provider': proxy_lb_id})
-
-            self.assertEqual(3, mock_list_ports.call_count)
+        self.assertEqual(3, mock_client.list_ports.call_count)
 
         self.assertEqual(200, response.status_int)
 

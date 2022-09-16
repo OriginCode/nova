@@ -16,9 +16,9 @@
 
 import glob
 import os
+from unittest import mock
 
 import fixtures
-import mock
 
 from nova import exception
 from nova.pci import utils
@@ -44,7 +44,7 @@ class PciDeviceMatchTestCase(test.NoDBTestCase):
             [{'vendor_id': 'v1', 'device_id': 'd1'},
              {'vendor_id': 'v3', 'device_id': 'd3'}]))
 
-    def test_spec_dismatch(self):
+    def test_spec_mismatch(self):
         self.assertFalse(utils.pci_device_prop_match(
             self.fake_pci_1,
             [{'vendor_id': 'v4', 'device_id': 'd4'},

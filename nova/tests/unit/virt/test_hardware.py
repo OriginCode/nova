@@ -14,9 +14,9 @@
 
 import collections
 import copy
-import ddt
+from unittest import mock
 
-import mock
+import ddt
 import testtools
 
 import nova.conf
@@ -2249,7 +2249,7 @@ class NUMATopologyTest(test.NoDBTestCase):
         self.assertEqual(hostusage.cells[2].cpu_usage, 1)
         self.assertEqual(hostusage.cells[2].memory_usage, 256)
 
-    def test_host_usage_culmulative_with_free(self):
+    def test_host_usage_cumulative_with_free(self):
         hosttopo = objects.NUMATopology(cells=[
             objects.NUMACell(
                 id=0,
@@ -2657,7 +2657,7 @@ class VirtNUMAHostTopologyTestCase(test.NoDBTestCase):
                 self.host, self.instance2, self.limits)
         self.assertIsNone(fitted_instance)
 
-    def test_get_fitting_culmulative_fails_limits(self):
+    def test_get_fitting_cumulative_fails_limits(self):
         fitted_instance1 = hw.numa_fit_instance_to_host(
                 self.host, self.instance1, self.limits)
         self.assertIsInstance(fitted_instance1, objects.InstanceNUMATopology)
@@ -2668,7 +2668,7 @@ class VirtNUMAHostTopologyTestCase(test.NoDBTestCase):
                 self.host, self.instance2, self.limits)
         self.assertIsNone(fitted_instance2)
 
-    def test_get_fitting_culmulative_success_limits(self):
+    def test_get_fitting_cumulative_success_limits(self):
         fitted_instance1 = hw.numa_fit_instance_to_host(
                 self.host, self.instance1, self.limits)
         self.assertIsInstance(fitted_instance1, objects.InstanceNUMATopology)
@@ -2812,6 +2812,54 @@ class NumberOfSerialPortsTest(test.NoDBTestCase):
         self.assertRaises(exception.ImageSerialPortNumberExceedFlavorValue,
                           hw.get_number_of_serial_ports,
                           flavor, image_meta)
+
+
+class VirtLockMemoryTestCase(test.NoDBTestCase):
+    def _test_get_locked_memory_constraint(self, spec=None, props=None):
+        flavor = objects.Flavor(vcpus=16, memory_mb=2048,
+                                extra_specs=spec or {})
+        image_meta = objects.ImageMeta.from_dict({"properties": props or {}})
+        return hw.get_locked_memory_constraint(flavor, image_meta)
+
+    def test_get_locked_memory_constraint_image(self):
+        self.assertTrue(
+            self._test_get_locked_memory_constraint(
+                spec={"hw:mem_page_size": "small"},
+                props={"hw_locked_memory": "True"}))
+
+    def test_get_locked_memory_conflict(self):
+        ex = self.assertRaises(
+            exception.FlavorImageLockedMemoryConflict,
+            self._test_get_locked_memory_constraint,
+            spec={
+                "hw:locked_memory": "False",
+                "hw:mem_page_size": "small"
+            },
+            props={"hw_locked_memory": "True"}
+        )
+        ex_msg = ("locked_memory value in image (True) and flavor (False) "
+                  "conflict. A consistent value is expected if both "
+                  "specified.")
+        self.assertEqual(ex_msg, str(ex))
+
+    def test_get_locked_memory_constraint_forbidden(self):
+        self.assertRaises(
+            exception.LockMemoryForbidden,
+            self._test_get_locked_memory_constraint,
+            {"hw:locked_memory": "True"})
+
+        self.assertRaises(
+            exception.LockMemoryForbidden,
+            self._test_get_locked_memory_constraint,
+            {},
+            {"hw_locked_memory": "True"})
+
+    def test_get_locked_memory_constraint_image_false(self):
+        # False value of locked_memory will not raise LockMemoryForbidden
+        self.assertFalse(
+            self._test_get_locked_memory_constraint(
+                spec=None,
+                props={"hw_locked_memory": "False"}))
 
 
 class VirtMemoryPagesTestCase(test.NoDBTestCase):
@@ -3836,9 +3884,16 @@ class CPUPinningTestCase(test.NoDBTestCase, _CPUPinningTestCaseBase):
                 siblings=[set([2]), set([3])])
         ])
         inst_topo = objects.InstanceNUMATopology(
-                cells=[objects.InstanceNUMACell(
-                    cpuset=set(), pcpuset=set([0, 1]), memory=2048,
-                    cpu_policy=fields.CPUAllocationPolicy.DEDICATED)])
+            cells=[
+                objects.InstanceNUMACell(
+                    id=0,
+                    cpuset=set(),
+                    pcpuset=set([0, 1]),
+                    memory=2048,
+                    cpu_policy=fields.CPUAllocationPolicy.DEDICATED,
+                )
+            ]
+        )
 
         inst_topo = hw.numa_fit_instance_to_host(host_topo, inst_topo)
 
@@ -3867,9 +3922,16 @@ class CPUPinningTestCase(test.NoDBTestCase, _CPUPinningTestCaseBase):
                 siblings=[set([2]), set([3])])
         ])
         inst_topo = objects.InstanceNUMATopology(
-                cells=[objects.InstanceNUMACell(
-                    cpuset=set(), pcpuset=set([0, 1]), memory=2048,
-                    cpu_policy=fields.CPUAllocationPolicy.DEDICATED)])
+            cells=[
+                objects.InstanceNUMACell(
+                    id=0,
+                    cpuset=set(),
+                    pcpuset=set([0, 1]),
+                    memory=2048,
+                    cpu_policy=fields.CPUAllocationPolicy.DEDICATED,
+                )
+            ]
+        )
 
         inst_topo = hw.numa_fit_instance_to_host(host_topo, inst_topo)
 
@@ -3898,9 +3960,16 @@ class CPUPinningTestCase(test.NoDBTestCase, _CPUPinningTestCaseBase):
                 siblings=[set([2]), set([3])])
         ])
         inst_topo = objects.InstanceNUMATopology(
-                cells=[objects.InstanceNUMACell(
-                    cpuset=set(), pcpuset=set([0, 1]), memory=2048,
-                    cpu_policy=fields.CPUAllocationPolicy.DEDICATED)])
+            cells=[
+                objects.InstanceNUMACell(
+                    id=0,
+                    cpuset=set(),
+                    pcpuset=set([0, 1]),
+                    memory=2048,
+                    cpu_policy=fields.CPUAllocationPolicy.DEDICATED,
+                )
+            ]
+        )
 
         inst_topo = hw.numa_fit_instance_to_host(host_topo, inst_topo)
         self.assertIsNone(inst_topo)
@@ -3927,12 +3996,24 @@ class CPUPinningTestCase(test.NoDBTestCase, _CPUPinningTestCaseBase):
                 siblings=[set([4]), set([5]), set([6]), set([7])])
         ])
         inst_topo = objects.InstanceNUMATopology(
-                cells=[objects.InstanceNUMACell(
-                            cpuset=set(), pcpuset=set([0, 1]), memory=2048,
-                            cpu_policy=fields.CPUAllocationPolicy.DEDICATED),
-                       objects.InstanceNUMACell(
-                            cpuset=set(), pcpuset=set([2, 3]), memory=2048,
-                            cpu_policy=fields.CPUAllocationPolicy.DEDICATED)])
+            cells=[
+                objects.InstanceNUMACell(
+                    id=0,
+                    cpuset=set(),
+                    pcpuset=set([0, 1]),
+                    memory=2048,
+                    cpu_policy=fields.CPUAllocationPolicy.DEDICATED,
+                ),
+                objects.InstanceNUMACell(
+                    id=1,
+                    cpuset=set(),
+                    pcpuset=set([2, 3]),
+                    memory=2048,
+                    cpu_policy=fields.CPUAllocationPolicy.DEDICATED,
+                ),
+            ]
+        )
+
         inst_topo = hw.numa_fit_instance_to_host(host_topo, inst_topo)
 
         for cell in inst_topo.cells:
@@ -3970,12 +4051,24 @@ class CPUPinningTestCase(test.NoDBTestCase, _CPUPinningTestCaseBase):
         ])
 
         inst_topo = objects.InstanceNUMATopology(
-                cells=[objects.InstanceNUMACell(
-                            cpuset=set(), pcpuset=set([0, 1]), memory=2048,
-                            cpu_policy=fields.CPUAllocationPolicy.DEDICATED),
-                       objects.InstanceNUMACell(
-                            cpuset=set(), pcpuset=set([2, 3]), memory=2048,
-                            cpu_policy=fields.CPUAllocationPolicy.DEDICATED)])
+            cells=[
+                objects.InstanceNUMACell(
+                    id=0,
+                    cpuset=set(),
+                    pcpuset=set([0, 1]),
+                    memory=2048,
+                    cpu_policy=fields.CPUAllocationPolicy.DEDICATED,
+                ),
+                objects.InstanceNUMACell(
+                    id=1,
+                    cpuset=set(),
+                    pcpuset=set([2, 3]),
+                    memory=2048,
+                    cpu_policy=fields.CPUAllocationPolicy.DEDICATED,
+                ),
+            ]
+        )
+
         inst_topo = hw.numa_fit_instance_to_host(host_topo, inst_topo)
 
         for cell in inst_topo.cells:
@@ -4003,12 +4096,24 @@ class CPUPinningTestCase(test.NoDBTestCase, _CPUPinningTestCaseBase):
                 siblings=[set([4]), set([5]), set([6]), set([7])])
         ])
         inst_topo = objects.InstanceNUMATopology(
-                cells=[objects.InstanceNUMACell(
-                            cpuset=set(), pcpuset=set([0, 1]), memory=2048,
-                            cpu_policy=fields.CPUAllocationPolicy.DEDICATED),
-                       objects.InstanceNUMACell(
-                            cpuset=set(), pcpuset=set([2, 3]), memory=2048,
-                            cpu_policy=fields.CPUAllocationPolicy.DEDICATED)])
+            cells=[
+                objects.InstanceNUMACell(
+                    id=0,
+                    cpuset=set(),
+                    pcpuset=set([0, 1]),
+                    memory=2048,
+                    cpu_policy=fields.CPUAllocationPolicy.DEDICATED,
+                ),
+                objects.InstanceNUMACell(
+                    id=1,
+                    cpuset=set(),
+                    pcpuset=set([2, 3]),
+                    memory=2048,
+                    cpu_policy=fields.CPUAllocationPolicy.DEDICATED,
+                ),
+            ]
+        )
+
         inst_topo = hw.numa_fit_instance_to_host(host_topo, inst_topo)
         self.assertIsNone(inst_topo)
 

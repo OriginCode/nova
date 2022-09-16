@@ -11,9 +11,9 @@
 #    under the License.
 
 import functools
+from unittest import mock
 
 import fixtures
-import mock
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 
@@ -119,7 +119,7 @@ class LockServerPolicyTest(base.BasePolicyTest):
             exc.format_message())
 
     @mock.patch('nova.compute.api.API.lock')
-    def test_lock_sevrer_overridden_policy_pass_with_same_user(
+    def test_lock_server_overridden_policy_pass_with_same_user(
         self, mock_lock):
         rule_name = ls_policies.POLICY_ROOT % 'lock'
         self.policy.set_rules({rule_name: "user_id:%(user_id)s"})
@@ -139,11 +139,9 @@ class LockServerNoLegacyNoScopePolicyTest(LockServerPolicyTest):
     def setUp(self):
         super(LockServerNoLegacyNoScopePolicyTest, self).setUp()
         # With no legacy rule, only project admin or member will be
-        # able to lock/unlock the server and only project admin can
-        # override the unlock.
-        self.project_action_authorized_contexts = [
-            self.project_admin_context, self.project_member_context]
-        self.project_admin_authorized_contexts = [self.project_admin_context]
+        # able to lock/unlock the server.
+        self.project_action_authorized_contexts = (
+            self.project_member_or_admin_with_no_scope_no_legacy)
 
 
 class LockServerScopeTypePolicyTest(LockServerPolicyTest):
@@ -160,10 +158,8 @@ class LockServerScopeTypePolicyTest(LockServerPolicyTest):
         super(LockServerScopeTypePolicyTest, self).setUp()
         self.flags(enforce_scope=True, group="oslo_policy")
         # Scope enable will not allow system admin to lock/unlock the server.
-        self.project_action_authorized_contexts = [
-            self.legacy_admin_context,
-            self.project_admin_context, self.project_member_context,
-            self.project_reader_context, self.project_foo_context]
+        self.project_action_authorized_contexts = (
+            self.project_m_r_or_admin_with_scope_and_legacy)
         self.project_admin_authorized_contexts = [
             self.legacy_admin_context, self.project_admin_context]
 
@@ -178,9 +174,8 @@ class LockServerScopeTypeNoLegacyPolicyTest(LockServerScopeTypePolicyTest):
         super(LockServerScopeTypeNoLegacyPolicyTest, self).setUp()
         # With scope enable and no legacy rule, only project admin/member
         # will be able to lock/unlock the server.
-        self.project_action_authorized_contexts = [
-            self.project_admin_context, self.project_member_context]
-        self.project_admin_authorized_contexts = [self.project_admin_context]
+        self.project_action_authorized_contexts = (
+            self.project_member_or_admin_with_scope_no_legacy)
 
 
 class LockServerOverridePolicyTest(LockServerScopeTypeNoLegacyPolicyTest):

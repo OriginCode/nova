@@ -41,7 +41,6 @@ Possible values:
 * ``ironic.IronicDriver``
 * ``vmwareapi.VMwareVCDriver``
 * ``hyperv.HyperVDriver``
-* ``powervm.PowerVMDriver``
 * ``zvm.ZVMDriver``
 """),
     cfg.BoolOpt('allow_resize_to_same_host',
@@ -200,7 +199,7 @@ The template will be rendered using Jinja2 template engine, and receive a
 top-level key called ``interfaces``. This key will contain a list of
 dictionaries, one for each interface.
 
-Refer to the cloudinit documentaion for more information:
+Refer to the cloudinit documentation for more information:
 
   https://cloudinit.readthedocs.io/en/latest/topics/datasources.html
 
@@ -306,6 +305,21 @@ Related options:
   agent disabled. When used with libvirt the instance mode should be
   configured as HVM.
  """),
+    cfg.IntOpt('reimage_timeout_per_gb',
+        default=20,
+        min=1,
+        help="""
+Timeout for reimaging a volume.
+
+Number of seconds to wait for volume-reimaged events to arrive before
+continuing or failing.
+
+This is a per gigabyte time which has a default value of 20 seconds and
+will be multiplied by the GB size of image. Eg: an image of 6 GB will have
+a timeout of 20 * 6 = 120 seconds.
+Try increasing the timeout if the image copy per GB takes more time and you
+are hitting timeout failures.
+"""),
 ]
 
 resource_tracker_opts = [
@@ -1009,15 +1023,16 @@ Related options:
   to be enabled for this to take effect.
 """),
     cfg.BoolOpt('packing_host_numa_cells_allocation_strategy',
-        default=True,
+        default=False,
         help="""
 This option controls allocation strategy used to choose NUMA cells on host for
 placing VM's NUMA cells (for VMs with defined numa topology). By
-default host's NUMA cell with more resources consumed will be chosen first for
-placing attempt. So the host cell with some usage will be packed with VM's cell
-until it will be completely exhausted, before new free host's cell will be
-used. When the packing_host_numa_cells_allocation_strategy variable is set to
-``False``, host's NUMA cell with more resources available will be used.
+default host's NUMA cell with more resources consumed will be chosen last for
+placing attempt. When the packing_host_numa_cells_allocation_strategy variable
+is set to ``False``, host's NUMA cell with more resources available will be
+used. When set to ``True`` cells with some usage will be packed with VM's cell
+until it will be completely exhausted, before a new free host's cell will be
+used.
 
 Possible values:
 

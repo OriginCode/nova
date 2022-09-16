@@ -35,9 +35,9 @@ import os
 import os.path
 import pprint
 import sys
+from unittest import mock
 
 import fixtures
-import mock
 from oslo_cache import core as cache
 from oslo_concurrency import lockutils
 from oslo_config import cfg
@@ -61,6 +61,7 @@ from nova import exception
 from nova import objects
 from nova.objects import base as objects_base
 from nova import quota
+from nova.scheduler.client import report
 from nova.tests import fixtures as nova_fixtures
 from nova.tests.unit import matchers
 from nova import utils
@@ -285,10 +286,14 @@ class TestCase(base.BaseTestCase):
         quota.UID_QFD_POPULATED_CACHE_ALL = False
 
         self.useFixture(nova_fixtures.GenericPoisonFixture())
+        self.useFixture(nova_fixtures.SysFsPoisonFixture())
 
         # make sure that the wsgi app is fully initialized for all testcase
         # instead of only once initialized for test worker
         wsgi_app.init_global_data.reset()
+
+        # Reset the placement client singleton
+        report.PLACEMENTCLIENT = None
 
     def _setup_cells(self):
         """Setup a normal cellsv2 environment.
@@ -355,7 +360,7 @@ class TestCase(base.BaseTestCase):
         self.useFixture(fixtures.MonkeyPatch(old, new))
 
     @staticmethod
-    def patch_exists(patched_path, result):
+    def patch_exists(patched_path, result, other=None):
         """Provide a static method version of patch_exists(), which if you
         haven't already imported nova.test can be slightly easier to
         use as a context manager within a test method via:
@@ -364,7 +369,7 @@ class TestCase(base.BaseTestCase):
                 with self.patch_exists(path, True):
                     ...
         """
-        return patch_exists(patched_path, result)
+        return patch_exists(patched_path, result, other)
 
     @staticmethod
     def patch_open(patched_path, read_data):
@@ -848,10 +853,12 @@ class ContainKeyValue(object):
 
 
 @contextlib.contextmanager
-def patch_exists(patched_path, result):
+def patch_exists(patched_path, result, other=None):
     """Selectively patch os.path.exists() so that if it's called with
     patched_path, return result.  Calls with any other path are passed
-    through to the real os.path.exists() function.
+    through to the real os.path.exists() function if other is not provided.
+    If other is provided then that will be the result of the call on paths
+    other than patched_path.
 
     Either import and use as a decorator / context manager, or use the
     nova.TestCase.patch_exists() static method as a context manager.
@@ -885,7 +892,10 @@ def patch_exists(patched_path, result):
     def fake_exists(path):
         if path == patched_path:
             return result
-        return real_exists(path)
+        elif other is not None:
+            return other
+        else:
+            return real_exists(path)
 
     with mock.patch.object(os.path, "exists") as mock_exists:
         mock_exists.side_effect = fake_exists

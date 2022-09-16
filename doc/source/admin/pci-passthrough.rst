@@ -51,6 +51,20 @@ capabilities.
    Nova will ignore PCI devices reported by the hypervisor if the address is
    outside of these ranges.
 
+.. versionchanged:: 26.0.0 (Zed):
+  PCI passthrough device inventories now can be tracked in Placement.
+  For more information, refer to :ref:`pci-tracking-in-placement`.
+
+.. versionchanged:: 26.0.0 (Zed):
+  The nova-compute service will refuse to start if both the parent PF and its
+  children VFs are configured in :oslo.config:option:`pci.device_spec`.
+  For more information, refer to :ref:`pci-tracking-in-placement`.
+
+.. versionchanged:: 26.0.0 (Zed):
+  The nova-compute service will refuse to start with
+  :oslo.config:option:`pci.device_spec` configuration that uses the
+  ``devname`` field.
+
 Enabling PCI passthrough
 ------------------------
 
@@ -92,15 +106,15 @@ Configure ``nova-compute``
 
 Once PCI passthrough has been configured for the host, :program:`nova-compute`
 must be configured to allow the PCI device to pass through to VMs. This is done
-using the :oslo.config:option:`pci.passthrough_whitelist` option. For example,
+using the :oslo.config:option:`pci.device_spec` option. For example,
 assuming our sample PCI device has a PCI address of ``41:00.0`` on each host:
 
 .. code-block:: ini
 
    [pci]
-   passthrough_whitelist = { "address": "0000:41:00.0" }
+   device_spec = { "address": "0000:41:00.0" }
 
-Refer to :oslo.config:option:`pci.passthrough_whitelist` for syntax information.
+Refer to :oslo.config:option:`pci.device_spec` for syntax information.
 
 Alternatively, to enable passthrough of all devices with the same product and
 vendor ID:
@@ -108,7 +122,7 @@ vendor ID:
 .. code-block:: ini
 
    [pci]
-   passthrough_whitelist = { "vendor_id": "8086", "product_id": "154d" }
+   device_spec = { "vendor_id": "8086", "product_id": "154d" }
 
 If using vendor and product IDs, all PCI devices matching the ``vendor_id`` and
 ``product_id`` are added to the pool of PCI devices available for passthrough
@@ -159,7 +173,7 @@ Once configured, restart the :program:`nova-compute` service.
 Special Tags
 ^^^^^^^^^^^^
 
-When specified in :oslo.config:option:`pci.passthrough_whitelist` some tags
+When specified in :oslo.config:option:`pci.device_spec` some tags
 have special meaning:
 
 ``physical_network``
@@ -172,6 +186,13 @@ have special meaning:
   network segment in the networking backend. Besides typical SR-IOV scenarios,
   this tag can be used for remote-managed devices in conjunction with the
   ``remote_managed`` tag.
+
+.. note::
+
+   The use of ``"physical_network": null`` is only supported in single segment
+   networks. This is due to Nova not supporting multisegment networks for
+   SR-IOV ports. See
+   `bug 1983570 <https://bugs.launchpad.net/nova/+bug/1983570>`_ for details.
 
 ``remote_managed``
   Used to specify whether a PCI device is managed remotely or not. By default,
@@ -340,3 +361,144 @@ policy for any neutron SR-IOV interfaces attached by the user:
 You can also configure this for PCI passthrough devices by specifying the
 policy in the alias configuration via :oslo.config:option:`pci.alias`. For more
 information, refer to :oslo.config:option:`the documentation <pci.alias>`.
+
+.. _pci-tracking-in-placement:
+
+PCI tracking in Placement
+-------------------------
+.. note::
+   The feature described below are optional and disabled by default in nova
+   26.0.0. (Zed). The legacy PCI tracker code path is still supported and
+   enabled. The Placement PCI tracking can be enabled via the
+   :oslo.config:option:`pci.report_in_placement` configuration. But please note
+   that once it is enabled on a given compute host it cannot be disabled there
+   any more.
+
+Since nova 26.0.0 (Zed) PCI passthrough device inventories are tracked in
+Placement. If a PCI device exists on the hypervisor and
+matches one of the device specifications configured via
+:oslo.config:option:`pci.device_spec` then Placement will have a representation
+of the device. Each PCI device of type ``type-PCI`` and ``type-PF`` will be
+modeled as a Placement resource provider (RP) with the name
+``<hypervisor_hostname>_<pci_address>``. A devices with type ``type-VF`` is
+represented by its parent PCI device, the PF, as resource provider.
+
+By default nova will use ``CUSTOM_PCI_<vendor_id>_<product_id>`` as the
+resource class in PCI inventories in Placement. However the name of the
+resource class can be customized via the ``resource_class`` tag in the
+:oslo.config:option:`pci.device_spec` option. There is also a new ``traits``
+tag in that configuration that allows specifying a list of placement traits to
+be added to the resource provider representing the matching PCI devices.
+
+.. note::
+   In nova 26.0.0 (Zed) the Placement resource tracking of PCI devices does not
+   support SR-IOV devices intended to be consumed via Neutron ports and
+   therefore having ``physical_network`` tag in
+   :oslo.config:option:`pci.device_spec`. Such devices are supported via the
+   legacy PCI tracker code path in Nova.
+
+.. note::
+   Having different resource class or traits configuration for VFs under the
+   same parent PF is not supported and the nova-compute service will refuse to
+   start with such configuration.
+
+.. important::
+   While nova supported configuring both the PF and its children VFs for PCI
+   passthrough in the past, it only allowed consuming either the parent PF or
+   its children VFs. Since 26.0.0. (Zed) the nova-compute service will
+   enforce the same rule for the configuration as well and will refuse to
+   start if both the parent PF and its VFs are configured.
+
+.. important::
+   While nova supported configuring PCI devices by device name via the
+   ``devname`` parameter in :oslo.config:option:`pci.device_spec` in the past,
+   this proved to be problematic as the netdev name of a PCI device could
+   change for multiple reasons during hypervisor reboot. So since nova 26.0.0
+   (Zed) the nova-compute service will refuse to start with such configuration.
+   It is suggested to use the PCI address of the device instead.
+
+The nova-compute service makes sure that existing instances with PCI
+allocations in the nova DB will have a corresponding PCI allocation in
+placement. This allocation healing also acts on any new instances regardless of
+the status of the scheduling part of this feature to make sure that the nova
+DB and placement are in sync. There is one limitation of the healing logic.
+It assumes that there is no in-progress migration when the nova-compute service
+is upgraded. If there is an in-progress migration then the PCI allocation on
+the source host of the migration will not be healed. The placement view will be
+consistent after such migration is completed or reverted.
+
+Reconfiguring the PCI devices on the hypervisor or changing the
+:oslo.config:option:`pci.device_spec` configuration option and restarting the
+nova-compute service is supported in the following cases:
+
+* new devices are added
+* devices without allocation are removed
+
+Removing a device that has allocations is not supported. If a device having any
+allocation is removed then the nova-compute service will keep the device and
+the allocation exists in the nova DB and in placement and logs a warning. If
+a device with any allocation is reconfigured in a way that an allocated PF is
+removed and VFs from the same PF is configured (or vice versa) then
+nova-compute will refuse to start as it would create a situation where both
+the PF and its VFs are made available for consumption.
+
+
+For deeper technical details please read the `nova specification. <https://specs.openstack.org/openstack/nova-specs/specs/zed/approved/pci-device-tracking-in-placement.html>`_
+
+
+Virtual IOMMU support
+---------------------
+
+With provided :nova:extra-spec:`hw:viommu_model` flavor extra spec or equivalent
+image metadata property ``hw_viommu_model`` and with the guest CPU architecture
+and OS allows, we can enable vIOMMU in libvirt driver.
+
+.. note::
+
+    Enable vIOMMU might introduce significant performance overhead.
+    You can see performance comparision table from
+    `AMD vIOMMU session on KVM Forum 2021`_.
+    For the above reason, vIOMMU should only be enabled for workflow that
+    require it.
+
+.. _`AMD vIOMMU session on KVM Forum 2021`: https://static.sched.com/hosted_files/kvmforum2021/da/vIOMMU%20KVM%20Forum%202021%20-%20v4.pdf
+
+Here are four possible values allowed for ``hw:viommu_model``
+(and ``hw_viommu_model``):
+
+**virtio**
+    Supported on Libvirt since 8.3.0, for Q35 and ARM virt guests.
+
+**smmuv3**
+    Supported on Libvirt since 5.5.0, for ARM virt guests.
+**intel**
+    Supported for for Q35 guests.
+
+**auto**
+    This option will translate to ``virtio`` if Libvirt supported,
+    else ``intel`` on X86 (Q35) and ``smmuv3`` on AArch64.
+
+For the viommu attributes:
+
+* ``intremap``, ``caching_mode``, and ``iotlb``
+  options for viommu (These attributes are driver attributes defined in
+  `Libvirt IOMMU Domain`_) will direcly enabled.
+
+* ``eim`` will directly enabled if machine type is Q35.
+  ``eim`` is driver attribute defined in `Libvirt IOMMU Domain`_.
+
+.. note::
+
+    eim(Extended Interrupt Mode) attribute (with possible values on and off)
+    can be used to configure Extended Interrupt Mode.
+    A q35 domain with split I/O APIC (as described in hypervisor features),
+    and both interrupt remapping and EIM turned on for the IOMMU, will be
+    able to use more than 255 vCPUs. Since 3.4.0 (QEMU/KVM only).
+
+* ``aw_bits`` attribute can used to set the address width to allow mapping
+  larger iova addresses in the guest. Since Qemu current supported
+  values are 39 and 48, we directly set this to larger width (48)
+  if Libvirt supported.
+  ``aw_bits`` is driver attribute defined in `Libvirt IOMMU Domain`_.
+
+.. _`Libvirt IOMMU Domain`: https://libvirt.org/formatdomain.html#iommu-devices

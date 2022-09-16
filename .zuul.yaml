@@ -2,34 +2,6 @@
 # for job naming conventions.
 
 - job:
-    name: nova-tox-functional-centos8-py36
-    parent: openstack-tox-functional-py36
-    nodeset: devstack-single-node-centos-8-stream
-    description: |
-      Run tox-based functional tests for the OpenStack Nova project
-      under cPython version 3.6 with Nova specific irrelevant-files list.
-      Uses tox with the ``functional-py36`` environment.
-
-      This job also provides a parent for other projects to run the nova
-      functional tests on their own changes.
-    required-projects:
-      # including nova here makes this job reusable by other projects
-      - openstack/nova
-      - openstack/placement
-    irrelevant-files: &functional-irrelevant-files
-      - ^.*\.rst$
-      - ^api-.*$
-      - ^doc/(source|test)/.*$
-      - ^nova/locale/.*$
-      - ^releasenotes/.*$
-    vars:
-      # explicitly stating the work dir makes this job reusable by other
-      # projects
-      zuul_work_dir: src/opendev.org/openstack/nova
-      bindep_profile: test py36
-    timeout: 3600
-
-- job:
     name: nova-tox-functional-py38
     parent: openstack-tox-functional-py38
     description: |
@@ -43,7 +15,12 @@
       # including nova here makes this job reusable by other projects
       - openstack/nova
       - openstack/placement
-    irrelevant-files: *functional-irrelevant-files
+    irrelevant-files: &functional-irrelevant-files
+      - ^.*\.rst$
+      - ^api-.*$
+      - ^doc/(source|test)/.*$
+      - ^nova/locale/.*$
+      - ^releasenotes/.*$
     vars:
       # explicitly stating the work dir makes this job reusable by other
       # projects
@@ -74,6 +51,28 @@
     timeout: 3600
 
 - job:
+    name: nova-tox-functional-py310
+    parent: openstack-tox-functional-py310
+    description: |
+      Run tox-based functional tests for the OpenStack Nova project
+      under cPython version 3.10 with Nova specific irrelevant-files list.
+      Uses tox with the ``functional-py310`` environment.
+
+      This job also provides a parent for other projects to run the nova
+      functional tests on their own changes.
+    required-projects:
+      # including nova here makes this job reusable by other projects
+      - openstack/nova
+      - openstack/placement
+    irrelevant-files: *functional-irrelevant-files
+    vars:
+      # explicitly stating the work dir makes this job reusable by other
+      # projects
+      zuul_work_dir: src/opendev.org/openstack/nova
+      bindep_profile: test py310
+    timeout: 3600
+
+- job:
     name: nova-tox-validate-backport
     parent: openstack-tox
     description: |
@@ -90,7 +89,7 @@
     description: |
       Run tempest live migration tests against local qcow2 ephemeral storage
       and shared LVM/iSCSI cinder volumes.
-    irrelevant-files: &nova-base-irrelevant-files
+    irrelevant-files:
       - ^api-.*$
       - ^(test-|)requirements.txt$
       - ^.*\.rst$
@@ -101,6 +100,7 @@
       - ^nova/policies/.*$
       - ^nova/tests/.*$
       - ^nova/test.py$
+      - ^nova/virt/ironic/.*$
       - ^releasenotes/.*$
       - ^setup.cfg$
       - ^tools/.*$
@@ -117,8 +117,7 @@
             compute-feature-enabled:
               volume_backed_live_migration: true
               block_migration_for_live_migration: true
-              # NOTE(lyarwood): Skip until bug #1931702 is resolved.
-              block_migrate_cinder_iscsi: false
+              block_migrate_cinder_iscsi: true
     post-run: playbooks/nova-live-migration/post-run.yaml
 
 - job:
@@ -130,14 +129,28 @@
       the "iptables_hybrid" securitygroup firewall driver, aka "hybrid plug".
       The external events interactions between Nova and Neutron in these
       situations has historically been fragile. This job exercises them.
-    irrelevant-files: *nova-base-irrelevant-files
+    irrelevant-files: &nova-base-irrelevant-files
+      - ^api-.*$
+      - ^(test-|)requirements.txt$
+      - ^.*\.rst$
+      - ^.git.*$
+      - ^doc/.*$
+      - ^nova/hacking/.*$
+      - ^nova/locale/.*$
+      - ^nova/policies/.*$
+      - ^nova/tests/.*$
+      - ^nova/test.py$
+      - ^releasenotes/.*$
+      - ^setup.cfg$
+      - ^tools/.*$
+      - ^tox.ini$
     vars:
       tox_envlist: all
       tempest_test_regex: (^tempest\..*compute\..*(migration|resize|reboot).*)
       devstack_localrc:
         Q_AGENT: openvswitch
         Q_ML2_TENANT_NETWORK_TYPE: vxlan
-        Q_ML2_PLUGIN_MECHANISM_DRIVERS: openvswitch,linuxbridge
+        Q_ML2_PLUGIN_MECHANISM_DRIVERS: openvswitch
         ML2_L3_PLUGIN: router
       devstack_services:
         # Disable OVN services
@@ -156,12 +169,15 @@
           "/$NEUTRON_CORE_PLUGIN_CONF":
             securitygroup:
               firewall_driver: iptables_hybrid
+          $NEUTRON_CONF:
+            nova:
+              live_migration_events: True
     group-vars:
       subnode:
         devstack_localrc:
           Q_AGENT: openvswitch
           Q_ML2_TENANT_NETWORK_TYPE: vxlan
-          Q_ML2_PLUGIN_MECHANISM_DRIVERS: openvswitch,linuxbridge
+          Q_ML2_PLUGIN_MECHANISM_DRIVERS: openvswitch
           ML2_L3_PLUGIN: router
         devstack_services:
           # Disable OVN services
@@ -179,6 +195,9 @@
             "/$NEUTRON_CORE_PLUGIN_CONF":
               securitygroup:
                 firewall_driver: iptables_hybrid
+            $NEUTRON_CONF:
+              nova:
+                live_migration_events: True
     post-run: playbooks/nova-live-migration/post-run.yaml
 
 - job:
@@ -387,7 +406,7 @@
       devstack_localrc:
         Q_AGENT: openvswitch
         Q_ML2_TENANT_NETWORK_TYPE: vxlan
-        Q_ML2_PLUGIN_MECHANISM_DRIVERS: openvswitch,linuxbridge
+        Q_ML2_PLUGIN_MECHANISM_DRIVERS: openvswitch
         ML2_L3_PLUGIN: router
         # Enable TLS between the noVNC proxy & compute nodes; this requires
         # the tls-proxy service to be enabled. Added in Queens.
@@ -426,7 +445,7 @@
         devstack_localrc:
           Q_AGENT: openvswitch
           Q_ML2_TENANT_NETWORK_TYPE: vxlan
-          Q_ML2_PLUGIN_MECHANISM_DRIVERS: openvswitch,linuxbridge
+          Q_ML2_PLUGIN_MECHANISM_DRIVERS: openvswitch
           ML2_L3_PLUGIN: router
           NOVA_CONSOLE_PROXY_COMPUTE_TLS: True
           FORCE_CONFIG_DRIVE: True
@@ -488,8 +507,7 @@
               live_migration: true
               volume_backed_live_migration: true
               block_migration_for_live_migration: true
-              # NOTE(lyarwood): Skip until bug #1931702 is resolved.
-              block_migrate_cinder_iscsi: false
+              block_migrate_cinder_iscsi: true
       tox_envlist: all
       tempest_test_regex: ((tempest\.(api\.compute|scenario)\..*smoke.*)|(^tempest\.api\.compute\.admin\.(test_live_migration|test_migration)))
 
@@ -585,6 +603,15 @@
         GLANCE_STANDALONE: True
         GLANCE_USE_IMPORT_WORKFLOW: True
         DEVSTACK_PARALLEL: True
+      # NOTE(danms): This job is pretty heavy as it is, so we disable some
+      # services that are not relevant to the nova-glance-ceph scenario
+      # that this job is intended to validate.
+      devstack_services:
+        c-bak: false
+        s-account: false
+        s-container: false
+        s-object: false
+        s-proxy: false
       devstack_local_conf:
         post-config:
           $NOVA_CONF:
@@ -622,8 +649,8 @@
       - check-requirements
       - integrated-gate-compute
       - openstack-cover-jobs
-      - openstack-python3-yoga-jobs
-      - openstack-python3-yoga-jobs-arm64
+      - openstack-python3-zed-jobs
+      - openstack-python3-zed-jobs-arm64
       - periodic-stable-jobs
       - publish-openstack-docs-pti
       - release-notes-jobs-python3
@@ -648,12 +675,14 @@
         - nova-multi-cell
         - nova-next
         - nova-ovs-hybrid-plug
-        - nova-emulation
         - nova-tox-validate-backport:
             voting: false
-        - nova-tox-functional-centos8-py36
         - nova-tox-functional-py38
         - nova-tox-functional-py39
+        - nova-tox-functional-py310:
+            voting: true
+        - openstack-tox-py310:
+            voting: true
         - tempest-integrated-compute:
            # NOTE(gmann): Policies changes do not need to run all the
            # integration test jobs. Running only tempest and grenade
@@ -687,16 +716,10 @@
         - barbican-tempest-plugin-simple-crypto:
             irrelevant-files: *nova-base-irrelevant-files
             voting: false
-        - tempest-integrated-compute-centos-8-stream:
-            irrelevant-files: *nova-base-irrelevant-files
-        - tempest-centos8-stream-fips:
-            irrelevant-files: *nova-base-irrelevant-files
-            voting: false
     gate:
       jobs:
         - nova-live-migration
         - nova-live-migration-ceph
-        - nova-tox-functional-centos8-py36
         - nova-tox-functional-py38
         - nova-tox-functional-py39
         - nova-multi-cell
@@ -718,8 +741,12 @@
             irrelevant-files: *nova-base-irrelevant-files
         - openstacksdk-functional-devstack:
             irrelevant-files: *nova-base-irrelevant-files
-        - tempest-integrated-compute-centos-8-stream:
-            irrelevant-files: *nova-base-irrelevant-files
+    periodic-weekly:
+      jobs:
+        # Runs emulation feature functionality test less frequently due
+        # to being the initial release and experimental in nature.
+        - nova-emulation
+        - tempest-centos9-stream-fips
     experimental:
       jobs:
         - ironic-tempest-bfv:
@@ -749,3 +776,12 @@
             irrelevant-files: *nova-base-irrelevant-files
         - devstack-tobiko-nova:
             irrelevant-files: *nova-base-irrelevant-files
+        - tempest-centos9-stream-fips:
+            irrelevant-files: *nova-base-irrelevant-files
+        - nova-emulation
+        - tempest-integrated-compute-centos-9-stream:
+            irrelevant-files: *nova-base-irrelevant-files
+    periodic:
+      jobs:
+        - tempest-centos8-stream-fips:
+            branches: master

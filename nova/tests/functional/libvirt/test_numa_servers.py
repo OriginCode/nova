@@ -13,11 +13,11 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import mock
-import testtools
+from unittest import mock
 
 from oslo_config import cfg
 from oslo_log import log as logging
+import testtools
 
 import nova
 from nova.compute import manager
@@ -731,7 +731,7 @@ class NUMAServersTest(NUMAServersTestBase):
         for host, compute_rp_uuid in self.compute_rp_uuids.items():
             if host == original_host:
                 # the host that had the instance should no longer have
-                # alocations since the resize has been confirmed
+                # allocations since the resize has been confirmed
                 expected_usage = {'VCPU': 0, 'PCPU': 0, 'DISK_GB': 0,
                                   'MEMORY_MB': 0}
             else:
@@ -1187,10 +1187,8 @@ class ReshapeForPCPUsTest(NUMAServersTestBase):
         self.flags(cpu_dedicated_set='0-7', group='compute')
         self.flags(vcpu_pin_set=None)
 
-        computes = {}
-        for host, compute in self.computes.items():
-            computes[host] = self.restart_compute_service(compute)
-        self.computes = computes
+        for host in list(self.computes.keys()):
+            self.restart_compute_service(host)
 
         # verify that the inventory, usages and allocation are correct after
         # the reshape

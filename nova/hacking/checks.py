@@ -140,6 +140,7 @@ mock_class_as_new_value_in_patching_re = re.compile(
 rwlock_re = re.compile(
     r"(?P<module_part>(oslo_concurrency\.)?(lockutils|fasteners))"
     r"\.ReaderWriterLock\(.*\)")
+six_re = re.compile(r"^(import six(\..*)?|from six(\..*)? import .*)$")
 
 
 class BaseASTChecker(ast.NodeVisitor):
@@ -1029,4 +1030,51 @@ def check_lockutils_rwlocks(logical_line):
         yield (
             0,
             msg % {'module': match.group('module_part')}
+        )
+
+
+@core.flake8ext
+def check_six(logical_line):
+    """Check for use of six
+
+    nova is now Python 3-only so we don't want six. However, people might use
+    it out of habit and it will likely work since six is a transitive
+    dependency.
+
+    N370
+    """
+    match = re.match(six_re, logical_line)
+    if match:
+        yield (0, "N370: Don't use or import six")
+
+
+@core.flake8ext
+def import_stock_mock(logical_line):
+    """Use python's mock, not the mock library.
+
+    Since we `dropped support for python 2`__, we no longer need to use the
+    mock library, which existed to backport py3 functionality into py2. Change
+    Ib44b5bff657c8e76c4f701e14d51a4efda3f6d32 cut over to importing the stock
+    mock, which must be done by saying::
+
+        from unittest import mock
+
+    ...because if you say::
+
+        import mock
+
+    ...you may be getting the stock mock; or, due to transitive dependencies in
+    the environment, the library mock. This check can be removed in the future
+    (and we can start saying ``import mock`` again) if we manage to purge these
+    transitive dependencies.
+
+    .. __: https://review.opendev.org/#/c/687954/
+
+    N371
+    """
+    if logical_line == 'import mock' or logical_line.startswith('from mock'):
+        yield (
+            0,
+            "N371: You must explicitly import python's mock: "
+            "``from unittest import mock``"
         )

@@ -14,7 +14,8 @@
 #    under the License.
 """Tests for keypair API."""
 
-import mock
+from unittest import mock
+
 from oslo_concurrency import processutils
 from oslo_config import cfg
 from oslo_limit import fixture as limit_fixture
@@ -122,24 +123,6 @@ class CreateImportSharedTestMixIn(object):
         exc = self.assertRaises(exc_class, func, self.ctxt, self.ctxt.user_id,
                                 name, *args)
         self.assertIn(expected_message, str(exc))
-
-    def assertInvalidKeypair(self, expected_message, name):
-        msg = 'Keypair data is invalid: %s' % expected_message
-        self.assertKeypairRaises(exception.InvalidKeypair, msg, name)
-
-    def test_name_too_short(self):
-        msg = ('Keypair name must be string and between 1 '
-               'and 255 characters long')
-        self.assertInvalidKeypair(msg, '')
-
-    def test_name_too_long(self):
-        msg = ('Keypair name must be string and between 1 '
-               'and 255 characters long')
-        self.assertInvalidKeypair(msg, 'x' * 256)
-
-    def test_invalid_chars(self):
-        msg = "Keypair name contains unsafe characters"
-        self.assertInvalidKeypair(msg, '* BAD CHARACTERS!  *')
 
     def test_already_exists(self):
         def db_key_pair_create_duplicate(context, keypair):

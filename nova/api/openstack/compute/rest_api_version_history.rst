@@ -1202,3 +1202,30 @@ hostname based on the display name.
 
 In addition, the ``OS-EXT-SRV-ATTR:hostname`` field for all server
 responses is now visible to all users. Previously this was an admin-only field.
+
+.. _microversion 2.91:
+
+2.91
+----
+
+Add support to unshelve instance to a specific host.
+
+Add support to pin a server to an availability zone or unpin a server from any availability zone.
+
+.. _microversion 2.92:
+
+2.92
+----
+
+The ``POST /os-keypairs`` API now forbids to generate a keypair and allows new
+safe characters, specifically '@' and '.' (dot character).
+
+.. _microversion 2.93:
+
+2.93 (Maximum in Zed)
+---------------------
+
+Add support for volume backed server rebuild. The end user will provide the
+image with the rebuild command and it will rebuild the volume with the new
+image similar to the result of rebuilding an ephemeral disk.
+

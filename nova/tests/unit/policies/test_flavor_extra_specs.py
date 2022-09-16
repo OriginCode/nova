@@ -10,7 +10,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import mock
+from unittest import mock
+
 from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova.api.openstack.compute import flavor_manage
@@ -56,7 +57,7 @@ class FlavorExtraSpecsPolicyTest(base.BasePolicyTest):
         # In the base/legacy case, all project and system contexts are
         # authorized in the case of things that distinguish between
         # scopes, since scope checking is disabled.
-        self.all_system_authorized_contexts = (self.all_project_contexts |
+        self.all_project_authorized_contexts = (self.all_project_contexts |
                                                self.all_system_contexts)
 
         # In the base/legacy case, any admin is an admin.
@@ -166,7 +167,7 @@ class FlavorExtraSpecsPolicyTest(base.BasePolicyTest):
             }
         }
         authorize_res, unauthorize_res = self.common_policy_auth(
-            self.all_system_authorized_contexts,
+            self.all_project_authorized_contexts,
             rule_name, self.fm_ctrl._create, req, body=body,
             fatal=False)
         for resp in authorize_res:
@@ -186,7 +187,7 @@ class FlavorExtraSpecsPolicyTest(base.BasePolicyTest):
         req = fakes.HTTPRequest.blank('', version='2.61')
 
         authorize_res, unauthorize_res = self.common_policy_auth(
-            self.all_system_authorized_contexts,
+            self.all_project_authorized_contexts,
             rule_name, self.fm_ctrl._update, req, '1',
             body={'flavor': {'description': None}},
             fatal=False)
@@ -210,11 +211,13 @@ class FlavorExtraSpecsScopeTypePolicyTest(FlavorExtraSpecsPolicyTest):
         super(FlavorExtraSpecsScopeTypePolicyTest, self).setUp()
         self.flags(enforce_scope=True, group="oslo_policy")
 
-        # Only system users are authorized for system APIs
-        self.all_system_authorized_contexts = self.all_system_contexts
+        # Only project users are authorized
+        self.reduce_set('all_project_authorized', self.all_project_contexts)
+        self.reduce_set('all_authorized', self.all_project_contexts)
 
-        # Only system_admin can do system admin things
-        self.admin_authorized_contexts = [self.system_admin_context]
+        # Only admins can do admin things
+        self.admin_authorized_contexts = [self.legacy_admin_context,
+                                          self.project_admin_context]
 
 
 class FlavorExtraSpecsNoLegacyNoScopeTest(FlavorExtraSpecsPolicyTest):
@@ -234,7 +237,7 @@ class FlavorExtraSpecsNoLegacyNoScopeTest(FlavorExtraSpecsPolicyTest):
                 self.system_foo_context,
                 self.project_foo_context,
             ])
-        self.reduce_set('all_system_authorized', everything_but_foo)
+        self.reduce_set('all_project_authorized', everything_but_foo)
         self.reduce_set('all_authorized', everything_but_foo)
 
 
@@ -251,11 +254,10 @@ class FlavorExtraSpecsNoLegacyPolicyTest(FlavorExtraSpecsScopeTypePolicyTest):
         # contexts. With scope checking enabled, project and system
         # contexts stay separate.
         self.reduce_set(
-            'all_system_authorized',
-            self.all_system_contexts - set([self.system_foo_context]))
-        everything_but_foo = (
-            self.all_project_contexts | self.all_system_contexts) - set([
-                self.system_foo_context,
+            'all_project_authorized',
+            self.all_project_contexts - set([self.project_foo_context]))
+        everything_but_foo_and_system = (
+            self.all_contexts - set([
                 self.project_foo_context,
-            ])
-        self.reduce_set('all_authorized', everything_but_foo)
+            ]) - self.all_system_contexts)
+        self.reduce_set('all_authorized', everything_but_foo_and_system)

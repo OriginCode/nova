@@ -12,8 +12,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 import collections
+from unittest import mock
 
-import mock
 from oslo_serialization import jsonutils
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import uuidutils
@@ -116,14 +116,19 @@ class _TestRequestSpecObject(object):
             else:
                 self.assertEqual(instance.get(field), getattr(spec, field))
 
-    @mock.patch.object(objects.InstancePCIRequests,
-                       'from_request_spec_instance_props')
-    def test_from_instance_with_pci_requests(self, pci_from_spec):
-        fake_pci_requests = objects.InstancePCIRequests()
-        pci_from_spec.return_value = fake_pci_requests
+    def test_from_instance_with_pci_requests(self):
+        fake_pci_requests = objects.InstancePCIRequests(
+            instance_uuid=uuids.instance,
+            requests=[
+                objects.InstancePCIRequest(
+                    count=1,
+                    spec=[{'vendor_id': '8086'}],
+                ),
+            ],
+        )
 
         instance = dict(
-            uuid=uuidutils.generate_uuid(),
+            uuid=uuids.instance,
             root_gb=10,
             ephemeral_gb=0,
             memory_mb=10,
@@ -132,14 +137,15 @@ class _TestRequestSpecObject(object):
             project_id=fakes.FAKE_PROJECT_ID,
             user_id=fakes.FAKE_USER_ID,
             availability_zone='nova',
-            pci_requests={
-                'instance_uuid': 'fakeid',
-                'requests': [{'count': 1, 'spec': [{'vendor_id': '8086'}]}]})
+            pci_requests=fake_pci_requests.obj_to_primitive(),
+        )
         spec = objects.RequestSpec()
 
         spec._from_instance(instance)
-        pci_from_spec.assert_called_once_with(instance['pci_requests'])
-        self.assertEqual(fake_pci_requests, spec.pci_requests)
+        self.assertEqual(
+            fake_pci_requests.requests[0].spec,
+            spec.pci_requests.requests[0].spec,
+        )
 
     def test_from_instance_with_numa_stuff(self):
         instance = dict(
@@ -614,6 +620,30 @@ class _TestRequestSpecObject(object):
         self.assertIsInstance(req_obj.limits, objects.SchedulerLimits)
         self.assertIsInstance(req_obj.instance_group, objects.InstanceGroup)
         self.assertEqual('fresh', req_obj.instance_group.name)
+
+    @mock.patch.object(
+        request_spec.RequestSpec, '_get_by_instance_uuid_from_db'
+    )
+    @mock.patch('nova.objects.InstanceGroup.get_by_uuid')
+    def test_get_by_instance_uuid_deleted_group(
+            self, mock_get_ig, get_by_uuid
+    ):
+        fake_spec_obj = fake_request_spec.fake_spec_obj()
+        fake_spec_obj.scheduler_hints['group'] = ['fresh']
+        fake_spec = fake_request_spec.fake_db_spec(fake_spec_obj)
+        get_by_uuid.return_value = fake_spec
+        mock_get_ig.side_effect = exception.InstanceGroupNotFound(
+            group_uuid=uuids.instgroup
+        )
+
+        req_obj = request_spec.RequestSpec.get_by_instance_uuid(
+            self.context, fake_spec['instance_uuid']
+        )
+        # assert that both the instance_group object and scheduler hint
+        # are cleared if the instance_group was deleted since the request
+        # spec was last saved to the db.
+        self.assertIsNone(req_obj.instance_group, objects.InstanceGroup)
+        self.assertEqual({'hint': ['over-there']}, req_obj.scheduler_hints)
 
     @mock.patch('nova.objects.request_spec.RequestSpec.save')
     @mock.patch.object(

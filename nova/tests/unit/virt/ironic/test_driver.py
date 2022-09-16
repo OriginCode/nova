@@ -15,9 +15,10 @@
 
 """Tests for the ironic driver."""
 
+from unittest import mock
+
 import fixtures
 from ironicclient import exc as ironic_exception
-import mock
 from openstack import exceptions as sdk_exc
 from oslo_config import cfg
 from oslo_service import loopingcall
@@ -2596,9 +2597,6 @@ class IronicDriverSyncTestCase(IronicDriverTestCase):
         # Since the code we're testing runs in a spawn_n green thread, ensure
         # that the thread completes.
         self.useFixture(nova_fixtures.SpawnIsSynchronousFixture())
-
-        self.mock_conn = self.useFixture(
-            fixtures.MockPatchObject(self.driver, '_ironic_connection')).mock
 
     @mock.patch.object(loopingcall, 'FixedIntervalLoopingCall')
     @mock.patch.object(FAKE_CLIENT.node, 'set_provision_state')

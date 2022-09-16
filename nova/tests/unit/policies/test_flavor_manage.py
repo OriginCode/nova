@@ -10,7 +10,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import mock
+from unittest import mock
+
 from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova.api.openstack.compute import flavor_manage
@@ -104,10 +105,11 @@ class FlavorManageScopeTypePolicyTest(FlavorManagePolicyTest):
         super(FlavorManageScopeTypePolicyTest, self).setUp()
         self.flags(enforce_scope=True, group="oslo_policy")
 
-        # With scope enable, only system admin is able to manage
+        # With scope enabled, only project admin is able to manage
         # the flavors.
         self.admin_authorized_contexts = [
-            self.system_admin_context]
+            self.legacy_admin_context,
+            self.project_admin_context]
 
 
 class FlavorManageScopeTypeNoLegacyPolicyTest(
