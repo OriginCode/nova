@@ -3,6 +3,8 @@ nova (2:26.0.0~rc1-1) experimental; urgency=medium
   * New upstream release.
   * Fixed (build-)depends for this release.
   * Removed remove-crashing-blockdiag-doc-line.patch: not needed anymore.
+  * Rebased Add-a-healtcheck-url.patch.
+  * Removed remove-dataclasses-requirements.txt.patch not needed anymore.
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 16 Sep 2022 15:24:28 +0200
 
