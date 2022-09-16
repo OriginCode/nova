@@ -1,6 +1,7 @@
 nova (2:26.0.0~rc1-1) experimental; urgency=medium
 
   * New upstream release.
+  * Fixed (build-)depends for this release.
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 16 Sep 2022 15:24:28 +0200
 
