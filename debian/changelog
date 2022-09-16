@@ -7,6 +7,8 @@ nova (2:26.0.0~rc1-1) experimental; urgency=medium
   * Removed remove-dataclasses-requirements.txt.patch not needed anymore.
   * Removed Make_test_wait_for_instance_event_test_time_independent.patch
     applied upstream.
+  * Removed Add_a_proper_schema_version_to_network_data.json.patch applied
+    upstream.
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 16 Sep 2022 15:24:28 +0200
 
