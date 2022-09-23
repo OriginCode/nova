@@ -1,3 +1,9 @@
+nova (2:26.0.0~rc1-3) unstable; urgency=medium
+
+  * Uploading to unstable.
+
+ -- Thomas Goirand <zigo@debian.org>  Fri, 23 Sep 2022 23:50:36 +0200
+
 nova (2:26.0.0~rc1-2) experimental; urgency=medium
 
   * Add --namespace oslo.limit when generating nova.conf.
