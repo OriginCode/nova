@@ -1,3 +1,11 @@
+nova (2:26.0.0-2) unstable; urgency=medium
+
+  * Black list a unit test that gets stuck (Closes: #1022733):
+    - SupportDirectIOTestCase.test_supports_direct_io_with_exception_in_open
+    - SupportDirectIOTestCase.test_supports_direct_io_with_exception_in_write
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 25 Oct 2022 16:57:57 +0200
+
 nova (2:26.0.0-1) unstable; urgency=medium
 
   * New upstream release.
