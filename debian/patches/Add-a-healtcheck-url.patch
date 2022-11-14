@@ -11,11 +11,11 @@ Change-Id: Ie735336d143ad38dc10bb8200f9d3b713e603503
  etc/nova/api-paste.ini | 9 ++++++---
  1 file changed, 6 insertions(+), 3 deletions(-)
 
-diff --git a/etc/nova/api-paste.ini b/etc/nova/api-paste.ini
-index 7e20eaa7e20..e1266857e1c 100644
---- a/etc/nova/api-paste.ini
-+++ b/etc/nova/api-paste.ini
-@@ -6,7 +6,7 @@
+Index: nova/etc/nova/api-paste.ini
+===================================================================
+--- nova.orig/etc/nova/api-paste.ini
++++ nova/etc/nova/api-paste.ini
+@@ -6,7 +6,7 @@ use = egg:Paste#urlmap
  /: meta
  
  [pipeline:meta]
@@ -24,7 +24,7 @@ index 7e20eaa7e20..e1266857e1c 100644
  
  [app:metaapp]
  paste.app_factory = nova.api.metadata.handler:MetadataRequestHandler.factory
-@@ -30,17 +30,20 @@
+@@ -30,17 +30,22 @@ use = call:nova.api.openstack.urlmap:url
  
  [composite:openstack_compute_api_v21]
  use = call:nova.api.auth:pipeline_factory_v21
@@ -46,6 +46,8 @@ index 7e20eaa7e20..e1266857e1c 100644
 +
 +[filter:healthcheck]
 +use = egg:oslo.middleware#healthcheck
++backends = disable_by_file
++disable_by_file_path = /etc/nova/healthcheck_disable
  
  [filter:request_log]
  paste.filter_factory = nova.api.openstack.requestlog:RequestLog.factory

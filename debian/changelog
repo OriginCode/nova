@@ -1,3 +1,9 @@
+nova (2:26.0.0-3) unstable; urgency=medium
+
+  * Add a disable_by_file feature to Add-a-healtcheck-url.patch.
+
+ -- Thomas Goirand <zigo@debian.org>  Mon, 14 Nov 2022 17:39:54 +0100
+
 nova (2:26.0.0-2) unstable; urgency=medium
 
   * Black list a unit test that gets stuck (Closes: #1022733):
