@@ -1,3 +1,9 @@
+nova (2:26.0.0-4) unstable; urgency=medium
+
+  * Removed python3-pypowervm as (build-)depends.
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 28 Dec 2022 20:43:26 +0100
+
 nova (2:26.0.0-3) unstable; urgency=medium
 
   * Add a disable_by_file feature to Add-a-healtcheck-url.patch.
