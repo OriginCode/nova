@@ -1,3 +1,9 @@
+nova (2:26.0.0-5) unstable; urgency=medium
+
+  * Kill the nova-volume transition package.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 10 Jan 2023 16:12:23 +0100
+
 nova (2:26.0.0-4) unstable; urgency=medium
 
   * Removed python3-pypowervm as (build-)depends.

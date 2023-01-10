@@ -468,28 +468,6 @@ Description: OpenStack Compute - virtual machine scheduler
  .
  This is the Nova scheduler.
 
-Package: nova-volume
-Section: oldlibs
-Architecture: all
-Depends:
- cinder-api,
- cinder-scheduler,
- cinder-volume,
- ${misc:Depends},
-Description: OpenStack Compute - storage metapackage
- OpenStack is a reliable cloud infrastructure. Its mission is to produce
- the ubiquitous cloud computing platform that will meet the needs of public
- and private cloud providers regardless of size, by being simple to implement
- and massively scalable.
- .
- OpenStack Compute, codenamed Nova, is a cloud computing fabric controller
- designed to be modular and easy to extend and adapt. In addition to its
- "native" OpenStack API, it also supports the Amazon EC2 API, and it supports
- many different database backends (including SQLite, MySQL, and PostgreSQL),
- hypervisors (KVM, Xen), and user directory systems (LDAP, SQL).
- .
- This metapackage is for the transition from nova-volume to Cinder.
-
 Package: python3-nova
 Architecture: all
 Section: python
