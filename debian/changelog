@@ -4,7 +4,7 @@ nova (2:26.0.0-6) unstable; urgency=high
     references a specific backing file path, an authenticated user may convince
     systems to return a copy of that file's contents from the server resulting
     in unauthorized access to potentially sensitive data. Add upstream patch
-    cve-2022-47951-glance-stable-zed.patch (Closes: #XXXXXX).
+    cve-2022-47951-glance-stable-zed.patch (Closes: #1029561).
 
  -- Thomas Goirand <zigo@debian.org>  Tue, 24 Jan 2023 14:11:46 +0100
 
