@@ -1,3 +1,10 @@
+nova (2:26.1.0-1) unstable; urgency=medium
+
+  * New upstream release.
+  * Removed cve-2022-47951-nova-stable-zed.patch applied upstream.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 31 Jan 2023 17:10:58 +0100
+
 nova (2:26.0.0-6) unstable; urgency=high
 
   * CVE-2022-47951: By supplying a specially created VMDK flat image which

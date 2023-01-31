@@ -1,4 +1,3 @@
 Install-missed-files.patch
 remove-svg-converter-from-doc-conf.py.patch
 Add-a-healtcheck-url.patch
-cve-2022-47951-nova-stable-zed.patch
