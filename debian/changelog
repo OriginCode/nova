@@ -4,6 +4,7 @@ nova (2:27.0.0~rc1-1) experimental; urgency=medium
   * Removed (build-)depends versions when satisfied in Bookworm.
   * Removed breaks / replaces not relevant after Bookworm.
   * Removed lsb-base depends.
+  * Fixed (build-)depends for this release.
 
  -- Thomas Goirand <zigo@debian.org>  Mon, 06 Mar 2023 15:55:23 +0100
 
