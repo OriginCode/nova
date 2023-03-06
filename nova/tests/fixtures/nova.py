@@ -20,8 +20,10 @@ import collections
 import contextlib
 from contextlib import contextmanager
 import functools
+from importlib.abc import MetaPathFinder
 import logging as std_logging
 import os
+import sys
 import time
 from unittest import mock
 import warnings
@@ -63,6 +65,7 @@ from nova.scheduler import weights
 from nova import service
 from nova.tests.functional.api import client
 from nova import utils
+from nova.virt import node
 
 CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
@@ -563,11 +566,10 @@ class CellDatabases(fixtures.Fixture):
                          call_monitor_timeout=None):
         """Mirror rpc.get_client() but with our special sauce."""
         serializer = CheatingSerializer(serializer)
-        return messaging.RPCClient(rpc.TRANSPORT,
-                                   target,
-                                   version_cap=version_cap,
-                                   serializer=serializer,
-                                   call_monitor_timeout=call_monitor_timeout)
+        return messaging.get_rpc_client(rpc.TRANSPORT, target,
+            version_cap=version_cap,
+            serializer=serializer,
+            call_monitor_timeout=call_monitor_timeout)
 
     def add_cell_database(self, connection_str, default=False):
         """Add a cell database to the fixture.
@@ -1798,3 +1800,70 @@ class SysFsPoisonFixture(fixtures.Fixture):
         # a bunch of test to fail
         # self.inject_poison("os.path", "exists")
         # self.inject_poison("os", "stat")
+
+
+class ImportModulePoisonFixture(fixtures.Fixture):
+    """Poison imports of modules unsuitable for the test environment.
+
+    Examples are guestfs and libvirt. Ordinarily, these would not be installed
+    in the test environment but if they _are_ present, it can result in
+    actual calls to libvirt, for example, which could cause tests to fail.
+
+    This fixture will inspect module imports and if they are in the disallowed
+    list, it will fail the test with a helpful message about mocking needed in
+    the test.
+    """
+
+    class ForbiddenModules(MetaPathFinder):
+        def __init__(self, test, modules):
+            super().__init__()
+            self.test = test
+            self.modules = modules
+
+        def find_spec(self, fullname, path, target=None):
+            if fullname in self.modules:
+                self.test.fail_message = (
+                    f"This test imports the '{fullname}' module, which it "
+                    f'should not in the test environment. Please add '
+                    f'appropriate mocking to this test.'
+                )
+                raise ImportError(fullname)
+
+    def __init__(self, module_names):
+        self.module_names = module_names
+        self.fail_message = ''
+        if isinstance(module_names, str):
+            self.module_names = {module_names}
+        self.meta_path_finder = self.ForbiddenModules(self, self.module_names)
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(self.cleanup)
+        sys.meta_path.insert(0, self.meta_path_finder)
+
+    def cleanup(self):
+        sys.meta_path.remove(self.meta_path_finder)
+        # We use a flag and check it during the cleanup phase to fail the test
+        # if needed. This is done because some module imports occur inside of a
+        # try-except block that ignores all exceptions, so raising an exception
+        # there (which is also what self.assert* and self.fail() do underneath)
+        # will not work to cause a failure in the test.
+        if self.fail_message:
+            raise ImportError(self.fail_message)
+
+
+class ComputeNodeIdFixture(fixtures.Fixture):
+    def setUp(self):
+        super().setUp()
+
+        node.LOCAL_NODE_UUID = None
+        self.useFixture(fixtures.MockPatch(
+            'nova.virt.node.read_local_node_uuid',
+            lambda: None))
+        self.useFixture(fixtures.MockPatch(
+            'nova.virt.node.write_local_node_uuid',
+            lambda uuid: None))
+        self.useFixture(fixtures.MockPatch(
+            'nova.compute.manager.ComputeManager.'
+            '_ensure_existing_node_identity',
+            mock.DEFAULT))

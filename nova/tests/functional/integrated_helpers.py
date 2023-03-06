@@ -598,7 +598,7 @@ class InstanceHelperMixin:
 
     def _evacuate_server(
             self, server, extra_post_args=None, expected_host=None,
-            expected_state='ACTIVE', expected_task_state=NOT_SPECIFIED,
+            expected_state='SHUTOFF', expected_task_state=NOT_SPECIFIED,
             expected_migration_status='done'):
         """Evacuate a server."""
         api = getattr(self, 'admin_api', self.api)
@@ -632,6 +632,13 @@ class InstanceHelperMixin:
         if wait_for_stop:
             return self._wait_for_state_change(server, 'SHUTOFF')
         return server
+
+    def _snapshot_server(self, server, snapshot_name):
+        """Create server snapshot."""
+        self.api.post_server_action(
+            server['id'],
+            {'createImage': {'name': snapshot_name}}
+        )
 
 
 class PlacementHelperMixin:
@@ -868,6 +875,20 @@ class PlacementHelperMixin:
             1, len(migrations),
             'Test expected a single migration but found %i' % len(migrations))
         return migrations[0].uuid
+
+    def _reserve_placement_resource(self, rp_name, rc_name, reserved):
+        rp_uuid = self._get_provider_uuid_by_name(rp_name)
+        inv = self.placement.get(
+            '/resource_providers/%s/inventories/%s' % (rp_uuid, rc_name),
+            version='1.26'
+        ).body
+        inv["reserved"] = reserved
+        result = self.placement.put(
+            '/resource_providers/%s/inventories/%s' % (rp_uuid, rc_name),
+            version='1.26', body=inv
+        ).body
+        self.assertEqual(reserved, result["reserved"])
+        return result
 
 
 class PlacementInstanceHelperMixin(InstanceHelperMixin, PlacementHelperMixin):

@@ -235,7 +235,7 @@ class ComputeTaskManager:
     may involve coordinating activities on multiple compute nodes.
     """
 
-    target = messaging.Target(namespace='compute_task', version='1.24')
+    target = messaging.Target(namespace='compute_task', version='1.25')
 
     def __init__(self):
         self.compute_rpcapi = compute_rpcapi.ComputeAPI()
@@ -1037,6 +1037,12 @@ class ComputeTaskManager:
                     request_spec.requested_resources = res_req
                     request_spec.request_level_params = req_lvl_params
 
+                    # NOTE(gibi): as PCI devices is tracked in placement we
+                    # need to generate request groups from InstancePCIRequests.
+                    # This will append new RequestGroup objects to the
+                    # request_spec.requested_resources list if needed
+                    request_spec.generate_request_groups_from_pci_requests()
+
                     # NOTE(cfriesen): Ensure that we restrict the scheduler to
                     # the cell specified by the instance mapping.
                     self._restrict_request_spec_to_cell(
@@ -1146,7 +1152,8 @@ class ComputeTaskManager:
                          injected_files, new_pass, orig_sys_metadata,
                          bdms, recreate, on_shared_storage,
                          preserve_ephemeral=False, host=None,
-                         request_spec=None, reimage_boot_volume=False):
+                         request_spec=None, reimage_boot_volume=False,
+                         target_state=None):
         # recreate=True means the instance is being evacuated from a failed
         # host to a new destination host. The 'recreate' variable name is
         # confusing, so rename it to evacuate here at the top, which is simpler
@@ -1241,6 +1248,12 @@ class ComputeTaskManager:
                     # add them to the RequestSpec.
                     request_spec.requested_resources = res_req
                     request_spec.request_level_params = req_lvl_params
+
+                    # NOTE(gibi): as PCI devices is tracked in placement we
+                    # need to generate request groups from InstancePCIRequests.
+                    # This will append new RequestGroup objects to the
+                    # request_spec.requested_resources list if needed
+                    request_spec.generate_request_groups_from_pci_requests()
 
                 try:
                     # if this is a rebuild of instance on the same host with
@@ -1344,7 +1357,8 @@ class ComputeTaskManager:
                 limits=limits,
                 request_spec=request_spec,
                 accel_uuids=accel_uuids,
-                reimage_boot_volume=reimage_boot_volume)
+                reimage_boot_volume=reimage_boot_volume,
+                target_state=target_state)
 
     def _validate_image_traits_for_rebuild(self, context, instance, image_ref):
         """Validates that the traits specified in the image can be satisfied
@@ -2082,8 +2096,8 @@ class ComputeTaskManager:
                         skipped_host(target_ctxt, host, image_ids)
                         continue
 
-                    fetch_pool.spawn_n(wrap_cache_images, target_ctxt, host,
-                                       image_ids)
+                    utils.pass_context(fetch_pool.spawn_n, wrap_cache_images,
+                                       target_ctxt, host, image_ids)
 
         # Wait until all those things finish
         fetch_pool.waitall()

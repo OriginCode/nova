@@ -13,6 +13,7 @@
 #    under the License.
 from unittest import mock
 
+import ddt
 import fixtures
 import os_resource_classes
 import os_traits
@@ -73,10 +74,6 @@ class PlacementPCIReportingTests(test_pci_sriov_servers._PCIServersTestBase):
             )
         )
 
-    @staticmethod
-    def _to_device_spec_conf(spec_list):
-        return [jsonutils.dumps(x) for x in spec_list]
-
 
 class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
 
@@ -91,7 +88,7 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
             num_pci=2, num_pfs=2, num_vfs=4)
 
         # the emulated devices will then be filtered by the device_spec:
-        device_spec = self._to_device_spec_conf(
+        device_spec = self._to_list_of_json_str(
             [
                 # PCI_PROD_ID will match two type-PCI devs (slot 0, 1)
                 {
@@ -168,7 +165,7 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
         pci_info = fakelibvirt.HostPCIDevicesInfo(
             num_pci=1, num_pfs=1, num_vfs=1)
 
-        device_spec = self._to_device_spec_conf(
+        device_spec = self._to_list_of_json_str(
             [
                 # PCI_PROD_ID will match the type-PCI in slot 0
                 {
@@ -215,7 +212,7 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
         pci_info = fakelibvirt.HostPCIDevicesInfo(
             num_pci=0, num_pfs=1, num_vfs=1)
         # both device will be matched by our config
-        device_spec = self._to_device_spec_conf(
+        device_spec = self._to_list_of_json_str(
             [
                 # PF
                 {
@@ -248,7 +245,7 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
             num_pci=0, num_pfs=1, num_vfs=2)
         # the config matches the two VFs separately and tries to configure
         # them with different resource class
-        device_spec = self._to_device_spec_conf(
+        device_spec = self._to_list_of_json_str(
             [
                 {
                     "address": "0000:81:00.1",
@@ -282,7 +279,7 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
             num_pci=0, num_pfs=1, num_vfs=2)
         # the config matches the two VFs separately and tries to configure
         # them with different trait list
-        device_spec = self._to_device_spec_conf(
+        device_spec = self._to_list_of_json_str(
             [
                 {
                     "address": "0000:81:00.1",
@@ -316,7 +313,7 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
         pci_info = fakelibvirt.HostPCIDevicesInfo(
             num_pci=0, num_pfs=1, num_vfs=1)
         # then the config assigns physnet to the dev
-        device_spec = self._to_device_spec_conf(
+        device_spec = self._to_list_of_json_str(
             [
                 {
                     "vendor_id": fakelibvirt.PCI_VEND_ID,
@@ -336,7 +333,7 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
         )
 
     def test_devname_based_dev_spec_rejected(self):
-        device_spec = self._to_device_spec_conf(
+        device_spec = self._to_list_of_json_str(
             [
                 {
                     "devname": "eth0",
@@ -364,7 +361,7 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
         pci_info = fakelibvirt.HostPCIDevicesInfo(
             num_pci=1, num_pfs=0, num_vfs=0)
         # the config matches that PCI dev
-        device_spec = self._to_device_spec_conf(
+        device_spec = self._to_list_of_json_str(
             [
                 {
                     "vendor_id": fakelibvirt.PCI_VEND_ID,
@@ -386,7 +383,7 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
         )
 
         # now un-configure the PCI device and restart the compute
-        self.flags(group='pci', device_spec=self._to_device_spec_conf([]))
+        self.flags(group='pci', device_spec=self._to_list_of_json_str([]))
         self.restart_compute_service(hostname="compute1")
 
         # the RP had no allocation so nova could remove it
@@ -402,7 +399,7 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
         pci_info = fakelibvirt.HostPCIDevicesInfo(
             num_pci=0, num_pfs=1, num_vfs=2)
         # then the config matching the VFs
-        device_spec = self._to_device_spec_conf(
+        device_spec = self._to_list_of_json_str(
             [
                 {
                     "vendor_id": fakelibvirt.PCI_VEND_ID,
@@ -450,7 +447,7 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
         pci_info = fakelibvirt.HostPCIDevicesInfo(
             num_pci=0, num_pfs=1, num_vfs=2)
         # then the config patches the VFs
-        device_spec = self._to_device_spec_conf(
+        device_spec = self._to_list_of_json_str(
             [
                 {
                     "vendor_id": fakelibvirt.PCI_VEND_ID,
@@ -493,7 +490,7 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
         pci_info = fakelibvirt.HostPCIDevicesInfo(
             num_pci=0, num_pfs=1, num_vfs=2)
         # then the config matches both VFs
-        device_spec = self._to_device_spec_conf(
+        device_spec = self._to_list_of_json_str(
             [
                 {
                     "vendor_id": fakelibvirt.PCI_VEND_ID,
@@ -516,7 +513,7 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
 
         # change the config to match the PF but do not match the VFs and
         # restart the compute
-        device_spec = self._to_device_spec_conf(
+        device_spec = self._to_list_of_json_str(
             [
                 {
                     "vendor_id": fakelibvirt.PCI_VEND_ID,
@@ -548,7 +545,7 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
         pci_info = fakelibvirt.HostPCIDevicesInfo(
             num_pci=0, num_pfs=1, num_vfs=2)
         # then the config only matches the PF
-        device_spec = self._to_device_spec_conf(
+        device_spec = self._to_list_of_json_str(
             [
                 {
                     "vendor_id": fakelibvirt.PCI_VEND_ID,
@@ -571,7 +568,7 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
 
         # remove the PF from the config and add the VFs instead then restart
         # the compute
-        device_spec = self._to_device_spec_conf(
+        device_spec = self._to_list_of_json_str(
             [
                 {
                     "vendor_id": fakelibvirt.PCI_VEND_ID,
@@ -604,7 +601,7 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
             num_pci=0, num_pfs=2, num_vfs=4)
         # from slot 0 we match the PF only and ignore the VFs
         # from slot 1 we match the VFs but ignore the parent PF
-        device_spec = self._to_device_spec_conf(
+        device_spec = self._to_list_of_json_str(
             [
                 {
                     "vendor_id": fakelibvirt.PCI_VEND_ID,
@@ -649,7 +646,7 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
 
         # change the resource class and traits configuration and restart the
         # compute
-        device_spec = self._to_device_spec_conf(
+        device_spec = self._to_list_of_json_str(
             [
                 {
                     "product_id": fakelibvirt.PF_PROD_ID,
@@ -702,7 +699,7 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
         pci_info = fakelibvirt.HostPCIDevicesInfo(
             num_pci=0, num_pfs=1, num_vfs=1)
         # we match the PF only and ignore the VF
-        device_spec = self._to_device_spec_conf(
+        device_spec = self._to_list_of_json_str(
             [
                 {
                     "vendor_id": fakelibvirt.PCI_VEND_ID,
@@ -756,7 +753,7 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
             self._create_one_compute_with_a_pf_consumed_by_an_instance())
 
         # remove 0000:81:00.0 from the device spec and restart the compute
-        device_spec = self._to_device_spec_conf([])
+        device_spec = self._to_list_of_json_str([])
         self.flags(group='pci', device_spec=device_spec)
         # The PF is used but removed from the config. The PciTracker warns
         # but keeps the device so the placement logic mimic this and only warns
@@ -800,7 +797,7 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
         # in the config, then restart the compute service
 
         # only match the VF now
-        device_spec = self._to_device_spec_conf(
+        device_spec = self._to_list_of_json_str(
             [
                 {
                     "vendor_id": fakelibvirt.PCI_VEND_ID,
@@ -875,7 +872,7 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
         pci_info = fakelibvirt.HostPCIDevicesInfo(
             num_pci=1, num_pfs=0, num_vfs=0)
         # the config matches the PCI dev
-        device_spec = self._to_device_spec_conf(
+        device_spec = self._to_list_of_json_str(
             [
                 {
                     "vendor_id": fakelibvirt.PCI_VEND_ID,
@@ -902,7 +899,7 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
         pci_info = fakelibvirt.HostPCIDevicesInfo(
             num_pci=1, num_pfs=0, num_vfs=0)
         # the config matches the PCI dev
-        device_spec = self._to_device_spec_conf(
+        device_spec = self._to_list_of_json_str(
             [
                 {
                     "vendor_id": fakelibvirt.PCI_VEND_ID,
@@ -953,25 +950,13 @@ class PlacementPCIAllocationHealingTests(PlacementPCIReportingTests):
             )
         )
 
-    @staticmethod
-    def _move_allocation(allocations, from_uuid, to_uuid):
-        allocations[to_uuid] = allocations[from_uuid]
-        del allocations[from_uuid]
-
-    def _move_server_allocation(self, allocations, server_uuid, revert=False):
-        migration_uuid = self.get_migration_uuid_for_instance(server_uuid)
-        if revert:
-            self._move_allocation(allocations, migration_uuid, server_uuid)
-        else:
-            self._move_allocation(allocations, server_uuid, migration_uuid)
-
     def test_heal_single_pci_allocation(self):
         # The fake libvirt will emulate on the host:
         # * one type-PCI in slot 0
         pci_info = fakelibvirt.HostPCIDevicesInfo(
             num_pci=1, num_pfs=0, num_vfs=0)
         # the config matches the PCI dev
-        device_spec = self._to_device_spec_conf(
+        device_spec = self._to_list_of_json_str(
             [
                 {
                     "vendor_id": fakelibvirt.PCI_VEND_ID,
@@ -1027,7 +1012,7 @@ class PlacementPCIAllocationHealingTests(PlacementPCIReportingTests):
         pci_info = fakelibvirt.HostPCIDevicesInfo(
             num_pci=2, num_pfs=2, num_vfs=8)
         # the config matches:
-        device_spec = self._to_device_spec_conf(
+        device_spec = self._to_list_of_json_str(
             [
                 # both type-PCI
                 {
@@ -1127,7 +1112,7 @@ class PlacementPCIAllocationHealingTests(PlacementPCIReportingTests):
         pci_info = fakelibvirt.HostPCIDevicesInfo(
             num_pci=2, num_pfs=2, num_vfs=8)
         # the config matches:
-        device_spec = self._to_device_spec_conf(
+        device_spec = self._to_list_of_json_str(
             [
                 # both type-PCI
                 {
@@ -1216,7 +1201,7 @@ class PlacementPCIAllocationHealingTests(PlacementPCIReportingTests):
         compute1_pci_info = fakelibvirt.HostPCIDevicesInfo(
             num_pci=0, num_pfs=1, num_vfs=2)
         # the config matches just the VFs
-        compute1_device_spec = self._to_device_spec_conf(
+        compute1_device_spec = self._to_list_of_json_str(
             [
                 {
                     "vendor_id": fakelibvirt.PCI_VEND_ID,
@@ -1273,7 +1258,7 @@ class PlacementPCIAllocationHealingTests(PlacementPCIReportingTests):
         compute2_pci_info = fakelibvirt.HostPCIDevicesInfo(
             num_pci=0, num_pfs=1, num_vfs=1)
         # the config matches just the VFs
-        compute2_device_spec = self._to_device_spec_conf(
+        compute2_device_spec = self._to_list_of_json_str(
             [
                 {
                     "vendor_id": fakelibvirt.PCI_VEND_ID,
@@ -1377,7 +1362,7 @@ class PlacementPCIAllocationHealingTests(PlacementPCIReportingTests):
         compute1_pci_info = fakelibvirt.HostPCIDevicesInfo(
             num_pci=0, num_pfs=1, num_vfs=1)
         # the config matches just the VFs
-        compute1_device_spec = self._to_device_spec_conf(
+        compute1_device_spec = self._to_list_of_json_str(
             [
                 {
                     "vendor_id": fakelibvirt.PCI_VEND_ID,
@@ -1435,7 +1420,7 @@ class PlacementPCIAllocationHealingTests(PlacementPCIReportingTests):
         compute2_pci_info = fakelibvirt.HostPCIDevicesInfo(
             num_pci=2, num_pfs=1, num_vfs=1)
         # the config matches the PCI devs and hte PF but not the VFs
-        compute2_device_spec = self._to_device_spec_conf(
+        compute2_device_spec = self._to_list_of_json_str(
             [
                 {
                     "vendor_id": fakelibvirt.PCI_VEND_ID,
@@ -1516,7 +1501,7 @@ class PlacementPCIAllocationHealingTests(PlacementPCIReportingTests):
         compute1_pci_info = fakelibvirt.HostPCIDevicesInfo(
             num_pci=0, num_pfs=1, num_vfs=3)
         # the config matches just the VFs
-        compute1_device_spec = self._to_device_spec_conf(
+        compute1_device_spec = self._to_list_of_json_str(
             [
                 {
                     "vendor_id": fakelibvirt.PCI_VEND_ID,
@@ -1613,8 +1598,400 @@ class PlacementPCIAllocationHealingTests(PlacementPCIReportingTests):
         compute1_expected_placement_view["allocations"][server["id"]] = {
             "0000:81:00.0": {self.VF_RC: 2}
         }
-        self.assert_placement_pci_view(
-            "compute1", **compute1_expected_placement_view)
+        # NOTE(gibi): This is unfortunate but during same host resize
+        # confirm when the PCI scheduling is not enabled the healing logic
+        # cannot heal the dest host allocation during the claim. It will only
+        # heal it in the next run of the  ResourceTracker._update(). This due
+        # to the fact that ResourceTracker.drop_move_claim runs both for
+        # revert (on the dest) and confirm (on the source) and in same host
+        # resize this means that it runs on both the source and the dest as
+        # they are the same.
+        # Anyhow the healing will happen just a bit later. And the end goal is
+        # to make the scheduler support enabled by default and delete the
+        # whole healing logic. So I think this is acceptable.
         self._run_periodics()
         self.assert_placement_pci_view(
             "compute1", **compute1_expected_placement_view)
+
+
+@ddt.ddt
+class SimpleRCAndTraitBasedPCIAliasTests(PlacementPCIReportingTests):
+    def setUp(self):
+        super().setUp()
+        self.flags(group='filter_scheduler', pci_in_placement=True)
+
+        # The fake libvirt will emulate on the host:
+        # * one type-PCI in slot 0
+        pci_info = fakelibvirt.HostPCIDevicesInfo(
+            num_pci=1, num_pfs=0, num_vfs=0)
+        device_spec = self._to_list_of_json_str(
+            [
+                {
+                    "address": "0000:81:00.0",
+                    "resource_class": "gpu",
+                    "traits": ",".join(
+                        [
+                            os_traits.HW_GPU_API_VULKAN,
+                            "purple",
+                            "round",
+                        ]
+                    ),
+                },
+            ]
+        )
+        self.flags(group='pci', device_spec=device_spec)
+        self.start_compute(hostname="compute1", pci_info=pci_info)
+
+        self.assertPCIDeviceCounts("compute1", total=1, free=1)
+        self.compute1_expected_placement_view = {
+            "inventories": {
+                "0000:81:00.0": {"CUSTOM_GPU": 1},
+            },
+            "traits": {
+                "0000:81:00.0": [
+                    "HW_GPU_API_VULKAN",
+                    "CUSTOM_PURPLE",
+                    "CUSTOM_ROUND",
+                ],
+            },
+            "usages": {
+                "0000:81:00.0": {"CUSTOM_GPU": 0},
+            },
+            "allocations": {},
+        }
+        self.assert_placement_pci_view(
+            "compute1", **self.compute1_expected_placement_view)
+
+    @ddt.data(
+        {
+            "vendor_id": fakelibvirt.PCI_VEND_ID,
+            "product_id": fakelibvirt.PCI_PROD_ID,
+            "name": "a-gpu-wrong-rc",
+        },
+        {
+            "resource_class": os_resource_classes.PGPU,
+            "name": "a-gpu-wrong-rc-2",
+        },
+        {
+            "resource_class": "GPU",
+            # NOTE(gibi): "big" is missing from device spec
+            "traits": "purple,big",
+            "name": "a-gpu-missing-trait",
+        },
+    )
+    def test_boot_with_custom_rc_and_traits_no_matching_device(
+        self, pci_alias
+    ):
+        self.flags(group="pci", alias=self._to_list_of_json_str([pci_alias]))
+        extra_spec = {"pci_passthrough:alias": f"{pci_alias['name']}:1"}
+        flavor_id = self._create_flavor(extra_spec=extra_spec)
+        server = self._create_server(
+            flavor_id=flavor_id, networks=[], expected_state="ERROR"
+        )
+        self.assertIn("fault", server)
+        self.assertIn("No valid host", server["fault"]["message"])
+
+        self.assertPCIDeviceCounts("compute1", total=1, free=1)
+        self.assert_placement_pci_view(
+            "compute1", **self.compute1_expected_placement_view
+        )
+
+    def test_boot_with_custom_rc_and_traits_succeeds(self):
+        pci_alias_gpu = {
+            "resource_class": "GPU",
+            "traits": "HW_GPU_API_VULKAN,PURPLE",
+            "name": "a-gpu",
+        }
+        self.flags(
+            group="pci", alias=self._to_list_of_json_str([pci_alias_gpu])
+        )
+
+        extra_spec = {"pci_passthrough:alias": "a-gpu:1"}
+        flavor_id = self._create_flavor(extra_spec=extra_spec)
+        server = self._create_server(flavor_id=flavor_id, networks=[])
+
+        self.assertPCIDeviceCounts("compute1", total=1, free=0)
+        self.compute1_expected_placement_view["usages"]["0000:81:00.0"][
+            "CUSTOM_GPU"
+        ] = 1
+        self.compute1_expected_placement_view["allocations"][server["id"]] = {
+            "0000:81:00.0": {"CUSTOM_GPU": 1}
+        }
+        self.assert_placement_pci_view(
+            "compute1", **self.compute1_expected_placement_view
+        )
+        self.assert_no_pci_healing("compute1")
+
+
+class RCAndTraitBasedPCIAliasTests(PlacementPCIReportingTests):
+    def setUp(self):
+        super().setUp()
+        self.flags(group='filter_scheduler', pci_in_placement=True)
+
+    def test_device_claim_consistent_with_placement_allocation(self):
+        """As soon as [filter_scheduler]pci_in_placement is enabled the
+        nova-scheduler will allocate PCI devices in placement. Then on the
+        nova-compute side the PCI claim will also allocate PCI devices in the
+        nova DB. This test will create a situation where the two allocation
+        could contradict and observes that in a contradicting situation the PCI
+        claim will fail instead of allocating a device that is not allocated in
+        placement.
+
+        For the contradiction to happen we need two PCI devices that looks
+        different from placement perspective than from the nova DB perspective.
+
+        We can do that by assigning different traits from in placement and
+        having different product_id in the Nova DB. Then we will create a
+        request that would match from placement perspective to one of the
+        device only and would match to the other device from nova DB
+        perspective. Then we will expect that the boot request fails with no
+        valid host.
+        """
+        # The fake libvirt will emulate on the host:
+        # * one type-PCI in slot 0
+        # * one type-PF in slot 1
+        pci_info = fakelibvirt.HostPCIDevicesInfo(
+            num_pci=1, num_pfs=1, num_vfs=0)
+        # we allow both device to be consumed, but we assign different traits
+        # so we can selectively schedule to one of the devices in placement
+        device_spec = self._to_list_of_json_str(
+            [
+                {
+                    "address": "0000:81:00.0",
+                    "resource_class": "MY_DEV",
+                    "traits": "A_PCI",
+                },
+                {
+                    "address": "0000:81:01.0",
+                    "resource_class": "MY_DEV",
+                    "traits": "A_PF",
+                },
+            ]
+        )
+        self.flags(group='pci', device_spec=device_spec)
+        self.start_compute(hostname="compute1", pci_info=pci_info)
+
+        self.assertPCIDeviceCounts("compute1", total=2, free=2)
+        compute1_expected_placement_view = {
+            "inventories": {
+                "0000:81:00.0": {"CUSTOM_MY_DEV": 1},
+                "0000:81:01.0": {"CUSTOM_MY_DEV": 1},
+            },
+            "traits": {
+                "0000:81:00.0": [
+                    "CUSTOM_A_PCI",
+                ],
+                "0000:81:01.0": [
+                    "CUSTOM_A_PF",
+                ],
+            },
+            "usages": {
+                "0000:81:00.0": {"CUSTOM_MY_DEV": 0},
+                "0000:81:01.0": {"CUSTOM_MY_DEV": 0},
+            },
+            "allocations": {},
+        }
+        self.assert_placement_pci_view(
+            "compute1", **compute1_expected_placement_view)
+
+        # now we create a PCI alias that cannot be fulfilled from both
+        # nova and placement perspective at the same time, but can be fulfilled
+        # from each perspective individually
+        pci_alias_no_match = {
+            "resource_class": "MY_DEV",
+            # by product_id this matches 81.00 only
+            "product_id": fakelibvirt.PCI_PROD_ID,
+            # by trait this matches 81.01 only
+            "traits": "A_PF",
+            "name": "a-pci",
+        }
+        self.flags(
+            group="pci",
+            alias=self._to_list_of_json_str([pci_alias_no_match]),
+        )
+
+        # then try to boot with the alias and expect no valid host error
+        extra_spec = {"pci_passthrough:alias": "a-pci:1"}
+        flavor_id = self._create_flavor(extra_spec=extra_spec)
+        server = self._create_server(
+            flavor_id=flavor_id, networks=[], expected_state='ERROR')
+        self.assertIn('fault', server)
+        self.assertIn('No valid host', server['fault']['message'])
+        self.assert_placement_pci_view(
+            "compute1", **compute1_expected_placement_view)
+        self.assert_no_pci_healing("compute1")
+
+    def test_vf_with_split_allocation(self):
+        # The fake libvirt will emulate on the host:
+        # * two type-PFs in slot 0, 1 with 2 VFs each
+        pci_info = fakelibvirt.HostPCIDevicesInfo(
+            num_pci=0, num_pfs=2, num_vfs=4)
+        # make all 4 VFs available
+        device_spec = self._to_list_of_json_str(
+            [
+                {
+                    "product_id": fakelibvirt.VF_PROD_ID,
+                    "resource_class": "MY_VF",
+                    "traits": "blue",
+                },
+            ]
+        )
+        self.flags(group='pci', device_spec=device_spec)
+        self.start_compute(hostname="compute1", pci_info=pci_info)
+
+        compute1_expected_placement_view = {
+            "inventories": {
+                "0000:81:00.0": {"CUSTOM_MY_VF": 2},
+                "0000:81:01.0": {"CUSTOM_MY_VF": 2},
+            },
+            "traits": {
+                "0000:81:00.0": [
+                    "CUSTOM_BLUE",
+                ],
+                "0000:81:01.0": [
+                    "CUSTOM_BLUE",
+                ],
+            },
+            "usages": {
+                "0000:81:00.0": {"CUSTOM_MY_VF": 0},
+                "0000:81:01.0": {"CUSTOM_MY_VF": 0},
+            },
+            "allocations": {},
+        }
+        self.assert_placement_pci_view(
+            "compute1", **compute1_expected_placement_view)
+        self.assertPCIDeviceCounts('compute1', total=4, free=4)
+
+        pci_alias_vf = {
+            "resource_class": "MY_VF",
+            "traits": "blue",
+            "name": "a-vf",
+        }
+        self.flags(
+            group="pci",
+            alias=self._to_list_of_json_str([pci_alias_vf]),
+        )
+
+        # reserve VFs from 81.01 in placement to drive the first instance to
+        # 81.00
+        self._reserve_placement_resource(
+            "compute1_0000:81:01.0", "CUSTOM_MY_VF", 2)
+        # boot an instance with a single VF
+        # we expect that it is allocated from 81.00 as both VF on 81.01 is
+        # reserved
+        extra_spec = {"pci_passthrough:alias": "a-vf:1"}
+        flavor_id = self._create_flavor(extra_spec=extra_spec)
+        server_1vf = self._create_server(flavor_id=flavor_id, networks=[])
+
+        self.assertPCIDeviceCounts('compute1', total=4, free=3)
+        compute1_expected_placement_view["usages"] = {
+            "0000:81:00.0": {"CUSTOM_MY_VF": 1}
+        }
+        compute1_expected_placement_view["allocations"][server_1vf["id"]] = {
+            "0000:81:00.0": {"CUSTOM_MY_VF": 1},
+        }
+        self.assert_placement_pci_view(
+            "compute1", **compute1_expected_placement_view)
+        self.assert_no_pci_healing("compute1")
+
+        # Boot a second instance requesting two VFs and ensure that the only
+        # way that placement allows this is to split the two VFs between PFs.
+        # Let's remove the reservation of one resource from 81.01 so the only
+        # viable placement candidate is: one VF from 81.00 and one VF from
+        # 81.01
+        self._reserve_placement_resource(
+            "compute1_0000:81:01.0", "CUSTOM_MY_VF", 1)
+
+        extra_spec = {"pci_passthrough:alias": "a-vf:2"}
+        flavor_id = self._create_flavor(extra_spec=extra_spec)
+        server_2vf = self._create_server(flavor_id=flavor_id, networks=[])
+
+        self.assertPCIDeviceCounts('compute1', total=4, free=1)
+        compute1_expected_placement_view["usages"] = {
+            # both VM uses one VF
+            "0000:81:00.0": {"CUSTOM_MY_VF": 2},
+            "0000:81:01.0": {"CUSTOM_MY_VF": 1},
+        }
+        compute1_expected_placement_view["allocations"][server_2vf["id"]] = {
+            "0000:81:00.0": {"CUSTOM_MY_VF": 1},
+            "0000:81:01.0": {"CUSTOM_MY_VF": 1},
+        }
+        self.assert_placement_pci_view(
+            "compute1", **compute1_expected_placement_view)
+        self.assert_no_pci_healing("compute1")
+
+    def test_3vfs_asymmetric_split_between_pfs(self):
+        # The fake libvirt will emulate on the host:
+        # * two type-PFs in slot 0, 1 with 2 VFs each
+        pci_info = fakelibvirt.HostPCIDevicesInfo(
+            num_pci=0, num_pfs=2, num_vfs=4)
+        # make all 4 VFs available
+        device_spec = self._to_list_of_json_str(
+            [
+                {
+                    "product_id": fakelibvirt.VF_PROD_ID,
+                    "resource_class": "MY_VF",
+                    "traits": "blue",
+                },
+            ]
+        )
+        self.flags(group='pci', device_spec=device_spec)
+        self.start_compute(hostname="compute1", pci_info=pci_info)
+
+        compute1_expected_placement_view = {
+            "inventories": {
+                "0000:81:00.0": {"CUSTOM_MY_VF": 2},
+                "0000:81:01.0": {"CUSTOM_MY_VF": 2},
+            },
+            "traits": {
+                "0000:81:00.0": [
+                    "CUSTOM_BLUE",
+                ],
+                "0000:81:01.0": [
+                    "CUSTOM_BLUE",
+                ],
+            },
+            "usages": {
+                "0000:81:00.0": {"CUSTOM_MY_VF": 0},
+                "0000:81:01.0": {"CUSTOM_MY_VF": 0},
+            },
+            "allocations": {},
+        }
+        self.assert_placement_pci_view(
+            "compute1", **compute1_expected_placement_view)
+        self.assertPCIDeviceCounts('compute1', total=4, free=4)
+
+        pci_alias_vf = {
+            "resource_class": "MY_VF",
+            "traits": "blue",
+            "name": "a-vf",
+        }
+        self.flags(
+            group="pci",
+            alias=self._to_list_of_json_str([pci_alias_vf]),
+        )
+
+        # Boot an instance requesting three VFs. The 3 VFs can be split between
+        # the two PFs two ways: 2 from 81.00 and 1 from 81.01, or 1 from 81.00
+        # and 2 from 81.01.
+        # Let's block the first way in placement by reserving 1 device from
+        # 81.00
+        self._reserve_placement_resource(
+            "compute1_0000:81:00.0", "CUSTOM_MY_VF", 1)
+        extra_spec = {"pci_passthrough:alias": "a-vf:3"}
+        flavor_id = self._create_flavor(extra_spec=extra_spec)
+        # We expect this to fit.
+        server_3vf = self._create_server(flavor_id=flavor_id, networks=[])
+
+        self.assertPCIDeviceCounts('compute1', total=4, free=1)
+        compute1_expected_placement_view["usages"] = {
+            "0000:81:00.0": {"CUSTOM_MY_VF": 1},
+            "0000:81:01.0": {"CUSTOM_MY_VF": 2},
+        }
+        compute1_expected_placement_view["allocations"][server_3vf["id"]] = {
+            "0000:81:00.0": {"CUSTOM_MY_VF": 1},
+            "0000:81:01.0": {"CUSTOM_MY_VF": 2},
+        }
+        self.assert_placement_pci_view(
+            "compute1", **compute1_expected_placement_view)
+        self.assert_no_pci_healing("compute1")

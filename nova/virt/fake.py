@@ -32,6 +32,7 @@ import fixtures
 import os_resource_classes as orc
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import versionutils
 
 from nova.compute import power_state
@@ -48,6 +49,7 @@ from nova.objects import migrate_data
 from nova.virt import driver
 from nova.virt import hardware
 from nova.virt.ironic import driver as ironic
+import nova.virt.node
 from nova.virt import virtapi
 
 CONF = nova.conf.CONF
@@ -160,8 +162,8 @@ class FakeDriver(driver.ComputeDriver):
         self._host = host
         # NOTE(gibi): this is unnecessary complex and fragile but this is
         # how many current functional sample tests expect the node name.
-        self._nodes = (['fake-mini'] if self._host == 'compute'
-                       else [self._host])
+        self._set_nodes(['fake-mini'] if self._host == 'compute'
+                        else [self._host])
 
     def _set_nodes(self, nodes):
         # NOTE(gibi): this is not part of the driver interface but used
@@ -504,6 +506,12 @@ class FakeDriver(driver.ComputeDriver):
         host_status['host_hostname'] = nodename
         host_status['host_name_label'] = nodename
         host_status['cpu_info'] = jsonutils.dumps(cpu_info)
+        # NOTE(danms): Because the fake driver runs on the same host
+        # in tests, potentially with multiple nodes, we need to
+        # control our node uuids. Make sure we return a unique and
+        # consistent uuid for each node we are responsible for to
+        # avoid the persistent local node identity from taking over.
+        host_status['uuid'] = str(getattr(uuids, 'node_%s' % nodename))
         return host_status
 
     def update_provider_tree(self, provider_tree, nodename, allocations=None):
@@ -646,6 +654,10 @@ class FakeDriver(driver.ComputeDriver):
     def get_available_nodes(self, refresh=False):
         return self._nodes
 
+    def get_nodenames_by_uuid(self, refresh=False):
+        return {str(getattr(uuids, 'node_%s' % n)): n
+                for n in self.get_available_nodes()}
+
     def instance_on_disk(self, instance):
         return False
 
@@ -764,7 +776,7 @@ class PredictableNodeUUIDDriver(SmallFakeDriver):
             PredictableNodeUUIDDriver, self).get_available_resource(nodename)
         # This is used in ComputeNode.update_from_virt_driver which is called
         # from the ResourceTracker when creating a ComputeNode.
-        resources['uuid'] = uuid.uuid5(uuid.NAMESPACE_DNS, nodename)
+        resources['uuid'] = str(uuid.uuid5(uuid.NAMESPACE_DNS, nodename))
         return resources
 
 
@@ -1119,3 +1131,22 @@ class EphEncryptionDriverPLAIN(MediumFakeDriver):
         FakeDriver.capabilities,
         supports_ephemeral_encryption=True,
         supports_ephemeral_encryption_plain=True)
+
+
+class FakeDriverWithoutFakeNodes(FakeDriver):
+    """FakeDriver that behaves like a real single-node driver.
+
+    This behaves like a real virt driver from the perspective of its
+    nodes, with a stable nodename and use of the global node identity
+    stuff to provide a stable node UUID.
+    """
+
+    def get_available_resource(self, nodename):
+        resources = super().get_available_resource(nodename)
+        resources['uuid'] = nova.virt.node.get_local_node_uuid()
+        return resources
+
+    def get_nodenames_by_uuid(self, refresh=False):
+        return {
+            nova.virt.node.get_local_node_uuid(): self.get_available_nodes()[0]
+        }

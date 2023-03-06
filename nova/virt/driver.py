@@ -34,6 +34,7 @@ from nova import context as nova_context
 from nova.i18n import _
 from nova import objects
 from nova.virt import event as virtevent
+import nova.virt.node
 
 CONF = nova.conf.CONF
 LOG = logging.getLogger(__name__)
@@ -1594,6 +1595,11 @@ class ComputeDriver(object):
         [hypervisor_hostname].
         """
         raise NotImplementedError()
+
+    def get_nodenames_by_uuid(self, refresh=False):
+        """Returns a dict of {uuid: nodename} for all managed nodes."""
+        nodename = self.get_available_nodes()[0]
+        return {nova.virt.node.get_local_node_uuid(): nodename}
 
     def node_is_available(self, nodename):
         """Return whether this compute service manages a particular node."""

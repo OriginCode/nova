@@ -1478,6 +1478,23 @@ Related options:
 """),
 ]
 
+libvirt_cpu_mgmt_opts = [
+    cfg.BoolOpt('cpu_power_management',
+                default=False,
+                help='Use libvirt to manage CPU cores performance.'),
+    cfg.StrOpt('cpu_power_management_strategy',
+               choices=['cpu_state', 'governor'],
+               default='cpu_state',
+               help='Tuning strategy to reduce CPU power consumption when '
+                    'unused'),
+    cfg.StrOpt('cpu_power_governor_low',
+               default='powersave',
+               help='Governor to use in order '
+                    'to reduce CPU power consumption'),
+    cfg.StrOpt('cpu_power_governor_high',
+             default='performance',
+             help='Governor to use in order to have best CPU performance'),
+]
 
 ALL_OPTS = list(itertools.chain(
     libvirt_general_opts,
@@ -1499,6 +1516,7 @@ ALL_OPTS = list(itertools.chain(
     libvirt_volume_nvmeof_opts,
     libvirt_pmem_opts,
     libvirt_vtpm_opts,
+    libvirt_cpu_mgmt_opts,
 ))
 
 

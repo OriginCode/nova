@@ -171,6 +171,12 @@ class TestCase(base.BaseTestCase):
     # base class when USES_DB is True.
     NUMBER_OF_CELLS = 1
 
+    # The stable compute id stuff is intentionally singleton-ish, which makes
+    # it a nightmare for testing multiple host/node combinations in tests like
+    # we do. So, mock it out by default, unless the test is specifically
+    # designed to handle it.
+    STUB_COMPUTE_ID = True
+
     def setUp(self):
         """Run before each test method to initialize test environment."""
         # Ensure BaseTestCase's ConfigureLogging fixture is disabled since
@@ -288,12 +294,21 @@ class TestCase(base.BaseTestCase):
         self.useFixture(nova_fixtures.GenericPoisonFixture())
         self.useFixture(nova_fixtures.SysFsPoisonFixture())
 
+        # Additional module names can be added to this set if needed
+        self.useFixture(nova_fixtures.ImportModulePoisonFixture(
+            set(['guestfs', 'libvirt'])))
+
         # make sure that the wsgi app is fully initialized for all testcase
         # instead of only once initialized for test worker
         wsgi_app.init_global_data.reset()
 
         # Reset the placement client singleton
         report.PLACEMENTCLIENT = None
+
+        # Reset our local node uuid cache (and avoid writing to the
+        # local filesystem when we generate a new one).
+        if self.STUB_COMPUTE_ID:
+            self.useFixture(nova_fixtures.ComputeNodeIdFixture())
 
     def _setup_cells(self):
         """Setup a normal cellsv2 environment.
@@ -683,6 +698,7 @@ class SubclassSignatureTestCase(testtools.TestCase, metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     def setUp(self):
+        self.useFixture(nova_fixtures.ConfFixture(CONF))
         self.base = self._get_base_class()
 
         super(SubclassSignatureTestCase, self).setUp()

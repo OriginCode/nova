@@ -1537,7 +1537,7 @@ class LibvirtConfigGuestInputTest(LibvirtConfigBaseTest):
 
 class LibvirtConfigGuestGraphicsTest(LibvirtConfigBaseTest):
 
-    def test_config_graphics(self):
+    def test_config_graphics_vnc(self):
         obj = config.LibvirtConfigGuestGraphics()
         obj.type = "vnc"
         obj.autoport = True
@@ -1547,6 +1547,30 @@ class LibvirtConfigGuestGraphicsTest(LibvirtConfigBaseTest):
         xml = obj.to_xml()
         self.assertXmlEqual(xml, """
   <graphics type="vnc" autoport="yes" keymap="en_US" listen="127.0.0.1"/>
+                            """)
+
+    def test_config_graphics_spice(self):
+        obj = config.LibvirtConfigGuestGraphics()
+        obj.type = "spice"
+        obj.autoport = False
+        obj.keymap = "en_US"
+        obj.listen = "127.0.0.1"
+
+        obj.image_compression = "auto_glz"
+        obj.jpeg_compression = "auto"
+        obj.zlib_compression = "always"
+        obj.playback_compression = True
+        obj.streaming_mode = "filter"
+
+        xml = obj.to_xml()
+        self.assertXmlEqual(xml, """
+  <graphics type="spice" autoport="no" keymap="en_US" listen="127.0.0.1">
+    <image compression="auto_glz"/>
+    <jpeg compression="auto"/>
+    <zlib compression="always"/>
+    <playback compression="on"/>
+    <streaming mode="filter"/>
+  </graphics>
                             """)
 
 
@@ -1591,7 +1615,7 @@ class LibvirtConfigGuestHostdevPCI(LibvirtConfigBaseTest):
             </hostdev>
             """
 
-    def test_config_guest_hosdev_pci(self):
+    def test_config_guest_hostdev_pci(self):
         hostdev = config.LibvirtConfigGuestHostdevPCI()
         hostdev.domain = "1234"
         hostdev.bus = "11"
@@ -1600,7 +1624,7 @@ class LibvirtConfigGuestHostdevPCI(LibvirtConfigBaseTest):
         xml = hostdev.to_xml()
         self.assertXmlEqual(self.expected, xml)
 
-    def test_parse_guest_hosdev_pci(self):
+    def test_parse_guest_hostdev_pci(self):
         xmldoc = self.expected
         obj = config.LibvirtConfigGuestHostdevPCI()
         obj.parse_str(xmldoc)
@@ -1612,7 +1636,7 @@ class LibvirtConfigGuestHostdevPCI(LibvirtConfigBaseTest):
         self.assertEqual(obj.slot, '0x22')
         self.assertEqual(obj.function, '0x3')
 
-    def test_parse_guest_hosdev_usb(self):
+    def test_parse_guest_hostdev_usb(self):
         xmldoc = """<hostdev mode='subsystem' type='usb'>
                       <source startupPolicy='optional'>
                           <vendor id='0x1234'/>
@@ -3181,6 +3205,32 @@ class LibvirtConfigNodeDeviceTest(LibvirtConfigBaseTest):
                               config.LibvirtConfigNodeDeviceMdevInformation)
         self.assertEqual("nvidia-11", obj.mdev_information.type)
         self.assertEqual(12, obj.mdev_information.iommu_group)
+        self.assertIsNone(obj.mdev_information.uuid)
+
+    def test_config_mdev_device_uuid(self):
+        xmlin = """
+        <device>
+          <name>mdev_b2107403_110c_45b0_af87_32cc91597b8a_0000_41_00_0</name>
+          <path>/sys/devices/pci0000:40/0000:40:03.1/0000:41:00.0/b2107403-110c-45b0-af87-32cc91597b8a</path>
+          <parent>pci_0000_41_00_0</parent>
+          <driver>
+            <name>vfio_mdev</name>
+          </driver>
+          <capability type='mdev'>
+            <type id='nvidia-442'/>
+            <uuid>b2107403-110c-45b0-af87-32cc91597b8a</uuid>
+            <iommuGroup number='57'/>
+          </capability>
+        </device>"""
+
+        obj = config.LibvirtConfigNodeDevice()
+        obj.parse_str(xmlin)
+        self.assertIsInstance(obj.mdev_information,
+                              config.LibvirtConfigNodeDeviceMdevInformation)
+        self.assertEqual("nvidia-442", obj.mdev_information.type)
+        self.assertEqual(57, obj.mdev_information.iommu_group)
+        self.assertEqual("b2107403-110c-45b0-af87-32cc91597b8a",
+                         obj.mdev_information.uuid)
 
     def test_config_vdpa_device(self):
         xmlin = """

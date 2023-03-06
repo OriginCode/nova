@@ -258,17 +258,17 @@ stopping at 0, or use the :option:`--until-complete` option.
     ``YYYY-MM-DD[HH:mm:ss]``. For example::
 
         # Purge shadow table rows older than a specific date
-        nova-manage db archive --before 2015-10-21
+        nova-manage db archive_deleted_rows --before 2015-10-21
         # or
-        nova-manage db archive --before "Oct 21 2015"
+        nova-manage db archive_deleted_rows --before "Oct 21 2015"
         # Times are also accepted
-        nova-manage db archive --before "2015-10-21 12:00"
+        nova-manage db archive_deleted_rows --before "2015-10-21 12:00"
 
     Note that relative dates (such as ``yesterday``) are not supported
     natively. The ``date`` command can be helpful here::
 
         # Archive deleted rows more than one month old
-        nova-manage db archive --before "$(date -d 'now - 1 month')"
+        nova-manage db archive_deleted_rows --before "$(date -d 'now - 1 month')"
 
 .. option:: --verbose
 
@@ -1607,7 +1607,7 @@ instance changing when moving between machine types.
 
 .. option:: --force
 
-    Skip machine type compatability checks and force machine type update.
+    Skip machine type compatibility checks and force machine type update.
 
 .. rubric:: Return codes
 

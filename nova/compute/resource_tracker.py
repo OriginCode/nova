@@ -49,6 +49,7 @@ from nova import rpc
 from nova.scheduler.client import report
 from nova import utils
 from nova.virt import hardware
+from nova.virt import node
 
 
 CONF = nova.conf.CONF
@@ -619,18 +620,11 @@ class ResourceTracker(object):
         :param prefix: Prefix to use when accessing migration context
             attributes. 'old_' or 'new_', with 'new_' being the default.
         """
-        # Remove usage for an instance that is tracked in migrations, such as
-        # on the dest node during revert resize.
-        if instance['uuid'] in self.tracked_migrations:
-            migration = self.tracked_migrations.pop(instance['uuid'])
+        if instance["uuid"] in self.tracked_migrations:
             if not flavor:
-                flavor = self._get_flavor(instance, prefix, migration)
-        # Remove usage for an instance that is not tracked in migrations (such
-        # as on the source node after a migration).
-        # NOTE(lbeliveau): On resize on the same node, the instance is
-        # included in both tracked_migrations and tracked_instances.
-        elif instance['uuid'] in self.tracked_instances:
-            self.tracked_instances.remove(instance['uuid'])
+                flavor = self._get_flavor(
+                    instance, prefix, self.tracked_migrations[instance["uuid"]]
+                )
 
         if flavor is not None:
             numa_topology = self._get_migration_context_resource(
@@ -645,6 +639,15 @@ class ResourceTracker(object):
 
             ctxt = context.elevated()
             self._update(ctxt, self.compute_nodes[nodename])
+
+        # Remove usage for an instance that is tracked in migrations, such as
+        # on the dest node during revert resize.
+        self.tracked_migrations.pop(instance['uuid'], None)
+        # Remove usage for an instance that is not tracked in migrations (such
+        # as on the source node after a migration).
+        # NOTE(lbeliveau): On resize on the same node, the instance is
+        # included in both tracked_migrations and tracked_instances.
+        self.tracked_instances.discard(instance['uuid'])
 
     @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE, fair=True)
     def update_usage(self, context, instance, nodename):
@@ -666,50 +669,6 @@ class ResourceTracker(object):
         return (nodename not in self.compute_nodes or
                 not self.driver.node_is_available(nodename))
 
-    def _check_for_nodes_rebalance(self, context, resources, nodename):
-        """Check if nodes rebalance has happened.
-
-        The ironic driver maintains a hash ring mapping bare metal nodes
-        to compute nodes. If a compute dies, the hash ring is rebuilt, and
-        some of its bare metal nodes (more precisely, those not in ACTIVE
-        state) are assigned to other computes.
-
-        This method checks for this condition and adjusts the database
-        accordingly.
-
-        :param context: security context
-        :param resources: initial values
-        :param nodename: node name
-        :returns: True if a suitable compute node record was found, else False
-        """
-        if not self.driver.rebalances_nodes:
-            return False
-
-        # Its possible ironic just did a node re-balance, so let's
-        # check if there is a compute node that already has the correct
-        # hypervisor_hostname. We can re-use that rather than create a
-        # new one and have to move existing placement allocations
-        cn_candidates = objects.ComputeNodeList.get_by_hypervisor(
-            context, nodename)
-
-        if len(cn_candidates) == 1:
-            cn = cn_candidates[0]
-            LOG.info("ComputeNode %(name)s moving from %(old)s to %(new)s",
-                     {"name": nodename, "old": cn.host, "new": self.host})
-            cn.host = self.host
-            self.compute_nodes[nodename] = cn
-            self._copy_resources(cn, resources)
-            self._setup_pci_tracker(context, cn, resources)
-            self._update(context, cn)
-            return True
-        elif len(cn_candidates) > 1:
-            LOG.error(
-                "Found more than one ComputeNode for nodename %s. "
-                "Please clean up the orphaned ComputeNode records in your DB.",
-                nodename)
-
-        return False
-
     def _init_compute_node(self, context, resources):
         """Initialize the compute node if it does not already exist.
 
@@ -727,6 +686,7 @@ class ResourceTracker(object):
             False otherwise
         """
         nodename = resources['hypervisor_hostname']
+        node_uuid = resources['uuid']
 
         # if there is already a compute node just use resources
         # to initialize
@@ -738,14 +698,28 @@ class ResourceTracker(object):
 
         # now try to get the compute node record from the
         # database. If we get one we use resources to initialize
-        cn = self._get_compute_node(context, nodename)
+
+        # We use read_deleted=True so that we will find and recover a deleted
+        # node object, if necessary.
+        with utils.temporary_mutation(context, read_deleted='yes'):
+            cn = self._get_compute_node(context, node_uuid)
+            if cn and cn.deleted:
+                # Undelete and save this right now so that everything below
+                # can continue without read_deleted=yes
+                LOG.info('Undeleting compute node %s', cn.uuid)
+                cn.deleted = False
+                cn.deleted_at = None
+                cn.save()
         if cn:
+            if cn.host != self.host:
+                LOG.info("ComputeNode %(name)s moving from %(old)s to %(new)s",
+                         {"name": nodename, "old": cn.host, "new": self.host})
+                cn.host = self.host
+                self._update(context, cn)
+
             self.compute_nodes[nodename] = cn
             self._copy_resources(cn, resources)
             self._setup_pci_tracker(context, cn, resources)
-            return False
-
-        if self._check_for_nodes_rebalance(context, resources, nodename):
             return False
 
         # there was no local copy and none in the database
@@ -754,7 +728,13 @@ class ResourceTracker(object):
         cn = objects.ComputeNode(context)
         cn.host = self.host
         self._copy_resources(cn, resources, initial=True)
-        cn.create()
+        try:
+            cn.create()
+        except exception.DuplicateRecord:
+            raise exception.InvalidConfiguration(
+                'Duplicate compute node record found for host %s node %s' % (
+                cn.host, cn.hypervisor_hostname))
+
         # Only map the ComputeNode into compute_nodes if create() was OK
         # because if create() fails, on the next run through here nodename
         # would be in compute_nodes and we won't try to create again (because
@@ -887,6 +867,14 @@ class ResourceTracker(object):
         # contains a non-None value, even for non-Ironic nova-compute hosts. It
         # is this value that will be populated in the compute_nodes table.
         resources['host_ip'] = CONF.my_ip
+        if 'uuid' not in resources:
+            # NOTE(danms): Any driver that does not provide a uuid per
+            # node gets the locally-persistent compute_id. Only ironic
+            # should be setting the per-node uuid (and returning
+            # multiple nodes in general). If this is the first time we
+            # are creating a compute node on this host, we will
+            # generate and persist this uuid for the future.
+            resources['uuid'] = node.get_local_node_uuid()
 
         # We want the 'cpu_info' to be None from the POV of the
         # virt driver, but the DB requires it to be non-null so
@@ -991,8 +979,6 @@ class ResourceTracker(object):
         # notified when instances are deleted, we need remove all usages
         # from deleted instances.
         self.pci_tracker.clean_usage(instances, migrations)
-        dev_pools_obj = self.pci_tracker.stats.to_device_pools_obj()
-        cn.pci_device_pools = dev_pools_obj
 
         self._report_final_resource_view(nodename)
 
@@ -1014,14 +1000,13 @@ class ResourceTracker(object):
         if startup:
             self._check_resources(context)
 
-    def _get_compute_node(self, context, nodename):
+    def _get_compute_node(self, context, node_uuid):
         """Returns compute node for the host and nodename."""
         try:
-            return objects.ComputeNode.get_by_host_and_nodename(
-                context, self.host, nodename)
+            return objects.ComputeNode.get_by_uuid(context, node_uuid)
         except exception.NotFound:
             LOG.warning("No compute node record for %(host)s:%(node)s",
-                        {'host': self.host, 'node': nodename})
+                        {'host': self.host, 'node': node_uuid})
 
     def _report_hypervisor_resource_view(self, resources):
         """Log the hypervisor's view of free resources.
@@ -1314,13 +1299,23 @@ class ResourceTracker(object):
 
     def _update(self, context, compute_node, startup=False):
         """Update partial stats locally and populate them to Scheduler."""
+
+        self._update_to_placement(context, compute_node, startup)
+
+        if self.pci_tracker:
+            # sync PCI device pool state stored in the compute node with
+            # the actual state from the PCI tracker as we commit changes in
+            # the DB and in the PCI tracker below
+            dev_pools_obj = self.pci_tracker.stats.to_device_pools_obj()
+            compute_node.pci_device_pools = dev_pools_obj
+
         # _resource_change will update self.old_resources if it detects changes
         # but we want to restore those if compute_node.save() fails.
         nodename = compute_node.hypervisor_hostname
         old_compute = self.old_resources[nodename]
         if self._resource_change(compute_node):
             # If the compute_node's resource changed, update to DB. Note that
-            # _update_to_placement below does not supersede the need to do this
+            # _update_to_placement above does not supersede the need to do this
             # because there are stats-related fields in the ComputeNode object
             # which could have changed and still need to be reported to the
             # scheduler filters/weighers (which could be out of tree as well).
@@ -1332,8 +1327,6 @@ class ResourceTracker(object):
                 # stale data to compare.
                 with excutils.save_and_reraise_exception(logger=LOG):
                     self.old_resources[nodename] = old_compute
-
-        self._update_to_placement(context, compute_node, startup)
 
         if self.pci_tracker:
             self.pci_tracker.save(context)

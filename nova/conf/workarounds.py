@@ -374,6 +374,28 @@ Related options:
 
 * :oslo.config:option:`DEFAULT.compute_driver` (libvirt)
 """),
+    cfg.IntOpt('qemu_monitor_announce_self_count',
+                default=3,
+                min=1,
+                help="""
+The total number of times to send the announce_self command to the QEMU
+monitor when enable_qemu_monitor_announce_self is enabled.
+
+Related options:
+
+* :oslo.config:option:`WORKAROUNDS.enable_qemu_monitor_announce_self` (libvirt)
+"""),
+    cfg.IntOpt('qemu_monitor_announce_self_interval',
+                default=1,
+                min=1,
+                help="""
+The number of seconds to wait before re-sending the announce_self
+command to the QEMU monitor.
+
+Related options:
+
+* :oslo.config:option:`WORKAROUNDS.enable_qemu_monitor_announce_self` (libvirt)
+"""),
     cfg.BoolOpt('disable_compute_service_check_for_ffu',
                 default=False,
                 help="""
@@ -410,6 +432,13 @@ with the destination host. When using QEMU >= 2.9 and libvirt >=
 4.4.0, libvirt will do the correct thing with respect to checking CPU
 compatibility on the destination host during live migration.
 """),
+    cfg.BoolOpt('skip_cpu_compare_at_startup',
+               default=False,
+               help="""
+This will skip the CPU comparison call at the startup of Compute
+service and lets libvirt handle it.
+"""),
+
     cfg.BoolOpt(
         'skip_hypervisor_version_check_on_lm',
         default=False,

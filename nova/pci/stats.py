@@ -13,7 +13,7 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
-
+import collections
 import copy
 import typing as ty
 
@@ -64,6 +64,19 @@ class PciDeviceStats(object):
     """
 
     pool_keys = ['product_id', 'vendor_id', 'numa_node', 'dev_type']
+    # these can be specified in the [pci]device_spec and can be requested via
+    # the PCI alias, but they are matched by the placement
+    # allocation_candidates query, so we can ignore them during pool creation
+    # and during filtering here
+    ignored_spec_tags = ignored_pool_tags = ['resource_class', 'traits']
+    # this is a metadata key in the spec that is matched
+    # specially in _filter_pools_based_on_placement_allocation. So we can
+    # ignore them in the general matching logic.
+    ignored_spec_tags += ['rp_uuids']
+    # this is a metadata key in the pool that is matched
+    # specially in _filter_pools_based_on_placement_allocation. So we can
+    # ignore them in the general matching logic.
+    ignored_pool_tags += ['rp_uuid']
 
     def __init__(
         self,
@@ -134,8 +147,22 @@ class PciDeviceStats(object):
             return None
         tags = devspec.get_tags()
         pool = {k: getattr(dev, k) for k in self.pool_keys}
+
         if tags:
-            pool.update(tags)
+            pool.update(
+                {
+                    k: v
+                    for k, v in tags.items()
+                    if k not in self.ignored_pool_tags
+                }
+            )
+        # NOTE(gibi): since PCI in placement maps a PCI dev or a PF to a
+        # single RP and the scheduler allocates from a specific RP we need
+        # to split the pools by PCI or PF address. We can still keep
+        # the VFs from the same parent PF in a single pool though as they
+        # are equivalent from placement perspective.
+        pool['address'] = dev.parent_addr or dev.address
+
         # NOTE(gibi): parent_ifname acts like a tag during pci claim but
         # not provided as part of the whitelist spec as it is auto detected
         # by the virt driver.
@@ -224,6 +251,17 @@ class PciDeviceStats(object):
             free_devs.extend(pool['devices'])
         return free_devs
 
+    def _allocate_devs(
+        self, pool: Pool, num: int, request_id: str
+    ) -> ty.List["objects.PciDevice"]:
+        alloc_devices = []
+        for _ in range(num):
+            pci_dev = pool['devices'].pop()
+            self._handle_device_dependents(pci_dev)
+            pci_dev.request_id = request_id
+            alloc_devices.append(pci_dev)
+        return alloc_devices
+
     def consume_requests(
         self,
         pci_requests: 'objects.InstancePCIRequests',
@@ -235,7 +273,10 @@ class PciDeviceStats(object):
         for request in pci_requests:
             count = request.count
 
-            pools = self._filter_pools(self.pools, request, numa_cells)
+            rp_uuids = self._get_rp_uuids_for_request(
+                request=request, provider_mapping=None)
+            pools = self._filter_pools(
+                self.pools, request, numa_cells, rp_uuids=rp_uuids)
 
             # Failed to allocate the required number of devices. Return the
             # devices already allocated during previous iterations back to
@@ -251,20 +292,29 @@ class PciDeviceStats(object):
                     self.add_device(alloc_devices.pop())
                 raise exception.PciDeviceRequestFailed(requests=pci_requests)
 
-            for pool in pools:
-                if pool['count'] >= count:
-                    num_alloc = count
-                else:
-                    num_alloc = pool['count']
-                count -= num_alloc
-                pool['count'] -= num_alloc
-                for d in range(num_alloc):
-                    pci_dev = pool['devices'].pop()
-                    self._handle_device_dependents(pci_dev)
-                    pci_dev.request_id = request.request_id
-                    alloc_devices.append(pci_dev)
-                if count == 0:
-                    break
+            if not rp_uuids:
+                # if there is no placement allocation then we are free to
+                # consume from the pools in any order:
+                for pool in pools:
+                    if pool['count'] >= count:
+                        num_alloc = count
+                    else:
+                        num_alloc = pool['count']
+                    count -= num_alloc
+                    pool['count'] -= num_alloc
+                    alloc_devices += self._allocate_devs(
+                        pool, num_alloc, request.request_id)
+                    if count == 0:
+                        break
+            else:
+                # but if there is placement allocation then we have to follow
+                # it
+                requested_devs_per_pool_rp = collections.Counter(rp_uuids)
+                for pool in pools:
+                    count = requested_devs_per_pool_rp[pool['rp_uuid']]
+                    pool['count'] -= count
+                    alloc_devices += self._allocate_devs(
+                        pool, count, request.request_id)
 
         return alloc_devices
 
@@ -313,7 +363,15 @@ class PciDeviceStats(object):
         :returns: A list of pools that can be used to support the request if
             this is possible.
         """
-        request_specs = request.spec
+
+        def ignore_keys(spec):
+            return {
+                k: v
+                for k, v in spec.items()
+                if k not in self.ignored_spec_tags
+            }
+
+        request_specs = [ignore_keys(spec) for spec in request.spec]
         return [
             pool for pool in pools
             if utils.pci_device_prop_match(pool, request_specs)
@@ -510,11 +568,52 @@ class PciDeviceStats(object):
                          pool.get(PCI_REMOTE_MANAGED_TAG))]
         return pools
 
+    def _filter_pools_based_on_placement_allocation(
+        self,
+        pools: ty.List[Pool],
+        request: 'objects.InstancePCIRequest',
+        rp_uuids: ty.List[str],
+    ) -> ty.List[Pool]:
+        if not rp_uuids:
+            # If there is no placement allocation then we don't need to filter
+            # by it. This could happen if the instance only has neutron port
+            # based InstancePCIRequest as that is currently not having
+            # placement allocation (except for QoS ports, but that handled in a
+            # separate codepath) or if the [filter_scheduler]pci_in_placement
+            # configuration option is not enabled in the scheduler.
+            return pools
+
+        requested_dev_count_per_rp = collections.Counter(rp_uuids)
+        matching_pools = []
+        for pool in pools:
+            rp_uuid = pool.get('rp_uuid')
+            if rp_uuid is None:
+                # NOTE(gibi): As rp_uuids is not empty the scheduler allocated
+                # PCI resources on this host, so we know that
+                # [pci]report_in_placement is enabled on this host. But this
+                # pool has no RP mapping which can only happen if the pool
+                # contains PCI devices with physical_network tag, as those
+                # devices not yet reported in placement. But if they are not
+                # reported then we can ignore them here too.
+                continue
+
+            if (
+                # the placement allocation contains this pool
+                rp_uuid in requested_dev_count_per_rp and
+                # the amount of dev allocated in placement can be consumed
+                # from the pool
+                pool["count"] >= requested_dev_count_per_rp[rp_uuid]
+            ):
+                matching_pools.append(pool)
+
+        return matching_pools
+
     def _filter_pools(
         self,
         pools: ty.List[Pool],
         request: 'objects.InstancePCIRequest',
         numa_cells: ty.Optional[ty.List['objects.InstanceNUMACell']],
+        rp_uuids: ty.List[str],
     ) -> ty.Optional[ty.List[Pool]]:
         """Determine if an individual PCI request can be met.
 
@@ -529,6 +628,9 @@ class PciDeviceStats(object):
             quantity and required NUMA affinity of device(s) we want.
         :param numa_cells: A list of InstanceNUMACell objects whose ``id``
             corresponds to the ``id`` of host NUMACell objects.
+        :param rp_uuids: A list of PR uuids this request fulfilled from in
+            placement. So here we have to consider only the pools matching with
+            thes RP uuids
         :returns: A list of pools that can be used to support the request if
             this is possible, else None.
         """
@@ -613,6 +715,19 @@ class PciDeviceStats(object):
                 before_count - after_count
             )
 
+        # if there is placement allocation for the request then we have to
+        # remove the pools that are not in the placement allocation
+        before_count = after_count
+        pools = self._filter_pools_based_on_placement_allocation(
+            pools, request, rp_uuids)
+        after_count = sum([pool['count'] for pool in pools])
+        if after_count < before_count:
+            LOG.debug(
+                'Dropped %d device(s) that are not part of the placement '
+                'allocation',
+                before_count - after_count
+            )
+
         if after_count < request.count:
             LOG.debug('Not enough PCI devices left to satisfy request')
             return None
@@ -622,6 +737,7 @@ class PciDeviceStats(object):
     def support_requests(
         self,
         requests: ty.List['objects.InstancePCIRequest'],
+        provider_mapping: ty.Optional[ty.Dict[str, ty.List[str]]],
         numa_cells: ty.Optional[ty.List['objects.InstanceNUMACell']] = None,
     ) -> bool:
         """Determine if the PCI requests can be met.
@@ -635,6 +751,12 @@ class PciDeviceStats(object):
         :param requests: A list of InstancePCIRequest object describing the
             types, quantities and required NUMA affinities of devices we want.
         :type requests: nova.objects.InstancePCIRequests
+        :param provider_mapping: A dict keyed by RequestGroup requester_id,
+            to a list of resource provider UUIDs which provide resource
+            for that RequestGroup. If it is None then it signals that the
+            InstancePCIRequest objects already stores a mapping per request.
+            I.e.: we are called _after_ the scheduler made allocations for this
+            request in placement.
         :param numa_cells: A list of InstanceNUMACell objects whose ``id``
             corresponds to the ``id`` of host NUMACells, or None.
         :returns: Whether this compute node can satisfy the given request.
@@ -650,7 +772,7 @@ class PciDeviceStats(object):
         # objects.
         stats = copy.deepcopy(self)
         try:
-            stats.apply_requests(requests, numa_cells)
+            stats.apply_requests(requests, provider_mapping, numa_cells)
         except exception.PciDeviceRequestFailed:
             return False
 
@@ -660,6 +782,7 @@ class PciDeviceStats(object):
         self,
         pools: ty.List[Pool],
         request: 'objects.InstancePCIRequest',
+        rp_uuids: ty.List[str],
         numa_cells: ty.Optional[ty.List['objects.InstanceNUMACell']] = None,
     ) -> bool:
         """Apply an individual PCI request.
@@ -673,6 +796,8 @@ class PciDeviceStats(object):
         :param pools: A list of PCI device pool dicts
         :param request: An InstancePCIRequest object describing the type,
             quantity and required NUMA affinity of device(s) we want.
+        :param rp_uuids: A list of PR uuids this request fulfilled from in
+            placement
         :param numa_cells: A list of InstanceNUMACell objects whose ``id``
             corresponds to the ``id`` of host NUMACell objects.
         :returns: True if the request was applied against the provided pools
@@ -682,22 +807,77 @@ class PciDeviceStats(object):
         # Two concurrent requests may succeed when called support_requests
         # because this method does not remove related devices from the pools
 
-        filtered_pools = self._filter_pools(pools, request, numa_cells)
+        filtered_pools = self._filter_pools(
+            pools, request, numa_cells, rp_uuids)
 
         if not filtered_pools:
             return False
 
-        count = request.count
-        for pool in filtered_pools:
-            count = self._decrease_pool_count(pools, pool, count)
-            if not count:
-                break
+        if not rp_uuids:
+            # If there is no placement allocation for this request then we are
+            # free to consume from the filtered pools in any order
+            count = request.count
+            for pool in filtered_pools:
+                count = self._decrease_pool_count(pools, pool, count)
+                if not count:
+                    break
+        else:
+            # but if there is placement allocation then we have to follow that
+            requested_devs_per_pool_rp = collections.Counter(rp_uuids)
+            for pool in filtered_pools:
+                count = requested_devs_per_pool_rp[pool['rp_uuid']]
+                pool['count'] -= count
+                if pool['count'] == 0:
+                    pools.remove(pool)
 
         return True
+
+    def _get_rp_uuids_for_request(
+        self,
+        provider_mapping: ty.Optional[ty.Dict[str, ty.List[str]]],
+        request: 'objects.InstancePCIRequest'
+    ) -> ty.List[str]:
+        """Return the list of RP uuids that are fulfilling the request.
+
+        An RP will be in the list as many times as many devices needs to
+        be allocated from that RP.
+        """
+
+        if request.source == objects.InstancePCIRequest.NEUTRON_PORT:
+            # TODO(gibi): support neutron based requests in a later cycle
+            # an empty list will signal that any PCI pool can be used for this
+            # request
+            return []
+
+        if not provider_mapping:
+            # NOTE(gibi): AFAIK specs is always a list of a single dict
+            # but the object is hard to change retroactively
+            rp_uuids = request.spec[0].get('rp_uuids')
+            if not rp_uuids:
+                # This can happen if [filter_scheduler]pci_in_placement is not
+                # enabled yet
+                # An empty list will signal that any PCI pool can be used for
+                # this request
+                return []
+
+            # TODO(gibi): this is baaad but spec is a dict of string so
+            #  the list is serialized
+            return rp_uuids.split(',')
+
+        # NOTE(gibi): the PCI prefilter generates RequestGroup suffixes from
+        # InstancePCIRequests in the form of {request_id}-{count_index}
+        # NOTE(gibi): a suffixed request group always fulfilled from a single
+        # RP
+        return [
+            rp_uuids[0]
+            for group_id, rp_uuids in provider_mapping.items()
+            if group_id.startswith(request.request_id)
+        ]
 
     def apply_requests(
         self,
         requests: ty.List['objects.InstancePCIRequest'],
+        provider_mapping: ty.Optional[ty.Dict[str, ty.List[str]]],
         numa_cells: ty.Optional[ty.List['objects.InstanceNUMACell']] = None,
     ) -> None:
         """Apply PCI requests to the PCI stats.
@@ -711,15 +891,23 @@ class PciDeviceStats(object):
         :param requests: A list of InstancePCIRequest object describing the
             types, quantities and required NUMA affinities of devices we want.
         :type requests: nova.objects.InstancePCIRequests
+        :param provider_mapping: A dict keyed by RequestGroup requester_id,
+            to a list of resource provider UUIDs which provide resource
+            for that RequestGroup. If it is None then it signals that the
+            InstancePCIRequest objects already stores a mapping per request.
+            I.e.: we are called _after_ the scheduler made allocations for this
+            request in placement.
         :param numa_cells: A list of InstanceNUMACell objects whose ``id``
             corresponds to the ``id`` of host NUMACells, or None.
         :raises: exception.PciDeviceRequestFailed if this compute node cannot
             satisfy the given request.
         """
-        if not all(
-            self._apply_request(self.pools, r, numa_cells) for r in requests
-        ):
-            raise exception.PciDeviceRequestFailed(requests=requests)
+
+        for r in requests:
+            rp_uuids = self._get_rp_uuids_for_request(provider_mapping, r)
+
+            if not self._apply_request(self.pools, r, rp_uuids, numa_cells):
+                raise exception.PciDeviceRequestFailed(requests=requests)
 
     def __iter__(self) -> ty.Iterator[Pool]:
         pools: ty.List[Pool] = []
@@ -757,3 +945,40 @@ class PciDeviceStats(object):
         )
         pools = self._filter_pools_for_spec(self.pools, dummy_req)
         return bool(pools)
+
+    def populate_pools_metadata_from_assigned_devices(self):
+        """Populate the rp_uuid of each pool based on the rp_uuid of the
+        devices assigned to the pool. This can only be called from the compute
+        where devices are assigned to each pool. This should not be called from
+        the scheduler as there device - pool assignment is not known.
+        """
+        # PciDevices are tracked in placement and flavor based PCI requests
+        # are scheduled and allocated in placement. To be able to correlate
+        # what is allocated in placement and what is consumed in nova we
+        # need to map device pools to RPs. We can do that as the PciDevice
+        # contains the RP UUID that represents it in placement.
+        # NOTE(gibi): We cannot do this when the device is originally added to
+        # the pool as the device -> placement translation, that creates the
+        # RPs, runs after all the device is created and assigned to pools.
+        for pool in self.pools:
+            pool_rps = {
+                dev.extra_info.get("rp_uuid")
+                for dev in pool["devices"]
+                if "rp_uuid" in dev.extra_info
+            }
+            if len(pool_rps) >= 2:
+                # FIXME(gibi): Do we have a 1:1 pool - RP mapping even
+                #  if two PFs providing very similar VFs?
+                raise ValueError(
+                    "We have a pool %s connected to more than one RPs %s in "
+                    "placement via devs %s" % (pool, pool_rps, pool["devices"])
+                )
+
+            if not pool_rps:
+                # this can happen if the nova-compute is upgraded to have the
+                # PCI in placement inventory handling code but
+                # [pci]report_in_placement is not turned on yet.
+                continue
+
+            if pool_rps:  # now we know that it is a single RP
+                pool['rp_uuid'] = next(iter(pool_rps))

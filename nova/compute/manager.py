@@ -84,6 +84,7 @@ from nova.objects import external_event as external_event_obj
 from nova.objects import fields
 from nova.objects import instance as obj_instance
 from nova.objects import migrate_data as migrate_data_obj
+from nova.objects import service as service_obj
 from nova.pci import request as pci_req_module
 from nova.pci import whitelist
 from nova import safe_utils
@@ -96,6 +97,7 @@ from nova.virt import configdrive
 from nova.virt import driver
 from nova.virt import event as virtevent
 from nova.virt import hardware
+import nova.virt.node
 from nova.virt import storage_users
 from nova.virt import virtapi
 from nova.volume import cinder
@@ -616,7 +618,7 @@ class ComputeVirtAPI(virtapi.VirtAPI):
 class ComputeManager(manager.Manager):
     """Manages the running instances from creation to destruction."""
 
-    target = messaging.Target(version='6.1')
+    target = messaging.Target(version='6.2')
 
     def __init__(self, compute_driver=None, *args, **kwargs):
         """Load configuration options and connect to the hypervisor."""
@@ -1470,30 +1472,110 @@ class ComputeManager(manager.Manager):
         :return: a dict of ComputeNode objects keyed by the UUID of the given
             node.
         """
-        nodes_by_uuid = {}
         try:
-            node_names = self.driver.get_available_nodes()
+            node_ids = self.driver.get_nodenames_by_uuid()
         except exception.VirtDriverNotReady:
             LOG.warning(
                 "Virt driver is not ready. If this is the first time this "
-                "service is starting on this host, then you can ignore this "
-                "warning.")
+                "service is starting on this host, then you can ignore "
+                "this warning.")
             return {}
 
-        for node_name in node_names:
-            try:
-                node = objects.ComputeNode.get_by_host_and_nodename(
-                    context, self.host, node_name)
-                nodes_by_uuid[node.uuid] = node
-            except exception.ComputeHostNotFound:
-                LOG.warning(
-                    "Compute node %s not found in the database. If this is "
-                    "the first time this service is starting on this host, "
-                    "then you can ignore this warning.", node_name)
-        return nodes_by_uuid
+        nodes = objects.ComputeNodeList.get_all_by_uuids(context,
+                                                         list(node_ids.keys()))
+        if not nodes:
+            # NOTE(danms): This should only happen if the compute_id is
+            # pre-provisioned on a host that has never started.
+            LOG.warning('Compute nodes %s for host %s were not found in the '
+                        'database. If this is the first time this service is '
+                        'starting on this host, then you can ignore this '
+                        'warning.',
+                        list(node_ids.keys()), self.host)
+            return {}
 
-    def init_host(self):
+        for node in nodes:
+            if node.hypervisor_hostname != node_ids.get(node.uuid):
+                raise exception.InvalidConfiguration(
+                    ('My compute node %s has hypervisor_hostname %s '
+                     'but virt driver reports it should be %s. Possible '
+                     'rename detected, refusing to start!') % (
+                         node.uuid, node.hypervisor_hostname,
+                         node_ids.get(node.uuid)))
+
+        return {n.uuid: n for n in nodes}
+
+    def _ensure_existing_node_identity(self, service_ref):
+        """If we are upgrading from an older service version, we need
+        to write our node identity uuid (if not already done) based on
+        nodes assigned to us in the database.
+        """
+        if 'ironic' in CONF.compute_driver.lower():
+            # We do not persist a single local node identity for
+            # ironic
+            return
+
+        if service_ref.version >= service_obj.NODE_IDENTITY_VERSION:
+            # Already new enough, nothing to do here, but make sure that we
+            # have a UUID file already, as this is not our first time starting.
+            if nova.virt.node.read_local_node_uuid() is None:
+                raise exception.InvalidConfiguration(
+                    ('No local node identity found, but this is not our '
+                     'first startup on this host. Refusing to start after '
+                     'potentially having lost that state!'))
+            return
+
+        if nova.virt.node.read_local_node_uuid():
+            # We already have a local node identity, no migration needed
+            return
+
+        context = nova.context.get_admin_context()
+        db_nodes = objects.ComputeNodeList.get_all_by_host(context, self.host)
+        if not db_nodes:
+            # This means we have no nodes in the database (that we
+            # know of) and thus have no need to record an existing
+            # UUID. That is probably strange, so log a warning.
+            raise exception.InvalidConfiguration(
+                ('Upgrading from service version %i but found no '
+                 'nodes in the database for host %s to persist '
+                 'locally; Possible rename detected, '
+                 'refusing to start!') % (
+                        service_ref.version, self.host))
+
+        if len(db_nodes) > 1:
+            # If this happens we can't do the right thing, so raise an
+            # exception to abort host startup
+            LOG.warning('Multiple nodes found in the database for host %s; '
+                        'unable to persist local node identity automatically')
+            raise exception.InvalidConfiguration(
+                'Multiple nodes found in database, manual node uuid '
+                'configuration required')
+
+        nova.virt.node.write_local_node_uuid(db_nodes[0].uuid)
+
+    def _check_for_host_rename(self, nodes_by_uuid):
+        if 'ironic' in CONF.compute_driver.lower():
+            # Ironic (currently) rebalances nodes at various times, and as
+            # such, nodes being discovered as assigned to this host with a
+            # different hostname is not surprising. Skip this check for
+            # ironic.
+            return
+        for node in nodes_by_uuid.values():
+            if node.host != self.host:
+                raise exception.InvalidConfiguration(
+                    'My node %s has host %r but my host is %r; '
+                    'Possible rename detected, refusing to start!' % (
+                        node.uuid, node.host, self.host))
+            LOG.debug('Verified node %s matches my host %s',
+                      node.uuid, self.host)
+
+    def init_host(self, service_ref):
         """Initialization for a standalone compute service."""
+
+        if service_ref:
+            # If we are an existing service, check to see if we need
+            # to record a locally-persistent node identity because
+            # we have upgraded from a previous version.
+            self._ensure_existing_node_identity(service_ref)
 
         if CONF.pci.device_spec:
             # Simply loading the PCI passthrough spec will do a bunch of
@@ -1524,7 +1606,18 @@ class ComputeManager(manager.Manager):
             raise exception.InvalidConfiguration(msg)
 
         self.driver.init_host(host=self.host)
+
+        # NOTE(gibi): At this point the compute_nodes of the resource tracker
+        # has not been populated yet so we cannot rely on the resource tracker
+        # here.
         context = nova.context.get_admin_context()
+        nodes_by_uuid = self._get_nodes(context)
+
+        # NOTE(danms): Check for a possible host rename and abort
+        # startup before we start mucking with instances we think are
+        # ours.
+        self._check_for_host_rename(nodes_by_uuid)
+
         instances = objects.InstanceList.get_by_host(
             context, self.host,
             expected_attrs=['info_cache', 'metadata', 'numa_topology'])
@@ -1534,17 +1627,12 @@ class ComputeManager(manager.Manager):
         self._validate_pinning_configuration(instances)
         self._validate_vtpm_configuration(instances)
 
-        # NOTE(gibi): At this point the compute_nodes of the resource tracker
-        # has not been populated yet so we cannot rely on the resource tracker
-        # here.
         # NOTE(gibi): If ironic and vcenter virt driver slow start time
         # becomes problematic here then we should consider adding a config
         # option or a driver flag to tell us if we should thread
         # _destroy_evacuated_instances and
         # _error_out_instances_whose_build_was_interrupted out in the
         # background on startup
-        nodes_by_uuid = self._get_nodes(context)
-
         try:
             # checking that instance was not already evacuated to other host
             evacuated_instances = self._destroy_evacuated_instances(
@@ -2471,10 +2559,12 @@ class ComputeManager(manager.Manager):
 
         if provider_mapping:
             try:
-                compute_utils\
-                    .update_pci_request_spec_with_allocated_interface_name(
-                        context, self.reportclient,
-                        instance.pci_requests.requests, provider_mapping)
+                compute_utils.update_pci_request_with_placement_allocations(
+                    context,
+                    self.reportclient,
+                    instance.pci_requests.requests,
+                    provider_mapping,
+                )
             except (exception.AmbiguousResourceProviderForPCIRequest,
                     exception.UnexpectedResourceProviderNameForPCIRequest
                     ) as e:
@@ -2736,7 +2826,8 @@ class ComputeManager(manager.Manager):
                     block_device_mapping)
             resources['block_device_info'] = block_device_info
         except (exception.InstanceNotFound,
-                exception.UnexpectedDeletingTaskStateError):
+                exception.UnexpectedDeletingTaskStateError,
+                exception.ComputeResourcesUnavailable):
             with excutils.save_and_reraise_exception():
                 self._build_resources_cleanup(instance, network_info)
         except (exception.UnexpectedTaskStateError,
@@ -3621,7 +3712,7 @@ class ComputeManager(manager.Manager):
                          bdms, recreate, on_shared_storage,
                          preserve_ephemeral, migration,
                          scheduled_node, limits, request_spec, accel_uuids,
-                         reimage_boot_volume):
+                         reimage_boot_volume, target_state):
         """Destroy and re-make this instance.
 
         A 'rebuild' effectively purges all existing data from the system and
@@ -3656,6 +3747,7 @@ class ComputeManager(manager.Manager):
         :param reimage_boot_volume: Boolean to specify whether the user has
                                     explicitly requested to rebuild a boot
                                     volume
+        :param target_state: Set a target state for the evacuated instance.
 
         """
         # recreate=True means the instance is being evacuated from a failed
@@ -3720,7 +3812,8 @@ class ComputeManager(manager.Manager):
                     image_meta, injected_files, new_pass, orig_sys_metadata,
                     bdms, evacuate, on_shared_storage, preserve_ephemeral,
                     migration, request_spec, allocs, rebuild_claim,
-                    scheduled_node, limits, accel_uuids, reimage_boot_volume)
+                    scheduled_node, limits, accel_uuids, reimage_boot_volume,
+                    target_state)
             except (exception.ComputeResourcesUnavailable,
                     exception.RescheduledException) as e:
                 if isinstance(e, exception.ComputeResourcesUnavailable):
@@ -3780,7 +3873,7 @@ class ComputeManager(manager.Manager):
             injected_files, new_pass, orig_sys_metadata, bdms, evacuate,
             on_shared_storage, preserve_ephemeral, migration, request_spec,
             allocations, rebuild_claim, scheduled_node, limits, accel_uuids,
-            reimage_boot_volume):
+            reimage_boot_volume, target_state):
         """Helper to avoid deep nesting in the top-level method."""
 
         provider_mapping = None
@@ -3788,10 +3881,12 @@ class ComputeManager(manager.Manager):
             provider_mapping = self._get_request_group_mapping(request_spec)
 
             if provider_mapping:
-                compute_utils.\
-                    update_pci_request_spec_with_allocated_interface_name(
-                        context, self.reportclient,
-                        instance.pci_requests.requests, provider_mapping)
+                compute_utils.update_pci_request_with_placement_allocations(
+                    context,
+                    self.reportclient,
+                    instance.pci_requests.requests,
+                    provider_mapping,
+                )
 
         claim_context = rebuild_claim(
             context, instance, scheduled_node, allocations,
@@ -3802,7 +3897,8 @@ class ComputeManager(manager.Manager):
                 context, instance, orig_image_ref, image_meta, injected_files,
                 new_pass, orig_sys_metadata, bdms, evacuate, on_shared_storage,
                 preserve_ephemeral, migration, request_spec, allocations,
-                provider_mapping, accel_uuids, reimage_boot_volume)
+                provider_mapping, accel_uuids, reimage_boot_volume,
+                target_state)
 
     @staticmethod
     def _get_image_name(image_meta):
@@ -3816,10 +3912,18 @@ class ComputeManager(manager.Manager):
             injected_files, new_pass, orig_sys_metadata, bdms, evacuate,
             on_shared_storage, preserve_ephemeral, migration, request_spec,
             allocations, request_group_resource_providers_mapping,
-            accel_uuids, reimage_boot_volume):
+            accel_uuids, reimage_boot_volume, target_state):
         orig_vm_state = instance.vm_state
 
         if evacuate:
+            if target_state and orig_vm_state != vm_states.ERROR:
+                # This will ensure that at destination the instance will have
+                # the desired state.
+                if target_state not in vm_states.ALLOW_TARGET_STATES:
+                    raise exception.InstanceEvacuateNotSupportedTargetState(
+                        target_state=target_state)
+                orig_vm_state = target_state
+
             if request_spec:
                 # NOTE(gibi): Do a late check of server group policy as
                 # parallel scheduling could violate such policy. This will
@@ -5414,10 +5518,12 @@ class ComputeManager(manager.Manager):
 
         if provider_mapping:
             try:
-                compute_utils.\
-                    update_pci_request_spec_with_allocated_interface_name(
-                        context, self.reportclient,
-                        instance.pci_requests.requests, provider_mapping)
+                compute_utils.update_pci_request_with_placement_allocations(
+                    context,
+                    self.reportclient,
+                    instance.pci_requests.requests,
+                    provider_mapping,
+                )
             except (exception.AmbiguousResourceProviderForPCIRequest,
                     exception.UnexpectedResourceProviderNameForPCIRequest
                     ) as e:
@@ -5520,7 +5626,7 @@ class ComputeManager(manager.Manager):
                                   clean_shutdown)
             except exception.BuildAbortException:
                 # NOTE(gibi): We failed
-                # update_pci_request_spec_with_allocated_interface_name so
+                # update_pci_request_with_placement_allocations so
                 # there is no reason to re-schedule. Just revert the allocation
                 # and fail the migration.
                 with excutils.save_and_reraise_exception():
@@ -5651,7 +5757,7 @@ class ComputeManager(manager.Manager):
                   'host (%s).', self.host, instance=instance)
         self._send_prep_resize_notifications(
             ctxt, instance, fields.NotificationPhase.START, flavor)
-        # TODO(mriedem): update_pci_request_spec_with_allocated_interface_name
+        # TODO(mriedem): update_pci_request_with_placement_allocations
         # should be called here if the request spec has request group mappings,
         # e.g. for things like QoS ports with resource requests. Do it outside
         # the try/except so if it raises BuildAbortException we do not attempt
@@ -6898,12 +7004,12 @@ class ComputeManager(manager.Manager):
 
         try:
             if provider_mappings:
-                update = (
-                    compute_utils.
-                        update_pci_request_spec_with_allocated_interface_name)
-                update(
-                    context, self.reportclient, instance.pci_requests.requests,
-                    provider_mappings)
+                compute_utils.update_pci_request_with_placement_allocations(
+                    context,
+                    self.reportclient,
+                    instance.pci_requests.requests,
+                    provider_mappings,
+                )
 
             accel_info = []
             if accel_uuids:
@@ -7983,12 +8089,12 @@ class ComputeManager(manager.Manager):
                 instance_uuid=instance.uuid) from e
 
         try:
-            update = (
-                compute_utils.
-                    update_pci_request_spec_with_allocated_interface_name)
-            update(
-                context, self.reportclient, pci_reqs.requests,
-                provider_mappings)
+            compute_utils.update_pci_request_with_placement_allocations(
+                context,
+                self.reportclient,
+                pci_reqs.requests,
+                provider_mappings,
+            )
         except (
             exception.AmbiguousResourceProviderForPCIRequest,
             exception.UnexpectedResourceProviderNameForPCIRequest
@@ -8807,7 +8913,8 @@ class ComputeManager(manager.Manager):
         # in order to be able to track and abort it in the future.
         self._waiting_live_migrations[instance.uuid] = (None, None)
         try:
-            future = self._live_migration_executor.submit(
+            future = nova.utils.pass_context(
+                self._live_migration_executor.submit,
                 self._do_live_migration, context, dest, instance,
                 block_migration, migration, migrate_data)
             self._waiting_live_migrations[instance.uuid] = (migration, future)
@@ -10091,7 +10198,9 @@ class ComputeManager(manager.Manager):
             else:
                 LOG.debug('Triggering sync for uuid %s', uuid)
                 self._syncs_in_progress[uuid] = True
-                self._sync_power_pool.spawn_n(_sync, db_instance)
+                nova.utils.pass_context(self._sync_power_pool.spawn_n,
+                                        _sync,
+                                        db_instance)
 
     def _query_driver_power_state_and_sync(self, context, db_instance):
         if db_instance.task_state is not None:
@@ -10374,6 +10483,14 @@ class ComputeManager(manager.Manager):
             LOG.exception(
                 "Error updating PCI resources for node %(node)s.",
                 {'node': nodename})
+        except exception.InvalidConfiguration as e:
+            if startup:
+                # If this happens during startup, we need to let it raise to
+                # abort our service startup.
+                raise
+            else:
+                LOG.error("Error updating resources for node %s: %s",
+                          nodename, e)
         except Exception:
             LOG.exception("Error updating resources for node %(node)s.",
                           {'node': nodename})
@@ -11290,7 +11407,7 @@ class _ComputeV5Proxy(object):
             bdms, recreate, on_shared_storage,
             preserve_ephemeral, migration,
             scheduled_node, limits, request_spec,
-            accel_uuids, False)
+            accel_uuids, False, None)
 
     # 5.13 support for optional accel_uuids argument
     def shelve_instance(self, context, instance, image_id,

@@ -397,6 +397,18 @@ class IronicDriver(virt_driver.ComputeDriver):
                 _("Ironic node uuid not supplied to "
                   "driver for instance %s.") % instance.uuid)
         node = self._get_node(node_uuid)
+
+        # Its possible this node has just moved from deleting
+        # to cleaning. Placement will update the inventory
+        # as all reserved, but this instance might have got here
+        # before that happened, but after the previous allocation
+        # got deleted. We trigger a re-schedule to another node.
+        if (self._node_resources_used(node) or
+                self._node_resources_unavailable(node)):
+            msg = "Chosen ironic node %s is not available" % node_uuid
+            LOG.info(msg, instance=instance)
+            raise exception.ComputeResourcesUnavailable(reason=msg)
+
         self._set_instance_id(node, instance)
 
     def failed_spawn_cleanup(self, instance):
@@ -826,6 +838,13 @@ class IronicDriver(virt_driver.ComputeDriver):
                   dict(num_nodes=len(node_uuids)))
 
         return node_uuids
+
+    def get_nodenames_by_uuid(self, refresh=False):
+        nodes = self.get_available_nodes(refresh=refresh)
+        # We use the uuid for compute_node.uuid and
+        # compute_node.hypervisor_hostname, so the dict keys and values are
+        # the same.
+        return dict(zip(nodes, nodes))
 
     def update_provider_tree(self, provider_tree, nodename, allocations=None):
         """Update a ProviderTree object with current resource provider and

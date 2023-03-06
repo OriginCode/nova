@@ -217,6 +217,11 @@ class InvalidVIOMMUArchitecture(Invalid):
                 "but given architecture %(arch)s.")
 
 
+class InstanceQuiesceFailed(Invalid):
+    msg_fmt = _("Failed to quiesce instance: %(reason)s")
+    code = 409
+
+
 class InvalidConfiguration(Invalid):
     msg_fmt = _("Configuration is Invalid.")
 
@@ -1446,6 +1451,11 @@ class InstanceEvacuateNotSupported(Invalid):
     msg_fmt = _('Instance evacuate is not supported.')
 
 
+class InstanceEvacuateNotSupportedTargetState(Invalid):
+    msg_fmt = _("Target state '%(target_state)s' for instance evacuate "
+                "is not supported.")
+
+
 class DBNotAllowed(NovaException):
     msg_fmt = _('%(binary)s attempted direct database access which is '
                 'not allowed by policy')
@@ -1472,6 +1482,11 @@ class UnsupportedRescueDevice(Invalid):
 
 class UnsupportedRescueImage(Invalid):
     msg_fmt = _("Requested rescue image '%(image)s' is not supported")
+
+
+class UnsupportedRPCVersion(Invalid):
+    msg_fmt = _("Unsupported RPC version for %(api)s. "
+                "Required >= %(required)s")
 
 
 class Base64Exception(NovaException):
@@ -2491,3 +2506,18 @@ class PlacementPciMixedTraitsException(PlacementPciException):
 
 class ReimageException(NovaException):
     msg_fmt = _("Reimaging volume failed.")
+
+
+class InvalidNodeConfiguration(NovaException):
+    msg_fmt = _('Invalid node identity configuration: %(reason)s')
+
+
+class DuplicateRecord(NovaException):
+    msg_fmt = _('Unable to create duplicate record for %(target)s')
+
+
+class NotSupportedComputeForEvacuateV295(NotSupported):
+    msg_fmt = _("Starting with microversion 2.95, evacuate API will stop "
+                "instance on destination. To evacuate before upgrades are "
+                "complete please use an older microversion. Required version "
+                "for compute %(expected), current version %(currently)s")

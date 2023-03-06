@@ -1068,7 +1068,7 @@ class PortResourceRequestBasedSchedulingTest(
     def test_interface_attach_sriov_with_qos_pci_update_fails(self):
         # Update the name of the network device RP of PF2 on host2 to something
         # unexpected. This will cause
-        # update_pci_request_spec_with_allocated_interface_name() to raise
+        # update_pci_request_with_placement_allocations() to raise
         # when the sriov interface is attached.
         rsp = self.placement.put(
             '/resource_providers/%s'
@@ -1115,7 +1115,7 @@ class PortResourceRequestBasedSchedulingTest(
     ):
         # Update the name of the network device RP of PF2 on host2 to something
         # unexpected. This will cause
-        # update_pci_request_spec_with_allocated_interface_name() to raise
+        # update_pci_request_with_placement_allocations() to raise
         # when the sriov interface is attached.
         rsp = self.placement.put(
             '/resource_providers/%s'
@@ -1923,7 +1923,7 @@ class ServerMoveWithPortResourceRequestTest(
     def test_migrate_server_with_qos_port_pci_update_fail_not_reschedule(self):
         # Update the name of the network device RP of PF2 on host2 to something
         # unexpected. This will cause
-        # update_pci_request_spec_with_allocated_interface_name() to raise
+        # update_pci_request_with_placement_allocations() to raise
         # when the instance is migrated to the host2.
         rsp = self.placement.put(
             '/resource_providers/%s'
@@ -1943,7 +1943,7 @@ class ServerMoveWithPortResourceRequestTest(
             non_qos_port, qos_port, qos_sriov_port)
 
         # The compute manager on host2 will raise from
-        # update_pci_request_spec_with_allocated_interface_name which will
+        # update_pci_request_with_placement_allocations which will
         # intentionally not trigger a re-schedule even if there is host3 as an
         # alternate.
         self.api.post_server_action(server['id'], {'migrate': None})
@@ -2162,7 +2162,8 @@ class ServerMoveWithPortResourceRequestTest(
             # simply fail and the server remains on the source host
             server = self._evacuate_server(
                 server, expected_host='host1', expected_task_state=None,
-                expected_migration_status='failed')
+                expected_migration_status='failed',
+                expected_state="ACTIVE")
 
         # As evacuation failed the resource allocation should be untouched
         self._check_allocation(
@@ -2186,7 +2187,7 @@ class ServerMoveWithPortResourceRequestTest(
     def test_evacuate_with_qos_port_pci_update_fail(self):
         # Update the name of the network device RP of PF2 on host2 to something
         # unexpected. This will cause
-        # update_pci_request_spec_with_allocated_interface_name() to raise
+        # update_pci_request_with_placement_allocations() to raise
         # when the instance is evacuated to the host2.
         rsp = self.placement.put(
             '/resource_providers/%s'
@@ -2207,7 +2208,7 @@ class ServerMoveWithPortResourceRequestTest(
             self.compute1_service_id, {'forced_down': 'true'})
 
         # The compute manager on host2 will raise from
-        # update_pci_request_spec_with_allocated_interface_name
+        # update_pci_request_with_placement_allocations
         server = self._evacuate_server(
             server, expected_host='host1', expected_state='ERROR',
             expected_task_state=None, expected_migration_status='failed')
@@ -2363,7 +2364,7 @@ class ServerMoveWithPortResourceRequestTest(
     def test_live_migrate_with_qos_port_pci_update_fails(self):
         # Update the name of the network device RP of PF2 on host2 to something
         # unexpected. This will cause
-        # update_pci_request_spec_with_allocated_interface_name() to raise
+        # update_pci_request_with_placement_allocations() to raise
         # when the instance is live migrated to the host2.
         rsp = self.placement.put(
             '/resource_providers/%s'
@@ -2504,7 +2505,7 @@ class ServerMoveWithPortResourceRequestTest(
     def test_unshelve_offloaded_server_with_qos_port_pci_update_fails(self):
         # Update the name of the network device RP of PF2 on host2 to something
         # unexpected. This will cause
-        # update_pci_request_spec_with_allocated_interface_name() to raise
+        # update_pci_request_with_placement_allocations() to raise
         # when the instance is unshelved to the host2.
         rsp = self.placement.put(
             '/resource_providers/%s'
@@ -2537,7 +2538,7 @@ class ServerMoveWithPortResourceRequestTest(
         self.api.post_server_action(server['id'], {'unshelve': None})
 
         # Unshelve fails on host2 due to
-        # update_pci_request_spec_with_allocated_interface_name fails so the
+        # update_pci_request_with_placement_allocations fails so the
         # instance goes back to shelve offloaded state
         self.notifier.wait_for_versioned_notifications(
             'instance.unshelve.start')
@@ -2979,6 +2980,7 @@ class ExtendedResourceRequestOldCompute(
         super().setUp()
         self.neutron = self.useFixture(
             ExtendedResourceRequestNeutronFixture(self))
+        self.api.microversion = '2.72'
 
     @mock.patch.object(
         objects.service, 'get_minimum_version_all_cells',

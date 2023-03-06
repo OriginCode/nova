@@ -2547,6 +2547,8 @@ class API:
                           instance=instance)
                 with nova_context.target_cell(context, cell) as cctxt:
                     self._local_delete(cctxt, instance, bdms, delete_type, cb)
+                    self._record_action_start(context, instance,
+                                              instance_actions.DELETE)
 
         except exception.InstanceNotFound:
             # NOTE(comstud): Race condition. Instance already gone.
@@ -3795,7 +3797,8 @@ class API:
                 orig_sys_metadata=orig_sys_metadata, bdms=bdms,
                 preserve_ephemeral=preserve_ephemeral, host=host,
                 request_spec=request_spec,
-                reimage_boot_volume=reimage_boot_volume)
+                reimage_boot_volume=reimage_boot_volume,
+                target_state=None)
 
     def _check_volume_status(self, context, bdms):
         """Check whether the status of the volume is "in-use".
@@ -4697,6 +4700,7 @@ class API:
                allow_bfv_rescue=False):
         """Rescue the given instance."""
 
+        image_meta = None
         if rescue_image_ref:
             try:
                 image_meta = image_meta_obj.ImageMeta.from_image_ref(
@@ -4717,6 +4721,8 @@ class API:
                             "image properties set")
                 raise exception.UnsupportedRescueImage(
                     image=rescue_image_ref)
+        else:
+            image_meta = instance.image_meta
 
         bdms = objects.BlockDeviceMappingList.get_by_instance_uuid(
                     context, instance.uuid)
@@ -4724,6 +4730,9 @@ class API:
 
         volume_backed = compute_utils.is_volume_backed_instance(
             context, instance, bdms)
+
+        allow_bfv_rescue &= 'hw_rescue_bus' in image_meta.properties and \
+            'hw_rescue_device' in image_meta.properties
 
         if volume_backed and allow_bfv_rescue:
             cn = objects.ComputeNode.get_by_host_and_nodename(
@@ -5609,7 +5618,7 @@ class API:
     @check_instance_state(vm_state=[vm_states.ACTIVE, vm_states.STOPPED,
                                     vm_states.ERROR], task_state=None)
     def evacuate(self, context, instance, host, on_shared_storage,
-                 admin_password=None, force=None):
+                 admin_password=None, force=None, target_state=None):
         """Running evacuate to target host.
 
         Checking vm compute host state, if the host not in expected_state,
@@ -5620,6 +5629,7 @@ class API:
         :param on_shared_storage: True if instance files on shared storage
         :param admin_password: password to set on rebuilt instance
         :param force: Force the evacuation to the specific host target
+        :param target_state: Set a target state for the evacuated instance
 
         """
         LOG.debug('vm evacuation scheduled', instance=instance)
@@ -5683,7 +5693,7 @@ class API:
                        on_shared_storage=on_shared_storage,
                        host=host,
                        request_spec=request_spec,
-                       )
+                       target_state=target_state)
 
     def get_migrations(self, context, filters):
         """Get all migrations for the given filters."""

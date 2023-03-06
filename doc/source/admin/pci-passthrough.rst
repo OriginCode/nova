@@ -65,6 +65,10 @@ capabilities.
   :oslo.config:option:`pci.device_spec` configuration that uses the
   ``devname`` field.
 
+.. versionchanged:: 27.0.0 (2023.1 Antelope):
+   Nova provides Placement based scheduling support for servers with flavor
+   based PCI requests. This support is disable by default.
+
 Enabling PCI passthrough
 ------------------------
 
@@ -219,7 +223,7 @@ have special meaning:
      result in an error depending on your driver and kernel version (see, for
      example, `this bug <https://bugs.launchpad.net/ubuntu/+source/linux/+bug/1957753>`_
      which discusses a case relevant to one driver). As of Libvirt v8.1.0, EPERM
-     errors encountered while programming a VLAN are ignored if VLAN clearning is
+     errors encountered while programming a VLAN are ignored if VLAN clearing is
      not explicitly requested in the device XML.
 
 ``trusted``
@@ -442,6 +446,39 @@ removed and VFs from the same PF is configured (or vice versa) then
 nova-compute will refuse to start as it would create a situation where both
 the PF and its VFs are made available for consumption.
 
+Since nova 27.0.0 (2023.1 Antelope) scheduling and allocation of PCI devices
+in Placement can also be enabled via
+:oslo.config:option:`filter_scheduler.pci_in_placement`. Please note that this
+should only be enabled after all the computes in the system is configured to
+report PCI inventory in Placement via
+enabling :oslo.config:option:`pci.report_in_placement`. In Antelope flavor
+based PCI requests are support but Neutron port base PCI requests are not
+handled in Placement.
+
+If you are upgrading from an earlier version with already existing servers with
+PCI usage then you must enable :oslo.config:option:`pci.report_in_placement`
+first on all your computes having PCI allocations and then restart the
+nova-compute service, before you enable
+:oslo.config:option:`filter_scheduler.pci_in_placement`. The compute service
+will heal the missing PCI allocation in placement during startup and will
+continue healing missing allocations for future servers until the scheduling
+support is enabled.
+
+If a flavor requests multiple ``type-VF`` devices via
+:nova:extra-spec:`pci_passthrough:alias` then it is important to consider the
+value of :nova:extra-spec:`group_policy` as well. The value ``none``
+allows nova to select VFs from the same parent PF to fulfill the request. The
+value ``isolate`` restricts nova to select each VF from a different parent PF
+to fulfill the request. If :nova:extra-spec:`group_policy` is not provided in
+such flavor then it will defaulted to ``none``.
+
+Symmetrically with the ``resource_class`` and ``traits`` fields of
+:oslo.config:option:`pci.device_spec` the :oslo.config:option:`pci.alias`
+configuration option supports requesting devices by Placement resource class
+name via the ``resource_class`` field and also support requesting traits to
+be present on the selected devices via the ``traits`` field in the alias. If
+the ``resource_class`` field is not specified in the alias then it is defaulted
+by nova to ``CUSTOM_PCI_<vendor_id>_<product_id>``.
 
 For deeper technical details please read the `nova specification. <https://specs.openstack.org/openstack/nova-specs/specs/zed/approved/pci-device-tracking-in-placement.html>`_
 
@@ -456,7 +493,7 @@ and OS allows, we can enable vIOMMU in libvirt driver.
 .. note::
 
     Enable vIOMMU might introduce significant performance overhead.
-    You can see performance comparision table from
+    You can see performance comparison table from
     `AMD vIOMMU session on KVM Forum 2021`_.
     For the above reason, vIOMMU should only be enabled for workflow that
     require it.

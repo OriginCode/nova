@@ -114,6 +114,7 @@ from nova.virt.image import model as imgmodel
 from nova.virt import images
 from nova.virt.libvirt import blockinfo
 from nova.virt.libvirt import config as vconfig
+from nova.virt.libvirt import cpu as libvirt_cpu
 from nova.virt.libvirt import designer
 from nova.virt.libvirt import event as libvirtevent
 from nova.virt.libvirt import guest as libvirt_guest
@@ -412,6 +413,8 @@ class LibvirtDriver(driver.ComputeDriver):
                               not CONF.force_raw_images)
         requires_ploop_image = CONF.libvirt.virt_type == 'parallels'
 
+        self.image_backend = imagebackend.Backend(CONF.use_cow_images)
+
         self.capabilities = {
             "has_imagecache": True,
             "supports_evacuate": True,
@@ -439,6 +442,10 @@ class LibvirtDriver(driver.ComputeDriver):
             "supports_bfv_rescue": True,
             "supports_vtpm": CONF.libvirt.swtpm_enabled,
             "supports_socket_pci_numa_affinity": True,
+            "supports_ephemeral_encryption":
+                self.image_backend.backend().SUPPORTS_LUKS,
+            "supports_ephemeral_encryption_luks":
+                self.image_backend.backend().SUPPORTS_LUKS,
         }
         super(LibvirtDriver, self).__init__(virtapi)
 
@@ -463,7 +470,6 @@ class LibvirtDriver(driver.ComputeDriver):
 
         self._disk_cachemode = None
         self.image_cache_manager = imagecache.ImageCacheManager()
-        self.image_backend = imagebackend.Backend(CONF.use_cow_images)
 
         self.disk_cachemodes = {}
 
@@ -812,6 +818,18 @@ class LibvirtDriver(driver.ComputeDriver):
                         "force_raw_images to True.")
                 raise exception.InvalidConfiguration(msg)
 
+        # NOTE(sbauza): We verify first if the dedicated CPU performances were
+        # modified by Nova before. Note that it can provide an exception if
+        # either the governor strategies are different between the cores or if
+        # the cores are offline.
+        libvirt_cpu.validate_all_dedicated_cpus()
+        # NOTE(sbauza): We powerdown all dedicated CPUs but if some instances
+        # exist that are pinned for some CPUs, then we'll later powerup those
+        # CPUs when rebooting the instance in _init_instance()
+        # Note that it can provide an exception if the config options are
+        # wrongly modified.
+        libvirt_cpu.power_down_all_dedicated_cpus()
+
         # TODO(sbauza): Remove this code once mediated devices are persisted
         # across reboots.
         self._recreate_assigned_mediated_devices()
@@ -984,33 +1002,26 @@ class LibvirtDriver(driver.ComputeDriver):
             msg = _("The cpu_models option is required when cpu_mode=custom")
             raise exception.Invalid(msg)
 
-        cpu = vconfig.LibvirtConfigGuestCPU()
-        for model in models:
-            cpu.model = self._get_cpu_model_mapping(model)
-            try:
-                self._compare_cpu(cpu, self._get_cpu_info(), None)
-            except exception.InvalidCPUInfo as e:
-                msg = (_("Configured CPU model: %(model)s is not "
-                         "compatible with host CPU. Please correct your "
-                         "config and try again. %(e)s") % {
-                            'model': model, 'e': e})
-                raise exception.InvalidCPUInfo(msg)
-
-        # Use guest CPU model to check the compatibility between guest CPU and
-        # configured extra_flags
-        cpu = vconfig.LibvirtConfigGuestCPU()
-        cpu.model = self._host.get_capabilities().host.cpu.model
-        for flag in set(x.lower() for x in CONF.libvirt.cpu_model_extra_flags):
-            cpu_feature = self._prepare_cpu_flag(flag)
-            cpu.add_feature(cpu_feature)
-            try:
-                self._compare_cpu(cpu, self._get_cpu_info(), None)
-            except exception.InvalidCPUInfo as e:
-                msg = (_("Configured extra flag: %(flag)s it not correct, or "
-                         "the host CPU does not support this flag. Please "
-                         "correct the config and try again. %(e)s") % {
-                            'flag': flag, 'e': e})
-                raise exception.InvalidCPUInfo(msg)
+        if not CONF.workarounds.skip_cpu_compare_at_startup:
+            # Use guest CPU model to check the compatibility between
+            # guest CPU and configured extra_flags
+            for model in models:
+                cpu = vconfig.LibvirtConfigGuestCPU()
+                cpu.model = self._get_cpu_model_mapping(model)
+                for flag in set(x.lower() for
+                                x in CONF.libvirt.cpu_model_extra_flags):
+                    cpu_feature = self._prepare_cpu_flag(flag)
+                    cpu.add_feature(cpu_feature)
+                try:
+                    self._compare_cpu(cpu, self._get_cpu_info(), None)
+                except exception.InvalidCPUInfo as e:
+                    msg = (_("Configured CPU model: %(model)s "
+                             "and CPU Flags %(flags)s ar not "
+                             "compatible with host CPU. Please correct your "
+                             "config and try again. %(e)s") % {
+                                'model': model, 'e': e,
+                                'flags': CONF.libvirt.cpu_model_extra_flags})
+                    raise exception.InvalidCPUInfo(msg)
 
     def _check_vtpm_support(self) -> None:
         # TODO(efried): A key manager must be configured to create/retrieve
@@ -1514,6 +1525,8 @@ class LibvirtDriver(driver.ComputeDriver):
             # NOTE(GuanQiang): teardown container to avoid resource leak
             if CONF.libvirt.virt_type == 'lxc':
                 self._teardown_container(instance)
+            # We're sure the instance is gone, we can shutdown the core if so
+            libvirt_cpu.power_down(instance)
 
     def destroy(self, context, instance, network_info, block_device_info=None,
                 destroy_disks=True, destroy_secrets=True):
@@ -3166,6 +3179,7 @@ class LibvirtDriver(driver.ComputeDriver):
 
         current_power_state = guest.get_power_state(self._host)
 
+        libvirt_cpu.power_up(instance)
         # TODO(stephenfin): Any reason we couldn't use 'self.resume' here?
         guest.launch(pause=current_power_state == power_state.PAUSED)
 
@@ -3250,7 +3264,13 @@ class LibvirtDriver(driver.ComputeDriver):
                      '[Error Code %(error_code)s] %(ex)s')
                    % {'instance_name': instance.name,
                       'error_code': error_code, 'ex': err_msg})
-            raise exception.InternalError(msg)
+
+            if error_code == libvirt.VIR_ERR_AGENT_UNRESPONSIVE:
+                msg += (", libvirt cannot connect to the qemu-guest-agent"
+                    " inside the instance.")
+                raise exception.InstanceQuiesceFailed(reason=msg)
+            else:
+                raise exception.InternalError(msg)
 
     def quiesce(self, context, instance, image_meta):
         """Freeze the guest filesystems to prepare for snapshot.
@@ -7296,6 +7316,11 @@ class LibvirtDriver(driver.ComputeDriver):
             graphics = vconfig.LibvirtConfigGuestGraphics()
             graphics.type = "spice"
             graphics.listen = CONF.spice.server_listen
+            graphics.image_compression = CONF.spice.image_compression
+            graphics.jpeg_compression = CONF.spice.jpeg_compression
+            graphics.zlib_compression = CONF.spice.zlib_compression
+            graphics.playback_compression = CONF.spice.playback_compression
+            graphics.streaming_mode = CONF.spice.streaming_mode
             guest.add_device(graphics)
             add_video_driver = True
 
@@ -7637,6 +7662,7 @@ class LibvirtDriver(driver.ComputeDriver):
                 post_xml_callback()
 
             if power_on or pause:
+                libvirt_cpu.power_up(instance)
                 guest.launch(pause=pause)
 
             return guest
@@ -7741,15 +7767,18 @@ class LibvirtDriver(driver.ComputeDriver):
         if not CONF.compute.cpu_dedicated_set:
             return set()
 
-        online_cpus = self._host.get_online_cpus()
+        if CONF.libvirt.cpu_power_management:
+            available_cpus = self._host.get_available_cpus()
+        else:
+            available_cpus = self._host.get_online_cpus()
         dedicated_cpus = hardware.get_cpu_dedicated_set()
 
-        if not dedicated_cpus.issubset(online_cpus):
+        if not dedicated_cpus.issubset(available_cpus):
             msg = _("Invalid '[compute] cpu_dedicated_set' config: one or "
-                    "more of the configured CPUs is not online. Online "
-                    "cpuset(s): %(online)s, configured cpuset(s): %(req)s")
+                    "more of the configured CPUs is not available. Available "
+                    "cpuset(s): %(available)s, configured cpuset(s): %(req)s")
             raise exception.Invalid(msg % {
-                'online': sorted(online_cpus),
+                'available': sorted(available_cpus),
                 'req': sorted(dedicated_cpus)})
 
         return dedicated_cpus
@@ -8227,15 +8256,52 @@ class LibvirtDriver(driver.ComputeDriver):
 
     def _get_mediated_device_information(self, devname):
         """Returns a dict of a mediated device."""
-        virtdev = self._host.device_lookup_by_name(devname)
+        # LP #1951656 - In Libvirt 7.7, the mdev name now includes the PCI
+        # address of the parent device (e.g. mdev_<uuid>_<pci_address>) due to
+        # the mdevctl allowing for multiple mediated devs having the same UUID
+        # defined (only one can be active at a time). Since the guest
+        # information doesn't have the parent ID, try to lookup which
+        # mediated device is available that matches the UUID. If multiple
+        # devices are found that match the UUID, then this is an error
+        # condition.
+        try:
+            virtdev = self._host.device_lookup_by_name(devname)
+        except libvirt.libvirtError as ex:
+            if ex.get_error_code() != libvirt.VIR_ERR_NO_NODE_DEVICE:
+                raise
+            mdevs = [dev for dev in self._host.list_mediated_devices()
+                     if dev.startswith(devname)]
+            # If no matching devices are found, simply raise the original
+            # exception indicating that no devices are found.
+            if not mdevs:
+                raise
+            elif len(mdevs) > 1:
+                msg = ("The mediated device name %(devname)s refers to a UUID "
+                       "that is present in multiple libvirt mediated devices. "
+                       "Matching libvirt mediated devices are %(devices)s. "
+                       "Mediated device UUIDs must be unique for Nova." %
+                       {'devname': devname,
+                        'devices': ', '.join(mdevs)})
+                raise exception.InvalidLibvirtMdevConfig(reason=msg)
+
+            LOG.debug('Found requested device %s as %s. Using that.',
+                      devname, mdevs[0])
+            virtdev = self._host.device_lookup_by_name(mdevs[0])
         xmlstr = virtdev.XMLDesc(0)
         cfgdev = vconfig.LibvirtConfigNodeDevice()
         cfgdev.parse_str(xmlstr)
+        # Starting with Libvirt 7.3, the uuid information is available in the
+        # node device information. If its there, use that. Otherwise,
+        # fall back to the previous behavior of parsing the uuid from the
+        # devname.
+        if cfgdev.mdev_information.uuid:
+            mdev_uuid = cfgdev.mdev_information.uuid
+        else:
+            mdev_uuid = libvirt_utils.mdev_name2uuid(cfgdev.name)
 
         device = {
             "dev_id": cfgdev.name,
-            # name is like mdev_00ead764_fdc0_46b6_8db9_2963f5c815b4
-            "uuid": libvirt_utils.mdev_name2uuid(cfgdev.name),
+            "uuid": mdev_uuid,
             # the physical GPU PCI device
             "parent": cfgdev.parent,
             "type": cfgdev.mdev_information.type,
@@ -8323,6 +8389,7 @@ class LibvirtDriver(driver.ComputeDriver):
         :param requested_types: Filter out the result for only mediated devices
                                 having those types.
         """
+        LOG.debug('Searching for available mdevs...')
         allocated_mdevs = self._get_all_assigned_mediated_devices()
         mdevs = self._get_mediated_devices(requested_types)
         available_mdevs = set()
@@ -8338,6 +8405,7 @@ class LibvirtDriver(driver.ComputeDriver):
                 available_mdevs.add(mdev["uuid"])
 
         available_mdevs -= set(allocated_mdevs)
+        LOG.info('Available mdevs at: %s.', available_mdevs)
         return available_mdevs
 
     def _create_new_mediated_device(self, parent, uuid=None):
@@ -8349,6 +8417,7 @@ class LibvirtDriver(driver.ComputeDriver):
 
         :returns: the newly created mdev UUID or None if not possible
         """
+        LOG.debug('Attempting to create new mdev...')
         supported_types = self.supported_vgpu_types
         # Try to see if we can still create a new mediated device
         devices = self._get_mdev_capable_devices(supported_types)
@@ -8360,6 +8429,7 @@ class LibvirtDriver(driver.ComputeDriver):
                 # The device is not the one that was called, not creating
                 # the mdev
                 continue
+            LOG.debug('Trying on: %s.', dev_name)
             dev_supported_type = self._get_vgpu_type_per_pgpu(dev_name)
             if dev_supported_type and device['types'][
                     dev_supported_type]['availableInstances'] > 0:
@@ -8369,7 +8439,13 @@ class LibvirtDriver(driver.ComputeDriver):
                 pci_addr = "{}:{}:{}.{}".format(*dev_name[4:].split('_'))
                 chosen_mdev = nova.privsep.libvirt.create_mdev(
                     pci_addr, dev_supported_type, uuid=uuid)
+                LOG.info('Created mdev: %s on pGPU: %s.',
+                         chosen_mdev, pci_addr)
                 return chosen_mdev
+            LOG.debug('Failed: No available instances on device.')
+        LOG.info('Failed to create mdev. '
+                 'No free space found among the following devices: %s.',
+                 [dev['dev_id'] for dev in devices])
 
     @utils.synchronized(VGPU_RESOURCE_SEMAPHORE)
     def _allocate_mdevs(self, allocations):
@@ -8452,6 +8528,8 @@ class LibvirtDriver(driver.ComputeDriver):
                 # Take the first available mdev
                 chosen_mdev = mdevs_available.pop()
             else:
+                LOG.debug('No available mdevs where found. '
+                          'Creating an new one...')
                 chosen_mdev = self._create_new_mediated_device(parent_device)
             if not chosen_mdev:
                 # If we can't find devices having available VGPUs, just raise
@@ -8459,6 +8537,7 @@ class LibvirtDriver(driver.ComputeDriver):
                     reason='mdev-capable resource is not available')
             else:
                 chosen_mdevs.append(chosen_mdev)
+                LOG.info('Allocated mdev: %s.', chosen_mdev)
         return chosen_mdevs
 
     def _detach_mediated_devices(self, guest):
@@ -9461,6 +9540,7 @@ class LibvirtDriver(driver.ComputeDriver):
         data["hypervisor_type"] = self._host.get_driver_type()
         data["hypervisor_version"] = self._host.get_version()
         data["hypervisor_hostname"] = self._host.get_hostname()
+        data["uuid"] = self._host.get_node_uuid()
         # TODO(berrange): why do we bother converting the
         # libvirt capabilities XML into a special JSON format ?
         # The data format is different across all the drivers
@@ -9914,7 +9994,7 @@ class LibvirtDriver(driver.ComputeDriver):
         try:
             cpu_xml = cpu.to_xml()
             LOG.debug("cpu compare xml: %s", cpu_xml, instance=instance)
-            ret = self._host.compare_cpu(cpu_xml)
+            ret = self._host.compare_hypervisor_cpu(cpu_xml)
         except libvirt.libvirtError as e:
             error_code = e.get_error_code()
             if error_code == libvirt.VIR_ERR_NO_SUPPORT:
@@ -10997,16 +11077,37 @@ class LibvirtDriver(driver.ComputeDriver):
         if not CONF.workarounds.enable_qemu_monitor_announce_self:
             return
 
-        LOG.info('Sending announce-self command to QEMU monitor',
-                 instance=instance)
+        current_attempt = 0
 
-        try:
-            guest = self._host.get_guest(instance)
-            guest.announce_self()
-        except Exception:
-            LOG.warning('Failed to send announce-self command to QEMU monitor',
-                        instance=instance)
-            LOG.exception()
+        max_attempts = (
+            CONF.workarounds.qemu_monitor_announce_self_count)
+        # qemu_monitor_announce_retry_interval specified in seconds
+        announce_pause = (
+            CONF.workarounds.qemu_monitor_announce_self_interval)
+
+        while(current_attempt < max_attempts):
+            # Increment attempt
+            current_attempt += 1
+
+            # Only use announce_pause after the first attempt to avoid
+            # pausing before calling announce_self for the first attempt
+            if current_attempt != 1:
+                greenthread.sleep(announce_pause)
+
+            LOG.info('Sending announce-self command to QEMU monitor. '
+                     'Attempt %(current_attempt)s of %(max_attempts)s',
+                     {'current_attempt': current_attempt,
+                      'max_attempts': max_attempts}, instance=instance)
+            try:
+                guest = self._host.get_guest(instance)
+                guest.announce_self()
+            except Exception:
+                LOG.warning('Failed to send announce-self command to '
+                    'QEMU monitor. Attempt %(current_attempt)s of '
+                    '%(max_attempts)s',
+                    {'current_attempt': current_attempt,
+                     'max_attempts': max_attempts}, instance=instance)
+                LOG.exception()
 
     def post_live_migration_at_destination(self, context,
                                            instance,
@@ -11255,6 +11356,9 @@ class LibvirtDriver(driver.ComputeDriver):
 
     def get_available_nodes(self, refresh=False):
         return [self._host.get_hostname()]
+
+    def get_nodenames_by_uuid(self, refresh=False):
+        return {self._host.get_node_uuid(): self._host.get_hostname()}
 
     def get_host_cpu_stats(self):
         """Return the current CPU state of the host."""

@@ -12,12 +12,15 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 import ddt
+from oslo_utils.fixture import uuidsentinel as uuids
 from unittest import mock
 
 from nova.compute import pci_placement_translator as ppt
+from nova.compute import provider_tree
 from nova import exception
 from nova.objects import fields
 from nova.objects import pci_device
+from nova.pci import devspec
 from nova import test
 
 
@@ -88,8 +91,8 @@ class TestTranslator(test.NoDBTestCase):
     )
     def test_trait_normalization(self, trait_names, expected_traits):
         self.assertEqual(
-            expected_traits | {"COMPUTE_MANAGED_PCI_DEVICE"},
-            ppt._get_traits_for_dev({"traits": trait_names})
+            expected_traits,
+            ppt.get_traits(trait_names)
         )
 
     @ddt.unpack
@@ -110,7 +113,9 @@ class TestTranslator(test.NoDBTestCase):
     def test_resource_class_normalization(self, pci_dev, rc_name, expected_rc):
         self.assertEqual(
             expected_rc,
-            ppt._get_rc_for_dev(pci_dev, {"resource_class": rc_name})
+            ppt.get_resource_class(
+                rc_name, pci_dev.vendor_id, pci_dev.product_id
+            ),
         )
 
     def test_dependent_device_pf_then_vf(self):
@@ -118,12 +123,16 @@ class TestTranslator(test.NoDBTestCase):
             "fake-node", instances_under_same_host_resize=[])
         pf = pci_device.PciDevice(
             address="0000:81:00.0",
-            dev_type=fields.PciDeviceType.SRIOV_PF
+            dev_type=fields.PciDeviceType.SRIOV_PF,
+            vendor_id="dead",
+            product_id="beef",
         )
         vf = pci_device.PciDevice(
             address="0000:81:00.1",
             parent_addr=pf.address,
-            dev_type=fields.PciDeviceType.SRIOV_VF
+            dev_type=fields.PciDeviceType.SRIOV_VF,
+            vendor_id="dead",
+            product_id="beef",
         )
 
         pv._add_dev(pf, {"resource_class": "foo"})
@@ -146,17 +155,23 @@ class TestTranslator(test.NoDBTestCase):
             "fake-node", instances_under_same_host_resize=[])
         pf = pci_device.PciDevice(
             address="0000:81:00.0",
-            dev_type=fields.PciDeviceType.SRIOV_PF
+            dev_type=fields.PciDeviceType.SRIOV_PF,
+            vendor_id="dead",
+            product_id="beef",
         )
         vf = pci_device.PciDevice(
             address="0000:81:00.1",
             parent_addr=pf.address,
-            dev_type=fields.PciDeviceType.SRIOV_VF
+            dev_type=fields.PciDeviceType.SRIOV_VF,
+            vendor_id="dead",
+            product_id="beef",
         )
         vf2 = pci_device.PciDevice(
             address="0000:81:00.2",
             parent_addr=pf.address,
-            dev_type=fields.PciDeviceType.SRIOV_VF
+            dev_type=fields.PciDeviceType.SRIOV_VF,
+            vendor_id="dead",
+            product_id="beef",
         )
 
         pv._add_dev(vf, {"resource_class": "foo"})
@@ -182,7 +197,10 @@ class TestTranslator(test.NoDBTestCase):
             pci_device.PciDevice(
                 address="0000:81:00.%d" % f,
                 parent_addr="0000:71:00.0",
-                dev_type=fields.PciDeviceType.SRIOV_VF)
+                dev_type=fields.PciDeviceType.SRIOV_VF,
+                vendor_id="dead",
+                product_id="beef",
+            )
             for f in range(0, 4)
         ]
 
@@ -220,3 +238,54 @@ class TestTranslator(test.NoDBTestCase):
             "CUSTOM_BAR,CUSTOM_BAZ,CUSTOM_FOO for 0000:81:00.0,0000:81:00.1.",
             str(ex),
         )
+
+    def test_translator_maps_pci_device_to_rp(self):
+        pv = ppt.PlacementView(
+            "fake-node", instances_under_same_host_resize=[])
+        vf = pci_device.PciDevice(
+            address="0000:81:00.1",
+            parent_addr="0000:71:00.0",
+            dev_type=fields.PciDeviceType.SRIOV_VF,
+            vendor_id="dead",
+            product_id="beef",
+        )
+        pf = pci_device.PciDevice(
+            address="0000:72:00.0",
+            parent_addr=None,
+            dev_type=fields.PciDeviceType.SRIOV_PF,
+            vendor_id="dead",
+            product_id="beef",
+        )
+        pt = provider_tree.ProviderTree()
+        pt.new_root("fake-node", uuids.compute_rp)
+
+        pv._add_dev(vf, {})
+        pv._add_dev(pf, {})
+        pv.update_provider_tree(pt)
+
+        self.assertEqual(
+            pt.data("fake-node_0000:71:00.0").uuid, vf.extra_info["rp_uuid"]
+        )
+        self.assertEqual(
+            pt.data("fake-node_0000:72:00.0").uuid, pf.extra_info["rp_uuid"]
+        )
+
+    def test_update_provider_tree_for_pci_update_pools(self):
+        pt = provider_tree.ProviderTree()
+        pt.new_root("fake-node", uuids.compute_rp)
+        pf = pci_device.PciDevice(
+            address="0000:72:00.0",
+            parent_addr=None,
+            dev_type=fields.PciDeviceType.SRIOV_PF,
+            vendor_id="dead",
+            product_id="beef",
+            status=fields.PciDeviceStatus.AVAILABLE,
+        )
+        pci_tracker = mock.Mock()
+        pci_tracker.pci_devs = [pf]
+        pci_tracker.dev_filter.specs = [devspec.PciDeviceSpec({})]
+
+        ppt.update_provider_tree_for_pci(pt, 'fake-node', pci_tracker, {}, [])
+
+        pci_tracker.stats.populate_pools_metadata_from_assigned_devices.\
+            assert_called_once_with()

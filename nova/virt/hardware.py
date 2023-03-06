@@ -1213,10 +1213,13 @@ def _check_for_mem_encryption_requirement_conflicts(
             "image %(image_name)s which has hw_mem_encryption property "
             "explicitly set to %(image_val)s"
         )
+        # image_meta.name is not set if image object represents root
+        # Cinder volume.
+        image_name = (image_meta.name if 'name' in image_meta else None)
         data = {
             'flavor_name': flavor.name,
             'flavor_val': flavor_mem_enc_str,
-            'image_name': image_meta.name,
+            'image_name': image_name,
             'image_val': image_mem_enc,
         }
         raise exception.FlavorImageConflict(emsg % data)
@@ -1228,10 +1231,15 @@ def _check_mem_encryption_uses_uefi_image(requesters, image_meta):
 
     emsg = _(
         "Memory encryption requested by %(requesters)s but image "
-        "%(image_name)s doesn't have 'hw_firmware_type' property set to 'uefi'"
+        "%(image_name)s doesn't have 'hw_firmware_type' property set to "
+        "'uefi' or volume-backed instance was requested"
     )
+    # image_meta.name is not set if image object represents root Cinder
+    # volume, for this case FlavorImageConflict should be raised, but
+    # image_meta.name can't be extracted.
+    image_name = (image_meta.name if 'name' in image_meta else None)
     data = {'requesters': " and ".join(requesters),
-            'image_name': image_meta.name}
+            'image_name': image_name}
     raise exception.FlavorImageConflict(emsg % data)
 
 
@@ -1260,12 +1268,14 @@ def _check_mem_encryption_machine_type(image_meta, machine_type=None):
     if mach_type is None:
         return
 
+    # image_meta.name is not set if image object represents root Cinder volume.
+    image_name = (image_meta.name if 'name' in image_meta else None)
     # Could be something like pc-q35-2.11 if a specific version of the
     # machine type is required, so do substring matching.
     if 'q35' not in mach_type:
         raise exception.InvalidMachineType(
             mtype=mach_type,
-            image_id=image_meta.id, image_name=image_meta.name,
+            image_id=image_meta.id, image_name=image_name,
             reason=_("q35 type is required for SEV to work"))
 
 
@@ -2295,6 +2305,7 @@ def _numa_cells_support_network_metadata(
 def numa_fit_instance_to_host(
     host_topology: 'objects.NUMATopology',
     instance_topology: 'objects.InstanceNUMATopology',
+    provider_mapping: ty.Optional[ty.Dict[str, ty.List[str]]],
     limits: ty.Optional['objects.NUMATopologyLimit'] = None,
     pci_requests: ty.Optional['objects.InstancePCIRequests'] = None,
     pci_stats: ty.Optional[stats.PciDeviceStats] = None,
@@ -2310,6 +2321,12 @@ def numa_fit_instance_to_host(
     :param host_topology: objects.NUMATopology object to fit an
                           instance on
     :param instance_topology: objects.InstanceNUMATopology to be fitted
+    :param provider_mapping: A dict keyed by RequestGroup requester_id,
+        to a list of resource provider UUIDs which provide resource
+        for that RequestGroup. If it is None then it signals that the
+        InstancePCIRequest objects already stores a mapping per request.
+        I.e.: we are called _after_ the scheduler made allocations for this
+        request in placement.
     :param limits: objects.NUMATopologyLimits that defines limits
     :param pci_requests: instance pci_requests
     :param pci_stats: pci_stats for the host
@@ -2465,7 +2482,7 @@ def numa_fit_instance_to_host(
             continue
 
         if pci_requests and pci_stats and not pci_stats.support_requests(
-                pci_requests, chosen_instance_cells):
+                pci_requests, provider_mapping, chosen_instance_cells):
             continue
 
         if network_metadata and not _numa_cells_support_network_metadata(

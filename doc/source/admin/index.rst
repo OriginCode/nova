@@ -99,7 +99,7 @@ the defaults from the :doc:`install guide </install/index>` will be sufficient.
   cells allow sharding of your compute environment. Upfront planning is key to
   a successful cells v2 layout.
 
-* :doc:`Availablity Zones </admin/availability-zones>`: Availability Zones are
+* :doc:`Availability Zones </admin/availability-zones>`: Availability Zones are
   an end-user visible logical abstraction for partitioning a cloud without
   knowing the physical infrastructure.
 
@@ -206,6 +206,7 @@ instance for these kind of workloads.
    secure-boot
    sev
    managing-resource-providers
+   compute-node-identification
    resource-limits
    cpu-models
    libvirt-misc
@@ -230,3 +231,4 @@ Once you are running nova, the following information is extremely useful.
    node-down
    hw-machine-type
    hw-emulation-architecture
+   soft-delete-shadow-tables

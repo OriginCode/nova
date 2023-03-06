@@ -1254,10 +1254,12 @@ class _ComputeAPIUnitTestMixIn(object):
     @mock.patch('nova.objects.Instance.save')
     @mock.patch('nova.compute.utils.notify_about_instance_usage')
     @mock.patch('nova.objects.Service.get_by_compute_host')
+    @mock.patch('nova.compute.api.API._record_action_start')
     @mock.patch('nova.compute.api.API._local_delete')
     def test_delete_error_state_with_no_host(
-            self, mock_local_delete, mock_service_get, _mock_notify,
-            _mock_save, mock_bdm_get, mock_lookup, _mock_del_booting):
+            self, mock_local_delete, mock_record, mock_service_get,
+            _mock_notify, _mock_save, mock_bdm_get, mock_lookup,
+            _mock_del_booting):
         # Instance in error state with no host should be a local delete
         # for non API cells
         inst = self._create_instance_obj(params=dict(vm_state=vm_states.ERROR,
@@ -1269,6 +1271,8 @@ class _ComputeAPIUnitTestMixIn(object):
             mock_local_delete.assert_called_once_with(
                     self.context, inst, mock_bdm_get.return_value,
                     'delete', self.compute_api._do_delete)
+            mock_record.assert_called_once_with(self.context, inst,
+                                                instance_actions.DELETE)
             mock_terminate.assert_not_called()
         mock_service_get.assert_not_called()
 
@@ -4077,7 +4081,8 @@ class _ComputeAPIUnitTestMixIn(object):
                     injected_files=[], bdms=bdms,
                     preserve_ephemeral=False, host=None,
                     request_spec=fake_spec,
-                    reimage_boot_volume=True)
+                    reimage_boot_volume=True,
+                    target_state=None)
                 _check_auto_disk_config.assert_called_once_with(
                     image=image, auto_disk_config=None)
                 _checks_for_create_and_rebuild.assert_called_once_with(
@@ -4092,7 +4097,8 @@ class _ComputeAPIUnitTestMixIn(object):
                     instance,
                     uuids.image_ref,
                     admin_pass,
-                    reimage_boot_volume=False)
+                    reimage_boot_volume=False,
+                    target_state=None)
 
     @mock.patch.object(objects.RequestSpec, 'save')
     @mock.patch.object(objects.RequestSpec, 'get_by_instance_uuid')
@@ -4151,7 +4157,8 @@ class _ComputeAPIUnitTestMixIn(object):
                               instance,
                               uuids.image_ref,
                               admin_pass,
-                              reimage_boot_volume=False)
+                              reimage_boot_volume=False,
+                              target_state=None)
 
     @mock.patch.object(objects.RequestSpec, 'get_by_instance_uuid')
     @mock.patch.object(objects.Instance, 'save')
@@ -4201,7 +4208,8 @@ class _ComputeAPIUnitTestMixIn(object):
                     orig_image_ref=uuids.image_ref,
                     orig_sys_metadata=orig_system_metadata, bdms=bdms,
                     preserve_ephemeral=False, host=instance.host,
-                    request_spec=fake_spec, reimage_boot_volume=False)
+                    request_spec=fake_spec, reimage_boot_volume=False,
+                    target_state=None)
 
         _check_auto_disk_config.assert_called_once_with(
             image=image, auto_disk_config=None)
@@ -4274,7 +4282,8 @@ class _ComputeAPIUnitTestMixIn(object):
                     orig_image_ref=uuids.image_ref,
                     orig_sys_metadata=orig_system_metadata, bdms=bdms,
                     preserve_ephemeral=False, host=None,
-                    request_spec=fake_spec, reimage_boot_volume=False)
+                    request_spec=fake_spec, reimage_boot_volume=False,
+                    target_state=None)
             # assert the request spec was modified so the scheduler picks
             # the existing instance host/node
             req_spec_save.assert_called_once_with()
@@ -4342,7 +4351,8 @@ class _ComputeAPIUnitTestMixIn(object):
                     orig_image_ref=uuids.image_ref,
                     orig_sys_metadata=orig_system_metadata, bdms=bdms,
                     preserve_ephemeral=False, host=instance.host,
-                    request_spec=fake_spec, reimage_boot_volume=False)
+                    request_spec=fake_spec, reimage_boot_volume=False,
+                    target_state=None)
 
         _check_auto_disk_config.assert_called_once_with(
             image=image, auto_disk_config=None)
@@ -4401,7 +4411,8 @@ class _ComputeAPIUnitTestMixIn(object):
                 orig_image_ref=uuids.image_ref,
                 orig_sys_metadata=orig_system_metadata, bdms=bdms,
                 preserve_ephemeral=False, host=instance.host,
-                request_spec=fake_spec, reimage_boot_volume=False)
+                request_spec=fake_spec, reimage_boot_volume=False,
+                target_state=None)
 
         _check_auto_disk_config.assert_called_once_with(
             image=image, auto_disk_config=None)
@@ -4465,7 +4476,8 @@ class _ComputeAPIUnitTestMixIn(object):
                 orig_image_ref=uuids.image_ref,
                 orig_sys_metadata=orig_system_metadata, bdms=bdms,
                 preserve_ephemeral=False, host=instance.host,
-                request_spec=fake_spec, reimage_boot_volume=False)
+                request_spec=fake_spec, reimage_boot_volume=False,
+                target_state=None)
 
         _check_auto_disk_config.assert_called_once_with(
             image=image, auto_disk_config=None)
@@ -5790,7 +5802,10 @@ class _ComputeAPIUnitTestMixIn(object):
                     destination_type='volume', volume_type=None,
                     snapshot_id=None, volume_id=uuids.volume_id,
                     volume_size=None)])
-        rescue_image_meta_obj = image_meta_obj.ImageMeta.from_dict({})
+        rescue_image_meta_obj = image_meta_obj.ImageMeta.from_dict({
+            'properties': {'hw_rescue_device': 'disk',
+                           'hw_rescue_bus': 'scsi'}
+        })
 
         with test.nested(
             mock.patch.object(self.compute_api.placementclient,
@@ -5842,6 +5857,7 @@ class _ComputeAPIUnitTestMixIn(object):
             # Assert that the instance task state as set in the compute API
             self.assertEqual(task_states.RESCUING, instance.task_state)
 
+    @mock.patch('nova.objects.instance.Instance.image_meta')
     @mock.patch('nova.objects.compute_node.ComputeNode'
                 '.get_by_host_and_nodename')
     @mock.patch('nova.compute.utils.is_volume_backed_instance',
@@ -5850,7 +5866,8 @@ class _ComputeAPIUnitTestMixIn(object):
                 '.get_by_instance_uuid')
     def test_rescue_bfv_without_required_trait(self, mock_get_bdms,
                                                mock_is_volume_backed,
-                                               mock_get_cn):
+                                               mock_get_cn,
+                                               mock_image_meta):
         instance = self._create_instance_obj()
         bdms = objects.BlockDeviceMappingList(objects=[
                 objects.BlockDeviceMapping(
@@ -5858,6 +5875,12 @@ class _ComputeAPIUnitTestMixIn(object):
                     destination_type='volume', volume_type=None,
                     snapshot_id=None, volume_id=uuids.volume_id,
                     volume_size=None)])
+
+        instance.image_meta = image_meta_obj.ImageMeta.from_dict({
+            'properties': {'hw_rescue_device': 'disk',
+                           'hw_rescue_bus': 'scsi'}
+        })
+
         with test.nested(
             mock.patch.object(self.compute_api.placementclient,
                               'get_provider_traits'),
@@ -5894,6 +5917,124 @@ class _ComputeAPIUnitTestMixIn(object):
                 self.context, instance.host, instance.node)
             mock_get_traits.assert_called_once_with(
                 self.context, uuids.cn)
+
+    @mock.patch('nova.objects.image_meta.ImageMeta.from_image_ref')
+    @mock.patch('nova.objects.compute_node.ComputeNode'
+                '.get_by_host_and_nodename')
+    @mock.patch('nova.compute.utils.is_volume_backed_instance',
+                return_value=True)
+    @mock.patch('nova.objects.block_device.BlockDeviceMappingList'
+                '.get_by_instance_uuid')
+    def test_rescue_bfv_with_required_image_properties(
+            self, mock_get_bdms, mock_is_volume_backed, mock_get_cn,
+            mock_image_meta_obj_from_ref):
+        instance = self._create_instance_obj()
+        bdms = objects.BlockDeviceMappingList(objects=[
+            objects.BlockDeviceMapping(
+                boot_index=0, image_id=uuids.image_id, source_type='image',
+                destination_type='volume', volume_type=None,
+                snapshot_id=None, volume_id=uuids.volume_id,
+                volume_size=None)])
+        rescue_image_meta_obj = image_meta_obj.ImageMeta.from_dict({
+            'properties': {'hw_rescue_device': 'disk',
+                           'hw_rescue_bus': 'scsi'}
+        })
+
+        with test.nested(
+            mock.patch.object(self.compute_api.placementclient,
+                              'get_provider_traits'),
+            mock.patch.object(self.compute_api.volume_api, 'get'),
+            mock.patch.object(self.compute_api.volume_api, 'check_attached'),
+            mock.patch.object(instance, 'save'),
+            mock.patch.object(self.compute_api, '_record_action_start'),
+            mock.patch.object(self.compute_api.compute_rpcapi,
+                              'rescue_instance')
+        ) as (
+                mock_get_traits, mock_get_volume, mock_check_attached,
+                mock_instance_save, mock_record_start, mock_rpcapi_rescue
+        ):
+            # Mock out the returned compute node, image_meta, bdms and volume
+            mock_image_meta_obj_from_ref.return_value = rescue_image_meta_obj
+            mock_get_bdms.return_value = bdms
+            mock_get_volume.return_value = mock.sentinel.volume
+            mock_get_cn.return_value = mock.Mock(uuid=uuids.cn)
+
+            # Ensure the required trait is returned, allowing BFV rescue
+            mock_trait_info = mock.Mock(traits=[ot.COMPUTE_RESCUE_BFV])
+            mock_get_traits.return_value = mock_trait_info
+
+            # Try to rescue the instance
+            self.compute_api.rescue(self.context, instance,
+                                    rescue_image_ref=uuids.rescue_image_id,
+                                    allow_bfv_rescue=True)
+
+            # Assert all of the calls made in the compute API
+            mock_get_bdms.assert_called_once_with(self.context, instance.uuid)
+            mock_get_volume.assert_called_once_with(
+                self.context, uuids.volume_id)
+            mock_check_attached.assert_called_once_with(
+                self.context, mock.sentinel.volume)
+            mock_is_volume_backed.assert_called_once_with(
+                self.context, instance, bdms)
+            mock_get_cn.assert_called_once_with(
+                self.context, instance.host, instance.node)
+            mock_get_traits.assert_called_once_with(self.context, uuids.cn)
+            mock_instance_save.assert_called_once_with(
+                expected_task_state=[None])
+            mock_record_start.assert_called_once_with(
+                self.context, instance, instance_actions.RESCUE)
+            mock_rpcapi_rescue.assert_called_once_with(
+                self.context, instance=instance, rescue_password=None,
+                rescue_image_ref=uuids.rescue_image_id, clean_shutdown=True)
+
+            # Assert that the instance task state as set in the compute API
+            self.assertEqual(task_states.RESCUING, instance.task_state)
+
+    @mock.patch('nova.objects.image_meta.ImageMeta.from_image_ref')
+    @mock.patch('nova.compute.utils.is_volume_backed_instance',
+                return_value=True)
+    @mock.patch('nova.objects.block_device.BlockDeviceMappingList'
+                '.get_by_instance_uuid')
+    def test_rescue_bfv_without_required_image_properties(
+            self, mock_get_bdms, mock_is_volume_backed,
+            mock_image_meta_obj_from_ref):
+        instance = self._create_instance_obj()
+        bdms = objects.BlockDeviceMappingList(objects=[
+            objects.BlockDeviceMapping(
+                boot_index=0, image_id=uuids.image_id, source_type='image',
+                destination_type='volume', volume_type=None,
+                snapshot_id=None, volume_id=uuids.volume_id,
+                volume_size=None)])
+        rescue_image_meta_obj = image_meta_obj.ImageMeta.from_dict({
+            'properties': {}
+        })
+
+        with test.nested(
+            mock.patch.object(self.compute_api.volume_api, 'get'),
+            mock.patch.object(self.compute_api.volume_api, 'check_attached'),
+        ) as (
+            mock_get_volume, mock_check_attached
+        ):
+            # Mock out the returned bdms, volume and image_meta
+            mock_get_bdms.return_value = bdms
+            mock_get_volume.return_value = mock.sentinel.volume
+            mock_image_meta_obj_from_ref.return_value = rescue_image_meta_obj
+
+            # Assert that any attempt to rescue a bfv instance on a compute
+            # node that does not report the COMPUTE_RESCUE_BFV trait fails and
+            # raises InstanceNotRescuable
+            self.assertRaises(exception.InstanceNotRescuable,
+                              self.compute_api.rescue, self.context, instance,
+                              rescue_image_ref=None, allow_bfv_rescue=True)
+
+            # Assert the calls made in the compute API prior to the failure
+            mock_get_bdms.assert_called_once_with(self.context, instance.uuid)
+            mock_get_volume.assert_called_once_with(
+                self.context, uuids.volume_id)
+            mock_check_attached.assert_called_once_with(
+                self.context, mock.sentinel.volume)
+            mock_is_volume_backed.assert_called_once_with(
+                self.context, instance, bdms)
 
     @mock.patch('nova.compute.utils.is_volume_backed_instance',
                 return_value=True)
@@ -7905,8 +8046,9 @@ class ComputeAPIUnitTestCase(_ComputeAPIUnitTestMixIn, test.NoDBTestCase):
     @mock.patch.object(compute_utils, 'notify_about_instance_usage')
     @mock.patch.object(objects.BlockDeviceMapping, 'destroy')
     @mock.patch.object(objects.Instance, 'destroy')
+    @mock.patch('nova.compute.api.API._record_action_start')
     def _test_delete_volume_backed_instance(
-            self, vm_state, mock_instance_destroy, bdm_destroy,
+            self, vm_state, mock_record, mock_instance_destroy, bdm_destroy,
             notify_about_instance_usage, mock_save, mock_elevated,
             bdm_get_by_instance_uuid, mock_lookup, _mock_del_booting,
             notify_about_instance_action):
@@ -7935,6 +8077,8 @@ class ComputeAPIUnitTestCase(_ComputeAPIUnitTestMixIn, test.NoDBTestCase):
                      'detach') as mock_detach:
             self.compute_api.delete(self.context, inst)
 
+        mock_record.assert_called_once_with(self.context, inst,
+                                            instance_actions.DELETE)
         mock_deallocate.assert_called_once_with(self.context, inst)
         mock_detach.assert_called_once_with(self.context, volume_id,
                                             inst.uuid)

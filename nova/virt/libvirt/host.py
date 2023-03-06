@@ -66,6 +66,7 @@ from nova.virt.libvirt import event as libvirtevent
 from nova.virt.libvirt import guest as libvirt_guest
 from nova.virt.libvirt import migration as libvirt_migrate
 from nova.virt.libvirt import utils as libvirt_utils
+import nova.virt.node  # noqa
 
 if ty.TYPE_CHECKING:
     import libvirt
@@ -138,6 +139,7 @@ class Host(object):
         self._caps = None
         self._domain_caps = None
         self._hostname = None
+        self._node_uuid = None
 
         self._wrapped_conn = None
         self._wrapped_conn_lock = threading.Lock()
@@ -738,6 +740,14 @@ class Host(object):
 
         return doms
 
+    def get_available_cpus(self):
+        """Get the set of CPUs that exist on the host.
+
+        :returns: set of CPUs, raises libvirtError on error
+        """
+        cpus, cpu_map, online = self.get_connection().getCPUMap()
+        return {cpu for cpu in range(cpus)}
+
     def get_online_cpus(self):
         """Get the set of CPUs that are online on the host
 
@@ -1058,6 +1068,12 @@ class Host(object):
                       'to %(new)s. A restart is required to take effect.',
                       {'old': self._hostname, 'new': hostname})
         return self._hostname
+
+    def get_node_uuid(self):
+        """Returns the UUID of this node."""
+        if not self._node_uuid:
+            self._node_uuid = nova.virt.node.get_local_node_uuid()
+        return self._node_uuid
 
     def find_secret(self, usage_type, usage_id):
         """Find a secret.
@@ -1566,7 +1582,7 @@ class Host(object):
     def list_mediated_devices(self, flags=0):
         """Lookup mediated devices.
 
-        :returns: a list of virNodeDevice instance
+        :returns: a list of strings with the name of the instance
         """
         return self._list_devices("mdev", flags=flags)
 
@@ -1604,6 +1620,22 @@ class Host(object):
     def compare_cpu(self, xmlDesc, flags=0):
         """Compares the given CPU description with the host CPU."""
         return self.get_connection().compareCPU(xmlDesc, flags)
+
+    def compare_hypervisor_cpu(self, xmlDesc, flags=0):
+        """Compares the given CPU description with the CPU provided by
+        the host hypervisor. This is different from the older method,
+        compare_cpu(), which compares a given CPU definition with the
+        host CPU without considering the abilities of the host
+        hypervisor. Except @xmlDesc, rest of all the parameters to
+        compareHypervisorCPU API are optional (libvirt will choose
+        sensible defaults).
+        """
+        emulator = None
+        arch = None
+        machine = None
+        virttype = None
+        return self.get_connection().compareHypervisorCPU(
+            emulator, arch, machine, virttype, xmlDesc, flags)
 
     def is_cpu_control_policy_capable(self):
         """Returns whether kernel configuration CGROUP_SCHED is enabled

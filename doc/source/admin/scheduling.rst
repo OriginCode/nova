@@ -1100,6 +1100,16 @@ control the initial allocation ratio values for a compute node:
 * :oslo.config:option:`initial_disk_allocation_ratio` the initial DISK_GB
   inventory allocation ratio for a new compute node record, defaults to 1.0
 
+Starting with the 27.0.0 Antelope release, the following default values are used
+for the initial allocation ratio values for a compute node:
+
+* :oslo.config:option:`initial_cpu_allocation_ratio` the initial VCPU
+  inventory allocation ratio for a new compute node record, defaults to 4.0
+* :oslo.config:option:`initial_ram_allocation_ratio` the initial MEMORY_MB
+  inventory allocation ratio for a new compute node record, defaults to 1.0
+* :oslo.config:option:`initial_disk_allocation_ratio` the initial DISK_GB
+  inventory allocation ratio for a new compute node record, defaults to 1.0
+
 Scheduling considerations
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -1162,7 +1172,7 @@ here.
     :oslo.config:option:`DEFAULT.cpu_allocation_ratio`,
     :oslo.config:option:`DEFAULT.ram_allocation_ratio` or
     :oslo.config:option:`DEFAULT.disk_allocation_ratio` to a non-null value
-    would ensure the user-configured value was always overriden.
+    would ensure the user-configured value was always overridden.
 
 .. _osc-placement: https://docs.openstack.org/osc-placement/latest/index.html
 

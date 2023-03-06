@@ -248,8 +248,9 @@
       tox_envlist: all
       # Only run compute API tests.
       tempest_test_regex: ^tempest\.api\.compute
-      # Skip slow tests.
-      tempest_exclude_regex: .*\[.*\bslow\b.*\]
+      # Skip slow tests. Also, skip some volume detach tests until bug#1998148
+      # is fixed.
+      tempest_exclude_regex: (^tempest\.(api\.compute\.(volumes\.test_attach_volume\.AttachVolumeTestJSON\.test_attach_detach_volume|servers\.(test_server_rescue\.ServerStableDeviceRescueTest\.test_stable_device_rescue_disk_virtio_with_volume_attached|test_server_rescue_negative\.ServerRescueNegativeTestJSON\.test_rescued_vm_detach_volume)))|.*\[.*\bslow\b.*\])
       devstack_local_conf:
         test-config:
           $TEMPEST_CONFIG:
@@ -594,8 +595,11 @@
     required-projects:
       - openstack/nova
     pre-run:
-      - playbooks/ceph/glance-copy-policy.yaml
+      - playbooks/ceph/glance-setup.yaml
     vars:
+      # NOTE(danms): Increase our swap size since we're dealing with
+      # larger images and trigger OOMs.
+      configure_swap_size: 4096
       # NOTE(danms): These tests create an empty non-raw image, which nova
       # will refuse because we set never_download_image_if_on_rbd in this job.
       # Just skip these tests for this case.
@@ -603,6 +607,8 @@
         GLANCE_STANDALONE: True
         GLANCE_USE_IMPORT_WORKFLOW: True
         DEVSTACK_PARALLEL: True
+        GLANCE_LIMIT_IMAGE_SIZE_TOTAL: 2048
+        MYSQL_REDUCE_MEMORY: True
       # NOTE(danms): This job is pretty heavy as it is, so we disable some
       # services that are not relevant to the nova-glance-ceph scenario
       # that this job is intended to validate.
@@ -613,6 +619,12 @@
         s-object: false
         s-proxy: false
       devstack_local_conf:
+        test-config:
+          $TEMPEST_CONFIG:
+            image-feature-enabled:
+              manage_locations: true
+            volume:
+              volume_size: 1
         post-config:
           $NOVA_CONF:
             libvirt:
@@ -621,7 +633,7 @@
               never_download_image_if_on_rbd: True
           $GLANCE_API_CONF:
             DEFAULT:
-              enabled_backends: "cheap:file, robust:rbd"
+              enabled_backends: "cheap:file, robust:rbd, web:http"
               default_log_levels: "amqp=WARN, amqplib=WARN, boto=WARN, qpid=WARN, sqlalchemy=WARN, suds=INFO, oslo.messaging=INFO, oslo_messaging=INFO, iso8601=WARN, requests.packages.urllib3.connectionpool=WARN, urllib3.connectionpool=WARN, websocket=WARN, requests.packages.urllib3.util.retry=WARN, urllib3.util.retry=WARN, keystonemiddleware=WARN, routes.middleware=WARN, stevedore=WARN, taskflow=WARN, keystoneauth=WARN, oslo.cache=INFO, dogpile.core.dogpile=INFO, oslo_policy=DEBUG"
             glance_store:
               default_backend: cheap
@@ -633,6 +645,8 @@
               rbd_store_ceph_conf: /etc/ceph/ceph.conf
             cheap:
               filesystem_store_datadir: /opt/stack/data/glance/images/
+            web:
+              https_insecure: false
             os_glance_staging_store:
               filesystem_store_datadir: /opt/stack/data/glance/os_glance_staging_store/
             os_glance_tasks_store:
@@ -643,14 +657,53 @@
             image_conversion:
               output_format: raw
 
+# TODO(gmann): As per the 2023.1 testing runtime, we need to run at least
+# one job on Focal. This job can be removed as per the future testing
+# runtime (whenever we drop the Ubuntu Focal testing).
+- job:
+    name: tempest-integrated-compute-ubuntu-focal
+    description: This is integrated compute job testing on Ubuntu Focal(20.04)
+    parent: tempest-integrated-compute
+    nodeset: openstack-single-node-focal
+
+# TODO(gmann): Remove this jobs once all the required services for intergrate
+# compute gate (Cinder, Glance, Neutron) by default enable scope and new
+# defaults which means all the nova jobs will be tested with new RBAC in
+# integrated way and we do not need this separate job.
+- job:
+    name: tempest-integrated-compute-enforce-scope-new-defaults
+    parent: tempest-integrated-compute
+    description: |
+      This job runs the Tempest tests with scope and new defaults enabled
+      for Nova, Neutron, Glance, and Cinder services.
+    # TODO (gmann): There were few fixes in neutron and neutron-lib for the
+    # RBAC but they are not yet released so we need to add both projcts as
+    # the required-projects. Those can be removed once new version of neutron
+    # and neutron-lib is released.
+    required-projects:
+      - openstack/neutron
+      - openstack/neutron-lib
+    vars:
+      devstack_localrc:
+        # Enabeling the scope and new defaults for services implemented it.
+        # NOTE (gmann): We need to keep keystone scope check disable as
+        # services (except ironic) does not support the system scope and
+        # they need keystone to continue working with project scope. Until
+        # Keystone policies are changed to work for project scoped also, we
+        # need to keep scope check disable for keystone.
+        NOVA_ENFORCE_SCOPE: true
+        CINDER_ENFORCE_SCOPE: true
+        GLANCE_ENFORCE_SCOPE: true
+        NEUTRON_ENFORCE_SCOPE: true
+
 - project:
     # Please try to keep the list of job names sorted alphabetically.
     templates:
       - check-requirements
       - integrated-gate-compute
       - openstack-cover-jobs
-      - openstack-python3-zed-jobs
-      - openstack-python3-zed-jobs-arm64
+      - openstack-python3-jobs
+      - openstack-python3-jobs-arm64
       - periodic-stable-jobs
       - publish-openstack-docs-pti
       - release-notes-jobs-python3
@@ -679,10 +732,7 @@
             voting: false
         - nova-tox-functional-py38
         - nova-tox-functional-py39
-        - nova-tox-functional-py310:
-            voting: true
-        - openstack-tox-py310:
-            voting: true
+        - nova-tox-functional-py310
         - tempest-integrated-compute:
            # NOTE(gmann): Policies changes do not need to run all the
            # integration test jobs. Running only tempest and grenade
@@ -702,6 +752,10 @@
              - ^setup.cfg$
              - ^tools/.*$
              - ^tox.ini$
+        - tempest-integrated-compute-ubuntu-focal:
+            irrelevant-files: *policies-irrelevant-files
+        - tempest-integrated-compute-enforce-scope-new-defaults:
+            irrelevant-files: *policies-irrelevant-files
         - grenade-skip-level:
             irrelevant-files: *policies-irrelevant-files
         - nova-grenade-multinode:
@@ -735,6 +789,10 @@
               - ^(?!nova/network/.*)(?!nova/virt/libvirt/vif.py).*$
         - tempest-integrated-compute:
            irrelevant-files: *policies-irrelevant-files
+        - tempest-integrated-compute-ubuntu-focal:
+            irrelevant-files: *policies-irrelevant-files
+        - tempest-integrated-compute-enforce-scope-new-defaults:
+            irrelevant-files: *policies-irrelevant-files
         - nova-grenade-multinode:
            irrelevant-files: *policies-irrelevant-files
         - tempest-ipv6-only:
@@ -781,7 +839,3 @@
         - nova-emulation
         - tempest-integrated-compute-centos-9-stream:
             irrelevant-files: *nova-base-irrelevant-files
-    periodic:
-      jobs:
-        - tempest-centos8-stream-fips:
-            branches: master
