@@ -133,7 +133,6 @@ Depends:
  python3-pastescript,
  uwsgi-plugin-python3,
  ${misc:Depends},
- ${ostack-lsb-base},
  ${python3:Depends},
 Recommends:
  python3-keystone,
@@ -205,7 +204,6 @@ Depends:
  rsync,
  vlan,
  ${misc:Depends},
- ${ostack-lsb-base},
  ${python3:Depends},
 Recommends:
  dmidecode,
@@ -366,7 +364,6 @@ Architecture: all
 Depends:
  nova-common (= ${binary:Version}),
  ${misc:Depends},
- ${ostack-lsb-base},
  ${python3:Depends},
 Description: OpenStack Compute - conductor service
  OpenStack is a reliable cloud infrastructure. Its mission is to produce
@@ -402,7 +399,6 @@ Depends:
  python3-websockify,
  spice-html5,
  ${misc:Depends},
- ${ostack-lsb-base},
  ${python3:Depends},
 Description: OpenStack Compute - NoVNC proxy
  OpenStack is a reliable cloud infrastructure. Its mission is to produce
@@ -448,7 +444,6 @@ Architecture: all
 Depends:
  nova-common (= ${binary:Version}),
  ${misc:Depends},
- ${ostack-lsb-base},
  ${python3:Depends},
 Description: OpenStack Compute - virtual machine scheduler
  OpenStack is a reliable cloud infrastructure. Its mission is to produce
