@@ -9,7 +9,7 @@ Uploaders:
 Build-Depends:
  debhelper-compat (= 11),
  dh-python,
- openstack-pkg-tools,
+ openstack-pkg-tools (>= 123~),
  po-debconf,
  python3-all,
  python3-pbr,
