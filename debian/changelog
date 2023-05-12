@@ -1,3 +1,9 @@
+nova (2:27.0.0-4) experimental; urgency=medium
+
+  * Closing the correct bug and fix patch header (Closes: #1035981).
+
+ -- Thomas Goirand <zigo@debian.org>  Fri, 12 May 2023 10:07:36 +0200
+
 nova (2:27.0.0-3) experimental; urgency=medium
 
   * Remove deprecated / removed options from nova-compute-ironic.conf.
