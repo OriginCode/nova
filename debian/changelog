@@ -1,3 +1,9 @@
+nova (2:27.0.0-5) unstable; urgency=medium
+
+  * Uploading to unstable.
+
+ -- Thomas Goirand <zigo@debian.org>  Mon, 19 Jun 2023 14:05:01 +0200
+
 nova (2:27.0.0-4) experimental; urgency=medium
 
   * Closing the correct bug and fix patch header (Closes: #1035981).
