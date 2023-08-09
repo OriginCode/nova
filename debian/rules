@@ -35,7 +35,10 @@ override_dh_auto_build:
 
 override_dh_sphinxdoc:
 ifeq (,$(findstring nodoc, $(DEB_BUILD_OPTIONS)))
-	PYTHONPATH=. python3 -m sphinx -b html doc/source $(CURDIR)/debian/nova-doc/usr/share/doc/nova-doc/html
+	set -e ; set -x ; if ! PYTHONPATH=. PYTHON=python3 python3 -m sphinx -b html doc/source $(CURDIR)/debian/nova-doc/usr/share/doc/nova-doc/html ; then \
+		cat /tmp/sphinx-err-* ; \
+		exit 1 ; \
+	fi
 	dh_sphinxdoc -O--buildsystem=python_distutils
 endif
 
