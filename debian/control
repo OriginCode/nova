@@ -19,6 +19,7 @@ Build-Depends-Indep:
  alembic,
  bandit,
  genisoimage,
+ graphviz,
  libvirt-daemon-system,
  openssh-client,
  procps,

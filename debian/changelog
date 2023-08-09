@@ -1,3 +1,9 @@
+nova (2:27.0.0-6) unstable; urgency=medium
+
+  * Added graphviz as build-depends.
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 09 Aug 2023 14:42:57 +0200
+
 nova (2:27.0.0-5) unstable; urgency=medium
 
   * Uploading to unstable.
