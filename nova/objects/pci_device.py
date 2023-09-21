@@ -198,6 +198,7 @@ class PciDevice(base.NovaPersistentObject, base.NovaObject):
         self.parent_device = None
         self.child_devices = []
 
+    @base.lazy_load_counter
     def obj_load_attr(self, attr):
         if attr in ['extra_info']:
             # NOTE(danms): extra_info used to be defaulted during init,
@@ -215,11 +216,11 @@ class PciDevice(base.NovaPersistentObject, base.NovaObject):
         return not (self == other)
 
     @classmethod
-    def populate_dev_uuids(cls, context, count):
+    def populate_dev_uuids(cls, context, max_count):
         @db.pick_context_manager_reader
         def get_devs_no_uuid(context):
             return context.session.query(db_models.PciDevice).\
-                    filter_by(uuid=None).limit(count).all()
+                    filter_by(uuid=None).limit(max_count).all()
 
         db_devs = get_devs_no_uuid(context)
 

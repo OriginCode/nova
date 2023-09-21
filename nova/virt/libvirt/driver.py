@@ -114,7 +114,7 @@ from nova.virt.image import model as imgmodel
 from nova.virt import images
 from nova.virt.libvirt import blockinfo
 from nova.virt.libvirt import config as vconfig
-from nova.virt.libvirt import cpu as libvirt_cpu
+from nova.virt.libvirt.cpu import api as libvirt_cpu
 from nova.virt.libvirt import designer
 from nova.virt.libvirt import event as libvirtevent
 from nova.virt.libvirt import guest as libvirt_guest
@@ -216,18 +216,16 @@ patch_tpool_proxy()
 # doc/source/reference/libvirt-distro-support-matrix.rst
 #
 # DO NOT FORGET to update this document when touching any versions below!
-MIN_LIBVIRT_VERSION = (6, 0, 0)
-MIN_QEMU_VERSION = (4, 2, 0)
-NEXT_MIN_LIBVIRT_VERSION = (7, 0, 0)
-NEXT_MIN_QEMU_VERSION = (5, 2, 0)
-
-# vIOMMU driver attribute aw_bits minimal support version.
-MIN_LIBVIRT_VIOMMU_AW_BITS = (6, 5, 0)
+MIN_LIBVIRT_VERSION = (7, 0, 0)
+MIN_QEMU_VERSION = (5, 2, 0)
+NEXT_MIN_LIBVIRT_VERSION = (8, 0, 0)
+NEXT_MIN_QEMU_VERSION = (6, 2, 0)
 
 # vIOMMU model value `virtio` minimal support version
 MIN_LIBVIRT_VIOMMU_VIRTIO_MODEL = (8, 3, 0)
 
-MIN_LIBVIRT_AARCH64_CPU_COMPARE = (6, 9, 0)
+
+MIN_LIBVIRT_TB_CACHE_SIZE = (8, 0, 0)
 
 # Virtuozzo driver support
 MIN_VIRTUOZZO_VERSION = (7, 0, 0)
@@ -246,9 +244,10 @@ VGPU_RESOURCE_SEMAPHORE = 'vgpu_resources'
 
 LIBVIRT_PERF_EVENT_PREFIX = 'VIR_PERF_PARAM_'
 
-# VDPA interface support
-MIN_LIBVIRT_VDPA = (6, 9, 0)
-MIN_QEMU_VDPA = (5, 1, 0)
+
+# Maxphysaddr minimal support version.
+MIN_LIBVIRT_MAXPHYSADDR = (8, 7, 0)
+MIN_QEMU_MAXPHYSADDR = (2, 7, 0)
 
 REGISTER_IMAGE_PROPERTY_DEFAULTS = [
     'hw_machine_type',
@@ -743,6 +742,9 @@ class LibvirtDriver(driver.ComputeDriver):
 
         self._check_my_ip()
 
+        # TODO(ykarel) This can be dropped when MIN_LIBVIRT_VERSION>=8.0.0
+        self._supports_tb_cache_size()
+
         if (CONF.libvirt.virt_type == 'lxc' and
                 not (CONF.libvirt.uid_maps and CONF.libvirt.gid_maps)):
             LOG.warning("Running libvirt-lxc without user namespaces is "
@@ -850,6 +852,19 @@ class LibvirtDriver(driver.ComputeDriver):
             'supports_secure_boot': self._host.supports_secure_boot,
             'supports_remote_managed_ports':
             self._host.supports_remote_managed_ports
+        })
+
+        supports_maxphysaddr = self._host.has_min_version(
+            lv_ver=MIN_LIBVIRT_MAXPHYSADDR,
+            hv_ver=MIN_QEMU_MAXPHYSADDR,
+            hv_type=host.HV_DRIVER_QEMU,
+        )
+
+        # NOTE(nmiki): Currently libvirt does not provide a distinction
+        # between passthrough mode and emulated mode support status.
+        self.capabilities.update({
+            'supports_address_space_passthrough': supports_maxphysaddr,
+            'supports_address_space_emulated': supports_maxphysaddr,
         })
 
     def _register_all_undefined_instance_details(self) -> None:
@@ -1216,6 +1231,19 @@ class LibvirtDriver(driver.ComputeDriver):
                 "'vcpu_pin_set' config option value to '[compute] "
                 "cpu_shared_set' and '[compute] cpu_dedicated_set', "
                 "respectively, and undefine 'vcpu_pin_set'.")
+
+    def _supports_tb_cache_size(self):
+        if (
+            CONF.libvirt.virt_type == 'qemu' and
+            CONF.libvirt.tb_cache_size and
+            CONF.libvirt.tb_cache_size > 0
+        ):
+            if not self._host.has_min_version(MIN_LIBVIRT_TB_CACHE_SIZE):
+                raise exception.InvalidConfiguration(
+                    _("Nova requires libvirt version %s or greater "
+                      "with '[libvirt] tb_cache_size' "
+                      "configured.") %
+                    libvirt_utils.version_to_string(MIN_LIBVIRT_TB_CACHE_SIZE))
 
     def _prepare_migration_flags(self):
         migration_flags = 0
@@ -1657,7 +1685,7 @@ class LibvirtDriver(driver.ComputeDriver):
             try:
                 self._disconnect_volume(
                     context, connection_info, instance,
-                    destroy_secrets=destroy_secrets)
+                    destroy_secrets=destroy_secrets, force=True)
             except Exception as exc:
                 with excutils.save_and_reraise_exception() as ctxt:
                     if cleanup_instance_disks:
@@ -1974,7 +2002,7 @@ class LibvirtDriver(driver.ComputeDriver):
         return (False if connection_count > 1 else True)
 
     def _disconnect_volume(self, context, connection_info, instance,
-                           encryption=None, destroy_secrets=True):
+                           encryption=None, destroy_secrets=True, force=False):
         self._detach_encryptor(
             context,
             connection_info,
@@ -1986,7 +2014,8 @@ class LibvirtDriver(driver.ComputeDriver):
         multiattach = connection_info.get('multiattach', False)
         if self._should_disconnect_target(
                 context, instance, multiattach, vol_driver, volume_id):
-            vol_driver.disconnect_volume(connection_info, instance)
+            vol_driver.disconnect_volume(
+                connection_info, instance, force=force)
         else:
             LOG.info('Detected multiple connections on this host for '
                      'volume: %(volume)s, skipping target disconnect.',
@@ -6175,6 +6204,14 @@ class LibvirtDriver(driver.ComputeDriver):
             if not CONF.workarounds.libvirt_disable_apic:
                 guest.add_feature(vconfig.LibvirtConfigGuestFeatureAPIC())
 
+        if (
+            CONF.libvirt.virt_type == 'qemu' and
+            CONF.libvirt.tb_cache_size and
+            CONF.libvirt.tb_cache_size > 0
+        ):
+            guest.add_feature(vconfig.LibvirtConfigGuestFeatureTCG(
+                CONF.libvirt.tb_cache_size))
+
         if CONF.libvirt.virt_type in ('qemu', 'kvm') and os_type == 'windows':
             hv = vconfig.LibvirtConfigGuestFeatureHyperV()
             hv.relaxed = True
@@ -7493,8 +7530,7 @@ class LibvirtDriver(driver.ComputeDriver):
 
         # As Qemu supported values are 39 and 48, we set this to
         # larger width (48) by default and will not exposed to end user.
-        if self._host.has_min_version(MIN_LIBVIRT_VIOMMU_AW_BITS):
-            iommu.aw_bits = 48
+        iommu.aw_bits = 48
 
         if guest.os_mach_type is not None and 'q35' in guest.os_mach_type:
             iommu.eim = True
@@ -7636,7 +7672,7 @@ class LibvirtDriver(driver.ComputeDriver):
         instance: 'objects.Instance',
         power_on: bool = True,
         pause: bool = False,
-        post_xml_callback: ty.Callable = None,
+        post_xml_callback: ty.Optional[ty.Callable] = None,
     ) -> libvirt_guest.Guest:
         """Create a Guest from XML.
 
@@ -7697,7 +7733,7 @@ class LibvirtDriver(driver.ComputeDriver):
         block_device_info: ty.Optional[ty.Dict[str, ty.Any]],
         power_on: bool = True,
         vifs_already_plugged: bool = False,
-        post_xml_callback: ty.Callable = None,
+        post_xml_callback: ty.Optional[ty.Callable] = None,
         external_events: ty.Optional[ty.List[ty.Tuple[str, str]]] = None,
         cleanup_instance_dir: bool = False,
         cleanup_instance_disks: bool = False,
@@ -8170,12 +8206,9 @@ class LibvirtDriver(driver.ComputeDriver):
         """
         dev_flags = (
             libvirt.VIR_CONNECT_LIST_NODE_DEVICES_CAP_NET |
-            libvirt.VIR_CONNECT_LIST_NODE_DEVICES_CAP_PCI_DEV
+            libvirt.VIR_CONNECT_LIST_NODE_DEVICES_CAP_PCI_DEV |
+            libvirt.VIR_CONNECT_LIST_NODE_DEVICES_CAP_VDPA
         )
-        if self._host.has_min_version(
-            lv_ver=MIN_LIBVIRT_VDPA, hv_ver=MIN_QEMU_VDPA,
-        ):
-            dev_flags |= libvirt.VIR_CONNECT_LIST_NODE_DEVICES_CAP_VDPA
 
         devices = {
             dev.name(): dev for dev in
@@ -9975,17 +10008,11 @@ class LibvirtDriver(driver.ComputeDriver):
 
         host_cpu = self._host.get_capabilities().host.cpu
         if host_cpu.arch == fields.Architecture.AARCH64:
-            if self._host.has_min_version(MIN_LIBVIRT_AARCH64_CPU_COMPARE):
-                LOG.debug("On AArch64 hosts, source and destination host "
-                          "CPUs are compared to check if they're compatible"
-                          "(the only use-case supported by libvirt for "
-                          "Arm64/AArch64)")
-                cpu = host_cpu
-            else:
-                LOG.debug("You need %s libvirt version to be able to compare "
-                          "source host CPU with destination host CPU; skip "
-                          "CPU comparison", MIN_LIBVIRT_AARCH64_CPU_COMPARE)
-                return
+            LOG.debug("On AArch64 hosts, source and destination host "
+                      "CPUs are compared to check if they're compatible"
+                      "(the only use-case supported by libvirt for "
+                      "Arm64/AArch64)")
+            cpu = host_cpu
 
         u = ("http://libvirt.org/html/libvirt-libvirt-host.html#"
              "virCPUCompareResult")

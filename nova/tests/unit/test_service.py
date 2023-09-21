@@ -134,7 +134,8 @@ class ServiceTestCase(test.NoDBTestCase):
         mock_create.assert_called_once_with()
         # pre_start_hook is called after service record is created,
         # but before RPC consumer is created
-        serv.manager.pre_start_hook.assert_called_once_with()
+        serv.manager.pre_start_hook.assert_called_once_with(
+            serv.service_ref)
         # post_start_hook is called after RPC consumer is created.
         serv.manager.post_start_hook.assert_called_once_with()
 
@@ -221,7 +222,7 @@ class ServiceTestCase(test.NoDBTestCase):
                                                             self.host,
                                                             self.binary)
         mock_create.assert_called_once_with()
-        serv.manager.pre_start_hook.assert_called_once_with()
+        serv.manager.pre_start_hook.assert_called_once_with(serv.service_ref)
         serv.manager.post_start_hook.assert_called_once_with()
         serv.stop()
         mock_stop.assert_called_once_with()
@@ -326,6 +327,7 @@ class TestWSGIService(test.NoDBTestCase):
         mock_get.return_value = None
         test_service = service.WSGIService("test_service")
         test_service.start()
+        self.addCleanup(test_service.stop)
         self.assertTrue(mock_create.called)
 
     @mock.patch('nova.objects.Service.get_by_host_and_binary')
@@ -333,14 +335,15 @@ class TestWSGIService(test.NoDBTestCase):
     def test_service_start_does_not_create_record(self, mock_create, mock_get):
         test_service = service.WSGIService("test_service")
         test_service.start()
+        self.addCleanup(test_service.stop)
         self.assertFalse(mock_create.called)
 
     @mock.patch('nova.objects.Service.get_by_host_and_binary')
     def test_service_random_port(self, mock_get):
         test_service = service.WSGIService("test_service")
         test_service.start()
+        self.addCleanup(test_service.stop)
         self.assertNotEqual(0, test_service.port)
-        test_service.stop()
 
     def test_workers_set_default(self):
         test_service = service.WSGIService("osapi_compute")
@@ -366,9 +369,9 @@ class TestWSGIService(test.NoDBTestCase):
         CONF.set_default("test_service_listen", "::1")
         test_service = service.WSGIService("test_service")
         test_service.start()
+        self.addCleanup(test_service.stop)
         self.assertEqual("::1", test_service.host)
         self.assertNotEqual(0, test_service.port)
-        test_service.stop()
 
     @mock.patch('nova.objects.Service.get_by_host_and_binary')
     def test_reset_pool_size_to_default(self, mock_get):
@@ -382,6 +385,7 @@ class TestWSGIService(test.NoDBTestCase):
         # Resetting pool size to default
         test_service.reset()
         test_service.start()
+        self.addCleanup(test_service.stop)
         self.assertEqual(test_service.server._pool.size,
                          CONF.wsgi.default_pool_size)
 

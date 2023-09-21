@@ -91,6 +91,7 @@ class ResourceTracker(object):
     """
 
     def __init__(self, host, driver, reportclient=None):
+        self.service_ref = None
         self.host = host
         self.driver = driver
         self.pci_tracker = None
@@ -125,6 +126,18 @@ class ResourceTracker(object):
         # smarter logging.
         self.absent_providers = set()
 
+    def set_service_ref(self, service_ref):
+        # NOTE(danms): Neither of these should ever happen, but sanity check
+        # just in case
+        if self.service_ref and self.service_ref.id != service_ref.id:
+            raise exception.ComputeServiceInUse(
+                'Resource tracker re-initialized with a different service')
+        elif service_ref.host != self.host:
+            raise exception.ServiceNotUnique(
+                'Resource tracker initialized with service that does '
+                'not match host')
+        self.service_ref = service_ref
+
     @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE, fair=True)
     def instance_claim(self, context, instance, nodename, allocations,
                        limits=None):
@@ -146,16 +159,20 @@ class ResourceTracker(object):
                   during the instance build.
         """
         if self.disabled(nodename):
-            # instance_claim() was called before update_available_resource()
-            # (which ensures that a compute node exists for nodename). We
-            # shouldn't get here but in case we do, just set the instance's
-            # host and nodename attribute (probably incorrect) and return a
-            # NoopClaim.
-            # TODO(jaypipes): Remove all the disabled junk from the resource
-            # tracker. Servicegroup API-level active-checking belongs in the
-            # nova-compute manager.
-            self._set_instance_host_and_node(instance, nodename)
-            return claims.NopClaim()
+            # If we get here, it means we are trying to claim for an instance
+            # that was scheduled to a node that we do not have in our list,
+            # or is in some other way unmanageable by this node. This would
+            # mean that we are unable to account for resources, create
+            # allocations in placement, or do any of the other accounting
+            # necessary for this to work. In the past, this situation was
+            # effectively ignored silently, but in a world where we track
+            # resources with placement and instance assignment to compute nodes
+            # by service, we can no longer be leaky.
+            raise exception.ComputeResourcesUnavailable(
+                ('Attempt to claim resources for instance %(inst)s '
+                 'on unknown node %(node)s failed') % {
+                     'inst': instance.uuid,
+                     'node': nodename})
 
         # sanity checks:
         if instance.host:
@@ -179,7 +196,7 @@ class ResourceTracker(object):
         # so that the resource audit knows about any cpus we've pinned.
         instance_numa_topology = claim.claimed_numa_topology
         instance.numa_topology = instance_numa_topology
-        self._set_instance_host_and_node(instance, nodename)
+        self._set_instance_host_and_node(instance, cn)
 
         if self.pci_tracker:
             # NOTE(jaypipes): ComputeNode.pci_device_pools is set below
@@ -273,18 +290,26 @@ class ResourceTracker(object):
         resources after the compute operation is finished.
         """
         image_meta = image_meta or {}
-        if migration:
-            self._claim_existing_migration(migration, nodename)
-        else:
-            migration = self._create_migration(
-                context, instance, new_flavor, nodename, move_type)
 
         if self.disabled(nodename):
-            # compute_driver doesn't support resource tracking, just
-            # generate the migration record and continue the resize:
-            return claims.NopClaim(migration=migration)
+            # This means we were asked to accept an incoming migration to a
+            # node that we do not own or track. We really should not get here,
+            # but if we do, we must refuse to continue with the migration
+            # process, since we cannot account for those resources, create
+            # allocations in placement, etc. This has been a silent resource
+            # leak in the past, but it must be a hard failure now.
+            raise exception.ComputeResourcesUnavailable(
+                ('Attempt to claim move resources for instance %(inst)s on '
+                 'unknown node %(node)s failed') % {
+                     'inst': instance.uuid,
+                     'node': 'nodename'})
 
         cn = self.compute_nodes[nodename]
+        if migration:
+            self._claim_existing_migration(migration, cn)
+        else:
+            migration = self._create_migration(
+                context, instance, new_flavor, cn, move_type)
 
         # TODO(moshele): we are recreating the pci requests even if
         # there was no change on resize. This will cause allocating
@@ -355,7 +380,7 @@ class ResourceTracker(object):
         return claim
 
     def _create_migration(
-        self, context, instance, new_flavor, nodename, move_type=None,
+        self, context, instance, new_flavor, node, move_type=None,
     ):
         """Create a migration record for the upcoming resize.  This should
         be done while the COMPUTE_RESOURCES_SEMAPHORE is held so the resource
@@ -363,7 +388,8 @@ class ResourceTracker(object):
         """
         migration = objects.Migration(context=context.elevated())
         migration.dest_compute = self.host
-        migration.dest_node = nodename
+        migration.dest_node = node.hypervisor_hostname
+        migration.dest_compute_id = node.id
         migration.dest_host = self.driver.get_host_ip_addr()
         migration.old_instance_type_id = instance.flavor.id
         migration.new_instance_type_id = new_flavor.id
@@ -379,7 +405,7 @@ class ResourceTracker(object):
         migration.create()
         return migration
 
-    def _claim_existing_migration(self, migration, nodename):
+    def _claim_existing_migration(self, migration, node):
         """Make an existing migration record count for resource tracking.
 
         If a migration record was created already before the request made
@@ -388,7 +414,8 @@ class ResourceTracker(object):
         COMPUTE_RESOURCES_SEMAPHORE is held.
         """
         migration.dest_compute = self.host
-        migration.dest_node = nodename
+        migration.dest_node = node.hypervisor_hostname
+        migration.dest_compute_id = node.id
         migration.dest_host = self.driver.get_host_ip_addr()
         # NOTE(artom) Migration objects for live migrations are created with
         # status 'accepted' by the conductor in live_migrate_instance() and do
@@ -515,7 +542,7 @@ class ResourceTracker(object):
             rc = resource.resource_class
             self.assigned_resources[rp_uuid][rc].add(resource)
 
-    def _set_instance_host_and_node(self, instance, nodename):
+    def _set_instance_host_and_node(self, instance, node):
         """Tag the instance as belonging to this host.  This should be done
         while the COMPUTE_RESOURCES_SEMAPHORE is held so the resource claim
         will not be lost if the audit process starts.
@@ -525,7 +552,15 @@ class ResourceTracker(object):
         # method changes that method might need to be updated.
         instance.host = self.host
         instance.launched_on = self.host
-        instance.node = nodename
+        if node is not None:
+            # NOTE(danms): This method can be called when the node is disabled,
+            # which means not in our list. The note in instance_claim()
+            # explains that we should actually never get there (here) and that
+            # if we do, we will likely record the instance membership
+            # incorrectly. As such, if we do not have a compute node to
+            # update the instance, just avoid making a change.
+            instance.node = node.hypervisor_hostname
+            instance.compute_id = node.id
         instance.save()
 
     def _unset_instance_host_and_node(self, instance):
@@ -536,6 +571,7 @@ class ResourceTracker(object):
         """
         instance.host = None
         instance.node = None
+        instance.compute_id = None
         instance.save()
 
     @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE, fair=True)
@@ -692,6 +728,14 @@ class ResourceTracker(object):
         # to initialize
         if nodename in self.compute_nodes:
             cn = self.compute_nodes[nodename]
+            if 'service_id' not in cn or cn.service_id is None:
+                LOG.debug('Setting ComputeNode %s service_id to %i',
+                          cn.uuid, self.service_ref.id)
+                cn.service_id = self.service_ref.id
+            elif cn.service_id != self.service_ref.id:
+                LOG.warning('Moving ComputeNode %s from service %i to %i',
+                            cn.uuid, cn.service_id, self.service_ref.id)
+                cn.service_id = self.service_ref.id
             self._copy_resources(cn, resources)
             self._setup_pci_tracker(context, cn, resources)
             return False
@@ -715,6 +759,7 @@ class ResourceTracker(object):
                 LOG.info("ComputeNode %(name)s moving from %(old)s to %(new)s",
                          {"name": nodename, "old": cn.host, "new": self.host})
                 cn.host = self.host
+                cn.service_id = self.service_ref.id
                 self._update(context, cn)
 
             self.compute_nodes[nodename] = cn
@@ -727,6 +772,7 @@ class ResourceTracker(object):
         # to be initialized with resource values.
         cn = objects.ComputeNode(context)
         cn.host = self.host
+        cn.service_id = self.service_ref.id
         self._copy_resources(cn, resources, initial=True)
         try:
             cn.create()
@@ -904,6 +950,26 @@ class ResourceTracker(object):
                               'another host\'s instance!',
                           {'uuid': migration.instance_uuid})
 
+    def _ensure_compute_id_for_instances(self, context, instances, node):
+        """Check the instances on a given node for compute_id linkage"""
+        for instance in instances:
+            changed = False
+            if 'compute_id' not in instance or instance.compute_id is None:
+                LOG.info('Setting Instance.compute_id=%i for %s',
+                         node.id, instance.uuid)
+                instance.compute_id = node.id
+                changed = True
+            elif instance.compute_id != node.id:
+                LOG.warning(
+                    'Correcting compute_id=%i from %i for instance %s',
+                    node.id, instance.compute_id, instance.uuid)
+                instance.compute_id = node.id
+                changed = True
+            if changed:
+                # NOTE(danms): Only save if we made a change here, even if
+                # the instance had other pending changes
+                instance.save()
+
     @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE, fair=True)
     def _update_available_resource(self, context, resources, startup=False):
 
@@ -961,6 +1027,14 @@ class ResourceTracker(object):
         instance_by_uuid = self._update_usage_from_instances(
             context, instances, nodename)
 
+        cn = self.compute_nodes[nodename]
+
+        # Make sure these instances have a proper compute_id->CN.id link
+        # NOTE(danms): This is for migrating old records, so we can remove
+        # this once we are sure all records have been migrated and we can
+        # rely on this linkage.
+        self._ensure_compute_id_for_instances(context, instances, cn)
+
         self._pair_instances_to_migrations(migrations, instance_by_uuid)
         self._update_usage_from_migrations(context, migrations, nodename)
 
@@ -971,8 +1045,6 @@ class ResourceTracker(object):
             self._remove_deleted_instances_allocations(
                 context, self.compute_nodes[nodename], migrations,
                 instance_by_uuid)
-
-        cn = self.compute_nodes[nodename]
 
         # NOTE(yjiang5): Because pci device tracker status is not cleared in
         # this periodic task, and also because the resource tracker is not
@@ -2043,6 +2115,9 @@ class ResourceTracker(object):
         # entry.
         instance.host = self.host
         instance.node = node
+        # NOTE(danms): We can be called with node=None, which means compute_id
+        # should also be None
+        instance.compute_id = node and self.compute_nodes[node].id or None
         instance.save()
         instance.drop_migration_context()
 
@@ -2069,3 +2144,13 @@ class ResourceTracker(object):
             # up the cache.
             self.remove_node(stale_cn)
             self.reportclient.invalidate_resource_provider(stale_cn)
+
+    def get_node_by_name(self, nodename):
+        """Get a node from our list by name.
+
+        :raises: ComputeHostNotFound if missing
+        """
+        try:
+            return self.compute_nodes[nodename]
+        except KeyError:
+            raise exception.ComputeHostNotFound(host=nodename)

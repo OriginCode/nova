@@ -91,12 +91,14 @@ def _get_auth(context):
     # from them generated from 'context.get_admin_context'
     # which only set is_admin=True but is without token.
     # So add load_auth_plugin when this condition appear.
+    user_auth = None
     if context.is_admin and not context.auth_token:
         if not _ADMIN_AUTH:
             _ADMIN_AUTH = _load_auth_plugin(CONF)
-        return _ADMIN_AUTH
-    else:
-        return service_auth.get_auth_plugin(context)
+        user_auth = _ADMIN_AUTH
+
+    # When user_auth = None, user_auth will be extracted from the context.
+    return service_auth.get_auth_plugin(context, user_auth=user_auth)
 
 
 # NOTE(efried): Bug #1752152
@@ -836,6 +838,39 @@ class API(object):
                           {'id': attachment_id,
                            'msg': str(ex),
                            'code': getattr(ex, 'code', None)})
+
+    def attachment_get_all(self, context, instance_id=None, volume_id=None):
+        """Get all attchments by instance id or volume id
+
+        :param context: The nova request context.
+        :param instance_id: UUID of the instance attachment to get.
+        :param volume_id: UUID of the volume attachment to get.
+        :returns: a list of cinderclient.v3.attachments.VolumeAttachment
+            objects.
+        """
+        if not instance_id and not volume_id:
+            raise exception.InvalidRequest(
+                "Either instance or volume id must be passed.")
+
+        search_opts = {}
+
+        if instance_id:
+            search_opts['instance_id'] = instance_id
+        if volume_id:
+            search_opts['volume_id'] = volume_id
+
+        try:
+            attachments = cinderclient(
+                context, '3.44', skip_version_check=True).attachments.list(
+                    search_opts=search_opts)
+        except cinder_exception.ClientException as ex:
+            with excutils.save_and_reraise_exception():
+                LOG.error('Get all attachment failed. '
+                          'Error: %(msg)s Code: %(code)s',
+                          {'msg': str(ex),
+                           'code': getattr(ex, 'code', None)})
+        return [_translate_attachment_ref(
+            each.to_dict()) for each in attachments]
 
     @translate_attachment_exception
     def attachment_update(self, context, attachment_id, connector,

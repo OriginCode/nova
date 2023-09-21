@@ -50,6 +50,8 @@ from nova.virt import driver
 
 _HOSTNAME = 'fake-host'
 _NODENAME = 'fake-node'
+_SERVICE_ID = 123
+_COMPUTE_ID = 1
 CONF = cfg.CONF
 
 _VIRT_DRIVER_AVAIL_RESOURCES = {
@@ -69,7 +71,7 @@ _VIRT_DRIVER_AVAIL_RESOURCES = {
 
 _COMPUTE_NODE_FIXTURES = [
     objects.ComputeNode(
-        id=1,
+        id=_COMPUTE_ID,
         deleted=False,
         uuid=uuids.cn1,
         host=_HOSTNAME,
@@ -82,6 +84,7 @@ _COMPUTE_NODE_FIXTURES = [
         hypervisor_type='fake',
         hypervisor_version=0,
         hypervisor_hostname=_NODENAME,
+        service_id=_SERVICE_ID,
         free_ram_mb=(_VIRT_DRIVER_AVAIL_RESOURCES['memory_mb'] -
                      _VIRT_DRIVER_AVAIL_RESOURCES['memory_mb_used']),
         free_disk_gb=(_VIRT_DRIVER_AVAIL_RESOURCES['local_gb'] -
@@ -181,6 +184,7 @@ _NUMA_HOST_TOPOLOGIES = {
             memory=_2MB,
             cpu_usage=0,
             memory_usage=0,
+            socket=0,
             mempages=[_NUMA_PAGE_TOPOLOGIES['2mb*1024']],
             siblings=[set([1]), set([2])],
             pinned_cpus=set()),
@@ -191,6 +195,7 @@ _NUMA_HOST_TOPOLOGIES = {
             memory=_2MB,
             cpu_usage=0,
             memory_usage=0,
+            socket=0,
             mempages=[_NUMA_PAGE_TOPOLOGIES['2mb*1024']],
             siblings=[set([3]), set([4])],
             pinned_cpus=set())]),
@@ -202,6 +207,7 @@ _INSTANCE_FIXTURES = [
         id=1,
         host=_HOSTNAME,
         node=_NODENAME,
+        compute_id=_COMPUTE_ID,
         uuid='c17741a5-6f3d-44a8-ade8-773dc8c29124',
         memory_mb=_FLAVOR_FIXTURES[1]['memory_mb'],
         vcpus=_FLAVOR_FIXTURES[1]['vcpus'],
@@ -227,6 +233,7 @@ _INSTANCE_FIXTURES = [
         id=2,
         host=_HOSTNAME,
         node=_NODENAME,
+        compute_id=_COMPUTE_ID,
         uuid='33805b54-dea6-47b8-acb2-22aeb1b57919',
         memory_mb=_FLAVOR_FIXTURES[2]['memory_mb'],
         vcpus=_FLAVOR_FIXTURES[2]['vcpus'],
@@ -315,6 +322,7 @@ _MIGRATION_INSTANCE_FIXTURES = {
         id=101,
         host=None,  # prevent RT trying to lazy-load this
         node=None,
+        compute_id=None,
         uuid='f15ecfb0-9bf6-42db-9837-706eb2c4bf08',
         memory_mb=_FLAVOR_FIXTURES[1]['memory_mb'],
         vcpus=_FLAVOR_FIXTURES[1]['vcpus'],
@@ -340,6 +348,7 @@ _MIGRATION_INSTANCE_FIXTURES = {
         id=102,
         host=None,  # prevent RT trying to lazy-load this
         node=None,
+        compute_id=None,
         uuid='f6ed631a-8645-4b12-8e1e-2fff55795765',
         memory_mb=_FLAVOR_FIXTURES[2]['memory_mb'],
         vcpus=_FLAVOR_FIXTURES[2]['vcpus'],
@@ -365,6 +374,7 @@ _MIGRATION_INSTANCE_FIXTURES = {
         id=3,
         host=None,  # prevent RT trying to lazy-load this
         node=None,
+        compute_id=None,
         uuid='f4f0bfea-fe7e-4264-b598-01cb13ef1997',
         memory_mb=_FLAVOR_FIXTURES[2]['memory_mb'],
         vcpus=_FLAVOR_FIXTURES[2]['vcpus'],
@@ -390,6 +400,7 @@ _MIGRATION_INSTANCE_FIXTURES = {
         id=102,
         host=None,  # prevent RT trying to lazy-load this
         node=None,
+        compute_id=None,
         uuid='077fb63a-bdc8-4330-90ef-f012082703dc',
         memory_mb=_FLAVOR_FIXTURES[2]['memory_mb'],
         vcpus=_FLAVOR_FIXTURES[2]['vcpus'],
@@ -503,6 +514,10 @@ def setup_rt(hostname, virt_resources=_VIRT_DRIVER_AVAIL_RESOURCES):
                        return_value=report_client_mock),
             mock.patch('nova.rpc.get_notifier', return_value=notifier_mock)):
         rt = resource_tracker.ResourceTracker(hostname, vd)
+
+    fake_service = objects.Service(id=_SERVICE_ID, host=hostname)
+    rt.set_service_ref(fake_service)
+
     return (rt, query_client_mock, report_client_mock, vd)
 
 
@@ -1047,6 +1062,7 @@ class TestUpdateAvailableResources(BaseTestCase):
         # The resizing instance has already had its instance type
         # changed to the *new* instance type (the bigger one, instance type 2)
         resizing_instance = _MIGRATION_INSTANCE_FIXTURES[inst_uuid].obj_clone()
+        resizing_instance.compute_id = _COMPUTE_ID
         resizing_instance.migration_context = (
             _MIGRATION_CONTEXT_FIXTURES[resizing_instance.uuid])
         all_instances = _INSTANCE_FIXTURES + [resizing_instance]
@@ -1174,6 +1190,7 @@ class TestUpdateAvailableResources(BaseTestCase):
         mig_ctxt.new_resources = objects.ResourceList(
                 objects=[self.resource_2])
         resizing_inst.migration_context = mig_ctxt
+        resizing_inst.compute_id = _COMPUTE_ID
         # the other instance is not being resized and only has the single
         # resource allocation for itself
         # here resource_0 is assigned to inst
@@ -1225,6 +1242,7 @@ class TestUpdateAvailableResources(BaseTestCase):
         mig_ctxt.new_resources = objects.ResourceList(
                 objects=[self.resource_2])
         resizing_inst.migration_context = mig_ctxt
+        resizing_inst.compute_id = _COMPUTE_ID
         inst = _INSTANCE_FIXTURES[0]
         inst.resources = objects.ResourceList(objects=[self.resource_0])
 
@@ -1422,6 +1440,7 @@ class TestInitComputeNode(BaseTestCase):
             hypervisor_hostname=resources['hypervisor_hostname'],
             # NOTE(sbauza): ResourceTracker adds host field
             host=_HOSTNAME,
+            service_id=_SERVICE_ID,
             # NOTE(sbauza): ResourceTracker adds CONF allocation ratios
             ram_allocation_ratio=CONF.initial_ram_allocation_ratio,
             cpu_allocation_ratio=CONF.initial_cpu_allocation_ratio,
@@ -1439,6 +1458,8 @@ class TestInitComputeNode(BaseTestCase):
                                          uuids.compute_node_uuid)
 
         create_mock.assert_called_once_with()
+        self.assertEqual(obj_base.obj_to_primitive(expected_compute),
+                         obj_base.obj_to_primitive(cn))
         self.assertTrue(obj_base.obj_equal_prims(expected_compute, cn))
         setup_pci.assert_called_once_with(mock.sentinel.ctx, cn, resources)
         self.assertFalse(update_mock.called)
@@ -1565,6 +1586,23 @@ class TestInitComputeNode(BaseTestCase):
                           self.rt._init_compute_node,
                           mock.MagicMock,
                           resources)
+
+    def test_init_compute_node_updates_service_id(self):
+        unset = object()
+        # Make sure that we can go from unset, none, or some other service_id
+        # to the one in our RT's service_ref
+        for iv in [unset, None, 121]:
+            compute = objects.ComputeNode(uuid=uuids.fakenode, id=7)
+            if iv is not unset:
+                compute.service_id = iv
+            self._setup_rt()
+            resources = {'hypervisor_hostname': 'fake-node',
+                        'uuid': uuids.fakenode}
+            self.rt.compute_nodes = {'fake-node': compute}
+            with mock.patch.object(self.rt, '_setup_pci_tracker'):
+                self.rt._init_compute_node(mock.MagicMock(), resources)
+            self.assertIn('service_id', compute)
+            self.assertEqual(self.rt.service_ref.id, compute.service_id)
 
 
 @ddt.ddt
@@ -2231,14 +2269,21 @@ class TestInstanceClaim(BaseTestCase):
         self.rt.compute_nodes = {}
         self.assertTrue(self.rt.disabled(_NODENAME))
 
-        with mock.patch.object(self.instance, 'save'):
-            claim = self.rt.instance_claim(mock.sentinel.ctx, self.instance,
-                                           _NODENAME, self.allocations, None)
+        # Reset all changes to the instance to make sure that we can detect
+        # any manipulation after the failure.
+        orig_node = self.instance.node
+        self.instance.obj_reset_changes(recursive=True)
 
-        self.assertEqual(self.rt.host, self.instance.host)
-        self.assertEqual(self.rt.host, self.instance.launched_on)
-        self.assertEqual(_NODENAME, self.instance.node)
-        self.assertIsInstance(claim, claims.NopClaim)
+        with mock.patch.object(self.instance, 'save') as mock_save:
+            self.assertRaises(exc.ComputeResourcesUnavailable,
+                              self.rt.instance_claim,
+                              mock.sentinel.ctx, self.instance,
+                              _NODENAME, self.allocations, None)
+            mock_save.assert_not_called()
+
+        # Make sure the instance was not touched by the failed claim process
+        self.assertEqual(set(), self.instance.obj_what_changed())
+        self.assertEqual(orig_node, self.instance.node)
 
     @mock.patch('nova.compute.utils.is_volume_backed_instance')
     @mock.patch('nova.objects.MigrationList.get_in_progress_and_error')
@@ -2765,7 +2810,7 @@ class TestResize(BaseTestCase):
                                          None, self.allocations)
 
         create_mig_mock.assert_called_once_with(
-                ctx, instance, new_flavor, _NODENAME,
+                ctx, instance, new_flavor, self.rt.compute_nodes[_NODENAME],
                 None  # move_type is None for resize...
         )
         self.assertIsInstance(claim, claims.MoveClaim)
@@ -4011,6 +4056,26 @@ class TestUpdateUsageFromInstance(BaseTestCase):
         mock_remove_allocs.assert_called_once_with(
             ctxt, instance.uuid, self.rt.compute_nodes[_NODENAME].uuid)
 
+    @mock.patch.object(objects.Instance, 'save')
+    def test_ensure_compute_id_for_instance(self, mock_save):
+        instances = [
+            objects.Instance(uuid=uuids.inst1),
+            objects.Instance(uuid=uuids.inst2, compute_id=None),
+            objects.Instance(uuid=uuids.inst3, compute_id=456),
+            objects.Instance(uuid=uuids.inst4, compute_id=123),
+        ]
+        node = objects.ComputeNode(id=123)
+        self.rt._ensure_compute_id_for_instances(None, instances, node)
+
+        # We should only have called save on the first three that had a change
+        objects.Instance.save.assert_has_calls([
+            mock.call(), mock.call(), mock.call(),
+        ])
+
+        # Make sure everyone is set to our node id now
+        for inst in instances:
+            self.assertEqual(123, inst.compute_id)
+
 
 class TestInstanceInResizeState(test.NoDBTestCase):
     def test_active_suspending(self):
@@ -4075,21 +4140,29 @@ class TestSetInstanceHostAndNode(BaseTestCase):
     @mock.patch('nova.objects.Instance.save')
     def test_set_instance_host_and_node(self, save_mock):
         inst = objects.Instance()
-        self.rt._set_instance_host_and_node(inst, _NODENAME)
+        self.rt._set_instance_host_and_node(inst, _COMPUTE_NODE_FIXTURES[0])
         save_mock.assert_called_once_with()
         self.assertEqual(self.rt.host, inst.host)
         self.assertEqual(_NODENAME, inst.node)
+        self.assertEqual(1, inst.compute_id)
         self.assertEqual(self.rt.host, inst.launched_on)
 
     @mock.patch('nova.objects.Instance.save')
     def test_unset_instance_host_and_node(self, save_mock):
         inst = objects.Instance()
-        self.rt._set_instance_host_and_node(inst, _NODENAME)
+        self.rt._set_instance_host_and_node(inst, _COMPUTE_NODE_FIXTURES[0])
         self.rt._unset_instance_host_and_node(inst)
         self.assertEqual(2, save_mock.call_count)
         self.assertIsNone(inst.host)
         self.assertIsNone(inst.node)
         self.assertEqual(self.rt.host, inst.launched_on)
+
+    def test_get_node_by_name(self):
+        self.assertRaises(exc.ComputeHostNotFound,
+                          self.rt.get_node_by_name, 'foo')
+        self.assertRaises(exc.ComputeHostNotFound,
+                          self.rt.get_node_by_name,
+                            _COMPUTE_NODE_FIXTURES[0].hypervisor_hostname)
 
 
 def _update_compute_node(node, **kwargs):
@@ -4276,6 +4349,37 @@ class ResourceTrackerTestCase(test.NoDBTestCase):
 
         self.assertRaises(AssertionError, _test_explict_unfair)
         self.assertRaises(AssertionError, _test_implicit_unfair)
+
+    def test_set_service_ref(self):
+        rt = resource_tracker.ResourceTracker(
+            _HOSTNAME, mock.sentinel.driver, mock.sentinel.reportclient)
+
+        # The service ref should default to None and we should be able to set
+        # the service ref to anything from that state, as long as the host
+        # matches what the rt was initialized with
+        self.assertIsNone(rt.service_ref)
+        service = objects.Service(id=123, host=_HOSTNAME)
+        rt.set_service_ref(service)
+        self.assertEqual(service, rt.service_ref)
+
+        # We should be able to set the service again with the same attributes
+        # without raising
+        service = service.obj_clone()
+        rt.set_service_ref(service)
+
+        # A service with a different id is an error
+        service = objects.Service(id=456, host=_HOSTNAME)
+        self.assertRaises(exc.ComputeServiceInUse,
+                          rt.set_service_ref, service)
+
+        # A service with a different host is an error
+        service = objects.Service(id=123, host='foo')
+        self.assertRaises(exc.ServiceNotUnique,
+                          rt.set_service_ref, service)
+
+        # Make sure we haven't disturbed the stored ref with the above
+        self.assertEqual(123, rt.service_ref.id)
+        self.assertEqual(_HOSTNAME, rt.service_ref.host)
 
 
 class ProviderConfigTestCases(BaseTestCase):

@@ -42,6 +42,7 @@ import oslo_messaging as messaging
 from oslo_messaging import conffixture as messaging_conffixture
 from oslo_privsep import daemon as privsep_daemon
 from oslo_utils.fixture import uuidsentinel
+from oslo_utils import strutils
 from requests import adapters
 from sqlalchemy import exc as sqla_exc
 from wsgi_intercept import interceptor
@@ -1135,6 +1136,64 @@ class IndirectionAPIFixture(fixtures.Fixture):
         self.addCleanup(self.cleanup)
 
 
+class IsolatedGreenPoolFixture(fixtures.Fixture):
+    """isolate each test to a dedicated greenpool.
+
+    Replace the default shared greenpool with a pre test greenpool
+    and wait for all greenthreads to finish in test cleanup.
+    """
+
+    def __init__(self, test):
+        self.test_case_id = test
+
+    def _setUp(self):
+        self.greenpool = eventlet.greenpool.GreenPool()
+
+        def _get_default_green_pool():
+            return self.greenpool
+        # NOTE(sean-k-mooney): greenpools use eventlet.spawn and
+        # eventlet.spawn_n so we can't stub out all calls to those functions.
+        # Instead since nova only creates greenthreads directly via nova.utils
+        # we stub out the default green pool. This will not capture
+        # Greenthreads created via the standard lib threading module.
+        self.useFixture(fixtures.MonkeyPatch(
+            'nova.utils._get_default_green_pool', _get_default_green_pool))
+        self.addCleanup(self.do_cleanup)
+
+    def do_cleanup(self):
+        running = self.greenpool.running()
+        if running:
+            # kill all greenthreads in the pool before raising to prevent
+            # them from interfering with other tests.
+            for gt in list(self.greenpool.coroutines_running):
+                if isinstance(gt, eventlet.greenthread.GreenThread):
+                    gt.kill()
+            # reset the global greenpool just in case.
+            utils.DEFAULT_GREEN_POOL = eventlet.greenpool.GreenPool()
+            if any(
+                isinstance(gt, eventlet.greenthread.GreenThread)
+                for gt in self.greenpool.coroutines_running
+            ):
+                raise RuntimeError(
+                    f'detected leaked greenthreads in {self.test_case_id}')
+            elif (len(self.greenpool.coroutines_running) > 0 and
+                  strutils.bool_from_string(os.getenv(
+                    "NOVA_RAISE_ON_GREENLET_LEAK", "0")
+            )):
+                raise RuntimeError(
+                    f'detected leaked greenlets in {self.test_case_id}')
+            else:
+                self.addDetail(
+                    'IsolatedGreenPoolFixture',
+                    f'no leaked greenthreads detected in {self.test_case_id} '
+                    'but some greenlets were running when the test finished.'
+                    'They cannot be killed so they may interact with '
+                    'other tests if they raise exceptions. '
+                    'These greenlets were likely created by spawn_n and'
+                    'and therefore are not expected to return or raise.'
+                )
+
+
 class _FakeGreenThread(object):
     def __init__(self, func, *args, **kwargs):
         self._result = func(*args, **kwargs)
@@ -1316,6 +1375,77 @@ class PrivsepFixture(fixtures.Fixture):
         super(PrivsepFixture, self).setUp()
         self.useFixture(fixtures.MockPatchObject(
             nova.privsep.sys_admin_pctxt, 'client_mode', False))
+
+
+class CGroupsFixture(fixtures.Fixture):
+    """Mocks checks made for available subsystems on the host's control group.
+
+    The fixture mocks all calls made on the host to verify the capabilities
+    provided by its kernel. Through this, one can simulate the underlying
+    system hosts work on top of and have tests react to expected outcomes from
+    such.
+
+    Use sample:
+    >>> cgroups = self.useFixture(CGroupsFixture())
+    >>> cgroups = self.useFixture(CGroupsFixture(version=2))
+    >>> cgroups = self.useFixture(CGroupsFixture())
+    ... cgroups.version = 2
+
+    :attr version: Arranges mocks to simulate the host interact with nova
+                   following the given version of cgroups.
+                   Available values are:
+                        - 0: All checks related to cgroups will return False.
+                        - 1: Checks related to cgroups v1 will return True.
+                        - 2: Checks related to cgroups v2 will return True.
+                   Defaults to 1.
+    """
+
+    def __init__(self, version=1):
+        self._cpuv1 = None
+        self._cpuv2 = None
+
+        self._version = version
+
+    @property
+    def version(self):
+        return self._version
+
+    @version.setter
+    def version(self, value):
+        self._version = value
+        self._update_mocks()
+
+    def setUp(self):
+        super().setUp()
+        self._cpuv1 = self.useFixture(fixtures.MockPatch(
+            'nova.virt.libvirt.host.Host._has_cgroupsv1_cpu_controller')).mock
+        self._cpuv2 = self.useFixture(fixtures.MockPatch(
+            'nova.virt.libvirt.host.Host._has_cgroupsv2_cpu_controller')).mock
+        self._update_mocks()
+
+    def _update_mocks(self):
+        if not self._cpuv1:
+            return
+
+        if not self._cpuv2:
+            return
+
+        if self.version == 0:
+            self._cpuv1.return_value = False
+            self._cpuv2.return_value = False
+            return
+
+        if self.version == 1:
+            self._cpuv1.return_value = True
+            self._cpuv2.return_value = False
+            return
+
+        if self.version == 2:
+            self._cpuv1.return_value = False
+            self._cpuv2.return_value = True
+            return
+
+        raise ValueError(f"Unknown cgroups version: '{self.version}'.")
 
 
 class NoopQuotaDriverFixture(fixtures.Fixture):
@@ -1867,3 +1997,101 @@ class ComputeNodeIdFixture(fixtures.Fixture):
             'nova.compute.manager.ComputeManager.'
             '_ensure_existing_node_identity',
             mock.DEFAULT))
+
+
+class GreenThreadPoolShutdownWait(fixtures.Fixture):
+    """Always wait for greenlets in greenpool to finish.
+
+    We use the futurist.GreenThreadPoolExecutor, for example, in compute
+    manager to run live migration jobs. It runs those jobs in bare greenlets
+    created by eventlet.spawn_n(). Bare greenlets cannot be killed the same
+    way as GreenThreads created by eventlet.spawn().
+
+    Because they cannot be killed, in the test environment we must either let
+    them run to completion or move on while they are still running (which can
+    cause test failures as the leaked greenlets attempt to access structures
+    that have already been torn down).
+
+    When a compute service is stopped by Service.stop(), the compute manager's
+    cleanup_host() method is called and while cleaning up, the compute manager
+    calls the GreenThreadPoolExecutor.shutdown() method with wait=False. This
+    means that a test running GreenThreadPoolExecutor jobs will not wait for
+    the bare greenlets to finish running -- it will instead move on immediately
+    while greenlets are still running.
+
+    This fixture will ensure GreenThreadPoolExecutor.shutdown() is always
+    called with wait=True in an effort to reduce the number of leaked bare
+    greenlets.
+
+    See https://bugs.launchpad.net/nova/+bug/1946339 for details.
+    """
+
+    def setUp(self):
+        super().setUp()
+        real_shutdown = futurist.GreenThreadPoolExecutor.shutdown
+        self.useFixture(fixtures.MockPatch(
+            'futurist.GreenThreadPoolExecutor.shutdown',
+            lambda self, wait: real_shutdown(self, wait=True)))
+
+
+class UnifiedLimitsFixture(fixtures.Fixture):
+    def setUp(self):
+        super().setUp()
+        self.mock_sdk_adapter = mock.Mock()
+        real_get_sdk_adapter = utils.get_sdk_adapter
+
+        def fake_get_sdk_adapter(service_type, **kwargs):
+            if service_type == 'identity':
+                return self.mock_sdk_adapter
+            return real_get_sdk_adapter(service_type, **kwargs)
+
+        self.useFixture(fixtures.MockPatch(
+            'nova.utils.get_sdk_adapter', fake_get_sdk_adapter))
+
+        self.mock_sdk_adapter.registered_limits.side_effect = (
+            self.registered_limits)
+        self.mock_sdk_adapter.limits.side_effect = self.limits
+        self.mock_sdk_adapter.create_registered_limit.side_effect = (
+            self.create_registered_limit)
+        self.mock_sdk_adapter.create_limit.side_effect = self.create_limit
+
+        self.registered_limits_list = []
+        self.limits_list = []
+
+    def registered_limits(self, region_id=None):
+        if region_id:
+            return [rl for rl in self.registered_limits_list
+                    if rl.region_id == region_id]
+        return self.registered_limits_list
+
+    def limits(self, project_id=None, region_id=None):
+        limits_list = self.limits_list
+        if project_id:
+            limits_list = [pl for pl in limits_list
+                           if pl.project_id == project_id]
+        if region_id:
+            limits_list = [pl for pl in limits_list
+                           if pl.region_id == region_id]
+        return limits_list
+
+    def create_registered_limit(self, **attrs):
+        rl = collections.namedtuple(
+            'RegisteredLimit',
+            ['resource_name', 'default_limit', 'region_id', 'service_id'])
+        rl.resource_name = attrs.get('resource_name')
+        rl.default_limit = attrs.get('default_limit')
+        rl.region_id = attrs.get('region_id')
+        rl.service_id = attrs.get('service_id')
+        self.registered_limits_list.append(rl)
+
+    def create_limit(self, **attrs):
+        pl = collections.namedtuple(
+            'Limit',
+            ['resource_name', 'resource_limit', 'project_id', 'region_id',
+             'service_id'])
+        pl.resource_name = attrs.get('resource_name')
+        pl.resource_limit = attrs.get('resource_limit')
+        pl.project_id = attrs.get('project_id')
+        pl.region_id = attrs.get('region_id')
+        pl.service_id = attrs.get('service_id')
+        self.limits_list.append(pl)

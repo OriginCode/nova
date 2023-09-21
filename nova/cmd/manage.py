@@ -58,6 +58,8 @@ from nova.db.main import api as db
 from nova.db import migration
 from nova import exception
 from nova.i18n import _
+from nova.limit import local as local_limit
+from nova.limit import placement as placement_limit
 from nova.network import constants
 from nova.network import neutron as neutron_api
 from nova import objects
@@ -70,6 +72,7 @@ from nova.objects import instance_mapping as instance_mapping_obj
 from nova.objects import pci_device as pci_device_obj
 from nova.objects import quotas as quotas_obj
 from nova.objects import virtual_interface as virtual_interface_obj
+import nova.quota
 from nova import rpc
 from nova.scheduler.client import report
 from nova.scheduler import utils as scheduler_utils
@@ -185,6 +188,8 @@ class DbCommands(object):
         instance_mapping_obj.populate_user_id,
         # Added in Victoria
         pci_device_obj.PciDevice.populate_dev_uuids,
+        # Added in 2023.2
+        instance_obj.populate_instance_compute_id,
     )
 
     @args('--local_cell', action='store_true',
@@ -229,10 +234,10 @@ class DbCommands(object):
         print(migration.db_version())
 
     @args('--max_rows', type=int, metavar='<number>', dest='max_rows',
-          help='Maximum number of deleted rows to archive. Defaults to 1000. '
-               'Note that this number does not include the corresponding '
-               'rows, if any, that are removed from the API database for '
-               'deleted instances.')
+          help='Maximum number of deleted rows to archive per table. Defaults '
+               'to 1000. Note that this number is a soft limit and does not '
+               'include the corresponding rows, if any, that are removed '
+               'from the API database for deleted instances.')
     @args('--before', metavar='<date>',
           help=('Archive rows that have been deleted before this date. '
                 'Accepts date strings in the default format output by the '
@@ -404,7 +409,10 @@ class DbCommands(object):
              'cell1.instances': 5}
         :param cctxt: Cell-targeted nova.context.RequestContext if archiving
             across all cells
-        :param max_rows: Maximum number of deleted rows to archive
+        :param max_rows: Maximum number of deleted rows to archive per table.
+            Note that this number is a soft limit and does not include the
+            corresponding rows, if any, that are removed from the API database
+            for deleted instances.
         :param until_complete: Whether to run continuously until all deleted
             rows are archived
         :param verbose: Whether to print how many rows were archived per table
@@ -417,15 +425,26 @@ class DbCommands(object):
         """
         ctxt = context.get_admin_context()
         while True:
-            run, deleted_instance_uuids, total_rows_archived = \
+            # table_to_rows = {table_name: number_of_rows_archived}
+            # deleted_instance_uuids = ['uuid1', 'uuid2', ...]
+            table_to_rows, deleted_instance_uuids, total_rows_archived = \
                 db.archive_deleted_rows(
                     cctxt, max_rows, before=before_date, task_log=task_log)
-            for table_name, rows_archived in run.items():
+
+            for table_name, rows_archived in table_to_rows.items():
                 if cell_name:
                     table_name = cell_name + '.' + table_name
                 table_to_rows_archived.setdefault(table_name, 0)
                 table_to_rows_archived[table_name] += rows_archived
-            if deleted_instance_uuids:
+
+            # deleted_instance_uuids does not necessarily mean that any
+            # instances rows were archived because it is obtained by a query
+            # separate from the archive queries. For example, if a
+            # DBReferenceError was raised while processing the instances table,
+            # we would have skipped the table and had 0 rows archived even
+            # though deleted instances rows were found.
+            instances_archived = table_to_rows.get('instances', 0)
+            if deleted_instance_uuids and instances_archived:
                 table_to_rows_archived.setdefault(
                     'API_DB.instance_mappings', 0)
                 table_to_rows_archived.setdefault(
@@ -448,8 +467,9 @@ class DbCommands(object):
 
             # If we're not archiving until there is nothing more to archive, we
             # have reached max_rows in this cell DB or there was nothing to
-            # archive.
-            if not until_complete or not run:
+            # archive. We check the values() in case we get something like
+            # table_to_rows = {'instances': 0} back somehow.
+            if not until_complete or not any(table_to_rows.values()):
                 break
             if verbose:
                 sys.stdout.write('.')
@@ -758,7 +778,7 @@ class CellV2Commands(object):
             url = sqla_url.make_url(connection)
             url = url.set(database=url.database + '_cell0')
 
-            return urlparse.unquote(str(url))
+            return urlparse.unquote(url.render_as_string(hide_password=False))
 
         dbc = database_connection or cell0_default_connection()
         ctxt = context.RequestContext()
@@ -3350,6 +3370,199 @@ class ImagePropertyCommands:
             return 1
 
 
+class LimitsCommands():
+
+    def _create_unified_limits(self, ctxt, legacy_defaults, project_id,
+                               region_id, output, dry_run):
+        return_code = 0
+
+        # Create registered (default) limits first.
+        unified_to_legacy_names = dict(
+            **local_limit.LEGACY_LIMITS, **placement_limit.LEGACY_LIMITS)
+
+        legacy_to_unified_names = dict(
+            zip(unified_to_legacy_names.values(),
+                unified_to_legacy_names.keys()))
+
+        # Handle the special case of PCPU. With legacy quotas, there is no
+        # dedicated quota limit for PCPUs, so they share the quota limit for
+        # VCPUs: 'cores'. With unified limits, class:PCPU has its own dedicated
+        # quota limit, so we will just mirror the limit for class:VCPU and
+        # create a limit with the same value for class:PCPU.
+        if 'cores' in legacy_defaults:
+            # Just make up a dummy legacy resource 'pcores' for this.
+            legacy_defaults['pcores'] = legacy_defaults['cores']
+            unified_to_legacy_names['class:PCPU'] = 'pcores'
+            legacy_to_unified_names['pcores'] = 'class:PCPU'
+
+        # For auth, a section for [keystone] is required in the config:
+        #
+        # [keystone]
+        # region_name = RegionOne
+        # user_domain_name = Default
+        # password = <password>
+        # username = <username>
+        # auth_url = http://127.0.0.1/identity
+        # auth_type = password
+        # system_scope = all
+        #
+        # The configured user needs 'role:admin and system_scope:all' by
+        # default in order to create limits in Keystone.
+        keystone_api = utils.get_sdk_adapter('identity')
+
+        # Service ID is required in unified limits APIs.
+        service_id = keystone_api.find_service('nova').id
+
+        # Retrieve the existing resource limits from Keystone.
+        registered_limits = keystone_api.registered_limits(region_id=region_id)
+
+        unified_defaults = {
+            rl.resource_name: rl.default_limit for rl in registered_limits}
+
+        # f-strings don't seem to work well with the _() translation function.
+        msg = f'Found default limits in Keystone: {unified_defaults} ...'
+        output(_(msg))
+
+        # Determine which resource limits are missing in Keystone so that we
+        # can create them.
+        output(_('Creating default limits in Keystone ...'))
+        for resource, rlimit in legacy_defaults.items():
+            resource_name = legacy_to_unified_names[resource]
+            if resource_name not in unified_defaults:
+                msg = f'Creating default limit: {resource_name} = {rlimit}'
+                if region_id:
+                    msg += f' in region {region_id}'
+                output(_(msg))
+                if not dry_run:
+                    try:
+                        keystone_api.create_registered_limit(
+                            resource_name=resource_name,
+                            default_limit=rlimit, region_id=region_id,
+                            service_id=service_id)
+                    except Exception as e:
+                        msg = f'Failed to create default limit: {str(e)}'
+                        print(_(msg))
+                        return_code = 1
+            else:
+                existing_rlimit = unified_defaults[resource_name]
+                msg = (f'A default limit: {resource_name} = {existing_rlimit} '
+                        'already exists in Keystone, skipping ...')
+                output(_(msg))
+
+        # Create project limits if there are any.
+        if not project_id:
+            return return_code
+
+        output(_('Reading project limits from the Nova API database ...'))
+        legacy_projects = objects.Quotas.get_all_by_project(ctxt, project_id)
+        legacy_projects.pop('project_id', None)
+        msg = f'Found project limits in the database: {legacy_projects} ...'
+        output(_(msg))
+
+        # Handle the special case of PCPU again for project limits.
+        if 'cores' in legacy_projects:
+            # Just make up a dummy legacy resource 'pcores' for this.
+            legacy_projects['pcores'] = legacy_projects['cores']
+
+        # Retrieve existing limits from Keystone.
+        project_limits = keystone_api.limits(
+            project_id=project_id, region_id=region_id)
+        unified_projects = {
+            pl.resource_name: pl.resource_limit for pl in project_limits}
+        msg = f'Found project limits in Keystone: {unified_projects} ...'
+        output(_(msg))
+
+        output(_('Creating project limits in Keystone ...'))
+        for resource, plimit in legacy_projects.items():
+            resource_name = legacy_to_unified_names[resource]
+            if resource_name not in unified_projects:
+                msg = (
+                    f'Creating project limit: {resource_name} = {plimit} '
+                    f'for project {project_id}')
+                if region_id:
+                    msg += f' in region {region_id}'
+                output(_(msg))
+                if not dry_run:
+                    try:
+                        keystone_api.create_limit(
+                            resource_name=resource_name,
+                            resource_limit=plimit, project_id=project_id,
+                            region_id=region_id, service_id=service_id)
+                    except Exception as e:
+                        msg = f'Failed to create project limit: {str(e)}'
+                        print(_(msg))
+                        return_code = 1
+            else:
+                existing_plimit = unified_projects[resource_name]
+                msg = (f'A project limit: {resource_name} = {existing_plimit} '
+                        'already exists in Keystone, skipping ...')
+                output(_(msg))
+
+        return return_code
+
+    @action_description(
+        _("Copy quota limits from the Nova API database to Keystone."))
+    @args('--project-id', metavar='<project-id>', dest='project_id',
+          help='Project ID for which to migrate quota limits')
+    @args('--region-id', metavar='<region-id>', dest='region_id',
+          help='Region ID for which to migrate quota limits')
+    @args('--verbose', action='store_true', dest='verbose', default=False,
+          help='Provide verbose output during execution.')
+    @args('--dry-run', action='store_true', dest='dry_run', default=False,
+          help='Show what limits would be created without actually '
+               'creating them.')
+    def migrate_to_unified_limits(self, project_id=None, region_id=None,
+                                  verbose=False, dry_run=False):
+        """Migrate quota limits from legacy quotas to unified limits.
+
+        Return codes:
+        * 0: Command completed successfully.
+        * 1: An unexpected error occurred.
+        * 2: Failed to connect to the database.
+        """
+        ctxt = context.get_admin_context()
+
+        output = lambda msg: None
+        if verbose:
+            output = lambda msg: print(msg)
+
+        output(_('Reading default limits from the Nova API database ...'))
+
+        try:
+            # This will look for limits in the 'default' quota class first and
+            # then fall back to the [quota] config options.
+            legacy_defaults = nova.quota.QUOTAS.get_defaults(ctxt)
+        except db_exc.CantStartEngineError:
+            print(_('Failed to connect to the database so aborting this '
+                    'migration attempt. Please check your config file to make '
+                    'sure that [api_database]/connection and '
+                    '[database]/connection are set and run this '
+                    'command again.'))
+            return 2
+
+        # Remove obsolete resource limits.
+        for resource in ('fixed_ips', 'floating_ips', 'security_groups',
+                         'security_group_rules'):
+            if resource in legacy_defaults:
+                msg = f'Skipping obsolete limit for {resource} ...'
+                output(_(msg))
+                legacy_defaults.pop(resource)
+
+        msg = (
+            f'Found default limits in the database: {legacy_defaults} ...')
+        output(_(msg))
+
+        try:
+            return self._create_unified_limits(
+                ctxt, legacy_defaults, project_id, region_id, output, dry_run)
+        except Exception as e:
+            msg = (f'Unexpected error, see nova-manage.log for the full '
+                   f'trace: {str(e)}')
+            print(_(msg))
+            LOG.exception('Unexpected error')
+            return 1
+
+
 CATEGORIES = {
     'api_db': ApiDbCommands,
     'cell_v2': CellV2Commands,
@@ -3358,6 +3571,7 @@ CATEGORIES = {
     'libvirt': LibvirtCommands,
     'volume_attachment': VolumeAttachmentCommands,
     'image_property': ImagePropertyCommands,
+    'limits': LimitsCommands,
 }
 
 

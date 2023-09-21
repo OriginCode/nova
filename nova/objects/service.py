@@ -253,7 +253,7 @@ NODE_IDENTITY_VERSION = 65
 #    and value be the latest service version that the release supports (for
 #    example, before Bobcat RC1, please add 'Bobcat': XX where X is the latest
 #    servion version that was added)
-OLDEST_SUPPORTED_SERVICE_VERSION = 'Yoga'
+OLDEST_SUPPORTED_SERVICE_VERSION = 'Antelope'
 SERVICE_VERSION_ALIASES = {
     'Victoria': 52,
     'Wallaby': 54,
@@ -261,6 +261,7 @@ SERVICE_VERSION_ALIASES = {
     'Yoga': 61,
     'Zed': 64,
     'Antelope': 66,
+    'Bobcat': 66,
 }
 
 
@@ -388,6 +389,7 @@ class Service(base.NovaPersistentObject, base.NovaObject,
 
         return service
 
+    @base.lazy_load_counter
     def obj_load_attr(self, attrname):
         if not self._context:
             raise exception.OrphanedObjectError(method='obj_load_attr',

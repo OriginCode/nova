@@ -1394,9 +1394,6 @@ class VDPAServersTest(_PCIServersWithMigrationTestBase):
     NUM_PFS = 1
     NUM_VFS = 4
 
-    FAKE_LIBVIRT_VERSION = 6_009_000  # 6.9.0
-    FAKE_QEMU_VERSION = 5_001_000  # 5.1.0
-
     def setUp(self):
         super().setUp()
         # The ultimate base class _IntegratedTestBase uses NeutronFixture but
@@ -1444,9 +1441,7 @@ class VDPAServersTest(_PCIServersWithMigrationTestBase):
             vdpa_info.add_device(f'vdpa_vdpa{idx}', idx, vf)
 
         return super().start_compute(hostname=hostname,
-            pci_info=pci_info, vdpa_info=vdpa_info,
-            libvirt_version=self.FAKE_LIBVIRT_VERSION,
-            qemu_version=self.FAKE_QEMU_VERSION)
+            pci_info=pci_info, vdpa_info=vdpa_info)
 
     def create_vdpa_port(self):
         vdpa_port = {
@@ -1549,7 +1544,11 @@ class VDPAServersTest(_PCIServersWithMigrationTestBase):
             'not supported for instance with vDPA ports',
             ex.response.text)
 
+    # NOTE(sbauza): Now we're post-Antelope release, we don't need to support
+    # this test
     def test_attach_interface_service_version_61(self):
+        self.flags(disable_compute_service_check_for_ffu=True,
+                   group='workarounds')
         with mock.patch(
                 "nova.objects.service.get_minimum_version_all_cells",
                 return_value=61
@@ -1578,7 +1577,11 @@ class VDPAServersTest(_PCIServersWithMigrationTestBase):
         self.assertEqual(hostname, port['binding:host_id'])
         self.assertEqual(server['id'], port['device_id'])
 
+    # NOTE(sbauza): Now we're post-Antelope release, we don't need to support
+    # this test
     def test_detach_interface_service_version_61(self):
+        self.flags(disable_compute_service_check_for_ffu=True,
+                   group='workarounds')
         with mock.patch(
                 "nova.objects.service.get_minimum_version_all_cells",
                 return_value=61
@@ -1612,10 +1615,7 @@ class VDPAServersTest(_PCIServersWithMigrationTestBase):
         # to any host but should still be owned by the vm
         port = self.neutron.show_port(vdpa_port['id'])['port']
         self.assertEqual(server['id'], port['device_id'])
-        # FIXME(sean-k-mooney): we should be unbinding the port from
-        # the host when we shelve offload but we don't today.
-        # This is unrelated to vdpa port and is a general issue.
-        self.assertEqual(hostname, port['binding:host_id'])
+        self.assertIsNone(port['binding:host_id'])
         self.assertIn('binding:profile', port)
         self.assertIsNone(server['OS-EXT-SRV-ATTR:hypervisor_hostname'])
         self.assertIsNone(server['OS-EXT-SRV-ATTR:host'])
@@ -1637,9 +1637,7 @@ class VDPAServersTest(_PCIServersWithMigrationTestBase):
         self.assertPCIDeviceCounts(hostname, total=num_pci, free=num_pci)
         self.assertIsNone(server['OS-EXT-SRV-ATTR:hypervisor_hostname'])
         port = self.neutron.show_port(vdpa_port['id'])['port']
-        # FIXME(sean-k-mooney): shelve  offload should unbind the port
-        # self.assertEqual('', port['binding:host_id'])
-        self.assertEqual(hostname, port['binding:host_id'])
+        self.assertIsNone(port['binding:host_id'])
 
         server = self._unshelve_server(server)
         self.assertPCIDeviceCounts(hostname, total=num_pci, free=num_pci - 2)
@@ -1670,9 +1668,7 @@ class VDPAServersTest(_PCIServersWithMigrationTestBase):
         self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci)
         self.assertIsNone(server['OS-EXT-SRV-ATTR:hypervisor_hostname'])
         port = self.neutron.show_port(vdpa_port['id'])['port']
-        # FIXME(sean-k-mooney): shelve should unbind the port
-        # self.assertEqual('', port['binding:host_id'])
-        self.assertEqual(source, port['binding:host_id'])
+        self.assertIsNone(port['binding:host_id'])
 
         # force the unshelve to the other host
         self.api.put_service(
@@ -1871,7 +1867,11 @@ class VDPAServersTest(_PCIServersWithMigrationTestBase):
             self.assertEqual(
                 dest, server['OS-EXT-SRV-ATTR:hypervisor_hostname'])
 
+    # NOTE(sbauza): Now we're post-Antelope release, we don't need to support
+    # this test
     def test_suspend_and_resume_service_version_62(self):
+        self.flags(disable_compute_service_check_for_ffu=True,
+                   group='workarounds')
         with mock.patch(
                 "nova.objects.service.get_minimum_version_all_cells",
                 return_value=62
@@ -1890,7 +1890,11 @@ class VDPAServersTest(_PCIServersWithMigrationTestBase):
         self.assertPCIDeviceCounts(source, total=num_pci, free=num_pci - 2)
         self.assertEqual('ACTIVE', server['status'])
 
+    # NOTE(sbauza): Now we're post-Antelope release, we don't need to support
+    # this test
     def test_live_migrate_service_version_62(self):
+        self.flags(disable_compute_service_check_for_ffu=True,
+                   group='workarounds')
         with mock.patch(
                 "nova.objects.service.get_minimum_version_all_cells",
                 return_value=62
@@ -3652,7 +3656,6 @@ class RemoteManagedServersTest(_PCIServersWithMigrationTestBase):
 
     # Min Libvirt version that supports working with PCI VPD.
     FAKE_LIBVIRT_VERSION = 7_009_000  # 7.9.0
-    FAKE_QEMU_VERSION = 5_001_000  # 5.1.0
 
     def setUp(self):
         super().setUp()
@@ -3781,8 +3784,7 @@ class RemoteManagedServersTest(_PCIServersWithMigrationTestBase):
         return super().start_compute(
             hostname=hostname, host_info=host_info, pci_info=pci_info,
             mdev_info=mdev_info, vdpa_info=vdpa_info,
-            libvirt_version=libvirt_version or self.FAKE_LIBVIRT_VERSION,
-            qemu_version=qemu_version or self.FAKE_QEMU_VERSION)
+            libvirt_version=libvirt_version or self.FAKE_LIBVIRT_VERSION)
 
     def create_remote_managed_tunnel_port(self):
         dpu_tunnel_port = {
@@ -3926,17 +3928,7 @@ class RemoteManagedServersTest(_PCIServersWithMigrationTestBase):
 
         port = self.neutron.show_port(uuids.dpu_tunnel_port)['port']
         self.assertIn('binding:profile', port)
-        self.assertEqual(
-            {
-                'pci_vendor_info': '15b3:101e',
-                'pci_slot': '0000:82:00.4',
-                'physical_network': None,
-                'pf_mac_address': '52:54:00:1e:59:02',
-                'vf_num': 3,
-                'card_serial_number': 'MT0000X00002',
-            },
-            port['binding:profile'],
-        )
+        self.assertEqual({}, port['binding:profile'])
 
     def test_suspend(self):
         self.start_compute()

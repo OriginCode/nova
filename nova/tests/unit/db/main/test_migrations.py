@@ -30,7 +30,6 @@ from unittest import mock
 from alembic import command as alembic_api
 from alembic import script as alembic_script
 import fixtures
-from migrate.versioning import api as migrate_api
 from oslo_db.sqlalchemy import enginefacade
 from oslo_db.sqlalchemy import test_fixtures
 from oslo_db.sqlalchemy import test_migrations
@@ -80,11 +79,9 @@ class NovaModelsMigrationsSync(test_migrations.ModelsMigrationsSync):
 
     def include_object(self, object_, name, type_, reflected, compare_to):
         if type_ == 'table':
-            # migrate_version is a sqlalchemy-migrate control table and
-            # isn't included in the model. shadow_* are generated from
-            # the model and have their own tests to ensure they don't
-            # drift.
-            if name == 'migrate_version' or name.startswith('shadow_'):
+            # shadow_* are generated from the model and have their own tests to
+            # ensure they don't drift.
+            if name.startswith('shadow_'):
                 return False
 
             # Define a whitelist of tables that will be removed from the DB in
@@ -158,7 +155,6 @@ class TestModelsSyncMySQL(
                     "FROM information_schema.TABLES "
                     "WHERE TABLE_SCHEMA = :database "
                     "AND ENGINE != 'InnoDB' "
-                    "AND TABLE_NAME != 'migrate_version'"
                 ),
                 {'database': self.engine.url.database},
             )
@@ -168,47 +164,6 @@ class TestModelsSyncMySQL(
 
 class TestModelsSyncPostgreSQL(
     NovaModelsMigrationsSync,
-    test_fixtures.OpportunisticDBTestMixin,
-    base.BaseTestCase,
-):
-    FIXTURE = test_fixtures.PostgresqlOpportunisticFixture
-
-
-class NovaModelsMigrationsLegacySync(NovaModelsMigrationsSync):
-    """Test that the models match the database after old migrations are run."""
-
-    def db_sync(self, engine):
-        # the 'nova.db.migration.db_sync' method will not use the legacy
-        # sqlalchemy-migrate-based migration flow unless the database is
-        # already controlled with sqlalchemy-migrate, so we need to manually
-        # enable version controlling with this tool to test this code path
-        repository = migration._find_migrate_repo(database='main')
-        migrate_api.version_control(
-            engine, repository, migration.MIGRATE_INIT_VERSION['main'])
-
-        # now we can apply migrations as expected and the legacy path will be
-        # followed
-        super().db_sync(engine)
-
-
-class TestModelsLegacySyncSQLite(
-    NovaModelsMigrationsLegacySync,
-    test_fixtures.OpportunisticDBTestMixin,
-    base.BaseTestCase,
-):
-    pass
-
-
-class TestModelsLegacySyncMySQL(
-    NovaModelsMigrationsLegacySync,
-    test_fixtures.OpportunisticDBTestMixin,
-    base.BaseTestCase,
-):
-    FIXTURE = test_fixtures.MySQLOpportunisticFixture
-
-
-class TestModelsLegacySyncPostgreSQL(
-    NovaModelsMigrationsLegacySync,
     test_fixtures.OpportunisticDBTestMixin,
     base.BaseTestCase,
 ):
@@ -227,7 +182,7 @@ class NovaMigrationsWalk(
         super().setUp()
         self.engine = enginefacade.writer.get_engine()
         self.config = migration._find_alembic_conf('main')
-        self.init_version = migration.ALEMBIC_INIT_VERSION['main']
+        self.init_version = '8f2f1571d55b'
 
     def assertIndexExists(self, connection, table_name, index):
         self.assertTrue(
@@ -322,6 +277,29 @@ class NovaMigrationsWalk(
         self.assertIndexNotExists(
             connection, 'instances', 'uuid',
         )
+
+    def _check_1b91788ec3a6(self, connection):
+        # the table optionally existed: there's no way to check for its
+        # removal without creating it first, which is dumb
+        pass
+
+    def _check_1acf2c98e646(self, connection):
+        for prefix in ('', 'shadow_'):
+            self.assertColumnExists(connection,
+                                    prefix + 'instances',
+                                    'compute_id')
+            self.assertColumnExists(connection,
+                                    prefix + 'migrations',
+                                    'dest_compute_id')
+            if not prefix:
+                self.assertIndexExists(
+                    connection,
+                    prefix + 'instances',
+                    'instances_compute_id_deleted_idx')
+                self.assertIndexExists(
+                    connection,
+                    prefix + 'migrations',
+                    'migrations_dest_compute_id_deleted_idx')
 
     def test_single_base_revision(self):
         """Ensure we only have a single base revision.

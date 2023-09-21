@@ -271,6 +271,38 @@ https://docs.openstack.org/latest/nova/admin/hw_machine_type.html"""))
 
         return upgradecheck.Result(upgradecheck.Code.SUCCESS)
 
+    def _check_service_user_token(self):
+        if not CONF.service_user.send_service_user_token:
+            msg = (_("""
+Service user token configuration is required for all Nova services.
+For more details see the following:
+https://docs.openstack.org/latest/nova/admin/configuration/service-user-token.html"""))  # noqa
+            return upgradecheck.Result(upgradecheck.Code.FAILURE, msg)
+        return upgradecheck.Result(upgradecheck.Code.SUCCESS)
+
+    def _check_compute_object_linkage(self):
+        ctxt = nova_context.get_admin_context()
+        try:
+            cn_no_service = main_db_api.compute_nodes_get_by_service_id(
+                ctxt, None)
+        except exception.ServiceNotFound:
+            cn_no_service = []
+        if cn_no_service:
+            msg = (_('Compute node objects without service_id linkage were '
+                     'found in the database. Ensure all non-deleted compute '
+                     'services have started with upgraded code.'))
+            return upgradecheck.Result(upgradecheck.Code.FAILURE, msg)
+
+        inst_no_compute = main_db_api.instance_get_all_by_filters(
+            ctxt, filters={'compute_id': None}, limit=1)
+        if inst_no_compute:
+            msg = (_('Non-deleted instances missing compute node linkage '
+                     'were found in the database. Online data migrations '
+                     'should be run.'))
+            return upgradecheck.Result(upgradecheck.Code.FAILURE, msg)
+
+        return upgradecheck.Result(upgradecheck.Code.SUCCESS)
+
     # The format of the check functions is to return an upgradecheck.Result
     # object with the appropriate upgradecheck.Code and details set. If the
     # check hits warnings or failures then those should be stored in the
@@ -294,6 +326,10 @@ https://docs.openstack.org/latest/nova/admin/hw_machine_type.html"""))
         (_('Older than N-1 computes'), _check_old_computes),
         # Added in Wallaby
         (_('hw_machine_type unset'), _check_machine_type_set),
+        # Added in Bobcat
+        (_('Service User Token Configuration'), _check_service_user_token),
+        # Added in 2023.2
+        (_('Object ID linkage'), _check_compute_object_linkage),
     )
 
 

@@ -42,6 +42,7 @@ from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional.api import client as api_client
 from nova.tests.functional import fixtures as func_fixtures
 from nova import utils
+import typing as ty
 
 
 CONF = nova.conf.CONF
@@ -639,6 +640,33 @@ class InstanceHelperMixin:
             server['id'],
             {'createImage': {'name': snapshot_name}}
         )
+
+    def _attach_volumes(self, server, vol_ids: ty.List[str]):
+        # attach volumes to server
+        # these attachments are done by nova api, that means
+        # nova know about these attachments and so they are valid ones.
+
+        for vol_id in vol_ids:
+            self.api.post_server_volume(
+                server['id'], {'volumeAttachment': {'volumeId': vol_id}})
+
+        for vol_id in vol_ids:
+            # wait for each vol to get attached
+            self._wait_for_volume_attach(server['id'], vol_id)
+
+        # here server is already in an active state
+        # this is just to refresh server object
+        # so attached volumes can be shown in server
+        return self._wait_for_state_change(server, expected_status='ACTIVE')
+
+    def _create_vol_attachments_by_cinder(
+            self, volume_id, server, new_attachments=1):
+        # these attachments are done by cinder api,
+        # and nova is not aware of them.
+
+        for _ in range(new_attachments):
+            self.cinder.create_vol_attachment(
+                volume_id, server['id'])
 
 
 class PlacementHelperMixin:
@@ -1244,6 +1272,10 @@ class _IntegratedTestBase(test.TestCase, PlacementInstanceHelperMixin):
     def _setup_conductor_service(self):
         return self.start_service('conductor')
 
+    def _stop_computes(self):
+        for compute in self.computes.values():
+            compute.stop()
+
     def _setup_services(self):
         # NOTE(danms): Set the global MQ connection to that of our first cell
         # for any cells-ignorant code. Normally this is defaulted in the tests
@@ -1252,8 +1284,11 @@ class _IntegratedTestBase(test.TestCase, PlacementInstanceHelperMixin):
             self.flags(transport_url=self.cell_mappings['cell1'].transport_url)
 
         self.conductor = self._setup_conductor_service()
+        self.addCleanup(self.conductor.stop)
         self.scheduler = self._setup_scheduler_service()
+        self.addCleanup(self.scheduler.stop)
         self.compute = self._setup_compute_service()
+        self.addCleanup(self._stop_computes)
 
         self.api_fixture = self.useFixture(
             nova_fixtures.OSAPIFixture(
@@ -1298,6 +1333,7 @@ class ProviderUsageBaseTestCase(test.TestCase, PlacementInstanceHelperMixin):
         self.policy = self.useFixture(nova_fixtures.RealPolicyFixture())
         self.neutron = self.useFixture(nova_fixtures.NeutronFixture(self))
         self.glance = self.useFixture(nova_fixtures.GlanceFixture(self))
+        self.useFixture(nova_fixtures.CinderFixture(self))
         self.placement = self.useFixture(func_fixtures.PlacementFixture()).api
         self.useFixture(nova_fixtures.AllServicesCurrent())
 

@@ -119,11 +119,11 @@ class BlockDeviceMapping(base.NovaPersistentObject, base.NovaObject,
             del primitive['tag']
 
     @classmethod
-    def populate_uuids(cls, context, count):
+    def populate_uuids(cls, context, max_count):
         @db.pick_context_manager_reader
         def get_bdms_no_uuid(context):
             return context.session.query(db_models.BlockDeviceMapping).\
-                    filter_by(uuid=None).limit(count).all()
+                    filter_by(uuid=None).limit(max_count).all()
 
         db_bdms = get_bdms_no_uuid(context)
 
@@ -328,6 +328,7 @@ class BlockDeviceMapping(base.NovaPersistentObject, base.NovaObject,
     def get_image_mapping(self):
         return block_device.BlockDeviceDict(self).get_image_mapping()
 
+    @base.lazy_load_counter
     def obj_load_attr(self, attrname):
         if not self._context:
             raise exception.OrphanedObjectError(method='obj_load_attr',

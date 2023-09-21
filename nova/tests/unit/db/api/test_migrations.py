@@ -25,7 +25,6 @@ from unittest import mock
 
 from alembic import command as alembic_api
 from alembic import script as alembic_script
-from migrate.versioning import api as migrate_api
 from oslo_db.sqlalchemy import enginefacade
 from oslo_db.sqlalchemy import test_fixtures
 from oslo_db.sqlalchemy import test_migrations
@@ -63,11 +62,6 @@ class NovaModelsMigrationsSync(test_migrations.ModelsMigrationsSync):
 
     def include_object(self, object_, name, type_, reflected, compare_to):
         if type_ == 'table':
-            # migrate_version is a sqlalchemy-migrate control table and
-            # isn't included in the model.
-            if name == 'migrate_version':
-                return False
-
             # Define a whitelist of tables that will be removed from the DB in
             # a later release and don't have a corresponding model anymore.
 
@@ -127,47 +121,6 @@ class TestModelsSyncPostgreSQL(
     FIXTURE = test_fixtures.PostgresqlOpportunisticFixture
 
 
-class NovaModelsMigrationsLegacySync(NovaModelsMigrationsSync):
-    """Test that the models match the database after old migrations are run."""
-
-    def db_sync(self, engine):
-        # the 'nova.db.migration.db_sync' method will not use the legacy
-        # sqlalchemy-migrate-based migration flow unless the database is
-        # already controlled with sqlalchemy-migrate, so we need to manually
-        # enable version controlling with this tool to test this code path
-        repository = migration._find_migrate_repo(database='api')
-        migrate_api.version_control(
-            engine, repository, migration.MIGRATE_INIT_VERSION['api'])
-
-        # now we can apply migrations as expected and the legacy path will be
-        # followed
-        super().db_sync(engine)
-
-
-class TestModelsLegacySyncSQLite(
-    NovaModelsMigrationsLegacySync,
-    test_fixtures.OpportunisticDBTestMixin,
-    testtools.TestCase,
-):
-    pass
-
-
-class TestModelsLegacySyncMySQL(
-    NovaModelsMigrationsLegacySync,
-    test_fixtures.OpportunisticDBTestMixin,
-    testtools.TestCase,
-):
-    FIXTURE = test_fixtures.MySQLOpportunisticFixture
-
-
-class TestModelsLegacySyncPostgreSQL(
-    NovaModelsMigrationsLegacySync,
-    test_fixtures.OpportunisticDBTestMixin,
-    testtools.TestCase,
-):
-    FIXTURE = test_fixtures.PostgresqlOpportunisticFixture
-
-
 class NovaMigrationsWalk(
     test_fixtures.OpportunisticDBTestMixin, test.NoDBTestCase,
 ):
@@ -180,7 +133,7 @@ class NovaMigrationsWalk(
         super().setUp()
         self.engine = enginefacade.writer.get_engine()
         self.config = migration._find_alembic_conf('api')
-        self.init_version = migration.ALEMBIC_INIT_VERSION['api']
+        self.init_version = 'd67eeaabee36'
 
     def _migrate_up(self, connection, revision):
         if revision == self.init_version:  # no tests for the initial revision
@@ -237,6 +190,11 @@ class NovaMigrationsWalk(
         columns = [x['name'] for x in inspector.get_columns('build_requests')]
         for removed_column in self._b30f573d3377_removed_columns:
             self.assertNotIn(removed_column, columns)
+
+    def _check_cdeec0c85668(self, connection):
+        # the table optionally existed: there's no way to check for its
+        # removal without creating it first, which is dumb
+        pass
 
     def test_single_base_revision(self):
         """Ensure we only have a single base revision.

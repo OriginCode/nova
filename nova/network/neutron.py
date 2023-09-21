@@ -222,13 +222,15 @@ def _get_auth_plugin(context, admin=False):
     # support some services (metadata API) where an admin context is used
     # without an auth token.
     global _ADMIN_AUTH
+    user_auth = None
     if admin or (context.is_admin and not context.auth_token):
         if not _ADMIN_AUTH:
             _ADMIN_AUTH = _load_auth_plugin(CONF)
-        return _ADMIN_AUTH
+        user_auth = _ADMIN_AUTH
 
-    if context.auth_token:
-        return service_auth.get_auth_plugin(context)
+    if context.auth_token or user_auth:
+        # When user_auth = None, user_auth will be extracted from the context.
+        return service_auth.get_auth_plugin(context, user_auth=user_auth)
 
     # We did not get a user token and we should not be using
     # an admin token so log an error
@@ -612,10 +614,22 @@ class API:
                     raise exception.ExternalNetworkAttachForbidden(
                         network_uuid=net['id'])
 
-    def _unbind_ports(self, context, ports,
-                      neutron, port_client=None):
-        """Unbind the given ports by clearing their device_id,
+    def unbind_ports(self, context, ports, detach=True):
+        """Unbind and detach the given ports by clearing their
         device_owner and dns_name.
+        The device_id will also be cleaned if detach=True.
+
+        :param context: The request context.
+        :param ports: list of port IDs.
+        """
+        neutron = get_client(context)
+        self._unbind_ports(context, ports, neutron, detach=detach)
+
+    def _unbind_ports(self, context, ports,
+                      neutron, port_client=None, detach=True):
+        """Unbind and detach the given ports by clearing their
+        device_owner and dns_name.
+        The device_id will also be cleaned if detach=True.
 
         :param context: The request context.
         :param ports: list of port IDs.
@@ -638,11 +652,12 @@ class API:
 
             port_req_body: ty.Dict[str, ty.Any] = {
                 'port': {
-                    'device_id': '',
-                    'device_owner': '',
                     constants.BINDING_HOST_ID: None,
                 }
             }
+            if detach:
+                port_req_body['port']['device_id'] = ''
+                port_req_body['port']['device_owner'] = ''
             try:
                 port = self._show_port(
                     context, port_id, neutron_client=neutron,
@@ -3894,7 +3909,7 @@ class API:
                 'Failed to get segment IDs for network %s' % network_id) from e
         # The segment field of an unconfigured subnet could be None
         return [subnet['segment_id'] for subnet in subnets
-                                     if subnet['segment_id'] is not None]
+                                     if subnet.get('segment_id') is not None]
 
     def get_segment_id_for_subnet(
         self,

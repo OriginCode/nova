@@ -869,7 +869,7 @@ def _pack_instance_onto_cores(host_cell, instance_cell,
                 instance_cell.pcpuset)
             cpuset_reserved = _get_reserved(
                 sibling_sets[1], pinning, num_cpu_reserved=num_cpu_reserved)
-            if not pinning or (num_cpu_reserved and not cpuset_reserved):
+            if pinning is None or (num_cpu_reserved and not cpuset_reserved):
                 continue
             break
 
@@ -895,7 +895,7 @@ def _pack_instance_onto_cores(host_cell, instance_cell,
             cpuset_reserved = _get_reserved(
                 sibling_set, pinning, num_cpu_reserved=num_cpu_reserved)
 
-    if not pinning or (num_cpu_reserved and not cpuset_reserved):
+    if pinning is None or (num_cpu_reserved and not cpuset_reserved):
         return
     LOG.debug('Selected cores for pinning: %s, in cell %s', pinning,
                                                             host_cell.id)
@@ -2583,6 +2583,7 @@ def numa_usage_from_instance_numa(host_topology, instance_topology,
             cpuset=host_cell.cpuset,
             pcpuset=host_cell.pcpuset,
             memory=host_cell.memory,
+            socket=host_cell.socket,
             cpu_usage=0,
             memory_usage=0,
             mempages=host_cell.mempages,
@@ -2607,8 +2608,10 @@ def numa_usage_from_instance_numa(host_topology, instance_topology,
                 None, fields.CPUAllocationPolicy.SHARED,
             ):
                 continue
-
-            pinned_cpus = set(instance_cell.cpu_pinning.values())
+            if instance_cell.cpu_pinning:
+                pinned_cpus = set(instance_cell.cpu_pinning.values())
+            else:
+                pinned_cpus = set()
             if instance_cell.cpuset_reserved:
                 pinned_cpus |= instance_cell.cpuset_reserved
 

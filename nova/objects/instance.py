@@ -28,6 +28,7 @@ from sqlalchemy.sql import func
 from nova import availability_zones as avail_zone
 from nova.compute import task_states
 from nova.compute import vm_states
+from nova import context as nova_context
 from nova.db.main import api as db
 from nova.db.main import models
 from nova import exception
@@ -115,7 +116,8 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
     # Version 2.5: Added hard_delete kwarg in destroy
     # Version 2.6: Added hidden
     # Version 2.7: Added resources
-    VERSION = '2.7'
+    # Version 2.8: Added compute_id
+    VERSION = '2.8'
 
     fields = {
         'id': fields.IntegerField(),
@@ -146,6 +148,7 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
 
         'host': fields.StringField(nullable=True),
         'node': fields.StringField(nullable=True),
+        'compute_id': fields.IntegerField(nullable=True),
 
         # TODO(stephenfin): Remove this in version 3.0 of the object as it has
         # been replaced by 'flavor'
@@ -231,6 +234,8 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
     def obj_make_compatible(self, primitive, target_version):
         super(Instance, self).obj_make_compatible(primitive, target_version)
         target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (2, 8) and 'compute_id' in primitive:
+            del primitive['compute_id']
         if target_version < (2, 7) and 'resources' in primitive:
             del primitive['resources']
         if target_version < (2, 6) and 'hidden' in primitive:
@@ -546,6 +551,21 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
             raise exception.ObjectActionError(action='create',
                                               reason='already deleted')
         updates = self.obj_get_changes()
+        version = versionutils.convert_version_to_tuple(self.VERSION)
+
+        if 'node' in updates and 'compute_id' not in updates:
+            # NOTE(danms): This is not really the best idea, as we should try
+            # not to have different behavior based on the version of the
+            # object. However, this exception helps us find cases in testing
+            # where these may not be updated together. We can remove this
+            # later.
+            if version >= (2, 8):
+                raise exception.ObjectActionError(
+                    ('Instance is being created with node (%r) '
+                     'but not compute_id') % updates['node'])
+            else:
+                LOG.warning('Instance is being created with node %r but '
+                            'no compute_id', updates['node'])
 
         # NOTE(danms): We know because of the check above that deleted
         # is either unset or false. Since we need to avoid passing False
@@ -578,6 +598,7 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
                 pci_requests.to_json())
         else:
             updates['extra']['pci_requests'] = None
+            updates['extra']['pci_devices'] = None
         device_metadata = updates.pop('device_metadata', None)
         expected_attrs.append('device_metadata')
         if device_metadata:
@@ -627,15 +648,25 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
                 resources.obj_to_primitive())
         else:
             updates['extra']['resources'] = None
+
+        # Initially all instances have no migration context, so avoid us
+        # trying to lazy-load it to check.
+        updates['extra']['migration_context'] = None
+
         db_inst = db.instance_create(self._context, updates)
         self._from_db_object(self._context, self, db_inst, expected_attrs)
+
+        if ('pci_devices' in updates['extra'] and
+                updates['extra']['pci_devices'] is None):
+            self.pci_devices = None
+        self.migration_context = None
 
         # NOTE(danms): The EC2 ids are created on their first load. In order
         # to avoid them being missing and having to be loaded later, we
         # load them once here on create now that the instance record is
         # created.
         self._load_ec2_ids()
-        self.obj_reset_changes(['ec2_ids'])
+        self.obj_reset_changes(['ec2_ids', 'pci_devices', 'migration_context'])
 
     @base.remotable
     def destroy(self, hard_delete=False):
@@ -779,6 +810,21 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         self._extra_values_to_save = {}
         updates = {}
         changes = self.obj_what_changed()
+
+        version = versionutils.convert_version_to_tuple(self.VERSION)
+        if 'node' in changes and 'compute_id' not in changes:
+            # NOTE(danms): This is not really the best idea, as we should try
+            # not to have different behavior based on the version of the
+            # object. However, this exception helps us find cases in testing
+            # where these may not be updated together. We can remove this
+            # later.
+            if version >= (2, 8):
+                raise exception.ObjectActionError(
+                    ('Instance.node is being updated (%r) '
+                     'but compute_id is not') % self.node)
+            else:
+                LOG.warning('Instance %s node is being updated to %r but '
+                            'compute_id is not', self.uuid, self.node)
 
         for field in self.fields:
             # NOTE(danms): For object fields, we construct and call a
@@ -1087,9 +1133,15 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         if numa_topology is not None:
             self.numa_topology = numa_topology.clear_host_pinning()
 
+    @base.lazy_load_counter
     def obj_load_attr(self, attrname):
         # NOTE(danms): We can't lazy-load anything without a context and a uuid
         if not self._context:
+            if 'uuid' in self:
+                LOG.debug(
+                    "Lazy-load of '%s' attempted by orphaned instance",
+                    attrname, instance=self
+                )
             raise exception.OrphanedObjectError(method='obj_load_attr',
                                                 objtype=self.obj_name())
         if 'uuid' not in self:
@@ -1296,17 +1348,41 @@ def _make_instance_list(context, inst_list, db_inst_list, expected_attrs):
 
 
 @db.pick_context_manager_writer
-def populate_missing_availability_zones(context, count):
+def populate_missing_availability_zones(context, max_count):
     # instances without host have no reasonable AZ to set
     not_empty_host = models.Instance.host != None  # noqa E711
     instances = (context.session.query(models.Instance).
         filter(not_empty_host).
-        filter_by(availability_zone=None).limit(count).all())
+        filter_by(availability_zone=None).limit(max_count).all())
     count_all = len(instances)
     count_hit = 0
     for instance in instances:
         az = avail_zone.get_instance_availability_zone(context, instance)
         instance.availability_zone = az
+        instance.save(context.session)
+        count_hit += 1
+    return count_all, count_hit
+
+
+@db.pick_context_manager_writer
+def populate_instance_compute_id(context, max_count):
+    instances = (context.session.query(models.Instance).
+        filter(models.Instance.compute_id == None).  # noqa E711
+        limit(max_count).all())
+    count_all = count_hit = 0
+    rd_context = nova_context.get_admin_context(read_deleted='yes')
+    for instance in instances:
+        count_all += 1
+        try:
+            node = objects.ComputeNode.get_by_host_and_nodename(rd_context,
+                                                                instance.host,
+                                                                instance.node)
+        except exception.ComputeHostNotFound:
+            LOG.error('Unable to migrate instance because host %s with '
+                      'node %s not found', instance.host, instance.node,
+                      instance=instance)
+            continue
+        instance.compute_id = node.id
         instance.save(context.session)
         count_hit += 1
     return count_all, count_hit

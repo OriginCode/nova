@@ -1172,8 +1172,7 @@ class IronicDriverTestCase(test.NoDBTestCase):
     @mock.patch.object(ironic_driver.IronicDriver, '_get_node_list')
     @mock.patch.object(objects.InstanceList, 'get_uuids_by_host')
     @mock.patch.object(objects.ServiceList, 'get_all_computes_by_hv_type')
-    @mock.patch.object(FAKE_CLIENT.node, 'get_by_instance_uuid')
-    def test_get_info_cached(self, mock_gbiu, mock_svc_by_hv,
+    def test_get_info_cached(self, mock_svc_by_hv,
                              mock_uuids_by_host, mock_get_node_list):
         properties = {'memory_mb': 512, 'cpus': 2}
         power_state = ironic_states.POWER_ON
@@ -1181,7 +1180,6 @@ class IronicDriverTestCase(test.NoDBTestCase):
                 instance_uuid=self.instance_uuid, properties=properties,
                 power_state=power_state)
 
-        mock_gbiu.return_value = node
         mock_svc_by_hv.return_value = []
         mock_get_node_list.return_value = [node]
 
@@ -1193,7 +1191,6 @@ class IronicDriverTestCase(test.NoDBTestCase):
         result = self.driver.get_info(instance)
         self.assertEqual(hardware.InstanceInfo(state=nova_states.RUNNING),
                          result)
-        mock_gbiu.assert_not_called()
 
     @mock.patch.object(ironic_driver.IronicDriver, '_get_node_list')
     @mock.patch.object(objects.InstanceList, 'get_uuids_by_host')
@@ -1288,7 +1285,6 @@ class IronicDriverTestCase(test.NoDBTestCase):
 
         self.mock_conn.get_node.return_value = node
         mock_node.validate.return_value = ironic_utils.get_test_validation()
-        mock_node.get_by_instance_uuid.return_value = node
         mock_node.set_provision_state.return_value = mock.MagicMock()
 
         fake_looping_call = FakeLoopingCall()
@@ -1356,7 +1352,6 @@ class IronicDriverTestCase(test.NoDBTestCase):
 
         mock_node.get.return_value = node
         mock_node.validate.return_value = ironic_utils.get_test_validation()
-        mock_node.get_by_instance_uuid.return_value = node
         mock_node.set_provision_state.return_value = mock.MagicMock()
 
         fake_looping_call = FakeLoopingCall()
@@ -1719,11 +1714,9 @@ class IronicDriverTestCase(test.NoDBTestCase):
                                                  mock_required_by):
         mock_required_by.return_value = False
         node_uuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
-        node = _get_cached_node(driver='fake', uuid=node_uuid)
         flavor = ironic_utils.get_test_flavor(ephemeral_gb=1)
         instance = fake_instance.fake_instance_obj(self.ctx, node=node_uuid)
         instance.flavor = flavor
-        mock_node.get_by_instance_uuid.return_value = node
         mock_node.set_provision_state.return_value = mock.MagicMock()
         image_meta = ironic_utils.get_test_image_meta()
 
@@ -3021,7 +3014,7 @@ class HashRingTestCase(test.NoDBTestCase):
         services = ['host1', 'host2', 'host3']
         expected_hosts = {'host1', 'host2'}
         self.mock_is_up.return_value = True
-        self.flags(partition_key='not-none', group='ironic')
+        self.flags(conductor_group='not-none', group='ironic')
         self.flags(peer_list=['host1', 'host2'], group='ironic')
         self._test__refresh_hash_ring(services, expected_hosts,
                                       uncalled=['host3'])
@@ -3034,7 +3027,7 @@ class HashRingTestCase(test.NoDBTestCase):
         services = ['host1', 'host2', 'host3']
         expected_hosts = {'host1', 'host2', 'host3'}
         self.mock_is_up.return_value = True
-        self.flags(partition_key='not-none', group='ironic')
+        self.flags(conductor_group='not-none', group='ironic')
         self.flags(peer_list=['host1', 'host2'], group='ironic')
         self._test__refresh_hash_ring(services, expected_hosts,
                                       uncalled=['host3'])
@@ -3043,17 +3036,17 @@ class HashRingTestCase(test.NoDBTestCase):
     @mock.patch.object(ironic_driver, 'LOG', autospec=True)
     def test__check_peer_list(self, mock_log):
         self.flags(host='host1')
-        self.flags(partition_key='not-none', group='ironic')
+        self.flags(conductor_group='not-none', group='ironic')
         self.flags(peer_list=['host1', 'host2'], group='ironic')
         ironic_driver._check_peer_list()
-        # happy path, nothing happens
+        # warn as we have two hosts in the list
+        self.assertTrue(mock_log.warning.called)
         self.assertFalse(mock_log.error.called)
-        self.assertFalse(mock_log.warning.called)
 
     @mock.patch.object(ironic_driver, 'LOG', autospec=True)
     def test__check_peer_list_empty(self, mock_log):
         self.flags(host='host1')
-        self.flags(partition_key='not-none', group='ironic')
+        self.flags(conductor_group='not-none', group='ironic')
         self.flags(peer_list=[], group='ironic')
         self.assertRaises(exception.InvalidPeerList,
                           ironic_driver._check_peer_list)
@@ -3062,7 +3055,7 @@ class HashRingTestCase(test.NoDBTestCase):
     @mock.patch.object(ironic_driver, 'LOG', autospec=True)
     def test__check_peer_list_missing_self(self, mock_log):
         self.flags(host='host1')
-        self.flags(partition_key='not-none', group='ironic')
+        self.flags(conductor_group='not-none', group='ironic')
         self.flags(peer_list=['host2'], group='ironic')
         self.assertRaises(exception.InvalidPeerList,
                           ironic_driver._check_peer_list)
@@ -3071,10 +3064,12 @@ class HashRingTestCase(test.NoDBTestCase):
     @mock.patch.object(ironic_driver, 'LOG', autospec=True)
     def test__check_peer_list_only_self(self, mock_log):
         self.flags(host='host1')
-        self.flags(partition_key='not-none', group='ironic')
+        self.flags(conductor_group='not-none', group='ironic')
         self.flags(peer_list=['host1'], group='ironic')
         ironic_driver._check_peer_list()
-        self.assertTrue(mock_log.warning.called)
+        # happy path, nothing happens
+        self.assertFalse(mock_log.error.called)
+        self.assertFalse(mock_log.warning.called)
 
 
 class NodeCacheTestCase(test.NoDBTestCase):
@@ -3184,7 +3179,7 @@ class NodeCacheTestCase(test.NoDBTestCase):
         ]
         hosts = [self.host, self.host, self.host]
         partition_key = 'some-group'
-        self.flags(partition_key=partition_key, group='ironic')
+        self.flags(conductor_group=partition_key, group='ironic')
 
         self._test__refresh_cache(instances, nodes, hosts,
                                   partition_key=partition_key)
@@ -3205,7 +3200,7 @@ class NodeCacheTestCase(test.NoDBTestCase):
         ]
         hosts = [self.host, self.host, self.host]
         partition_key = 'some-group'
-        self.flags(partition_key=partition_key, group='ironic')
+        self.flags(conductor_group=partition_key, group='ironic')
 
         self._test__refresh_cache(instances, nodes, hosts,
                                   partition_key=partition_key,

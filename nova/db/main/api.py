@@ -1809,7 +1809,7 @@ def instance_get_all_by_filters_sort(context, filters, limit=None, marker=None,
     # For other filters that don't match this, we will do regexp matching
     exact_match_filter_names = ['project_id', 'user_id', 'image_ref',
                                 'vm_state', 'instance_type_id', 'uuid',
-                                'metadata', 'host', 'task_state',
+                                'metadata', 'host', 'task_state', 'compute_id',
                                 'system_metadata', 'locked', 'hidden']
 
     # Filter the query
@@ -3475,12 +3475,12 @@ def migration_get_by_sort_filters(context, sort_keys, sort_dirs, values):
 
 
 @pick_context_manager_writer
-def migration_migrate_to_uuid(context, count):
+def migration_migrate_to_uuid(context, max_count):
     # Avoid circular import
     from nova import objects
 
     db_migrations = model_query(context, models.Migration).filter_by(
-        uuid=None).limit(count).all()
+        uuid=None).limit(max_count).all()
 
     done = 0
     for db_migration in db_migrations:
@@ -4259,8 +4259,10 @@ def _get_fk_stmts(metadata, conn, table, column, records):
         # Create the shadow table for the referencing table.
         fk_shadow_tablename = _SHADOW_TABLE_PREFIX + fk_table.name
         try:
-            fk_shadow_table = schema.Table(
-                fk_shadow_tablename, metadata, autoload_with=conn)
+            with conn.begin():
+                fk_shadow_table = schema.Table(
+                    fk_shadow_tablename, metadata, autoload_with=conn,
+                )
         except sqla_exc.NoSuchTableError:
             # No corresponding shadow table; skip it.
             continue
@@ -4368,9 +4370,10 @@ def _archive_deleted_rows_for_table(
     rows_archived = 0
     deleted_instance_uuids = []
     try:
-        shadow_table = schema.Table(
-            shadow_tablename, metadata, autoload_with=conn,
-        )
+        with conn.begin():
+            shadow_table = schema.Table(
+                shadow_tablename, metadata, autoload_with=conn,
+            )
     except sqla_exc.NoSuchTableError:
         # No corresponding shadow table; skip it.
         conn.close()
@@ -4407,6 +4410,9 @@ def _archive_deleted_rows_for_table(
     select = select.order_by(column).limit(max_rows)
     with conn.begin():
         rows = conn.execute(select).fetchall()
+
+    # This is a list of IDs of rows that should be archived from this table,
+    # limited to a length of max_rows.
     records = [r[0] for r in rows]
 
     # We will archive deleted rows for this table and also generate insert and
@@ -4419,51 +4425,103 @@ def _archive_deleted_rows_for_table(
 
     # Keep track of any extra tablenames to number of rows that we archive by
     # following FK relationships.
-    # {tablename: extra_rows_archived}
+    #
+    # extras = {tablename: number_of_extra_rows_archived}
     extras = collections.defaultdict(int)
-    if records:
-        insert = shadow_table.insert().from_select(
-            columns, sql.select(table).where(column.in_(records))
-        ).inline()
-        delete = table.delete().where(column.in_(records))
+
+    if not records:
+        # Nothing to archive, so return.
+        return rows_archived, deleted_instance_uuids, extras
+
+    # Keep track of how many rows we accumulate for the insert+delete database
+    # transaction and cap it as soon as it is >= max_rows. Because we will
+    # archive all child rows of a parent row along with the parent at the same
+    # time, we end up with extra rows to archive in addition to len(records).
+    num_rows_in_batch = 0
+    # The sequence of query statements we will execute in a batch. These are
+    # ordered: [child1, child1, parent1, child2, child2, child2, parent2, ...]
+    # Parent + child "trees" are kept together to avoid FK constraint
+    # violations.
+    statements_in_batch = []
+    # The list of records in the batch. This is used for collecting deleted
+    # instance UUIDs in the case of the 'instances' table.
+    records_in_batch = []
+
+    # (melwitt): We will gather rows related by foreign key relationship for
+    # each deleted row, one at a time. We do it this way to keep track of and
+    # limit the total number of rows that will be archived in a single database
+    # transaction. In a large scale database with potentially hundreds of
+    # thousands of deleted rows, if we don't limit the size of the transaction
+    # based on max_rows, we can get into a situation where we get stuck not
+    # able to make much progress. The value of max_rows has to be 1) small
+    # enough to not exceed the database's max packet size limit or timeout with
+    # a deadlock but 2) large enough to make progress in an environment with a
+    # constant high volume of create and delete traffic. By archiving each
+    # parent + child rows tree one at a time, we can ensure meaningful progress
+    # can be made while allowing the caller to predictably control the size of
+    # the database transaction with max_rows.
+    for record in records:
         # Walk FK relationships and add insert/delete statements for rows that
         # refer to this table via FK constraints. fk_inserts and fk_deletes
         # will be prepended to by _get_fk_stmts if referring rows are found by
         # FK constraints.
         fk_inserts, fk_deletes = _get_fk_stmts(
-            metadata, conn, table, column, records)
+            metadata, conn, table, column, [record])
+        statements_in_batch.extend(fk_inserts + fk_deletes)
+        # statement to add parent row to shadow table
+        insert = shadow_table.insert().from_select(
+            columns, sql.select(table).where(column.in_([record]))).inline()
+        statements_in_batch.append(insert)
+        # statement to remove parent row from main table
+        delete = table.delete().where(column.in_([record]))
+        statements_in_batch.append(delete)
 
-        # NOTE(tssurya): In order to facilitate the deletion of records from
-        # instance_mappings, request_specs and instance_group_member tables in
-        # the nova_api DB, the rows of deleted instances from the instances
-        # table are stored prior to their deletion. Basically the uuids of the
-        # archived instances are queried and returned.
-        if tablename == "instances":
-            query_select = sql.select(table.c.uuid).where(
-                table.c.id.in_(records)
-            )
-            with conn.begin():
-                rows = conn.execute(query_select).fetchall()
-            deleted_instance_uuids = [r[0] for r in rows]
+        records_in_batch.append(record)
 
-        try:
-            # Group the insert and delete in a transaction.
-            with conn.begin():
-                for fk_insert in fk_inserts:
-                    conn.execute(fk_insert)
-                for fk_delete in fk_deletes:
-                    result_fk_delete = conn.execute(fk_delete)
-                    extras[fk_delete.table.name] += result_fk_delete.rowcount
-                conn.execute(insert)
-                result_delete = conn.execute(delete)
-            rows_archived += result_delete.rowcount
-        except db_exc.DBReferenceError as ex:
-            # A foreign key constraint keeps us from deleting some of
-            # these rows until we clean up a dependent table.  Just
-            # skip this table for now; we'll come back to it later.
-            LOG.warning("IntegrityError detected when archiving table "
-                        "%(tablename)s: %(error)s",
-                        {'tablename': tablename, 'error': str(ex)})
+        # Check whether were have a full batch >= max_rows. Rows are counted as
+        # the number of rows that will be moved in the database transaction.
+        # So each insert+delete pair represents one row that will be moved.
+        # 1 parent + its fks
+        num_rows_in_batch += 1 + len(fk_inserts)
+
+        if max_rows is not None and num_rows_in_batch >= max_rows:
+            break
+
+    # NOTE(tssurya): In order to facilitate the deletion of records from
+    # instance_mappings, request_specs and instance_group_member tables in the
+    # nova_api DB, the rows of deleted instances from the instances table are
+    # stored prior to their deletion. Basically the uuids of the archived
+    # instances are queried and returned.
+    if tablename == "instances":
+        query_select = sql.select(table.c.uuid).where(
+            table.c.id.in_(records_in_batch))
+        with conn.begin():
+            rows = conn.execute(query_select).fetchall()
+        # deleted_instance_uuids = ['uuid1', 'uuid2', ...]
+        deleted_instance_uuids = [r[0] for r in rows]
+
+    try:
+        # Group the insert and delete in a transaction.
+        with conn.begin():
+            for statement in statements_in_batch:
+                result = conn.execute(statement)
+                result_tablename = statement.table.name
+                # Add to archived row counts if not a shadow table.
+                if not result_tablename.startswith(_SHADOW_TABLE_PREFIX):
+                    if result_tablename == tablename:
+                        # Number of tablename (parent) rows archived.
+                        rows_archived += result.rowcount
+                    else:
+                        # Number(s) of child rows archived.
+                        extras[result_tablename] += result.rowcount
+
+    except db_exc.DBReferenceError as ex:
+        # A foreign key constraint keeps us from deleting some of these rows
+        # until we clean up a dependent table. Just skip this table for now;
+        # we'll come back to it later.
+        LOG.warning("IntegrityError detected when archiving table "
+                    "%(tablename)s: %(error)s",
+                    {'tablename': tablename, 'error': str(ex)})
 
     conn.close()
 
@@ -4508,12 +4566,9 @@ def archive_deleted_rows(context=None, max_rows=None, before=None,
     for table in meta.sorted_tables:
         tablename = table.name
         rows_archived = 0
-        # skip the special sqlalchemy-migrate migrate_version table and any
-        # shadow tables
-        # TODO(stephenfin): Drop 'migrate_version' once we remove support for
-        # the legacy sqlalchemy-migrate migrations
+        # skip the special alembic_version version table and any shadow tables
         if (
-            tablename in ('migrate_version', 'alembic_version') or
+            tablename == 'alembic_version' or
             tablename.startswith(_SHADOW_TABLE_PREFIX)
         ):
             continue
@@ -4543,9 +4598,12 @@ def archive_deleted_rows(context=None, max_rows=None, before=None,
 
 
 def _purgeable_tables(metadata):
-    return [t for t in metadata.sorted_tables
-            if (t.name.startswith(_SHADOW_TABLE_PREFIX) and not
-                t.name.endswith('migrate_version'))]
+    return [
+        t for t in metadata.sorted_tables if (
+            t.name.startswith(_SHADOW_TABLE_PREFIX) and not
+            t.name == 'alembic_version'
+        )
+    ]
 
 
 def purge_shadow_tables(context, before_date, status_fn=None):
@@ -4733,7 +4791,7 @@ def instance_tag_set(context, instance_uuid, tags):
     if to_add:
         data = [
             {'resource_id': instance_uuid, 'tag': tag} for tag in to_add]
-        context.session.execute(models.Tag.__table__.insert(None), data)
+        context.session.execute(models.Tag.__table__.insert(), data)
 
     return context.session.query(models.Tag).filter_by(
         resource_id=instance_uuid).all()

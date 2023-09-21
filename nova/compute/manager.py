@@ -675,6 +675,7 @@ class ComputeManager(manager.Manager):
         # NOTE(russellb) Load the driver last.  It may call back into the
         # compute manager via the virtapi, so we want it to be fully
         # initialized before that happens.
+        self.service_ref = None
         self.driver = driver.load_compute_driver(self.virtapi, compute_driver)
         self.rt = resource_tracker.ResourceTracker(
             self.host, self.driver, reportclient=self.reportclient)
@@ -706,6 +707,7 @@ class ComputeManager(manager.Manager):
         # to the database layer.
         instance.host = None
         instance.node = None
+        instance.compute_id = None
         # ResourceTracker._set_instance_host_and_node also sets launched_on
         # to the same value as host and is really only ever used by legacy
         # nova-network code, but we should also null it out to avoid confusion
@@ -1749,11 +1751,13 @@ class ComputeManager(manager.Manager):
                             instance_uuid=migration.instance_uuid)
         self._waiting_live_migrations.clear()
 
-    def pre_start_hook(self):
+    def pre_start_hook(self, service_ref):
         """After the service is initialized, but before we fully bring
         the service up by listening on RPC queues, make sure to update
         our available resources (and indirectly our available nodes).
         """
+        self.service_ref = service_ref
+        self.rt.set_service_ref(service_ref)
         self.update_available_resource(nova.context.get_admin_context(),
                                        startup=True)
 
@@ -1891,11 +1895,8 @@ class ComputeManager(manager.Manager):
                 else:
                     max_server = 1
                 if len(members_on_host) >= max_server:
-                    msg = _("Anti-affinity instance group policy "
-                            "was violated.")
-                    raise exception.RescheduledException(
-                            instance_uuid=instance.uuid,
-                            reason=msg)
+                    raise exception.GroupAffinityViolation(
+                        instance_uuid=instance.uuid, policy='Anti-affinity')
 
             # NOTE(ganso): The check for affinity below does not work and it
             # can easily be violated because the lock happens in different
@@ -1905,10 +1906,8 @@ class ComputeManager(manager.Manager):
             elif group.policy and 'affinity' == group.policy:
                 group_hosts = group.get_hosts(exclude=[instance.uuid])
                 if group_hosts and self.host not in group_hosts:
-                    msg = _("Affinity instance group policy was violated.")
-                    raise exception.RescheduledException(
-                            instance_uuid=instance.uuid,
-                            reason=msg)
+                    raise exception.GroupAffinityViolation(
+                        instance_uuid=instance.uuid, policy='Affinity')
 
         _do_validation(context, instance, group)
 
@@ -2348,6 +2347,9 @@ class ComputeManager(manager.Manager):
                         self.reportclient.delete_allocation_for_instance(
                             context, instance.uuid, force=True)
 
+                    if result in (build_results.FAILED_BY_POLICY,
+                                  build_results.RESCHEDULED_BY_POLICY):
+                        return
                     if result in (build_results.FAILED,
                                   build_results.RESCHEDULED):
                         self._build_failed(node)
@@ -2446,6 +2448,8 @@ class ComputeManager(manager.Manager):
                 self._nil_out_instance_obj_host_and_node(instance)
                 self._set_instance_obj_error_state(instance,
                                                    clean_task_state=True)
+                if isinstance(e, exception.RescheduledByPolicyException):
+                    return build_results.FAILED_BY_POLICY
                 return build_results.FAILED
             LOG.debug(e.format_message(), instance=instance)
             # This will be used for logging the exception
@@ -2472,6 +2476,10 @@ class ComputeManager(manager.Manager):
                     injected_files, requested_networks, security_groups,
                     block_device_mapping, request_spec=request_spec,
                     host_lists=[host_list])
+
+            if isinstance(e, exception.RescheduledByPolicyException):
+                return build_results.RESCHEDULED_BY_POLICY
+
             return build_results.RESCHEDULED
         except (exception.InstanceNotFound,
                 exception.UnexpectedDeletingTaskStateError):
@@ -2691,6 +2699,17 @@ class ComputeManager(manager.Manager):
                     bdms=block_device_mapping)
             raise exception.BuildAbortException(instance_uuid=instance.uuid,
                     reason=e.format_message())
+        except exception.GroupAffinityViolation as e:
+            LOG.exception('Failed to build and run instance',
+                          instance=instance)
+            self._notify_about_instance_usage(context, instance,
+                    'create.error', fault=e)
+            compute_utils.notify_about_instance_create(
+                    context, instance, self.host,
+                    phase=fields.NotificationPhase.ERROR, exception=e,
+                    bdms=block_device_mapping)
+            raise exception.RescheduledByPolicyException(
+                    instance_uuid=instance.uuid, reason=str(e))
         except Exception as e:
             LOG.exception('Failed to build and run instance',
                           instance=instance)
@@ -2985,7 +3004,7 @@ class ComputeManager(manager.Manager):
                 'Virt driver does not provide unplug_vifs method, so it '
                 'is not possible determine if VIFs should be unplugged.'
             )
-        except exception.NovaException as exc:
+        except Exception as exc:
             # It's possible that the instance never got as far as plugging
             # VIFs, in which case we would see an exception which can be
             # mostly ignored
@@ -3791,9 +3810,21 @@ class ComputeManager(manager.Manager):
                 try:
                     compute_node = self._get_compute_info(context, self.host)
                     scheduled_node = compute_node.hypervisor_hostname
-                except exception.ComputeHostNotFound:
+                except exception.ComputeHostNotFound as e:
+                    # This means we were asked to rebuild one of our own
+                    # instances, or another instance as a target of an
+                    # evacuation, but we are unable to find a matching compute
+                    # node.
                     LOG.exception('Failed to get compute_info for %s',
                                   self.host)
+                    self._set_migration_status(migration, 'failed')
+                    self._notify_instance_rebuild_error(context, instance, e,
+                                                        bdms)
+                    raise exception.InstanceFaultRollback(
+                        inner_exception=exception.BuildAbortException(
+                        instance_uuid=instance.uuid,
+                        reason=e.format_message()))
+
             else:
                 scheduled_node = instance.node
 
@@ -4143,6 +4174,66 @@ class ComputeManager(manager.Manager):
             accel_info = []
         return accel_info
 
+    def _delete_dangling_bdms(self, context, instance, bdms):
+        """Deletes dangling or stale attachments for volume from
+        Nova and Cinder DB so both service DBs can be in sync.
+
+        Retrieves volume attachments from the Nova block_device_mapping
+        table and verifies them with the Cinder volume_attachment table.
+        If attachment is not present in any one of the DBs, delete
+        attachments from the other DB.
+
+        :param context: The nova request context.
+        :param instance: instance object.
+        :param bdms: BlockDeviceMappingList list object.
+        """
+
+        try:
+            cinder_attachments = self.volume_api.attachment_get_all(
+                context, instance.uuid)
+        except (keystone_exception.EndpointNotFound,
+                cinder_exception.ClientException):
+            # if cinder is not deployed we never need to check for
+            # attachments as there cannot be dangling bdms.
+            # if we cannot connect to cinder we cannot check for dangling
+            # bdms so we skip the check. Intermittent connection issues
+            # to cinder should not cause instance reboot to fail.
+            return
+
+        # attachments present in nova DB, ones nova knows about
+        nova_attachments = []
+        bdms_to_delete = []
+        for bdm in bdms.objects:
+            if bdm.volume_id and bdm.source_type == 'volume' and \
+                bdm.destination_type == 'volume':
+                try:
+                    self.volume_api.attachment_get(context, bdm.attachment_id)
+                except exception.VolumeAttachmentNotFound:
+                    LOG.info(
+                        f"Removing stale volume attachment "
+                        f"'{bdm.attachment_id}' from instance for "
+                        f"volume '{bdm.volume_id}'.", instance=instance)
+                    bdm.destroy()
+                    bdms_to_delete.append(bdm)
+                else:
+                    nova_attachments.append(bdm.attachment_id)
+
+        cinder_attachments = [each['id'] for each in cinder_attachments]
+
+        if len(set(cinder_attachments) - set(nova_attachments)):
+            LOG.info(
+                "Removing stale volume attachments of instance from "
+                "Cinder", instance=instance)
+        for each_attach in set(cinder_attachments) - set(nova_attachments):
+            # delete only cinder known attachments, from cinder DB.
+            LOG.debug(
+                f"Removing attachment '{each_attach}'", instance=instance)
+            self.volume_api.attachment_delete(context, each_attach)
+
+        # refresh bdms object
+        for bdm in bdms_to_delete:
+            bdms.objects.remove(bdm)
+
     @wrap_exception()
     @reverts_task_state
     @wrap_instance_event(prefix='compute')
@@ -4172,6 +4263,9 @@ class ComputeManager(manager.Manager):
 
         bdms = objects.BlockDeviceMappingList.get_by_instance_uuid(
             context, instance.uuid)
+
+        self._delete_dangling_bdms(context, instance, bdms)
+
         block_device_info = self._get_instance_block_device_info(
             context, instance, bdms=bdms)
 
@@ -5079,7 +5173,12 @@ class ComputeManager(manager.Manager):
         """Revert host, node and flavor fields after a resize-revert."""
         self._set_instance_info(instance, instance.old_flavor)
         instance.host = migration.source_compute
-        instance.node = migration.source_node
+        # NOTE(danms): This could fail if we somehow ended up on the wrong
+        # host without the desired node. That's a big problem, so let the
+        # ComputeHostNotFound raise from here.
+        cn = self.rt.get_node_by_name(migration.source_node)
+        instance.node = cn.hypervisor_hostname
+        instance.compute_id = cn.id
         instance.save(expected_task_state=[task_states.RESIZE_REVERTING])
 
     @wrap_exception()
@@ -5600,7 +5699,7 @@ class ComputeManager(manager.Manager):
         # in case _prep_resize fails.
         instance_state = instance.vm_state
         with self._error_out_instance_on_exception(
-                context, instance, instance_state=instance_state),\
+                context, instance, instance_state=instance_state), \
                 errors_out_migration_ctxt(migration):
 
             self._send_prep_resize_notifications(
@@ -5994,6 +6093,11 @@ class ComputeManager(manager.Manager):
 
             instance.host = migration.dest_compute
             instance.node = migration.dest_node
+            # NOTE(danms): This could fail if the dest_compute_id was not set
+            # by the sending host *and* migration.dest_node does not point to
+            # a legit node on the dest_compute. Since that would be very bad,
+            # let the ComputeHostNotFound raise from here.
+            instance.compute_id = migration.get_dest_compute_id()
             # NOTE(gibi): as the instance now tracked on the destination we
             # have to make sure that the source compute resource track can
             # track this instance as a migration. For that the resource tracker
@@ -6379,7 +6483,12 @@ class ComputeManager(manager.Manager):
         # Setting the host/node values will make the ResourceTracker continue
         # to track usage for this instance on this host.
         instance.host = migration.dest_compute
-        instance.node = migration.dest_node
+        # NOTE(danms): This could fail if we somehow ended up on the wrong
+        # host without the desired node. That's a big problem, so let the
+        # ComputeHostNotFound raise from here.
+        cn = self.rt.get_node_by_name(migration.dest_node)
+        instance.compute_id = cn.id
+        instance.node = cn.hypervisor_hostname
         instance.save(expected_task_state=task_states.RESIZE_FINISH)
 
         # Broadcast to all schedulers that the instance is on this host.
@@ -6873,6 +6982,9 @@ class ComputeManager(manager.Manager):
         self._power_off_instance(instance, clean_shutdown)
         current_power_state = self._get_power_state(instance)
         network_info = self.network_api.get_instance_nw_info(context, instance)
+
+        ports_id = [vif['id'] for vif in network_info]
+        self.network_api.unbind_ports(context, ports_id, detach=False)
 
         block_device_info = self._get_instance_block_device_info(context,
                                                                  instance,
@@ -9156,6 +9268,7 @@ class ComputeManager(manager.Manager):
                 source_bdms)
         except Exception:
             # Restore the instance object
+            compute_node = None
             node_name = None
             try:
                 # get node name of compute, where instance will be
@@ -9177,6 +9290,7 @@ class ComputeManager(manager.Manager):
                 instance.host = dest
                 instance.task_state = None
                 instance.node = node_name
+                instance.compute_id = compute_node and compute_node.id or None
                 instance.progress = 0
                 instance.save()
             raise
@@ -9402,6 +9516,7 @@ class ComputeManager(manager.Manager):
         finally:
             # Restore instance state and update host
             current_power_state = self._get_power_state(instance)
+            compute_node = None
             node_name = None
             prev_host = instance.host
             try:
@@ -9424,6 +9539,7 @@ class ComputeManager(manager.Manager):
                 instance.power_state = current_power_state
                 instance.task_state = None
                 instance.node = node_name
+                instance.compute_id = compute_node and compute_node.id or None
                 instance.progress = 0
                 instance.save(expected_task_state=task_states.MIGRATING)
 

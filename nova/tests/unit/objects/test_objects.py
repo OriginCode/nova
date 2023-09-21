@@ -22,6 +22,7 @@ import pprint
 from unittest import mock
 
 import fixtures
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import timeutils
 from oslo_versionedobjects import base as ovo_base
 from oslo_versionedobjects import exception as ovo_exc
@@ -66,6 +67,7 @@ class MyObj(base.NovaPersistentObject, base.NovaObject,
         self._context = context
         return self
 
+    @base.lazy_load_counter
     def obj_load_attr(self, attrname):
         setattr(self, attrname, 'loaded!')
 
@@ -789,6 +791,35 @@ class TestObject(_LocalTest, _TestObject):
         self.assertTrue(obj.deleted)
 
 
+class TestObjectMisc(_BaseTestCase):
+    @mock.patch.object(base.LOG, 'debug')
+    def test_lazy_load_counter(self, mock_log):
+        obj = MyObj()
+        mock_log.assert_not_called()
+        self.assertIsNone(obj._lazy_loads)
+
+        obj.obj_load_attr('bar')
+        mock_log.assert_not_called()
+        self.assertEqual(['bar'], obj._lazy_loads)
+
+        obj.obj_load_attr('bar')
+        mock_log.assert_called_once_with(
+            'Object %s lazy-loaded attributes: %s', 'MyObj<anonymous>',
+            'bar,bar')
+        self.assertEqual(['bar', 'bar'], obj._lazy_loads)
+
+    def test_object_id(self):
+        obj1 = MyObj()
+        self.assertEqual('MyObj<anonymous>', base.object_id(obj1))
+
+        obj2 = objects.Instance(uuid=str(uuids.instance))
+        self.assertEqual('Instance<%s>' % str(uuids.instance),
+                         base.object_id(obj2))
+
+        obj3 = objects.Service(id=123)
+        self.assertEqual('Service<123>', base.object_id(obj3))
+
+
 class TestObjectSerializer(_BaseTestCase):
     def test_serialize_entity_primitive(self):
         ser = base.NovaObjectSerializer()
@@ -1073,7 +1104,7 @@ object_data = {
     'IDEDeviceBus': '1.0-29d4c9f27ac44197f01b6ac1b7e16502',
     'ImageMeta': '1.8-642d1b2eb3e880a367f37d72dd76162d',
     'ImageMetaProps': '1.34-29b3a6b7fe703f36bfd240d914f16c21',
-    'Instance': '2.7-d187aec68cad2e4d8b8a03a68e4739ce',
+    'Instance': '2.8-2727dba5e4a078e6cc848c1f94f7eb24',
     'InstanceAction': '1.2-9a5abc87fdd3af46f45731960651efb5',
     'InstanceActionEvent': '1.4-5b1f361bd81989f8bb2c20bb7e8a4cb4',
     'InstanceActionEventList': '1.1-13d92fb953030cdbfee56481756e02be',
@@ -1099,7 +1130,7 @@ object_data = {
     'LibvirtLiveMigrateNUMAInfo': '1.0-0e777677f3459d0ed1634eabbdb6c22f',
     'LibvirtVPMEMDevice': '1.0-17ffaf47585199eeb9a2b83d6bde069f',
     'MemoryDiagnostics': '1.0-2c995ae0f2223bb0f8e523c5cc0b83da',
-    'Migration': '1.7-bd45b232fd7c95cd79ae9187e10ef582',
+    'Migration': '1.8-6ed577d80e71e9b9d88b8cf358af3781',
     'MigrationContext': '1.2-89f10a83999f852a489962ae37d8a026',
     'MigrationList': '1.5-36793f8d65bae421bd5564d09a4de7be',
     'MonitorMetric': '1.1-53b1db7c4ae2c531db79761e7acc52ba',
