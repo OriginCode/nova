@@ -2,6 +2,7 @@ nova (2:28.0.0~rc1-1) experimental; urgency=medium
 
   * New upstream release.
   * Fixed (build-)depends for this release.
+  * Removed CVE-2023-2088 patch applied upstream.
 
  -- Thomas Goirand <zigo@debian.org>  Thu, 21 Sep 2023 14:20:05 +0200
 

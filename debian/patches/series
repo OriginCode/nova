@@ -1,5 +1,4 @@
 Install-missed-files.patch
 remove-svg-converter-from-doc-conf.py.patch
 Add-a-healtcheck-url.patch
-CVE-2023-2088_Use_force_True_for_os-brick_disconnect_during_delete.patch
 removed-actdiag-from-doc.patch
