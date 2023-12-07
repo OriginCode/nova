@@ -1,3 +1,9 @@
+nova (2:28.0.0-3) unstable; urgency=medium
+
+  * Fix nova-compute-kvm depends to (= ${binary:Version}).
+
+ -- Thomas Goirand <zigo@debian.org>  Thu, 07 Dec 2023 10:39:19 +0100
+
 nova (2:28.0.0-2) unstable; urgency=medium
 
   * Add oslo.db and os_vif namespaces when generating nova.conf.
