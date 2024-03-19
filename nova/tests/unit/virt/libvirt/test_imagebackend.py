@@ -27,6 +27,7 @@ import fixtures
 from oslo_concurrency import lockutils
 from oslo_config import fixture as config_fixture
 from oslo_service import loopingcall
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import imageutils
 from oslo_utils import units
 from oslo_utils import uuidutils
@@ -226,6 +227,43 @@ class _ImageTestCase(object):
     @ddt.data(5, None)
     def test_libvirt_info_scsi_with_unit(self, disk_unit):
         self._test_libvirt_info_scsi_with_unit(disk_unit)
+
+    def test_libvirt_info_with_encryption(self):
+        disk_info = {
+            'bus': 'virtio',
+            'dev': '/dev/vda',
+            'type': 'disk',
+            'encrypted': True,
+            'encryption_format': 'luks',
+            'encryption_secret_uuid': uuids.secret,
+        }
+        image = self.image_class(
+            self.INSTANCE, self.NAME, disk_info_mapping=disk_info)
+
+        if not image.SUPPORTS_LUKS:
+            classname = type(image).__name__
+            self.skipTest(
+                f"LUKS encryption is not supported with {classname}")
+
+        disk = image.libvirt_info(
+            cache_mode="none", extra_specs={}, boot_order="1")
+
+        self.assertIsInstance(disk, vconfig.LibvirtConfigGuestDisk)
+        self.assertEqual("/dev/vda", disk.target_dev)
+        self.assertEqual("virtio", disk.target_bus)
+        self.assertEqual("none", disk.driver_cache)
+        self.assertEqual("disk", disk.source_device)
+        self.assertEqual("1", disk.boot_order)
+
+        self.assertIsInstance(
+            disk.ephemeral_encryption,
+            vconfig.LibvirtConfigGuestDiskEncryption)
+        self.assertIsInstance(
+            disk.ephemeral_encryption.secret,
+            vconfig.LibvirtConfigGuestDiskEncryptionSecret)
+        self.assertEqual("passphrase", disk.ephemeral_encryption.secret.type)
+        self.assertEqual(uuids.secret, disk.ephemeral_encryption.secret.uuid)
+        self.assertEqual("luks", disk.ephemeral_encryption.format)
 
 
 class FlatTestCase(_ImageTestCase, test.NoDBTestCase):
@@ -697,7 +735,8 @@ class LvmTestCase(_ImageTestCase, test.NoDBTestCase):
         mock_get.assert_called_once_with(self.TEMPLATE_PATH)
         path = '/dev/%s/%s_%s' % (self.VG, self.INSTANCE.uuid, self.NAME)
         mock_convert_image.assert_called_once_with(
-            self.TEMPLATE_PATH, path, None, 'raw', CONF.instances_path, False)
+            self.TEMPLATE_PATH, path, None, 'raw', CONF.instances_path, False,
+            src_encryption=None, dest_encryption=None)
         mock_disk_op_sema.__enter__.assert_called_once()
 
     @mock.patch.object(imagebackend.lvm, 'create_volume')
@@ -732,7 +771,8 @@ class LvmTestCase(_ImageTestCase, test.NoDBTestCase):
         mock_get.assert_called_once_with(self.TEMPLATE_PATH)
         mock_convert_image.assert_called_once_with(
             self.TEMPLATE_PATH, self.PATH, None, 'raw',
-            CONF.instances_path, False)
+            CONF.instances_path, False, src_encryption=None,
+            dest_encryption=None)
         mock_disk_op_sema.__enter__.assert_called_once()
         mock_resize.assert_called_once_with(self.PATH, run_as_root=True)
 
@@ -970,7 +1010,8 @@ class EncryptedLvmTestCase(_ImageTestCase, test.NoDBTestCase):
                 self.KEY)
             nova.privsep.qemu.convert_image.assert_called_with(
                 self.TEMPLATE_PATH, self.PATH, None, 'raw',
-                CONF.instances_path, False)
+                CONF.instances_path, False, src_encryption=None,
+                dest_encryption=None)
 
     def _create_image_generated(self, sparse):
         with test.nested(
@@ -1041,7 +1082,8 @@ class EncryptedLvmTestCase(_ImageTestCase, test.NoDBTestCase):
                  self.KEY)
             nova.privsep.qemu.convert_image.assert_called_with(
                 self.TEMPLATE_PATH, self.PATH, None, 'raw',
-                CONF.instances_path, False)
+                CONF.instances_path, False, src_encryption=None,
+                dest_encryption=None)
             self.disk.resize2fs.assert_called_with(self.PATH, run_as_root=True)
 
     def test_create_image(self):

@@ -39,7 +39,7 @@ Libvirt enforces CPU limits in terms of *shares* and *quotas*, configured
 via :nova:extra-spec:`quota:cpu_shares` and :nova:extra-spec:`quota:cpu_period`
 / :nova:extra-spec:`quota:cpu_quota`, respectively. Both are implemented using
 the `cgroups cpu controller`__. Note that allowed values for *shares* are
-platform dependant.
+platform dependent.
 
 CPU shares are a proportional weighted share of total CPU resources relative to
 other instances. It does not limit CPU usage if CPUs are not busy. There is no
@@ -158,7 +158,7 @@ For example, to configure **outbound** traffic to an average of 262 Mbit/s
 .. note::
 
    The speed limit values in above example are specified in kilobytes/second,
-   whle the burst value is in kilobytes.
+   while the burst value is in kilobytes.
 
 VMWare
 ~~~~~~
@@ -280,34 +280,3 @@ To configure a minimum bandwidth allocation of 1024 Mbits/sec and a maximum of
    $ openstack flavor set $FLAVOR \
        --quota:vif_reservation=1024 \
        --quota:vif_limit=2048
-
-Hyper-V
-~~~~~~~
-
-CPU limits
-^^^^^^^^^^
-
-The Hyper-V driver does not support CPU limits.
-
-Memory limits
-^^^^^^^^^^^^^
-
-The Hyper-V driver does not support memory limits.
-
-Disk I/O limits
-^^^^^^^^^^^^^^^
-
-Hyper-V enforces disk limits through maximum total bytes and total I/O
-operations per second, using the :nova:extra-spec:`quota:disk_total_bytes_sec`
-and :nova:extra-spec:`quota:disk_total_iops_sec` extra specs, respectively. For
-example, to set a maximum disk read/write of 10 MB/sec for a flavor:
-
-.. code-block:: console
-
-   $ openstack flavor set $FLAVOR \
-       --property quota:disk_total_bytes_sec=10485760
-
-Network bandwidth limits
-^^^^^^^^^^^^^^^^^^^^^^^^
-
-The Hyper-V driver does not support network bandwidth limits.

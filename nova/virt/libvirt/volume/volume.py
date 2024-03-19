@@ -118,16 +118,17 @@ class LibvirtBaseVolumeDriver(object):
             conf.shareable = True
 
         volume_id = driver_block_device.get_volume_id(connection_info)
+        conf.alias = vconfig.make_libvirt_device_alias(volume_id)
         volume_secret = None
         if volume_id:
             volume_secret = self.host.find_secret('volume', volume_id)
         if volume_secret:
-            conf.encryption = vconfig.LibvirtConfigGuestDiskEncryption()
+            conf.volume_encryption = vconfig.LibvirtConfigGuestDiskEncryption()
             secret = vconfig.LibvirtConfigGuestDiskEncryptionSecret()
             secret.type = 'passphrase'
             secret.uuid = volume_secret.UUIDString()
-            conf.encryption.format = 'luks'
-            conf.encryption.secret = secret
+            conf.volume_encryption.format = 'luks'
+            conf.volume_encryption.secret = secret
 
         return conf
 

@@ -167,7 +167,7 @@ hugepage_validators = [
         name='hw:locked_memory',
         description=(
             'Determine if **guest** (instance) memory should be locked '
-            'preventing swaping. This is required in rare cases for device '
+            'preventing swapping. This is required in rare cases for device '
             'DMA transfers. Only supported by the libvirt virt driver.'
         ),
         value={
@@ -525,6 +525,18 @@ feature_flag_validators = [
                 'auto'
             ],
             'description': 'model for vIOMMU',
+        },
+    ),
+    base.ExtraSpecValidator(
+        name='hw:virtio_packed_ring',
+        description=(
+            'Permit guests to negotiate the virtio packed ring format. '
+            'This requires guest support and is only supported by '
+            'the libvirt driver.'
+        ),
+        value={
+            'type': bool,
+            'description': 'Whether to enable packed virtqueue',
         },
     ),
 ]

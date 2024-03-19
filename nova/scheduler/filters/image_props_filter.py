@@ -82,17 +82,29 @@ class ImagePropertiesFilter(filters.BaseHostFilter):
 
         def _compare_product_version(hyper_version, image_props):
             version_required = image_props.get('img_hv_requested_version')
-            if not(hypervisor_version and version_required):
+            if not (hypervisor_version and version_required):
                 return True
             img_prop_predicate = versionpredicate.VersionPredicate(
                 'image_prop (%s)' % version_required)
             hyper_ver_str = versionutils.convert_version_to_str(hyper_version)
             return img_prop_predicate.satisfied_by(hyper_ver_str)
 
+        def _compare_maxphysaddr_bits(host_state, image_props):
+            bits_required = image_props.get('hw_maxphysaddr_bits')
+            if not bits_required:
+                return True
+
+            bits = host_state.cpu_info.get('maxphysaddr', {}).get('bits')
+            if not bits:
+                return True
+
+            return bits >= bits_required
+
         for supp_inst in supp_instances:
             if _compare_props(checked_img_props, supp_inst):
                 if _compare_product_version(hypervisor_version, image_props):
-                    return True
+                    if _compare_maxphysaddr_bits(host_state, image_props):
+                        return True
 
         LOG.debug("Instance contains properties %(image_props)s "
                   "that are not provided by the compute node "

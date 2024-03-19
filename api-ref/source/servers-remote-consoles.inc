@@ -17,7 +17,7 @@ The API provides a unified request for creating a remote console. The user can
 get a URL to connect the console from this API. The URL includes the token
 which is used to get permission to access the console. Servers may support
 different console protocols. To return a remote console using a specific
-protocol, such as RDP, set the ``protocol`` parameter to ``rdp``.
+protocol, such as VNC, set the ``protocol`` parameter to ``vnc``.
 
 Normal response codes: 200
 
@@ -64,9 +64,9 @@ Show Console Connection Information
 Given the console authentication token for a server, shows the related
 connection information.
 
-This method used to be available only for the ``rdp-html5`` console type before
-microversion 2.31. Starting from microversion 2.31 it's available for all
-console types.
+Nova HyperV driver has been removed therefore requests for RDP console connection
+information will always return an http 400 error. Starting from microversion 2.31
+it's available for all other console types.
 
 Normal response codes: 200
 
@@ -94,5 +94,5 @@ Response
 
 **Example Show Console Authentication Token**
 
-.. literalinclude:: ../../doc/api_samples/os-console-auth-tokens/get-console-connect-info-get-resp.json
+.. literalinclude:: ../../doc/api_samples/os-console-auth-tokens/v2.31/get-console-connect-info-get-resp.json
    :language: javascript

@@ -109,10 +109,16 @@ def block_device_info_get_encrypted_disks(
     block_device_info: ty.Mapping[str, ty.Any],
 ) -> ty.List['nova.virt.block_device.DriverBlockDevice']:
     block_device_info = block_device_info or {}
+
+    # swap is a single device, not a list
+    swap = block_device_info.get('swap')
+    swap = [swap] if swap else []
+
     return [
         driver_bdm for driver_bdm in itertools.chain(
             block_device_info.get('image', []),
             block_device_info.get('ephemerals', []),
+            swap,
         )
         if driver_bdm.get('encrypted')
     ]
@@ -547,16 +553,6 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
-    def get_rdp_console(self, context, instance):
-        """Get connection info for a rdp console.
-
-        :param context: security context
-        :param instance: nova.objects.instance.Instance
-
-        :returns: an instance of console.type.ConsoleRDP
-        """
-        raise NotImplementedError()
-
     def get_serial_console(self, context, instance):
         """Get connection info for a serial console.
 
@@ -618,7 +614,7 @@ class ComputeDriver(object):
                       disk_bus=None, device_type=None, encryption=None):
         """Attach the disk to the instance at mountpoint using info.
 
-        :raises TooManyDiskDevices: if the maxmimum allowed devices to attach
+        :raises TooManyDiskDevices: if the maximum allowed devices to attach
                                     to a single instance is exceeded.
         """
         raise NotImplementedError()
@@ -1053,7 +1049,7 @@ class ComputeDriver(object):
         node, as well as the inventory, aggregates, and traits associated with
         those resource providers.
 
-        Implementors of this interface are expected to set ``allocation_ratio``
+        Implementers of this interface are expected to set ``allocation_ratio``
         and ``reserved`` values for inventory records, which may be based on
         configuration options, e.g. ``[DEFAULT]/cpu_allocation_ratio``,
         depending on the driver and resource class. If not provided, allocation
@@ -1160,6 +1156,26 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
+    def is_node_deleted(self, nodename):
+        """Check this compute node has been deleted.
+
+        This method is called when the compute manager notices that a
+        node that was previously reported as available is no longer
+        available.
+        In this case, we need to know if the node has actually been
+        deleted, or if it is simply no longer managed by this
+        nova-compute service.
+        If True is returned, the database and placement records will
+        be removed.
+
+        :param nodename:
+            node which the caller wants to check if its deleted
+        :returns: True if the node is safe to delete
+        """
+        # For most driver, compute nodes should never get deleted
+        # during a periodic task, they are only deleted via the API
+        return False
+
     def pre_live_migration(self, context, instance, block_device_info,
                            network_info, disk_info, migrate_data):
         """Prepare an instance for live migration
@@ -1171,7 +1187,7 @@ class ComputeDriver(object):
         :param disk_info: instance disk information
         :param migrate_data: a LiveMigrateData object
         :returns: migrate_data modified by the driver
-        :raises TooManyDiskDevices: if the maxmimum allowed devices to attach
+        :raises TooManyDiskDevices: if the maximum allowed devices to attach
                                     to a single instance is exceeded.
         """
         raise NotImplementedError()
@@ -1321,6 +1337,22 @@ class ComputeDriver(object):
         :returns: a LiveMigrateData object (hypervisor-dependent)
         """
         raise NotImplementedError()
+
+    def check_source_migrate_data_at_dest(self, ctxt, instance, migrate_data,
+                                         migration, limits, allocs):
+        """Runs the last checks on the destination after the source returned
+        the migrate_data.
+
+        :param ctxt: security context
+        :param instance: nova.db.main.models.Instance
+        :param migrate_data: result of check_can_live_migrate_source
+        :param migration: The Migration object for this live migration
+        :param limits: The SchedulerLimits object for this live migration
+        :param allocs: Allocations for this instance
+        :returns: a LibvirtLiveMigrateData object
+        :raises: MigrationPreCheckError
+        """
+        return migrate_data
 
     def post_claim_migrate_data(self, context, instance, migrate_data, claim):
         """Returns migrate_data augmented with any information obtained from
@@ -1725,7 +1757,7 @@ class ComputeDriver(object):
             The metadata of the image of the instance.
         :param nova.objects.BlockDeviceMapping root_bdm:
             The description of the root device.
-        :raises TooManyDiskDevices: if the maxmimum allowed devices to attach
+        :raises TooManyDiskDevices: if the maximum allowed devices to attach
                                     to a single instance is exceeded.
         """
         raise NotImplementedError()
@@ -1734,7 +1766,7 @@ class ComputeDriver(object):
                                           *block_device_lists):
         """Default the missing device names in the block device mapping.
 
-        :raises TooManyDiskDevices: if the maxmimum allowed devices to attach
+        :raises TooManyDiskDevices: if the maximum allowed devices to attach
                                     to a single instance is exceeded.
         """
         raise NotImplementedError()
@@ -1753,7 +1785,7 @@ class ComputeDriver(object):
                                  implementation if not set.
 
         :returns: The chosen device name.
-        :raises TooManyDiskDevices: if the maxmimum allowed devices to attach
+        :raises TooManyDiskDevices: if the maximum allowed devices to attach
                                     to a single instance is exceeded.
         """
         raise NotImplementedError()

@@ -159,7 +159,7 @@ def get_device_name_for_instance(instance, bdms, device):
     This method is a wrapper for get_next_device_name that gets the list
     of used devices and the root device from a block device mapping.
 
-    :raises TooManyDiskDevices: if the maxmimum allowed devices to attach to a
+    :raises TooManyDiskDevices: if the maximum allowed devices to attach to a
                                 single instance is exceeded.
     """
     mappings = block_device.instance_block_mapping(instance, bdms)
@@ -172,7 +172,7 @@ def default_device_names_for_instance(instance, root_device_name,
     """Generate missing device names for an instance.
 
 
-    :raises TooManyDiskDevices: if the maxmimum allowed devices to attach to a
+    :raises TooManyDiskDevices: if the maximum allowed devices to attach to a
                                 single instance is exceeded.
     """
 
@@ -212,7 +212,7 @@ def get_next_device_name(instance, device_name_list,
     /dev/vdc is specified but the backend uses /dev/xvdc), the device
     name will be converted to the appropriate format.
 
-    :raises TooManyDiskDevices: if the maxmimum allowed devices to attach to a
+    :raises TooManyDiskDevices: if the maximum allowed devices to attach to a
                                 single instance is exceeded.
     """
 
@@ -406,7 +406,7 @@ def notify_usage_exists(notifier, context, instance_ref, host,
 
 def notify_about_instance_usage(notifier, context, instance, event_suffix,
                                 network_info=None, extra_usage_info=None,
-                                fault=None):
+                                fault=None, best_effort=False):
     """Send an unversioned legacy notification about an instance.
 
     All new notifications should use notify_about_instance_action which sends
@@ -435,7 +435,14 @@ def notify_about_instance_usage(notifier, context, instance, event_suffix,
     else:
         method = notifier.info
 
-    method(context, 'compute.instance.%s' % event_suffix, usage_info)
+    try:
+        method(context, 'compute.instance.%s' % event_suffix, usage_info)
+    except Exception as e:
+        if best_effort:
+            LOG.error('Exception during notification sending: %s. '
+                      'Attempting to proceed with normal operation.', e)
+        else:
+            raise e
 
 
 def _get_fault_and_priority_from_exception(exception: Exception):
@@ -454,7 +461,7 @@ def _get_fault_and_priority_from_exception(exception: Exception):
 @rpc.if_notifications_enabled
 def notify_about_instance_action(context, instance, host, action, phase=None,
                                  source=fields.NotificationSource.COMPUTE,
-                                 exception=None, bdms=None):
+                                 exception=None, bdms=None, best_effort=False):
     """Send versioned notification about the action made on the instance
     :param instance: the instance which the action performed on
     :param host: the host emitting the notification
@@ -481,7 +488,14 @@ def notify_about_instance_action(context, instance, host, action, phase=None,
                     action=action,
                     phase=phase),
             payload=payload)
-    notification.emit(context)
+    try:
+        notification.emit(context)
+    except Exception as e:
+        if best_effort:
+            LOG.error('Exception during notification sending: %s. '
+                      'Attempting to proceed with normal operation.', e)
+        else:
+            raise e
 
 
 @rpc.if_notifications_enabled

@@ -2312,12 +2312,12 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
             ])
 
     def test_instance_update_and_get_original_conflict_race_fallthrough(self):
-        # Ensure that is update_match continuously fails for no discernable
+        # Ensure that is update_match continuously fails for no discernible
         # reason, we evantually raise UnknownInstanceUpdateConflict
         instance = self.create_instance_with_args()
 
         # Reproduce the conditions of a race between fetching and updating the
-        # instance by making update_on_match fail for no discernable reason.
+        # instance by making update_on_match fail for no discernible reason.
         with mock.patch.object(update_match, 'update_on_match',
                         side_effect=update_match.NoRowsMatched):
             self.assertRaises(exception.UnknownInstanceUpdateConflict,
@@ -2669,7 +2669,7 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
         block_dev = block_device.BlockDeviceDict(bdm_values)
         db.block_device_mapping_create(self.ctxt, block_dev, legacy=False)
 
-        # Crate a second BDM that is soft-deleted to simulate that the
+        # Create a second BDM that is soft-deleted to simulate that the
         # volume was detached and the BDM was deleted before the instance
         # was hard destroyed.
         bdm2_values = {
@@ -4169,6 +4169,222 @@ class VolumeUsageDBApiTestCase(test.TestCase):
                               'tot_write_bytes': 40400}
         for key, value in expected_vol_usage.items():
             self.assertEqual(vol_usage[key], value, key)
+
+
+class ShareMappingDBApiTestCase(test.TestCase):
+
+    def setUp(self):
+        super(ShareMappingDBApiTestCase, self).setUp()
+        self.user_id = 'fake'
+        self.project_id = 'fake'
+        self.context = context.RequestContext(self.user_id, self.project_id)
+
+    def _compare(self, share_mapping, expected):
+        for key, value in expected.items():
+            self.assertEqual(share_mapping[key], value)
+
+    @staticmethod
+    def create_test_data(ctxt):
+        expected_share_mappings = {
+            '1': {
+                'uuid': 'fake-uuid1',
+                'instance_uuid': 'fake-instance-uuid1',
+                'share_id': '1',
+                'status': None,
+                'tag': 'fake-tag1',
+                'export_location': 'fake-export_location1',
+                'share_proto': 'NFS'
+            },
+            '2': {
+                'uuid': 'fake-uuid2',
+                'instance_uuid': 'fake-instance-uuid2',
+                'share_id': '2',
+                'status': 'attached',
+                'tag': 'fake-tag2',
+                'export_location': 'fake-export_location2',
+                'share_proto': 'NFS'
+            }
+        }
+
+        db.share_mapping_update(
+            ctxt,
+            uuid='fake-uuid1',
+            instance_uuid='fake-instance-uuid1',
+            share_id='1',
+            status=None,
+            tag='fake-tag1',
+            export_location='fake-export_location1',
+            share_proto='NFS'
+        )
+        db.share_mapping_update(
+            ctxt,
+            uuid='fake-uuid2',
+            instance_uuid='fake-instance-uuid2',
+            share_id='2',
+            status='attached',
+            tag='fake-tag2',
+            export_location='fake-export_location2',
+            share_proto='NFS'
+        )
+
+        return expected_share_mappings
+
+    def test_share_mapping_update(self):
+        ctxt = context.get_admin_context()
+        expected_share_mappings = self.create_test_data(ctxt)
+
+        share_mappings = db.share_mapping_get_all(ctxt)
+        self.assertEqual(len(share_mappings), 2)
+        for share in share_mappings:
+            self._compare(
+                share, expected_share_mappings[share.share_id])
+
+        # Making an update
+        db.share_mapping_update(
+            ctxt,
+            uuid='fake-uuid1',
+            instance_uuid='fake-instance-uuid1',
+            share_id='1',
+            status='attached',
+            tag='fake-tag1',
+            export_location='fake-export_location1',
+            share_proto='NFS'
+        )
+        db.share_mapping_update(
+            ctxt,
+            uuid='fake-uuid2',
+            instance_uuid='fake-instance-uuid2',
+            share_id='2',
+            status='attached',
+            tag='fake-tag2-updated',
+            export_location='fake-export_location2',
+            share_proto='NFS'
+        )
+
+        expected_share_mappings_after_update = {
+            '1': {
+                'uuid': 'fake-uuid1',
+                'instance_uuid': 'fake-instance-uuid1',
+                'share_id': '1',
+                'status': 'attached',
+                'tag': 'fake-tag1',
+                'export_location': 'fake-export_location1',
+                'share_proto': 'NFS'
+            },
+            '2': {
+                'uuid': 'fake-uuid2',
+                'instance_uuid': 'fake-instance-uuid2',
+                'share_id': '2',
+                'status': 'attached',
+                'tag': 'fake-tag2-updated',
+                'export_location': 'fake-export_location2',
+                'share_proto': 'NFS'
+            }
+        }
+
+        share_mappings = db.share_mapping_get_all(ctxt)
+        self.assertEqual(len(share_mappings), 2)
+        for share in share_mappings:
+            self._compare(
+                share, expected_share_mappings_after_update[share.share_id])
+
+    def test_share_mapping_get_by_share_id(self):
+        ctxt = context.get_admin_context()
+        expected_share_mappings = self.create_test_data(ctxt)
+
+        share_mappings = db.share_mapping_get_by_share_id(ctxt, '1')
+        self.assertEqual(len(share_mappings), 1)
+        self._compare(
+            share_mappings[0],
+            expected_share_mappings[share_mappings[0].share_id]
+        )
+        share_mappings = db.share_mapping_get_by_share_id(ctxt, '2')
+        self.assertEqual(len(share_mappings), 1)
+        self._compare(
+            share_mappings[0],
+            expected_share_mappings[share_mappings[0].share_id]
+        )
+
+    def test_share_mapping_get_by_instance_uuid(self):
+        ctxt = context.get_admin_context()
+        expected_share_mappings = self.create_test_data(ctxt)
+
+        share_mappings = (
+            db.share_mapping_get_by_instance_uuid(ctxt, 'fake-instance-uuid1')
+        )
+        self.assertEqual(len(share_mappings), 1)
+        self._compare(
+            share_mappings[0],
+            expected_share_mappings[share_mappings[0].share_id]
+        )
+        share_mappings = (
+            db.share_mapping_get_by_instance_uuid(ctxt, 'fake-instance-uuid2')
+        )
+        self.assertEqual(len(share_mappings), 1)
+        self._compare(
+            share_mappings[0],
+            expected_share_mappings[share_mappings[0].share_id]
+        )
+
+    def test_share_mapping_get_by_instance_uuid_and_share_id(self):
+        ctxt = context.get_admin_context()
+        expected_share_mappings = self.create_test_data(ctxt)
+
+        share_mappings = (
+            db.share_mapping_get_by_instance_uuid_and_share_id(
+                ctxt,
+                'fake-instance-uuid1',
+                '1')
+        )
+        self._compare(
+            share_mappings,
+            expected_share_mappings[share_mappings.share_id]
+        )
+        share_mappings = (
+            db.share_mapping_get_by_instance_uuid_and_share_id(
+                ctxt,
+                'fake-instance-uuid2',
+                '2')
+        )
+        self._compare(
+            share_mappings,
+            expected_share_mappings[share_mappings.share_id]
+        )
+
+    def test_share_mapping_get_by_instance_uuid_and_share_id_missing(self):
+        ctxt = context.get_admin_context()
+
+        share_mappings = (
+            db.share_mapping_get_by_instance_uuid_and_share_id(
+                ctxt,
+                'fake-instance-uuid1',
+                '3')
+        )
+        self.assertIsNone(share_mappings)
+
+    def test_share_mapping_delete_by_instance_uuid_and_share_id(self):
+        ctxt = context.get_admin_context()
+        expected_share_mappings = self.create_test_data(ctxt)
+
+        db.share_mapping_delete_by_instance_uuid_and_share_id(
+            ctxt,
+            'fake-instance-uuid1',
+            '1'
+        )
+
+        share_mappings = db.share_mapping_get_all(ctxt)
+        self.assertEqual(len(share_mappings), 1)
+        for share in share_mappings:
+            self._compare(
+                share, expected_share_mappings[share.share_id]
+            )
+        db.share_mapping_delete_by_instance_uuid_and_share_id(
+            ctxt,
+            'fake-instance-uuid2',
+            '2'
+        )
+        share_mappings = db.share_mapping_get_all(ctxt)
+        self.assertEqual(len(share_mappings), 0)
 
 
 class TaskLogTestCase(test.TestCase):
@@ -5703,7 +5919,7 @@ class ArchiveTestCase(test.TestCase, ModelsObjectComparatorMixin):
             if table_name in [
                 'tags', 'resource_providers', 'allocations',
                 'inventories', 'resource_provider_aggregates',
-                'console_auth_tokens',
+                'console_auth_tokens', 'share_mapping',
             ]:
                 continue
 
@@ -5934,7 +6150,7 @@ class ArchiveTestCase(test.TestCase, ModelsObjectComparatorMixin):
         """:returns: 0 on success, 1 if no uuid column, 2 if insert failed."""
         # NOTE(cdent): migration 314 adds the resource_providers
         # table with a uuid column that does not archive, so skip.
-        skip_tables = ['resource_providers']
+        skip_tables = ['resource_providers', 'share_mapping']
         if tablename in skip_tables:
             return 1
         main_table = sqlalchemyutils.get_table(self.engine, tablename)

@@ -49,8 +49,10 @@ class InstanceNUMACell(base.NovaEphemeralObject,
                 raise exception.ObjectActionError(
                     action='obj_make_compatible',
                     reason=_(
-                        '%s policy is not supported in version %s'
-                    ) % (primitive['cpu_policy'], target_version))
+                        '{policy} policy is not supported in '
+                        'version {version}'
+                    ).format(policy=primitive['cpu_policy'],
+                             version=target_version))
 
         # NOTE(huaqiang): Since version 1.5, 'cpuset' is modified to track the
         # unpinned CPUs only, with pinned CPUs tracked via 'pcpuset' instead.
@@ -292,6 +294,12 @@ class InstanceNUMATopology(base.NovaObject,
         return set(itertools.chain.from_iterable([
             cell.cpu_pinning.values() for cell in self.cells
             if cell.cpu_pinning]))
+
+    @property
+    def cpuset_reserved(self):
+        return set(itertools.chain.from_iterable([
+            cell.cpuset_reserved for cell in self.cells
+            if cell.cpuset_reserved]))
 
     def clear_host_pinning(self):
         """Clear any data related to how instance is pinned to the host.

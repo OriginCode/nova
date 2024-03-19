@@ -770,7 +770,7 @@ class API(object):
         """Create a volume attachment. This requires microversion >= 3.44.
 
         The attachment_create call was introduced in microversion 3.27. We
-        need 3.44 as minmum here as we need attachment_complete to finish the
+        need 3.44 as minimum here as we need attachment_complete to finish the
         attaching process and it which was introduced in version 3.44.
 
         :param context: The nova request context.
@@ -840,7 +840,7 @@ class API(object):
                            'code': getattr(ex, 'code', None)})
 
     def attachment_get_all(self, context, instance_id=None, volume_id=None):
-        """Get all attchments by instance id or volume id
+        """Get all attachments by instance id or volume id
 
         :param context: The nova request context.
         :param instance_id: UUID of the instance attachment to get.
@@ -873,6 +873,10 @@ class API(object):
             each.to_dict()) for each in attachments]
 
     @translate_attachment_exception
+    @retrying.retry(stop_max_attempt_number=5,
+                    retry_on_exception=lambda e:
+                    (isinstance(e, cinder_exception.ClientException) and
+                     e.code in (500, 504)))
     def attachment_update(self, context, attachment_id, connector,
                           mountpoint=None):
         """Updates the connector on the volume attachment. An attachment

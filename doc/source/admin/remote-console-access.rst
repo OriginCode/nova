@@ -69,6 +69,31 @@ This particular example is illustrated below.
    :alt: noVNC process
    :width: 95%
 
+Consoleauth configuration:
+--------------------------
+
+The consoleauth accepts following options:
+
+- :oslo.config:option:`consoleauth.token_ttl`
+- :oslo.config:option:`consoleauth.enforce_session_timeout`
+
+.. code-block:: ini
+
+   [consoleauth]
+   token_ttl = 1000                    # default value is 600 second
+   enforce_session_timeout = True      # default is False
+
+
+Supported consoles:
+-------------------
+
+* :ref:`vnc-console`
+* :ref:`spice-console`
+* :ref:`serial-console`
+* :ref:`mks-console`
+
+
+.. _vnc-console:
 
 noVNC-based VNC console
 -----------------------
@@ -294,6 +319,8 @@ be told where to find them. This requires editing :file:`nova.conf` to set.
    vencrypt_ca_certs=/etc/pki/nova-novncproxy/ca-cert.pem
 
 
+.. _spice-console:
+
 SPICE console
 -------------
 
@@ -376,9 +403,10 @@ for SPICE consoles.
 - :oslo.config:option:`spice.playback_compression`
 - :oslo.config:option:`spice.streaming_mode`
 
+.. _serial-console:
 
-Serial
-------
+Serial console
+--------------
 
 Serial consoles provide an alternative to graphical consoles like VNC or SPICE.
 They work a little differently to graphical consoles so an example is
@@ -468,52 +496,10 @@ There are some things to keep in mind when configuring these options:
   :program:`nova-serialproxy` service to determine where to connect to for
   proxying the console interaction.
 
+.. _mks-console:
 
-RDP
----
-
-RDP is a graphical console primarily used with Hyper-V. Nova does not provide a
-console proxy service for RDP - instead, an external proxy service, such as the
-:program:`wsgate` application provided by `FreeRDP-WebConnect`__, should be
-used.
-
-__ https://github.com/FreeRDP/FreeRDP-WebConnect
-
-Configuration
-~~~~~~~~~~~~~
-
-To enable the RDP console service, you must configure both a console proxy
-service like :program:`wsgate` and the :program:`nova-compute` service. All
-options for the latter service are defined in the :oslo.config:group:`rdp`
-group.
-
-Information on configuring an RDP console proxy service, such as
-:program:`wsgate`, is not provided here. However, more information can be found
-at `cloudbase.it`__.
-
-The :program:`nova-compute` service requires the following options to configure
-RDP console support.
-
-- :oslo.config:option:`rdp.enabled`
-- :oslo.config:option:`rdp.html5_proxy_base_url`
-
-For example, to configure this via a ``nova.conf`` file:
-
-.. code-block:: ini
-
-   [rdp]
-   enabled = True
-   html5_proxy_base_url = https://IP_ADDRESS:6083/
-
-Replace ``IP_ADDRESS`` with the IP address from which the proxy is accessible
-by the outside world. For example, this may be the management interface IP
-address of the controller or the VIP.
-
-__ https://cloudbase.it/freerdp-html5-proxy-windows/
-
-
-MKS
----
+MKS console
+-----------
 
 MKS is the protocol used for accessing the console of a virtual machine running
 on VMware vSphere. It is very similar to VNC.  Due to the architecture of the
@@ -618,6 +604,13 @@ Frequently Asked Questions
   A: Make sure the ``base_url`` match your TLS setting. If you are using https
   console connections, make sure that the value of ``novncproxy_base_url`` is
   set explicitly where the ``nova-novncproxy`` service is running.
+
+- **Q: How do I know which nova config file to update to set a particular config option?**
+
+  A: First, find out which nova-service is responsible for the change you want
+  to make, using ``ps -aux | grep nova``. Once the service is found, check the
+  status of the service via systemctl. In the status output, associated conf
+  files with respective paths will be listed.
 
 
 References

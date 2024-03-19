@@ -325,11 +325,11 @@ Please refer to the libvirt documentation for further details.
 Target maximum period of time Nova will try to keep the instance paused
 during the last part of the memory copy, in *milliseconds*.
 
-Will be rounded up to a minimum of 100ms. You can increase this value
-if you want to allow live-migrations to complete faster, or avoid
-live-migration timeout errors by allowing the guest to be paused for
-longer during the live-migration switch over. This value may be exceeded
-if there is any reduction on the transfer rate after the VM is paused.
+Minimum downtime is 100ms. You can increase this value if you want to allow
+live-migrations to complete faster, or avoid live-migration timeout errors
+by allowing the guest to be paused for longer during the live-migration switch
+over. This value may be exceeded if there is any reduction on the transfer rate
+after the VM is paused.
 
 Related options:
 
@@ -341,7 +341,7 @@ Related options:
                help="""
 Number of incremental steps to reach max downtime value.
 
-Will be rounded up to a minimum of 3 steps.
+Minimum number of steps is 3.
 """),
     cfg.IntOpt('live_migration_downtime_delay',
                default=75,
@@ -854,14 +854,15 @@ The option may be reused for other equivalent technologies in the
 future.  If the machine does not support memory encryption, the option
 will be ignored and inventory will be set to 0.
 
-If the machine does support memory encryption, *for now* a value of
-``None`` means an effectively unlimited inventory, i.e. no limit will
-be imposed by Nova on the number of SEV guests which can be launched,
-even though the underlying hardware will enforce its own limit.
-However it is expected that in the future, auto-detection of the
-inventory from the hardware will become possible, at which point
-``None`` will cause auto-detection to automatically impose the correct
-limit.
+If the machine does support memory encryption and this option is not set,
+the driver detects maximum number of SEV guests from the libvirt API which
+is available since v8.0.0. Setting this option overrides the detected limit,
+unless the given value is not larger than the detected limit.
+
+On the other hand, if an older version of libvirt is used, ``None`` means
+an effectively unlimited inventory, i.e. no limit will be imposed by Nova
+on the number of SEV guests which can be launched, even though the underlying
+hardware will enforce its own limit.
 
 .. note::
 
@@ -916,6 +917,28 @@ Related options:
 
 * ``compute_driver`` (libvirt)
 * ``virt_type`` (qemu)
+"""),
+
+    cfg.StrOpt('migration_inbound_addr',
+                       default='$my_ip',
+                       help="""
+The address used as the migration address for this host.
+
+This option indicates the IP address, hostname, or FQDN which should be used as
+the target for cold migration, resize, and evacuate traffic when moving to this
+hypervisor. This metadata is then used by the source of the migration traffic
+to construct the commands used to copy data (e.g. disk image) to the
+destination.
+
+An included "%s" is replaced with the hostname of the migration target
+hypervisor.
+
+
+Related options:
+
+* ``my_ip``
+* ``live_migration_inbound_addr``
+
 """),
 ]
 

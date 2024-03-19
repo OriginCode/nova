@@ -1590,7 +1590,7 @@ def instance_get_all_by_filters(
 def _get_query_nova_resource_by_changes_time(query, filters, model_object):
     """Filter resources by changes-since or changes-before.
 
-    Special keys are used to tweek the query further::
+    Special keys are used to tweak the query further::
 
     |   'changes-since' - only return resources updated after
     |   'changes-before' - only return resources updated before
@@ -1646,7 +1646,7 @@ def instance_get_all_by_filters_sort(context, filters, limit=None, marker=None,
     |       ]
     |   }
 
-    Special keys are used to tweek the query further::
+    Special keys are used to tweak the query further::
 
     |   'changes-since' - only return instances updated after
     |   'changes-before' - only return instances updated before
@@ -1809,7 +1809,7 @@ def instance_get_all_by_filters_sort(context, filters, limit=None, marker=None,
     # For other filters that don't match this, we will do regexp matching
     exact_match_filter_names = ['project_id', 'user_id', 'image_ref',
                                 'vm_state', 'instance_type_id', 'uuid',
-                                'metadata', 'host', 'task_state', 'compute_id',
+                                'metadata', 'host', 'task_state',
                                 'system_metadata', 'locked', 'hidden']
 
     # Filter the query
@@ -4349,7 +4349,7 @@ def _archive_deleted_rows_for_table(
     shadow table.
 
     Will also follow FK constraints and archive all referring rows.
-    Example: archving a record from the 'instances' table will also archive
+    Example: archiving a record from the 'instances' table will also archive
     the 'instance_extra' record before archiving the 'instances' record.
 
     :returns: 3-item tuple:
@@ -4903,3 +4903,81 @@ def console_auth_token_destroy_expired_by_host(context, host):
         filter_by(host=host).\
         filter(models.ConsoleAuthToken.expires <= timeutils.utcnow_ts()).\
         delete()
+
+
+####################
+
+
+@require_context
+@pick_context_manager_reader
+def share_mapping_get_all(context):
+    """Get all share_mapping."""
+    return context.session.query(models.ShareMapping).all()
+
+
+@require_context
+@pick_context_manager_reader
+def share_mapping_get_by_share_id(context, share_id):
+    """Get share_mapping records for a specific share."""
+    return context.session.query(models.ShareMapping).\
+    filter_by(share_id=share_id).all()
+
+
+@require_context
+@pick_context_manager_reader
+def share_mapping_get_by_instance_uuid(context, instance_uuid):
+    """Get share_mapping records for a specific instance."""
+    return context.session.query(models.ShareMapping).\
+    filter_by(instance_uuid=instance_uuid).all()
+
+
+@require_context
+@pick_context_manager_reader
+def share_mapping_get_by_instance_uuid_and_share_id(
+        context, instance_uuid, share_id):
+    """Get share_mapping record for a specific instance and share_id."""
+    return context.session.query(models.ShareMapping).\
+    filter_by(instance_uuid=instance_uuid, share_id=share_id).first()
+
+
+@require_context
+@pick_context_manager_writer
+def share_mapping_delete_by_instance_uuid_and_share_id(
+        context, instance_uuid, share_id):
+    """Delete share_mapping record for a specific instance and share_id."""
+    context.session.query(models.ShareMapping).\
+    filter_by(instance_uuid=instance_uuid, share_id=share_id).delete()
+
+
+@require_context
+@pick_context_manager_writer
+def share_mapping_update(
+    context, uuid, instance_uuid, share_id, status, tag, export_location,
+    share_proto
+):
+    """Update share_mapping for a share
+    Creates new record if needed.
+    """
+    share_mapping = share_mapping_get_by_instance_uuid_and_share_id(
+            context, instance_uuid, share_id)
+
+    if share_mapping:
+        share_mapping.status = status
+        share_mapping.tag = tag
+        share_mapping.export_location = export_location
+        share_mapping.share_proto = share_proto
+        share_mapping.save(context.session)
+        context.session.refresh(share_mapping)
+
+    else:
+        share_mapping = models.ShareMapping()
+        share_mapping.uuid = uuid
+        share_mapping.instance_uuid = instance_uuid
+        share_mapping.share_id = share_id
+        share_mapping.status = status
+        share_mapping.tag = tag
+        share_mapping.export_location = export_location
+        share_mapping.share_proto = share_proto
+        share_mapping.save(context.session)
+
+    return share_mapping

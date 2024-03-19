@@ -3615,8 +3615,8 @@ class TestAPI(TestAPIBase):
 
         subnets = self.api._get_subnets_from_port(self.context, port_data)
 
-        self.assertEqual(subnet_data1[0]['gateway_ip'],
-                         subnets[0]['meta']['dhcp_server'])
+        self.assertEqual(subnet_data1[0]['enable_dhcp'],
+                         subnets[0]['meta']['enable_dhcp'])
 
     @mock.patch.object(neutronapi, 'get_client', return_value=mock.Mock())
     def test_get_physnet_tunneled_info_multi_segment(self, mock_get_client):
@@ -8144,17 +8144,20 @@ class TestAPIPortbinding(TestAPIBase):
                        'pf_mac_address': '52:54:00:1e:59:c6',
                        'vf_num': 1,
                    },
+                   'network_caps': ['gso', 'sg', 'tso', 'tx'],
                    'dev_type': obj_fields.PciDeviceType.SRIOV_VF,
                   }
         PciDevice = collections.namedtuple('PciDevice',
                                ['vendor_id', 'product_id', 'address',
                                 'card_serial_number', 'sriov_cap',
-                                'dev_type', 'parent_addr'])
+                                'dev_type', 'parent_addr',
+                                'network_caps'])
         mydev = PciDevice(**pci_dev)
         self.assertEqual(self.api._get_vf_pci_device_profile(mydev),
                          {'pf_mac_address': '52:54:00:1e:59:c6',
                           'vf_num': 1,
-                          'card_serial_number': 'MT2113X00000'})
+                          'card_serial_number': 'MT2113X00000',
+                          'capabilities': ['gso', 'sg', 'tso', 'tx']})
 
     @mock.patch.object(
         neutronapi.API, '_get_vf_pci_device_profile',

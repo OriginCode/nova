@@ -1040,6 +1040,7 @@ class TestArgsSerializer(test.NoDBTestCase):
 class TestRegistry(test.NoDBTestCase):
     @mock.patch('nova.objects.base.objects')
     def test_hook_chooses_newer_properly(self, mock_objects):
+        del mock_objects.MyObj
         reg = base.NovaObjectRegistry()
         reg.registration_hook(MyObj, 0)
 
@@ -1056,6 +1057,7 @@ class TestRegistry(test.NoDBTestCase):
 
     @mock.patch('nova.objects.base.objects')
     def test_hook_keeps_newer_properly(self, mock_objects):
+        del mock_objects.MyObj
         reg = base.NovaObjectRegistry()
         reg.registration_hook(MyObj, 0)
 
@@ -1085,7 +1087,7 @@ object_data = {
     'CellMappingList': '1.1-496ef79bb2ab41041fff8bcb57996352',
     'ComputeNode': '1.19-af6bd29a6c3b225da436a0d8487096f2',
     'ComputeNodeList': '1.17-52f3b0962b1c86b98590144463ebb192',
-    'ConsoleAuthToken': '1.1-8da320fb065080eb4d3c2e5c59f8bf52',
+    'ConsoleAuthToken': '1.2-a4677c3576ad91eb02068a5cb9d38eaa',
     'CpuDiagnostics': '1.0-d256f2e442d1b837735fd17dfe8e3d47',
     'Destination': '1.4-3b440d29459e2c98987ad5b25ad1cb2c',
     'DeviceBus': '1.0-77509ea1ea0dd750d5864b9bd87d3f9d',
@@ -1103,7 +1105,7 @@ object_data = {
     'HyperVLiveMigrateData': '1.4-e265780e6acfa631476c8170e8d6fce0',
     'IDEDeviceBus': '1.0-29d4c9f27ac44197f01b6ac1b7e16502',
     'ImageMeta': '1.8-642d1b2eb3e880a367f37d72dd76162d',
-    'ImageMetaProps': '1.34-29b3a6b7fe703f36bfd240d914f16c21',
+    'ImageMetaProps': '1.37-1e0d70fb51041c0446b00695c5ef0e21',
     'Instance': '2.8-2727dba5e4a078e6cc848c1f94f7eb24',
     'InstanceAction': '1.2-9a5abc87fdd3af46f45731960651efb5',
     'InstanceActionEvent': '1.4-5b1f361bd81989f8bb2c20bb7e8a4cb4',
@@ -1126,7 +1128,7 @@ object_data = {
     'KeyPair': '1.4-1244e8d1b103cc69d038ed78ab3a8cc6',
     'KeyPairList': '1.3-94aad3ac5c938eef4b5e83da0212f506',
     'LibvirtLiveMigrateBDMInfo': '1.1-5f4a68873560b6f834b74e7861d71aaf',
-    'LibvirtLiveMigrateData': '1.10-348cf70ea44d3b985f45f64725d6f6a7',
+    'LibvirtLiveMigrateData': '1.11-c535fa68cab55cc451e49996f1380ccc',
     'LibvirtLiveMigrateNUMAInfo': '1.0-0e777677f3459d0ed1634eabbdb6c22f',
     'LibvirtVPMEMDevice': '1.0-17ffaf47585199eeb9a2b83d6bde069f',
     'MemoryDiagnostics': '1.0-2c995ae0f2223bb0f8e523c5cc0b83da',
@@ -1153,7 +1155,7 @@ object_data = {
     'QuotasNoOp': '1.3-d1593cf969c81846bc8192255ea95cce',
     'RequestGroup': '1.3-0458d350a8ec9d0673f9be5640a990ce',
     'RequestLevelParams': '1.1-3a718a0ae0bfdec669e7108631b3f313',
-    'RequestSpec': '1.14-2cdbda368ca07e10905dc5fe96908a58',
+    'RequestSpec': '1.15-c1c9d34236d87a37c008dcf8926199fa',
     'Resource': '1.0-d8a2abbb380da583b995fd118f6a8953',
     'ResourceList': '1.0-4a53826625cc280e15fae64a575e0879',
     'ResourceMetadata': '1.0-77509ea1ea0dd750d5864b9bd87d3f9d',
@@ -1166,6 +1168,8 @@ object_data = {
     'Selection': '1.1-548e3c2f04da2a61ceaf9c4e1589f264',
     'Service': '1.22-8a740459ab9bf258a19c8fcb875c2d9a',
     'ServiceList': '1.19-5325bce13eebcbf22edc9678285270cc',
+    'ShareMapping': '1.0-5ed0db9b97582e84d582c0b8488aa5df',
+    'ShareMappingList': '1.0-634980d5efdf3656e28c8dec3d862ab9',
     'Tag': '1.1-8b8d7d5b48887651a0e01241672e2963',
     'TagList': '1.1-55231bdb671ecf7641d6a2e9109b5d8e',
     'TaskLog': '1.0-78b0534366f29aa3eebb01860fbe18fe',

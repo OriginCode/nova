@@ -18,6 +18,7 @@ Provides common functionality for integrated unit tests
 """
 
 import collections
+import datetime
 import random
 import re
 import string
@@ -26,6 +27,7 @@ import time
 from oslo_concurrency import lockutils
 from oslo_log import log as logging
 import oslo_messaging as messaging
+from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova.compute import instance_actions
 from nova.compute import rpcapi as compute_rpcapi
@@ -394,6 +396,32 @@ class InstanceHelperMixin:
 
         return flavor['id']
 
+    def _create_image(self, metadata):
+        image = {
+            'id': 'c456eb30-91d7-4f43-8f46-2efd9eccd744',
+            'name': 'fake-image-custom-property',
+            'created_at': datetime.datetime(2011, 1, 1, 1, 2, 3),
+            'updated_at': datetime.datetime(2011, 1, 1, 1, 2, 3),
+            'deleted_at': None,
+            'deleted': False,
+            'status': 'active',
+            'is_public': False,
+            'container_format': 'raw',
+            'disk_format': 'raw',
+            'size': '25165824',
+            'min_ram': 0,
+            'min_disk': 0,
+            'protected': False,
+            'visibility': 'public',
+            'tags': ['tag1', 'tag2'],
+            'properties': {
+                'kernel_id': 'nokernel',
+                'ramdisk_id': 'nokernel',
+            },
+        }
+        image['properties'].update(metadata)
+        return self.glance.create(None, image)
+
     def _build_server(self, name=None, image_uuid=None, flavor_id=None,
                       networks=None, az=None, host=None):
         """Build a request for the server create API.
@@ -492,6 +520,14 @@ class InstanceHelperMixin:
         )
         self.notifier.wait_for_versioned_notifications('instance.reboot.end')
         return self._wait_for_state_change(server, expected_state)
+
+    def _show_server(self, server):
+        """This method is to retrieve fresh copy of target server object
+        """
+        try:
+            return self.api.get_server(server['id'])
+        except api_client.OpenStackApiNotFoundException:
+            return server
 
     def _attach_interface(self, server, port_uuid):
         """attach a neutron port to a server."""
@@ -654,10 +690,9 @@ class InstanceHelperMixin:
             # wait for each vol to get attached
             self._wait_for_volume_attach(server['id'], vol_id)
 
-        # here server is already in an active state
         # this is just to refresh server object
         # so attached volumes can be shown in server
-        return self._wait_for_state_change(server, expected_status='ACTIVE')
+        return self._show_server(server)
 
     def _create_vol_attachments_by_cinder(
             self, volume_id, server, new_attachments=1):
@@ -667,6 +702,42 @@ class InstanceHelperMixin:
         for _ in range(new_attachments):
             self.cinder.create_vol_attachment(
                 volume_id, server['id'])
+
+    def _create_server_boot_from_volume(self):
+        bfv_image_id = uuids.bfv_image_uuid
+        timestamp = datetime.datetime(2011, 1, 1, 1, 2, 3)
+
+        image = {
+            'id': bfv_image_id,
+            'name': 'fake_image_name',
+            'created_at': timestamp,
+            'updated_at': timestamp,
+            'deleted_at': None,
+            'deleted': False,
+            'status': 'active',
+            'container_format': 'raw',
+            'disk_format': 'raw',
+            'min_disk': 0
+        }
+
+        self.glance.create(None, image)
+
+        # for bfv, image is not required in server request
+        server = self._build_server()
+        server.pop('imageRef')
+
+        # as bfv-image will be used as source in block_device_mapping_v2
+        # here block device will be created based on bfv-image
+        # i.e bfvimage_id
+        server['block_device_mapping_v2'] = [{
+            'source_type': 'image',
+            'destination_type': 'volume',
+            'boot_index': 0,
+            'uuid': bfv_image_id,
+            'volume_size': 1,
+        }]
+        server = self.api.post_server({'server': server})
+        return self._wait_for_state_change(server, 'ACTIVE')
 
 
 class PlacementHelperMixin:
@@ -1247,10 +1318,15 @@ class _IntegratedTestBase(test.TestCase, PlacementInstanceHelperMixin):
     #: do real authentication.
     STUB_KEYSTONE = True
 
+    #: Whether to treat RPC casts as calls. This shouldn't really default to
+    #: True but a significant number of existing tests may be relying on it.
+    CAST_AS_CALL = True
+
     def setUp(self):
         super(_IntegratedTestBase, self).setUp()
 
-        self.useFixture(nova_fixtures.CastAsCallFixture(self))
+        if self.CAST_AS_CALL:
+            self.useFixture(nova_fixtures.CastAsCallFixture(self))
 
         self.placement = self.useFixture(func_fixtures.PlacementFixture()).api
         self.neutron = self.useFixture(nova_fixtures.NeutronFixture(self))

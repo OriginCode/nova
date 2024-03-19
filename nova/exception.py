@@ -161,7 +161,7 @@ class Forbidden(NovaException):
 
 class NotSupported(NovaException):
     # This exception use return code as 400 and can be used
-    # directly or as base exception for operations whihc are not
+    # directly or as base exception for operations which are not
     # supported in Nova. Any feature that is not yet implemented
     # but plan to implement in future (example: Cyborg
     # integration operations), should use this exception as base
@@ -698,6 +698,22 @@ class VolumeAttachmentNotFound(NotFound):
 
 class VolumeNotFound(NotFound):
     msg_fmt = _("Volume %(volume_id)s could not be found.")
+
+
+class ShareNotFound(NotFound):
+    msg_fmt = _("Share %(share_id)s could not be found.")
+
+
+class ShareUmountError(NovaException):
+    msg_fmt = _("Share id %(share_id)s umount error "
+                "from server %(server_id)s.\n"
+                "Reason: %(reason)s.")
+
+
+class ShareMountError(NovaException):
+    msg_fmt = _("Share id %(share_id)s mount error "
+                "from server %(server_id)s.\n"
+                "Reason: %(reason)s.")
 
 
 class VolumeTypeNotFound(NotFound):
@@ -2530,3 +2546,17 @@ class NotSupportedComputeForEvacuateV295(NotSupported):
                 "instance on destination. To evacuate before upgrades are "
                 "complete please use an older microversion. Required version "
                 "for compute %(expected), current version %(currently)s")
+
+
+class EphemeralEncryptionSecretNotFound(Invalid):
+    msg_fmt = _(
+        'Encryption secret %(secret_uuid)s was not found in the key manager')
+
+
+class EphemeralEncryptionCleanupFailed(NovaException):
+    msg_fmt = _("Failed to clean up ephemeral encryption secrets: "
+                "%(error)s")
+
+
+class HostConflict(Exception):
+    pass

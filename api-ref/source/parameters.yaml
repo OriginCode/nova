@@ -2619,7 +2619,6 @@ driver_diagnostics:
 
     - ``libvirt``
     - ``xenapi``
-    - ``hyperv``
     - ``vmwareapi``
     - ``ironic``
   in: body
@@ -3379,7 +3378,7 @@ force_evacuate:
       Furthermore, this should not be specified when evacuating instances
       managed by a clustered hypervisor driver like ironic since you
       cannot specify a node, so the compute service will pick a node randomly
-      which may not be able to accomodate the instance.
+      which may not be able to accommodate the instance.
   in: body
   required: false
   type: boolean
@@ -5559,7 +5558,7 @@ os:scheduler_hints_cidr:
     Schedule the server on a host in the network specified with an IP address
     (``os:scheduler_hints:build_near_host_ip``) and this parameter.
     If ``os:scheduler_hints:build_near_host_ip`` is specified and
-    this paramete is omitted, ``/24`` is used.
+    this parameter is omitted, ``/24`` is used.
     It is available when ``SimpleCIDRAffinityFilter`` is available
     on cloud side.
   in: body
@@ -5696,6 +5695,18 @@ personality:
   required: false
   type: array
   max_version: 2.56
+pinned_availability_zone:
+  description: |
+    This is the availability zone requested during server creation.
+    Also when cross_az_attach option is false and booting an instance from
+    volume, the instance can be pinned to AZ and in that case, instance will
+    be scheduled on host belonging to pinned AZ.
+    Also when default_schedule_zone config option set to specific AZ, in that
+    case, instance would be pinned to that specific AZ, and instance will be
+    scheduled on host belonging to pinned AZ.
+  in: body
+  type: string
+  min_version: 2.96
 policies:
   description: |
     A list of exactly one policy name to associate with the server group. The
@@ -5957,15 +5968,15 @@ remote_console:
 remote_console_protocol:
   description: |
     The protocol of remote console. The valid values are ``vnc``, ``spice``,
-    ``rdp``, ``serial`` and ``mks``. The protocol ``mks`` is added since
-    Microversion ``2.8``.
+    ``serial`` and ``mks``. The protocol ``mks`` is added since Microversion
+    ``2.8``.
   in: body
   required: true
   type: string
 remote_console_type:
   description: |
     The type of remote console. The valid values are ``novnc``,
-    ``rdp-html5``, ``spice-html5``, ``serial``, and ``webmks``. The type
+    ``spice-html5``, ``serial``, and ``webmks``. The type
     ``webmks`` is added since Microversion ``2.8``.
   in: body
   required: true
@@ -6372,7 +6383,7 @@ server_hostname: &server_hostname
     .. note::
 
         This information is published via the metadata service and requires
-        application such as ``cloud-init`` to propogate it through to the
+        application such as ``cloud-init`` to propagate it through to the
         instance.
   min_version: 2.3
 server_hostname_req:
@@ -6388,7 +6399,7 @@ server_hostname_req:
     .. note::
 
         This information is published via the metadata service and requires
-        application such as ``cloud-init`` to propogate it through to the
+        application such as ``cloud-init`` to propagate it through to the
         instance.
   min_version: 2.90
 server_hostname_update_rebuild:

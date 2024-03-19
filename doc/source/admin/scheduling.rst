@@ -487,8 +487,7 @@ The image properties that the filter checks for are:
       This was previously called ``architecture``.
 
 ``img_hv_type``
-  Describes the hypervisor required by the image.  Examples are ``qemu``
-  and ``hyperv``.
+  Describes the hypervisor required by the image.  Examples are ``qemu``.
 
   .. note::
 
@@ -511,7 +510,7 @@ The image properties that the filter checks for are:
 
   .. code-block:: console
 
-     $ openstack image set --property hypervisor_type=hyperv --property \
+     $ openstack image set --property hypervisor_type=qemu --property \
        hypervisor_version_requires=">=6000" img-uuid
 
   .. versionchanged:: 12.0.0 (Liberty)
@@ -745,7 +744,9 @@ For example, when using the :command:`openstack server create` command, use the
 
    $ openstack server group create --policy affinity group-1
    $ openstack server create --image IMAGE_ID --flavor 1 \
-     --hint group=SERVER_GROUP_UUID server-1
+       --hint group=SERVER_GROUP_UUID server-1
+
+For more information on server groups, refer to :doc:`/user/server-groups`.
 
 
 .. _ServerGroupAntiAffinityFilter:
@@ -765,7 +766,9 @@ For example, when using the :command:`openstack server create` command, use the
 
    $ openstack server group create --policy anti-affinity group-1
    $ openstack server create --image IMAGE_ID --flavor 1 \
-     --hint group=SERVER_GROUP_UUID server-1
+       --hint group=SERVER_GROUP_UUID server-1
+
+For more information on server groups, refer to :doc:`/user/server-groups`.
 
 
 ``SimpleCIDRAffinityFilter``
@@ -1047,8 +1050,7 @@ hosts with different hypervisors.
 
 For example, the ironic virt driver uses the ironic API micro-version as the hypervisor
 version for a given node. The libvirt driver uses the libvirt version
-i.e. Libvirt `7.1.123` becomes `700100123` vs  Ironic `1.82` becomes `1`
-Hyper-V `6.3` becomes `6003`.
+i.e. Libvirt `7.1.123` becomes `700100123` vs  Ironic `1.82` becomes `1`.
 
 If you have a mixed virt driver deployment in the ironic vs non-ironic
 case nothing special needs to be done. ironic nodes are scheduled using custom
@@ -1073,7 +1075,7 @@ to a negative number and the weighing has the opposite effect of the default.
 
 This weigher compares hosts and orders them based on their number of instances
 respectively. By default the weigher is doing nothing but you
-can change its behaviour by modifiying the value of
+can change its behaviour by modifying the value of
 :oslo.config:option:`filter_scheduler.num_instances_weight_multiplier`.
 A positive value will favor hosts with a larger number of instances (packing
 strategy) while a negative value will follow a spread strategy that will
@@ -1152,10 +1154,9 @@ scheduling.
 Usage scenarios
 ~~~~~~~~~~~~~~~
 
-Since allocation ratios can be set via nova configuration, host aggregate
-metadata and the placement API, it can be confusing to know which should be
-used. This really depends on your scenario. A few common scenarios are detailed
-here.
+Since allocation ratios can be set via nova configuration and the placement
+API, it can be confusing to know which should be used. This really depends on
+your scenario. A few common scenarios are detailed here.
 
 1. When the deployer wants to **always** set an override value for a resource
    on a compute node, the deployer should ensure that the
@@ -1221,17 +1222,6 @@ resources are overcommitted or not:
 
 Some virt drivers may benefit from the use of these options to account for
 hypervisor-specific overhead.
-
-HyperV
-    Hyper-V creates a VM memory file on the local disk when an instance starts.
-    The size of this file corresponds to the amount of RAM allocated to the
-    instance.
-
-    You should configure the
-    :oslo.config:option:`reserved_host_disk_mb` config option to
-    account for this overhead, based on the amount of memory available
-    to instances.
-
 
 Cells considerations
 --------------------

@@ -14,6 +14,8 @@
 
 import datetime
 
+from oslo_utils.fixture import uuidsentinel as uuids
+
 from nova import exception
 from nova import objects
 from nova.objects import fields
@@ -358,6 +360,8 @@ class TestImageMetaProps(test.NoDBTestCase):
             'img_hv_requested_version': '>= 1.0',
             'os_require_quiesce': True,
             'os_secure_boot': 'required',
+            'hw_maxphysaddr_mode': 'passthrough',
+            'hw_maxphysaddr_bits': 42,
             'hw_rescue_bus': 'ide',
             'hw_rescue_device': 'disk',
             'hw_watchdog_action': fields.WatchdogAction.DISABLED,
@@ -499,6 +503,20 @@ class TestImageMetaProps(test.NoDBTestCase):
         secure_props = objects.ImageMetaProps.from_dict(props)
         self.assertEqual("required", secure_props.os_secure_boot)
 
+    def test_set_hw_maxphysaddr_mode(self):
+        props = {'hw_maxphysaddr_mode': "passthrough"}
+        obj = objects.ImageMetaProps.from_dict(props)
+        self.assertEqual("passthrough", obj.hw_maxphysaddr_mode)
+
+    def test_set_hw_maxphysaddr_mode_negative(self):
+        props = {'hw_maxphysaddr_mode': "blah"}
+        self.assertRaises(ValueError, objects.ImageMetaProps.from_dict, props)
+
+    def test_set_hw_maxphysaddr_bits(self):
+        props = {'hw_maxphysaddr_bits': 42}
+        obj = objects.ImageMetaProps.from_dict(props)
+        self.assertEqual(42, obj.hw_maxphysaddr_bits)
+
     def test_obj_make_compatible_img_hide_hypervisor_id(self):
         """Tests that checks if we pop img_hide_hypervisor_id."""
         obj = objects.ImageMetaProps(img_hide_hypervisor_id=True)
@@ -554,3 +572,22 @@ class TestImageMetaProps(test.NoDBTestCase):
         # and is absent on older versions
         primitive = obj.obj_to_primitive('1.33')
         self.assertNotIn('hw_viommu_model', primitive['nova_object.data'])
+
+    def test_obj_make_compatible_ephemeral_encryption_secret_uuid(self):
+        """Check 'hw_ephemeral_encryption_secret_uuid' compatibility."""
+        obj = objects.ImageMetaProps(
+            hw_ephemeral_encryption_secret_uuid=uuids.secret)
+
+        primitive = obj.obj_to_primitive('1.37')
+        self.assertIn(
+            'hw_ephemeral_encryption_secret_uuid',
+            primitive['nova_object.data'])
+        self.assertEqual(
+            uuids.secret,
+            primitive[
+                'nova_object.data']['hw_ephemeral_encryption_secret_uuid'])
+
+        primitive = obj.obj_to_primitive('1.36')
+        self.assertNotIn(
+            'hw_ephemeral_encryption_secret_uuid',
+            primitive['nova_object.data'])

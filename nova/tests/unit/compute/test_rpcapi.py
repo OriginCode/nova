@@ -355,11 +355,6 @@ class ComputeRpcAPITestCase(test.NoDBTestCase):
                 instance=self.fake_instance_obj, console_type='type',
                 version='6.0')
 
-    def test_get_rdp_console(self):
-        self._test_compute_api('get_rdp_console', 'call',
-                instance=self.fake_instance_obj, console_type='type',
-                version='6.0')
-
     def test_get_serial_console(self):
         self._test_compute_api('get_serial_console', 'call',
                 instance=self.fake_instance_obj, console_type='serial',
@@ -970,7 +965,7 @@ class ComputeRpcAPITestCase(test.NoDBTestCase):
     def test_remove_volume_connection(self):
         self._test_compute_api('remove_volume_connection', 'call',
                 instance=self.fake_instance_obj, volume_id='id', host='host',
-                version='6.0')
+                delete_attachment=True, version='6.3')
 
     def test_rescue_instance(self):
         self._test_compute_api('rescue_instance', 'cast',

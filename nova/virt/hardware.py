@@ -76,6 +76,11 @@ def get_cpu_dedicated_set():
     return cpu_ids
 
 
+def get_cpu_dedicated_set_nozero():
+    """Return cpu_dedicated_set without CPU0, if present"""
+    return (get_cpu_dedicated_set() or set()) - {0}
+
+
 def get_cpu_shared_set():
     """Parse ``[compute] cpu_shared_set`` config.
 
@@ -1936,6 +1941,56 @@ def get_vif_multiqueue_constraint(
     return flavor_value or image_value or False
 
 
+def get_packed_virtqueue_constraint(
+    flavor,
+    image_meta,
+) -> bool:
+    """Validate and return the requested Packed virtqueue configuration.
+
+    :param flavor: ``nova.objects.Flavor`` or dict instance
+    :param image_meta: ``nova.objects.ImageMeta`` or dict instance
+    :raises: nova.exception.FlavorImageConflict if a value is specified in both
+        the flavor and the image, but the values do not match
+    :returns: True if the Packed virtqueue must be enabled, else False.
+    """
+    key_value = 'virtio_packed_ring'
+
+    if type(image_meta) is dict:
+        flavor_key = ':'.join(['hw', key_value])
+        image_key = '_'.join(['hw', key_value])
+        flavor_value_str = flavor.get('extra_specs', {}).get(flavor_key, None)
+        image_value = image_meta.get('properties', {}).get(image_key, None)
+    else:
+        flavor_value_str, image_value = _get_flavor_image_meta(
+            key_value, flavor, image_meta)
+
+    flavor_value = None
+    if flavor_value_str is not None:
+        flavor_value = strutils.bool_from_string(flavor_value_str)
+
+    if (
+        image_value is not None and
+        flavor_value is not None and
+        image_value != flavor_value
+    ):
+        msg = _(
+            "Flavor has %(prefix)s:%(key)s extra spec "
+            "explicitly set to %(flavor_val)s, conflicting with image "
+            "which has %(prefix)s_%(key)s explicitly set to "
+            "%(image_val)s."
+        )
+        raise exception.FlavorImageConflict(
+            msg % {
+                'prefix': 'hw',
+                'key': key_value,
+                'flavor_val': flavor_value,
+                'image_val': image_value,
+            }
+        )
+
+    return flavor_value or image_value or False
+
+
 def get_vtpm_constraint(
     flavor: 'objects.Flavor',
     image_meta: 'objects.ImageMeta',
@@ -2253,6 +2308,7 @@ def _numa_cells_support_network_metadata(
         required_tunnel = network_metadata.tunneled
 
     if required_physnets:
+        removed_physnets = False
         # identify requested physnets that have an affinity to any of our
         # chosen host NUMA cells
         for host_cell in chosen_host_cells:
@@ -2263,6 +2319,12 @@ def _numa_cells_support_network_metadata(
             # drop said physnet(s) from the list we're searching for
             required_physnets -= required_physnets.intersection(
                 host_cell.network_metadata.physnets)
+            removed_physnets = True
+
+        if required_physnets and removed_physnets:
+            LOG.debug('Not all requested physnets have affinity to one '
+                      'of the chosen host NUMA cells. Remaining physnets '
+                      'are: %(physnets)s.', {'physnets': required_physnets})
 
         # however, if we still require some level of NUMA affinity, we need
         # to make sure one of the other NUMA cells isn't providing that; note
@@ -2274,8 +2336,15 @@ def _numa_cells_support_network_metadata(
 
             # if one of these cells provides affinity for one or more physnets,
             # we need to fail because we should be using that node and are not
-            if required_physnets.intersection(
-                    host_cell.network_metadata.physnets):
+            required_physnets_outside = required_physnets.intersection(
+                host_cell.network_metadata.physnets)
+
+            if required_physnets_outside:
+                LOG.debug('One or more requested physnets require affinity to '
+                          'a NUMA cell outside of the chosen host cells. This '
+                          'host cell cannot satisfy network requests for '
+                          'these physnets: %(physnets)s',
+                          {'physnets': required_physnets_outside})
                 return False
 
     if required_tunnel:
@@ -2288,6 +2357,9 @@ def _numa_cells_support_network_metadata(
             if host_cell.network_metadata.tunneled:
                 return True
 
+        LOG.debug('Tunneled networks have no affinity to any of the chosen '
+                  'host NUMA cells.')
+
         # however, if we still require some level of NUMA affinity, we need to
         # make sure one of the other NUMA cells isn't providing that; note
         # that, as with physnets, NUMA affinity might not be defined for
@@ -2297,6 +2369,12 @@ def _numa_cells_support_network_metadata(
                 continue
 
             if host_cell.network_metadata.tunneled:
+                LOG.debug('The host declares NUMA affinity for tunneled '
+                          'networks. The current instance requests a '
+                          'tunneled network but this host cell is out of '
+                          'the set declared to be local to the tunnel '
+                          'network endpoint. As such, this host cell cannot '
+                          'support the requested tunneled network.')
                 return False
 
     return True
@@ -2657,6 +2735,33 @@ def get_vpmems(flavor):
     return formed_labels
 
 
+def get_maxphysaddr_mode(
+    flavor: 'objects.Flavor',
+    image_meta: 'objects.ImageMeta',
+) -> ty.Optional[str]:
+    """Return maxphysaddr mode.
+
+    :param flavor: a flavor object to read extra specs from
+    :param image_meta: an objects.ImageMeta object
+    :raises: nova.exception.Invalid if a value is invalid
+    :returns: maxphysaddr mode if a value is valid, else None.
+    """
+    mode = _get_unique_flavor_image_meta(
+        'maxphysaddr_mode', flavor, image_meta, prefix='hw',
+    )
+
+    if mode is None:
+        return None
+
+    if mode not in fields.MaxPhyAddrMode.ALL:
+        raise exception.Invalid(
+            "Invalid Maxphyaddr mode %(mode)r. Allowed values: %(valid)s." %
+            {'mode': mode, 'valid': ', '.join(fields.MaxPhyAddrMode.ALL)}
+        )
+
+    return mode
+
+
 def check_hw_rescue_props(image_meta):
     """Confirm that hw_rescue_* image properties are present.
     """
@@ -2668,7 +2773,7 @@ def get_ephemeral_encryption_constraint(
     flavor: 'objects.Flavor',
     image_meta: 'objects.ImageMeta',
 ) -> bool:
-    """Get the ephemeral encryption constrants based on the flavor and image.
+    """Get the ephemeral encryption constraints based on the flavor and image.
 
     :param flavor: an objects.Flavor object
     :param image_meta: an objects.ImageMeta object

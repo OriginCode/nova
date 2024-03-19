@@ -103,11 +103,28 @@ CPU_TRAITS_MAPPING = {
     'xop': os_traits.HW_CPU_X86_XOP
 }
 
+
+def make_reverse_cpu_traits_mapping() -> ty.Dict[str, str]:
+    traits_cpu_mapping = dict()
+    for k, v in CPU_TRAITS_MAPPING.items():
+        if isinstance(v, tuple):
+            for trait in v:
+                traits_cpu_mapping[trait] = k
+        else:
+            traits_cpu_mapping[v] = k
+    return traits_cpu_mapping
+
+
 # Reverse CPU_TRAITS_MAPPING
-TRAITS_CPU_MAPPING = {v: k for k, v in CPU_TRAITS_MAPPING.items()}
+TRAITS_CPU_MAPPING = make_reverse_cpu_traits_mapping()
 
 # global directory for emulated TPM
 VTPM_DIR = '/var/lib/libvirt/swtpm/'
+
+
+class EncryptionOptions(ty.TypedDict):
+    secret: str
+    format: str
 
 
 def create_image(
@@ -115,7 +132,7 @@ def create_image(
     disk_format: str,
     disk_size: ty.Optional[ty.Union[str, int]],
     backing_file: ty.Optional[str] = None,
-    encryption: ty.Optional[ty.Dict[str, ty.Any]] = None
+    encryption: ty.Optional[EncryptionOptions] = None
 ) -> None:
     """Disk image creation with qemu-img
     :param path: Desired location of the disk image
@@ -128,7 +145,7 @@ def create_image(
         Can be None in the case of a COW image.
     :param backing_file: (Optional) Backing file to use.
     :param encryption: (Optional) Dict detailing various encryption attributes
-                       such as the format and passphrase.
+        such as the format and passphrase.
     """
     cmd = [
         'env', 'LC_ALL=C', 'LANG=C', 'qemu-img', 'create', '-f', disk_format
@@ -158,7 +175,7 @@ def create_image(
     if encryption:
         with tempfile.NamedTemporaryFile(mode='tr+', encoding='utf-8') as f:
             # Write out the passphrase secret to a temp file
-            f.write(encryption.get('secret'))
+            f.write(encryption['secret'])
 
             # Ensure the secret is written to disk, we can't .close() here as
             # that removes the file when using NamedTemporaryFile
@@ -168,7 +185,7 @@ def create_image(
             encryption_opts = [
                 '--object', f"secret,id=sec,file={f.name}",
                 '-o', 'encrypt.key-secret=sec',
-                '-o', f"encrypt.format={encryption.get('format')}",
+                '-o', f"encrypt.format={encryption['format']}",
             ]
             # Supported luks options:
             #  cipher-alg=<str>       - Name of cipher algorithm and key length
@@ -634,7 +651,7 @@ def mdev_name2uuid(mdev_name: str) -> str:
     :returns: string containing the uuid
     """
     mdev_uuid = mdev_name[5:].replace('_', '-')
-    # Unconditionnally remove the PCI address from the name
+    # Unconditionally remove the PCI address from the name
     mdev_uuid = mdev_uuid[:36]
     return str(uuid.UUID(mdev_uuid))
 

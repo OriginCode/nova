@@ -618,7 +618,7 @@ class ComputeVirtAPI(virtapi.VirtAPI):
 class ComputeManager(manager.Manager):
     """Manages the running instances from creation to destruction."""
 
-    target = messaging.Target(version='6.2')
+    target = messaging.Target(version='6.3')
 
     def __init__(self, compute_driver=None, *args, **kwargs):
         """Load configuration options and connect to the hypervisor."""
@@ -1570,6 +1570,18 @@ class ComputeManager(manager.Manager):
             LOG.debug('Verified node %s matches my host %s',
                       node.uuid, self.host)
 
+    def _sanity_check_new_host(self):
+        instances_on_hv = self.driver.list_instance_uuids()
+        if len(instances_on_hv) > 0:
+            # This means we have instances on our hypervisor, but we think
+            # we are a new host (i.e. we created a new service record). That
+            # likely means we're pointed at an empty database or the wrong
+            # cell.
+            raise exception.InvalidConfiguration(
+                'My hypervisor has existing instances, but I appear to be '
+                'a new service in this database. Possible database '
+                'configuration error, refusing to start!')
+
     def init_host(self, service_ref):
         """Initialization for a standalone compute service."""
 
@@ -1578,6 +1590,10 @@ class ComputeManager(manager.Manager):
             # to record a locally-persistent node identity because
             # we have upgraded from a previous version.
             self._ensure_existing_node_identity(service_ref)
+        else:
+            # If we are a new service (in the database), make sure we have no
+            # instances on our hypervisor as we would expect.
+            self._sanity_check_new_host()
 
         if CONF.pci.device_spec:
             # Simply loading the PCI passthrough spec will do a bunch of
@@ -2245,11 +2261,12 @@ class ComputeManager(manager.Manager):
 
     def _notify_about_instance_usage(self, context, instance, event_suffix,
                                      network_info=None, extra_usage_info=None,
-                                     fault=None):
+                                     fault=None, best_effort=False):
         compute_utils.notify_about_instance_usage(
             self.notifier, context, instance, event_suffix,
             network_info=network_info,
-            extra_usage_info=extra_usage_info, fault=fault)
+            extra_usage_info=extra_usage_info, fault=fault,
+            best_effort=best_effort)
 
     def _deallocate_network(self, context, instance,
                             requested_networks=None):
@@ -2950,7 +2967,7 @@ class ComputeManager(manager.Manager):
         return arqs
 
     def _split_network_arqs(self, arqs, requested_networks):
-        """splif arq request by exra spec from ARQ requested by port.
+        """split arq request by extra spec from ARQ requested by port.
 
         Return ARQ groups tuple:(spec_arqs, port_arqs)
         Each item in the tuple is a dict like:
@@ -3666,7 +3683,7 @@ class ComputeManager(manager.Manager):
                 # manually as we want to maintain a 'reserved' state
                 # throughout the reimage process from the cinder side so
                 # we are excluding the root BDM from certain operations
-                # here i.e. deleteing it's mapping before the destroy call.
+                # here i.e. deleting it's mapping before the destroy call.
                 block_device_info_copy = copy.deepcopy(block_device_info)
                 root_bdm = compute_utils.get_root_bdm(context, instance, bdms)
                 mapping = block_device_info_copy["block_device_mapping"]
@@ -3731,7 +3748,7 @@ class ComputeManager(manager.Manager):
                          bdms, recreate, on_shared_storage,
                          preserve_ephemeral, migration,
                          scheduled_node, limits, request_spec, accel_uuids,
-                         reimage_boot_volume, target_state):
+                         reimage_boot_volume=None, target_state=None):
         """Destroy and re-make this instance.
 
         A 'rebuild' effectively purges all existing data from the system and
@@ -3765,8 +3782,9 @@ class ComputeManager(manager.Manager):
         :param accel_uuids: a list of cyborg ARQ uuids
         :param reimage_boot_volume: Boolean to specify whether the user has
                                     explicitly requested to rebuild a boot
-                                    volume
-        :param target_state: Set a target state for the evacuated instance.
+                                    volume or None if RPC version is <=6.0
+        :param target_state: Set a target state for the evacuated instance or
+                             None if RPC version is <=6.1.
 
         """
         # recreate=True means the instance is being evacuated from a failed
@@ -4204,8 +4222,7 @@ class ComputeManager(manager.Manager):
         nova_attachments = []
         bdms_to_delete = []
         for bdm in bdms.objects:
-            if bdm.volume_id and bdm.source_type == 'volume' and \
-                bdm.destination_type == 'volume':
+            if bdm.volume_id and bdm.attachment_id:
                 try:
                     self.volume_api.attachment_get(context, bdm.attachment_id)
                 except exception.VolumeAttachmentNotFound:
@@ -7011,9 +7028,9 @@ class ComputeManager(manager.Manager):
 
         instance.power_state = current_power_state
         # NOTE(mriedem): The vm_state has to be set before updating the
-        # resource tracker, see vm_states.ALLOW_RESOURCE_REMOVAL. The host/node
-        # values cannot be nulled out until after updating the resource tracker
-        # though.
+        # resource tracker, see vm_states.allow_resource_removal(). The
+        # host/node values cannot be nulled out until after updating the
+        # resource tracker though.
         instance.vm_state = vm_states.SHELVED_OFFLOADED
         instance.task_state = None
         instance.save(expected_task_state=[task_states.SHELVING,
@@ -7320,6 +7337,9 @@ class ComputeManager(manager.Manager):
 
         return connect_info
 
+    # TODO(gmann): HyperV virt driver has been removed in Nova 29.0.0
+    # but we need to keep this method to avoid RPC error in case of using
+    # old controller with new compute. This can be removed in RPC API 7.0
     @messaging.expected_exceptions(exception.ConsoleTypeInvalid,
                                    exception.InstanceNotReady,
                                    exception.InstanceNotFound,
@@ -7329,38 +7349,10 @@ class ComputeManager(manager.Manager):
     @wrap_instance_fault
     def get_rdp_console(self, context, console_type, instance):
         """Return connection information for a RDP console."""
-        context = context.elevated()
-        LOG.debug("Getting RDP console", instance=instance)
 
-        if not CONF.rdp.enabled:
-            raise exception.ConsoleTypeUnavailable(console_type=console_type)
-
-        if console_type != 'rdp-html5':
-            raise exception.ConsoleTypeInvalid(console_type=console_type)
-
-        try:
-            # Retrieve connect info from driver, and then decorate with our
-            # access info token
-            console = self.driver.get_rdp_console(context, instance)
-            console_auth = objects.ConsoleAuthToken(
-                context=context,
-                console_type=console_type,
-                host=console.host,
-                port=console.port,
-                internal_access_path=console.internal_access_path,
-                instance_uuid=instance.uuid,
-                access_url_base=CONF.rdp.html5_proxy_base_url,
-            )
-            console_auth.authorize(CONF.consoleauth.token_ttl)
-            connect_info = console.get_connection_info(
-                console_auth.token, console_auth.access_url)
-
-        except exception.InstanceNotFound:
-            if instance.vm_state != vm_states.BUILDING:
-                raise
-            raise exception.InstanceNotReady(instance_id=instance.uuid)
-
-        return connect_info
+        msg = ("RDP console is applicable for HyperV virt driver only which "
+               "has been removed in Nova 29.0.0")
+        raise NotImplementedError(msg)
 
     @messaging.expected_exceptions(exception.ConsoleTypeInvalid,
                                    exception.InstanceNotReady,
@@ -7457,8 +7449,6 @@ class ComputeManager(manager.Manager):
     def validate_console_port(self, ctxt, instance, port, console_type):
         if console_type == "spice-html5":
             console_info = self.driver.get_spice_console(ctxt, instance)
-        elif console_type == "rdp-html5":
-            console_info = self.driver.get_rdp_console(ctxt, instance)
         elif console_type == "serial":
             console_info = self.driver.get_serial_console(ctxt, instance)
         elif console_type == "webmks":
@@ -7977,7 +7967,9 @@ class ComputeManager(manager.Manager):
             old_volume_id, new_volume_id)
 
     @wrap_exception()
-    def remove_volume_connection(self, context, volume_id, instance):
+    def remove_volume_connection(
+            self, context, volume_id, instance,
+            delete_attachment=False):
         """Remove the volume connection on this host
 
         Detach the volume from this instance on this host, and if this is
@@ -7996,7 +7988,8 @@ class ComputeManager(manager.Manager):
             # we cannot simply delete a v3 style attachment here without
             # needing to do some behavior modification of that
             # _rollback_live_migration flow which gets messy.
-            self._remove_volume_connection(context, bdm, instance)
+            self._remove_volume_connection(
+                context, bdm, instance, delete_attachment)
         except exception.NotFound:
             pass
 
@@ -8152,7 +8145,7 @@ class ComputeManager(manager.Manager):
         compute_node_uuid = objects.ComputeNode.get_by_nodename(
             context, instance.node).uuid
         # we can have multiple request groups, it would be enough to restrict
-        # only one of them to the compute tree but for symetry we restrict
+        # only one of them to the compute tree but for symmetry we restrict
         # all of them
         for request_group in request_groups:
             request_group.in_tree = compute_node_uuid
@@ -8211,7 +8204,7 @@ class ComputeManager(manager.Manager):
             exception.AmbiguousResourceProviderForPCIRequest,
             exception.UnexpectedResourceProviderNameForPCIRequest
         ):
-            # These are programing errors. So we clean up an re-raise to let
+            # These are programming errors. So we clean up an re-raise to let
             # the request fail
             with excutils.save_and_reraise_exception():
                 self.reportclient.remove_resources_from_instance_allocation(
@@ -8549,6 +8542,10 @@ class ComputeManager(manager.Manager):
                 # Update migrate VIFs with the newly claimed PCI devices
                 self._update_migrate_vifs_profile_with_pci(
                     migrate_data.vifs, port_id_to_pci)
+            # This should always be the last check as we persist some internal
+            # dictionary value in the libvirt driver.
+            migrate_data = self.driver.check_source_migrate_data_at_dest(
+                ctxt, instance, migrate_data, migration, limits, allocs)
         finally:
             self.driver.cleanup_live_migration_destination_check(ctxt,
                     dest_check_data)
@@ -9167,7 +9164,7 @@ class ComputeManager(manager.Manager):
         rollback process
 
         There may be other resources which need cleanup; currently this is
-        limited to vPMEM devices with the libvirt driver.
+        limited to vPMEM and mdev devices with the libvirt driver.
 
         :param migrate_data: implementation specific data
         :param migr_ctxt: specific resources stored in migration_context
@@ -9188,12 +9185,17 @@ class ComputeManager(manager.Manager):
                                    objects.LibvirtVPMEMDevice)):
                         has_vpmem = True
                         break
+            has_mdevs = 'target_mdevs' in migrate_data
+            power_management_possible = (
+                'dst_numa_info' in migrate_data and
+                migrate_data.dst_numa_info is not None)
             # No instance booting at source host, but instance dir
             # must be deleted for preparing next block migration
             # must be deleted for preparing next live migration w/o shared
             # storage
             # vpmem must be cleaned
-            do_cleanup = not migrate_data.is_shared_instance_path or has_vpmem
+            do_cleanup = (not migrate_data.is_shared_instance_path or
+                          has_vpmem or has_mdevs or power_management_possible)
             destroy_disks = not migrate_data.is_shared_block_storage
         elif isinstance(migrate_data, migrate_data_obj.HyperVLiveMigrateData):
             # NOTE(claudiub): We need to cleanup any zombie Planned VM.
@@ -9320,41 +9322,51 @@ class ComputeManager(manager.Manager):
         LOG.info('_post_live_migration() is started..',
                  instance=instance)
 
-        # Cleanup source host post live-migration
-        block_device_info = self._get_instance_block_device_info(
-                            ctxt, instance, bdms=source_bdms)
-        self.driver.post_live_migration(ctxt, instance, block_device_info,
-                                        migrate_data)
+        # NOTE(artom) The ordering and exception handling are important here.
+        # We want to immediately activate the port bindings on the destination
+        # host to minimize network downtime. This happens in
+        # migrate_instance_start(). It's also crucial that we call
+        # _post_live_migration_remove_source_vol_connections() to clean up
+        # source volume connections and prevent potential data leaks. We
+        # therefore activate the port bindings in a try block, and, regardless
+        # of any exceptions during that process, clean up volume connections in
+        # a finally block.
+        try:
+            # NOTE(artom) At this point in time we have not bound the ports to
+            # the destination host yet (this happens in
+            # migrate_instance_start() below). Therefore, the "old" source
+            # network info that's still in the instance info cache is safe to
+            # use here, since it'll be used below during
+            # driver.post_live_migration_at_source() to unplug the VIFs on the
+            # source.
+            network_info = instance.get_network_info()
 
-        # Disconnect volumes from this (the source) host.
-        self._post_live_migration_remove_source_vol_connections(
-            ctxt, instance, source_bdms)
+            self._notify_about_instance_usage(ctxt, instance,
+                                              "live_migration._post.start",
+                                              network_info=network_info,
+                                              best_effort=True)
+            compute_utils.notify_about_instance_action(
+                ctxt, instance, self.host,
+                action=fields.NotificationAction.LIVE_MIGRATION_POST,
+                phase=fields.NotificationPhase.START, best_effort=True)
 
-        # NOTE(artom) At this point in time we have not bound the ports to the
-        # destination host yet (this happens in migrate_instance_start()
-        # below). Therefore, the "old" source network info that's still in the
-        # instance info cache is safe to use here, since it'll be used below
-        # during driver.post_live_migration_at_source() to unplug the VIFs on
-        # the source.
-        network_info = instance.get_network_info()
+            migration = objects.Migration(
+                source_compute=self.host, dest_compute=dest,
+            )
+            # For neutron, migrate_instance_start will activate the destination
+            # host port bindings, if there are any created by conductor before
+            # live migration started.
+            self.network_api.migrate_instance_start(ctxt, instance, migration)
+        finally:
+            # Cleanup source host post live-migration
+            block_device_info = self._get_instance_block_device_info(
+                                ctxt, instance, bdms=source_bdms)
+            self.driver.post_live_migration(ctxt, instance, block_device_info,
+                                            migrate_data)
 
-        self._notify_about_instance_usage(ctxt, instance,
-                                          "live_migration._post.start",
-                                          network_info=network_info)
-        compute_utils.notify_about_instance_action(
-            ctxt, instance, self.host,
-            action=fields.NotificationAction.LIVE_MIGRATION_POST,
-            phase=fields.NotificationPhase.START)
-
-        migration = objects.Migration(
-            source_compute=self.host, dest_compute=dest,
-        )
-        # For neutron, migrate_instance_start will activate the destination
-        # host port bindings, if there are any created by conductor before live
-        # migration started.
-        self.network_api.migrate_instance_start(ctxt,
-                                                instance,
-                                                migration)
+            # Disconnect volumes from this (the source) host.
+            self._post_live_migration_remove_source_vol_connections(
+                ctxt, instance, source_bdms)
 
         destroy_vifs = False
         try:
@@ -9451,7 +9463,7 @@ class ComputeManager(manager.Manager):
     def _consoles_enabled(self):
         """Returns whether a console is enable."""
         return (CONF.vnc.enabled or CONF.spice.enabled or
-                CONF.rdp.enabled or CONF.serial_console.enabled or
+                CONF.serial_console.enabled or
                 CONF.mks.enabled)
 
     def _clean_instance_console_tokens(self, ctxt, instance):
@@ -10141,7 +10153,7 @@ class ComputeManager(manager.Manager):
                 if instance.flavor.extra_specs.get('accel:device_profile'):
                     # TODO(brinzhang): After cyborg support batch query ARQs
                     # for more than one instances, we will improve efficiency
-                    # with this implemention.
+                    # with this implementation.
                     accel_uuids = cyclient.get_arq_uuids_for_instance(instance)
                 self.shelve_offload_instance(
                     context, instance, clean_shutdown=False,
@@ -10638,6 +10650,19 @@ class ComputeManager(manager.Manager):
         # Delete orphan compute node not reported by driver but still in db
         for cn in compute_nodes_in_db:
             if cn.hypervisor_hostname not in nodenames:
+                # if the node could be migrated, we don't delete
+                # the compute node database records
+                if not self.driver.is_node_deleted(cn.hypervisor_hostname):
+                    LOG.warning(
+                        "Found orphan compute node %(id)s "
+                        "hypervisor host is %(hh)s, "
+                        "nodes are %(nodes)s. "
+                        "We are not deleting this as the driver "
+                        "says this node has not been deleted.",
+                        {'id': cn.id, 'hh': cn.hypervisor_hostname,
+                         'nodes': nodenames})
+                    continue
+
                 LOG.info("Deleting orphan compute node %(id)s "
                          "hypervisor host is %(hh)s, "
                          "nodes are %(nodes)s",

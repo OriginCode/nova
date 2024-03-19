@@ -172,7 +172,7 @@ class FakeLibvirtTests(test.NoDBTestCase):
         self.assertEqual(info[0], libvirt.VIR_DOMAIN_RUNNING)
         self.assertEqual(info[1], 128000)
         self.assertLessEqual(info[2], 128000)
-        self.assertEqual(info[3], 1)
+        self.assertEqual(info[3]['number'], 1)
         self.assertIs(type(info[4]), int)
 
     def test_createXML_runs_domain(self):
@@ -206,7 +206,7 @@ class FakeLibvirtTests(test.NoDBTestCase):
         self.assertFalse(dom.isActive(), 'Defined domain was running.')
         dom.createWithFlags(0)
         self.assertTrue(dom.isActive(),
-                        'Domain wasn\'t running after createWithFlags')
+                        "Domain wasn't running after createWithFlags")
 
     def test_managedSave(self):
         uuid = uuidutils.generate_uuid()

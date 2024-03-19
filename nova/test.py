@@ -56,6 +56,7 @@ import testtools
 from nova.api.openstack import wsgi_app
 from nova.compute import rpcapi as compute_rpcapi
 from nova import context
+import nova.crypto
 from nova.db.main import api as db_api
 from nova import exception
 from nova import objects
@@ -325,6 +326,9 @@ class TestCase(base.BaseTestCase):
         # the currently running test to fail.
         self.useFixture(nova_fixtures.GreenThreadPoolShutdownWait())
 
+        # Reset the global key manager
+        nova.crypto._KEYMGR = None
+
     def _setup_cells(self):
         """Setup a normal cellsv2 environment.
 
@@ -417,6 +421,12 @@ class TestCase(base.BaseTestCase):
         group = kw.pop('group', None)
         for k, v in kw.items():
             CONF.set_override(k, v, group)
+
+    def reset_flags(self, *k, **kw):
+        """Reset flag variables for a test."""
+        group = kw.pop('group')
+        for flag in k:
+            CONF.clear_override(flag, group)
 
     def enforce_fk_constraints(self, engine=None):
         if engine is None:
@@ -726,16 +736,20 @@ class SubclassSignatureTestCase(testtools.TestCase, metaclass=abc.ABCMeta):
         # getmembers returns all members, including members inherited from
         # the base class. It's redundant for us to test these, but as
         # they'll always pass it's not worth the complexity to filter them out.
-        for (name, method) in inspect.getmembers(cls, inspect.ismethod):
+        for (name, method) in inspect.getmembers(cls, inspect.isfunction):
             # Subclass __init__ methods can usually be legitimately different
             if name == '__init__':
+                continue
+
+            # Skip subclass private functions
+            if name.startswith('_'):
                 continue
 
             while hasattr(method, '__wrapped__'):
                 # This is a wrapped function. The signature we're going to
                 # see here is that of the wrapper, which is almost certainly
                 # going to involve varargs and kwargs, and therefore is
-                # unlikely to be what we want. If the wrapper manupulates the
+                # unlikely to be what we want. If the wrapper manipulates the
                 # arguments taken by the wrapped function, the wrapped function
                 # isn't what we want either. In that case we're just stumped:
                 # if it ever comes up, add more knobs here to work round it (or
@@ -820,10 +834,10 @@ class MatchType(object):
         self.wanttype = wanttype
 
     def __eq__(self, other):
-        return type(other) == self.wanttype
+        return type(other) is self.wanttype
 
     def __ne__(self, other):
-        return type(other) != self.wanttype
+        return type(other) is not self.wanttype
 
     def __repr__(self):
         return "<MatchType:" + str(self.wanttype) + ">"

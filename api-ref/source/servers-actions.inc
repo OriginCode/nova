@@ -20,7 +20,7 @@ also change the password of the server and add a security group to or
 remove a security group from a server. You can also trigger a crash dump
 into a server since Mitaka release.
 
-You can get an RDP, serial, SPICE, or VNC console for a server.
+You can get an serial, SPICE, or VNC console for a server.
 
 
 Add (Associate) Floating Ip (addFloatingIp Action) (DEPRECATED)
@@ -545,7 +545,7 @@ With microversion 2.93, we support rebuilding volume backed
 instances which will reimage the volume with the provided
 image. For microversion < 2.93, this operation keeps the
 contents of the volume given the image provided is same as
-the image with which the volume was created else the opearation
+the image with which the volume was created else the operation
 will error out.
 
 **Preconditions**

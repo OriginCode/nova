@@ -90,6 +90,11 @@ class CPUSetTestCase(test.NoDBTestCase):
         cpuset_ids = hw.get_cpu_dedicated_set()
         self.assertEqual(set([0, 1, 3, 4, 5, 6]), cpuset_ids)
 
+    def test_get_cpu_dedicated_set_nozero(self):
+        self.flags(cpu_dedicated_set='0-5,6,^2', group='compute')
+        cpuset_ids = hw.get_cpu_dedicated_set_nozero()
+        self.assertEqual(set([1, 3, 4, 5, 6]), cpuset_ids)
+
     def test_get_cpu_dedicated_set__unset(self):
         self.flags(cpu_dedicated_set=None, group='compute')
         cpuset_ids = hw.get_cpu_dedicated_set()
@@ -394,7 +399,7 @@ class VCPUTopologyTest(test.NoDBTestCase):
 
         for topo_test in testdata:
             image_meta = objects.ImageMeta.from_dict(topo_test["image"])
-            if type(topo_test["expect"]) == tuple:
+            if type(topo_test["expect"]) is tuple:
                 (preferred, maximum) = hw.get_cpu_topology_constraints(
                     topo_test["flavor"], image_meta)
 
@@ -520,7 +525,7 @@ class VCPUTopologyTest(test.NoDBTestCase):
         ]
 
         for topo_test in testdata:
-            if type(topo_test["expect"]) == list:
+            if type(topo_test["expect"]) is list:
                 actual = []
                 for topology in hw._get_possible_cpu_topologies(
                         topo_test["vcpus"],
@@ -996,7 +1001,7 @@ class NUMATopologyTest(test.NoDBTestCase):
                 cpu_policy = hw.get_cpu_policy_constraint(
                     testitem["flavor"], image_meta)
                 self.assertIsNone(cpu_policy)
-            elif type(testitem["expect"]) == type:
+            elif type(testitem["expect"]) is type:
                 self.assertRaises(testitem["expect"],
                                   hw.get_cpu_policy_constraint,
                                   testitem["flavor"],
@@ -1985,7 +1990,7 @@ class NUMATopologyTest(test.NoDBTestCase):
                 topology = hw.numa_get_constraints(
                     testitem["flavor"], image_meta)
                 self.assertIsNone(topology)
-            elif type(testitem["expect"]) == type:
+            elif type(testitem["expect"]) is type:
                 self.assertRaises(testitem["expect"],
                                   hw.numa_get_constraints,
                                   testitem["flavor"],
@@ -5696,11 +5701,57 @@ class VIFMultiqueueEnabledTest(test.NoDBTestCase):
 
         if isinstance(expected, type) and issubclass(expected, Exception):
             self.assertRaises(
-                expected, hw.get_vif_multiqueue_constraint, flavor, image_meta,
+                expected, hw.get_vif_multiqueue_constraint, flavor, image_meta
             )
         else:
             self.assertEqual(
-                expected, hw.get_vif_multiqueue_constraint(flavor, image_meta),
+                expected, hw.get_vif_multiqueue_constraint(flavor, image_meta)
+            )
+
+
+@ddt.ddt
+class VIFVirtioEnabledTest(test.NoDBTestCase):
+
+    @ddt.unpack
+    @ddt.data(
+        # pass: no configuration
+        (None, None, False),
+        # pass: flavor-only configuration
+        ('yes', None, True),
+        # pass: image-only configuration
+        (None, True, True),
+        # pass: identical image and flavor configuration
+        ('yes', True, True),
+        # fail: mismatched image and flavor configuration
+        ('no', True, exception.FlavorImageConflict),
+    )
+    def test_get_vif_virtio_constraint(
+        self, flavor_policy, image_policy, expected,
+    ):
+        extra_specs = {}
+
+        if flavor_policy:
+            extra_specs['hw:virtio_packed_ring'] = flavor_policy
+
+        image_meta_props = {}
+
+        if image_policy:
+            image_meta_props['hw_virtio_packed_ring'] = image_policy
+
+        flavor = objects.Flavor(
+            name='foo', vcpus=2, memory_mb=1024, extra_specs=extra_specs)
+        image_meta = objects.ImageMeta.from_dict(
+            {'name': 'bar', 'properties': image_meta_props})
+
+        if isinstance(expected, type) and issubclass(expected, Exception):
+            self.assertRaises(
+                expected, hw.get_packed_virtqueue_constraint,
+                flavor, image_meta,
+            )
+        else:
+            self.assertEqual(
+                expected, hw.get_packed_virtqueue_constraint(
+                    flavor, image_meta),
             )
 
 
@@ -5806,6 +5857,52 @@ class SecureBootPolicyTest(test.NoDBTestCase):
         else:
             self.assertEqual(
                 expected, hw.get_secure_boot_constraint(flavor, image_meta),
+            )
+
+
+@ddt.ddt
+class MaxphysaddrModeTest(test.NoDBTestCase):
+
+    @ddt.unpack
+    @ddt.data(
+        # pass: no configuration
+        (None, None, None),
+        # pass: flavor-only configuration
+        ('passthrough', None, 'passthrough'),
+        # pass: image-only configuration
+        (None, 'emulate', 'emulate'),
+        # pass: identical image and flavor configuration
+        ('passthrough', 'passthrough', 'passthrough'),
+        # fail: mismatched image and flavor configuration
+        ('passthrough', 'emulate', exception.FlavorImageConflict),
+        # fail: invalid value
+        ('foobar', None, exception.Invalid),
+    )
+    def test_get_maxphysaddr_mode(
+        self, flavor_policy, image_policy, expected,
+    ):
+        extra_specs = {}
+
+        if flavor_policy:
+            extra_specs['hw:maxphysaddr_mode'] = flavor_policy
+
+        image_meta_props = {}
+
+        if image_policy:
+            image_meta_props['hw_maxphysaddr_mode'] = image_policy
+
+        flavor = objects.Flavor(
+            name='foo', vcpus=1, memory_mb=1024, extra_specs=extra_specs)
+        image_meta = objects.ImageMeta.from_dict(
+            {'name': 'bar', 'properties': image_meta_props})
+
+        if isinstance(expected, type) and issubclass(expected, Exception):
+            self.assertRaises(
+                expected, hw.get_maxphysaddr_mode, flavor, image_meta,
+            )
+        else:
+            self.assertEqual(
+                expected, hw.get_maxphysaddr_mode(flavor, image_meta),
             )
 
 

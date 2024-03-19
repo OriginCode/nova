@@ -240,7 +240,9 @@ class LibvirtLiveMigrateData(LiveMigrateData):
     # Version 1.9: Inherited vifs from LiveMigrateData
     # Version 1.10: Added dst_numa_info, src_supports_numa_live_migration, and
     #               dst_supports_numa_live_migration fields
-    VERSION = '1.10'
+    # Version 1.11: Added dst_supports_mdev_live_migration,
+    #               source_mdev_types and target_mdevs fields
+    VERSION = '1.11'
 
     fields = {
         'filename': fields.StringField(),
@@ -270,12 +272,24 @@ class LibvirtLiveMigrateData(LiveMigrateData):
         'src_supports_numa_live_migration': fields.BooleanField(),
         'dst_supports_numa_live_migration': fields.BooleanField(),
         'dst_numa_info': fields.ObjectField('LibvirtLiveMigrateNUMAInfo'),
+        # TODO(sbauza) dst_supports_mdev_live_migration is only used as
+        # flag to indicate that the compute host is new enough to perform a
+        # mediated-device-aware live migration. Remove in version 2.0.
+        'dst_supports_mdev_live_migration': fields.BooleanField(),
+        # key is mdev UUID and value is its type.
+        'source_mdev_types': fields.DictOfStringsField(),
+        # key is source mdev UUID and value is the destination mdev UUID.
+        'target_mdevs': fields.DictOfStringsField(),
     }
 
     def obj_make_compatible(self, primitive, target_version):
         super(LibvirtLiveMigrateData, self).obj_make_compatible(
             primitive, target_version)
         target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 11):
+            primitive.pop('target_mdevs', None)
+            primitive.pop('source_mdev_types', None)
+            primitive.pop('dst_supports_mdev_live_migration', None)
         if (target_version < (1, 10) and
                 'src_supports_numa_live_migration' in primitive):
             del primitive['src_supports_numa_live_migration']
@@ -313,6 +327,9 @@ class LibvirtLiveMigrateData(LiveMigrateData):
         return self.is_shared_block_storage or self.is_shared_instance_path
 
 
+# TODO(gmann): HyperV virt driver has been removed in Nova 29.0.0 (OpenStack
+# 2024.1) release but we kept this object for a couple of cycle. This can be
+# removed too in Nova 31.0.0 (OpenStack 2025.1) or later.
 @obj_base.NovaObjectRegistry.register
 class HyperVLiveMigrateData(LiveMigrateData):
     # Version 1.0: Initial version

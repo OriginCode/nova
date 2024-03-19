@@ -1601,6 +1601,13 @@ class API:
                 'pf_mac_address': pf_mac,
                 'vf_num': vf_num,
             })
+
+        # Update port binding capabilities using PCI device's network
+        # capabilities if they exist.
+        pci_net_caps = pci_dev.network_caps
+        if pci_net_caps:
+            vf_profile.update({'capabilities': pci_net_caps})
+
         return vf_profile
 
     def _get_pci_device_profile(self, pci_dev):
@@ -1619,7 +1626,7 @@ class API:
                     self._get_vf_pci_device_profile(pci_dev))
 
             if pci_dev.dev_type == obj_fields.PciDeviceType.SRIOV_PF:
-                # In general the MAC address information flows fom the neutron
+                # In general the MAC address information flows from the neutron
                 # port to the device in the backend. Except for direct-physical
                 # ports. In that case the MAC address flows from the physical
                 # device, the PF, to the neutron port. So when such a port is
@@ -2219,7 +2226,7 @@ class API:
         :param port_id: The id of port to be queried
 
         :return: A tuple of vNIC type, trusted status, network ID, resource
-            request of the port if any and port numa affintiy policy,
+            request of the port if any and port numa affinity policy,
             and device_profile.
             Trusted status only affects SR-IOV ports and will always be
             None for other port types. If no port numa policy is
@@ -3603,6 +3610,7 @@ class API:
                            'gateway': network_model.IP(
                                 address=subnet['gateway_ip'],
                                 type='gateway'),
+                           'enable_dhcp': False,
             }
             if subnet.get('ipv6_address_mode'):
                 subnet_dict['ipv6_address_mode'] = subnet['ipv6_address_mode']
@@ -3619,22 +3627,14 @@ class API:
                         subnet_dict['dhcp_server'] = ip_pair['ip_address']
                         break
 
-            # NOTE(arnaudmorin): If enable_dhcp is set on subnet, but, for
-            # some reason neutron did not have any DHCP port yet, we still
-            # want the network_info to be populated with a valid dhcp_server
-            # value. This is mostly useful for the metadata API (which is
-            # relying on this value to give network_data to the instance).
-            #
-            # This will also help some providers which are using external
-            # DHCP servers not handled by neutron.
-            # In this case, neutron will never create any DHCP port in the
-            # subnet.
-            #
-            # Also note that we cannot set the value to None because then the
-            # value would be discarded by the metadata API.
-            # So the subnet gateway will be used as fallback.
-            if subnet.get('enable_dhcp') and 'dhcp_server' not in subnet_dict:
-                subnet_dict['dhcp_server'] = subnet['gateway_ip']
+            # NOTE(stblatzheim): If enable_dhcp is set on subnet, but subnet
+            # has ovn native dhcp and no dhcp-agents. Network owner will be
+            # network:distributed
+            # Just rely on enable_dhcp flag given by neutron
+            # Fix for https://bugs.launchpad.net/nova/+bug/2055245
+
+            if subnet.get('enable_dhcp'):
+                subnet_dict['enable_dhcp'] = True
 
             subnet_object = network_model.Subnet(**subnet_dict)
             for dns in subnet.get('dns_nameservers', []):
@@ -3776,7 +3776,7 @@ class API:
                 # the migration object...
                 if migration is not None:
                     # NOTE(artom) ... except for live migrations, because the
-                    # conductor has already done that whe calling
+                    # conductor has already done that when calling
                     # bind_ports_to_host().
                     if not migration.is_live_migration:
                         pci_mapping = self._get_pci_mapping_for_migration(

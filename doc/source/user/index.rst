@@ -18,7 +18,9 @@ End user guide
    :maxdepth: 1
 
    availability-zones
+   security-groups
    launch-instances
+   server-groups
    metadata
    manage-ip-addresses
    certificate-validation

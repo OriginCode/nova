@@ -25,6 +25,7 @@ import nova.conf
 from nova import context
 from nova import objects
 from nova.tests.fixtures import libvirt as fakelibvirt
+from nova.tests.functional.api import client
 from nova.tests.functional.libvirt import base
 from nova.virt.libvirt import driver as libvirt_driver
 from nova.virt.libvirt import utils as libvirt_utils
@@ -40,8 +41,8 @@ class VGPUTestBase(base.ServersTestBase):
     microversion = 'latest'
     ADMIN_API = True
 
-    FAKE_LIBVIRT_VERSION = 5000000
-    FAKE_QEMU_VERSION = 3001000
+    FAKE_LIBVIRT_VERSION = 7000000
+    FAKE_QEMU_VERSION = 5002000
 
     # Since we run all computes by a single process, we need to identify which
     # current compute service we use at the moment.
@@ -113,12 +114,16 @@ class VGPUTestBase(base.ServersTestBase):
                                                    parent=libvirt_parent)})
         return uuid
 
-    def start_compute_with_vgpu(self, hostname):
-        hostname = self.start_compute(
-            pci_info=fakelibvirt.HostPCIDevicesInfo(
+    def start_compute_with_vgpu(self, hostname, pci_info=None):
+        if not pci_info:
+            pci_info = fakelibvirt.HostPCIDevicesInfo(
                 num_pci=0, num_pfs=0, num_vfs=0, num_mdevcap=2,
-            ),
+            )
+        hostname = self.start_compute(
+            pci_info=pci_info,
             hostname=hostname,
+            libvirt_version=self.FAKE_LIBVIRT_VERSION,
+            qemu_version=self.FAKE_QEMU_VERSION
         )
         compute = self.computes[hostname]
         rp_uuid = self.compute_rp_uuids[hostname]
@@ -127,7 +132,8 @@ class VGPUTestBase(base.ServersTestBase):
             inventory = self._get_provider_inventory(rp)
             if orc.VGPU in inventory:
                 usage = self._get_provider_usages(rp)
-                self.assertEqual(16, inventory[orc.VGPU]['total'])
+                # if multiple types, the inventories are different
+                self.assertIn(inventory[orc.VGPU]['total'], [8, 16])
                 self.assertEqual(0, usage[orc.VGPU])
         # Since we haven't created any mdevs yet, we shouldn't find them
         self.assertEqual([], compute.driver._get_mediated_devices())
@@ -421,6 +427,280 @@ class VGPUMultipleTypesTests(VGPUTestBase):
             # We can be deterministic : since we asked for a specific type,
             # we know which pGPU we landed.
             self.assertEqual(expected[trait], mdev_info['parent'])
+
+
+class VGPULimitMultipleTypesTests(VGPUTestBase):
+
+    def setUp(self):
+        super(VGPULimitMultipleTypesTests, self).setUp()
+        extra_spec = {"resources:VGPU": "1"}
+        self.flavor = self._create_flavor(extra_spec=extra_spec)
+
+        self.flags(
+            enabled_mdev_types=[fakelibvirt.NVIDIA_11_VGPU_TYPE,
+                                fakelibvirt.NVIDIA_12_VGPU_TYPE],
+            group='devices')
+        # we need to call the below again to ensure the updated
+        # 'device_addresses' value is read and the new groups created
+        nova.conf.devices.register_dynamic_opts(CONF)
+        # host1 will have 2 physical GPUs :
+        #  - 0000:81:00.0 will only support nvidia-11
+        #  - 0000:81:01.0 will only support nvidia-12
+        MDEVCAP_DEV1_PCI_ADDR = self.libvirt2pci_address(
+            fakelibvirt.MDEVCAP_DEV1_PCI_ADDR)
+        MDEVCAP_DEV2_PCI_ADDR = self.libvirt2pci_address(
+            fakelibvirt.MDEVCAP_DEV2_PCI_ADDR)
+        self.flags(device_addresses=[MDEVCAP_DEV1_PCI_ADDR],
+                   group='mdev_nvidia-11')
+        self.flags(device_addresses=[MDEVCAP_DEV2_PCI_ADDR],
+                   group='mdev_nvidia-12')
+
+        # Start the compute by supporting both types
+        pci_info = fakelibvirt.HostPCIDevicesInfo(
+            num_pci=0, num_pfs=0, num_vfs=0, num_mdevcap=2,
+            multiple_gpu_types=True)
+        self.compute1 = self.start_compute_with_vgpu('host1', pci_info)
+
+    def test_create_servers_with_vgpu(self):
+        physdev1_rp_uuid = self._get_provider_uuid_by_name(
+            self.compute1.host + '_' + fakelibvirt.MDEVCAP_DEV1_PCI_ADDR)
+        physdev2_rp_uuid = self._get_provider_uuid_by_name(
+            self.compute1.host + '_' + fakelibvirt.MDEVCAP_DEV2_PCI_ADDR)
+
+        # Just for asserting the inventories we currently have.
+        physdev1_inventory = self._get_provider_inventory(physdev1_rp_uuid)
+        self.assertEqual(16, physdev1_inventory[orc.VGPU]['total'])
+        physdev2_inventory = self._get_provider_inventory(physdev2_rp_uuid)
+        self.assertEqual(8, physdev2_inventory[orc.VGPU]['total'])
+
+        # Now, let's limit the capacity for the first type to 2
+        self.flags(max_instances=2, group='mdev_nvidia-11')
+        # Make a restart to update the Resource Providers
+        self.compute2 = self.restart_compute_service('host1')
+        # Make sure we can still create an instance
+        server = self._create_server(
+            image_uuid='155d900f-4e14-4e4c-a73d-069cbf4541e6',
+            flavor_id=self.flavor, networks='auto', host=self.compute1.host)
+        mdevs = self.compute1.driver._get_mediated_devices()
+        self.assertEqual(1, len(mdevs))
+
+        # ... but actually looking at Placement, only now the 2nd GPU can be
+        # used because nvidia-11 was limited to 2 while the GPU supporting it
+        # was having a 8th capacity.
+        physdev2_inventory = self._get_provider_inventory(physdev2_rp_uuid)
+        self.assertEqual(8, physdev2_inventory[orc.VGPU]['total'])
+
+        # Get the instance we just created
+        inst = objects.Instance.get_by_uuid(self.context, server['id'])
+        expected_rp_name = (self.compute1.host + '_' +
+                            fakelibvirt.MDEVCAP_DEV2_PCI_ADDR)
+        # Yes, indeed we use the 2nd GPU
+        self.assert_mdev_usage(self.compute1, expected_amount=1,
+                                   expected_rc=orc.VGPU, instance=inst,
+                                   expected_rp_name=expected_rp_name)
+        # ... and what happened to the first GPU inventory ? Well, the whole
+        # Resource Provider disappeared !
+        provider = self._get_resource_provider_by_uuid(physdev1_rp_uuid)
+        self.assertEqual(404, provider['errors'][0]['status'])
+        self.assertIn(
+            "No resource provider with uuid %s found" % physdev1_rp_uuid,
+            provider['errors'][0]['detail'])
+
+
+class VGPULiveMigrationTests(base.LibvirtMigrationMixin, VGPUTestBase):
+
+    # Use the right minimum versions for live-migration
+    FAKE_LIBVIRT_VERSION = 8006000
+    FAKE_QEMU_VERSION = 8001000
+
+    def setUp(self):
+        # Prepares two computes (src and dst), each of them having two GPUs
+        # (81:00.0 and 81:01.0) with two types but where the operator only
+        # wants to supports nvidia-11 by 81:00.0 and nvidia-12 by 81:01.0
+        super(VGPULiveMigrationTests, self).setUp()
+
+        # Let's set the configuration correctly.
+        self.flags(
+            enabled_mdev_types=[fakelibvirt.NVIDIA_11_VGPU_TYPE,
+                                fakelibvirt.NVIDIA_12_VGPU_TYPE],
+            group='devices')
+        # we need to call the below again to ensure the updated
+        # 'device_addresses' value is read and the new groups created
+        nova.conf.devices.register_dynamic_opts(CONF)
+        MDEVCAP_DEV1_PCI_ADDR = self.libvirt2pci_address(
+            fakelibvirt.MDEVCAP_DEV1_PCI_ADDR)
+        MDEVCAP_DEV2_PCI_ADDR = self.libvirt2pci_address(
+            fakelibvirt.MDEVCAP_DEV2_PCI_ADDR)
+        self.flags(device_addresses=[MDEVCAP_DEV1_PCI_ADDR],
+                   group='mdev_nvidia-11')
+        self.flags(device_addresses=[MDEVCAP_DEV2_PCI_ADDR],
+                   group='mdev_nvidia-12')
+
+        pci_info = fakelibvirt.HostPCIDevicesInfo(
+            num_pci=0, num_pfs=0, num_vfs=0, num_mdevcap=2,
+            multiple_gpu_types=True)
+        self.src = self.start_compute_with_vgpu('src', pci_info=pci_info)
+        self.dest = self.start_compute_with_vgpu('dest', pci_info=pci_info)
+
+        # Add the custom traits to the 4 resource providers (two per host as
+        # we have two pGPUs)
+        self._create_trait('CUSTOM_NVIDIA_11')
+        self._create_trait('CUSTOM_NVIDIA_12')
+        for host in [self.src.host, self.dest.host]:
+            nvidia11_rp_uuid = self._get_provider_uuid_by_name(
+                host + '_' + fakelibvirt.MDEVCAP_DEV1_PCI_ADDR)
+            nvidia12_rp_uuid = self._get_provider_uuid_by_name(
+                host + '_' + fakelibvirt.MDEVCAP_DEV2_PCI_ADDR)
+            self._set_provider_traits(nvidia11_rp_uuid, ['CUSTOM_NVIDIA_11'])
+            self._set_provider_traits(nvidia12_rp_uuid, ['CUSTOM_NVIDIA_12'])
+
+        # We will test to live-migrate an instance using nvidia-11 type.
+        extra_spec = {"resources:VGPU": "1",
+                      "trait:CUSTOM_NVIDIA_11": "required"}
+        self.flavor = self._create_flavor(extra_spec=extra_spec)
+
+    def test_live_migration_fails_on_old_source(self):
+        pci_info = fakelibvirt.HostPCIDevicesInfo(
+            num_pci=0, num_pfs=0, num_vfs=0, num_mdevcap=2,
+            multiple_gpu_types=True)
+        self.src = self.restart_compute_service(
+            self.src.host,
+            pci_info=pci_info,
+            keep_hypervisor_state=False,
+            qemu_version=8000000,
+            libvirt_version=8005000)
+        server = self._create_server(
+            image_uuid='155d900f-4e14-4e4c-a73d-069cbf4541e6',
+            flavor_id=self.flavor, networks='auto', host=self.src.host)
+        # now live migrate that server
+        ex = self.assertRaises(
+            client.OpenStackApiException,
+            self._live_migrate,
+            server, 'completed')
+
+        self.assertEqual(500, ex.response.status_code)
+        self.assertIn('NoValidHost', str(ex))
+        log_out = self.stdlog.logger.output
+        self.assertIn('Migration pre-check error: Unable to migrate %s: '
+                      'Either libvirt or QEMU version for compute service '
+                      'source are too old than the supported ones '
+                      '' % server['id'], log_out)
+
+    def test_live_migration_fails_on_old_destination(self):
+        # For the fact to testing that we look at the dest object, we need to
+        # skip the verification for whether the destination HV version is older
+        self.flags(skip_hypervisor_version_check_on_lm=True,
+                   group='workarounds')
+        pci_info = fakelibvirt.HostPCIDevicesInfo(
+            num_pci=0, num_pfs=0, num_vfs=0, num_mdevcap=2,
+            multiple_gpu_types=True)
+        self.dest = self.restart_compute_service(
+            self.dest.host,
+            pci_info=pci_info,
+            keep_hypervisor_state=False,
+            qemu_version=8000000,
+            libvirt_version=8005000)
+        server = self._create_server(
+            image_uuid='155d900f-4e14-4e4c-a73d-069cbf4541e6',
+            flavor_id=self.flavor, networks='auto', host=self.src.host)
+        # now live migrate that server
+        ex = self.assertRaises(
+            client.OpenStackApiException,
+            self._live_migrate,
+            server, 'completed')
+
+        self.assertEqual(500, ex.response.status_code)
+        self.assertIn('NoValidHost', str(ex))
+        log_out = self.stdlog.logger.output
+        self.assertIn('Migration pre-check error: Unable to migrate %s: '
+                      'Either libvirt or QEMU version for compute service '
+                      'target are too old than the supported ones '
+                      '' % server['id'],
+                      log_out)
+
+    def test_live_migration_fails_due_to_non_supported_mdev_types(self):
+        self.flags(
+            enabled_mdev_types=[fakelibvirt.NVIDIA_11_VGPU_TYPE],
+            group='devices')
+        self.src = self.restart_compute_service(self.src.host)
+        self.flags(
+            enabled_mdev_types=[fakelibvirt.NVIDIA_12_VGPU_TYPE],
+            group='devices')
+        self.dest = self.restart_compute_service(self.dest.host)
+        # Force a periodic run in order to make sure all service resources
+        # are changed before we call create_service()
+        self._run_periodics()
+        self.server = self._create_server(
+            image_uuid='155d900f-4e14-4e4c-a73d-069cbf4541e6',
+            flavor_id=self.flavor, networks='auto', host=self.src.host)
+        # now live migrate that server
+        ex = self.assertRaises(
+            client.OpenStackApiException,
+            self._live_migrate,
+            self.server, 'completed')
+        self.assertEqual(500, ex.response.status_code)
+        self.assertIn('NoValidHost', str(ex))
+        log_out = self.stdlog.logger.output
+        # The log is fully JSON-serialized, so just check the phrase.
+        self.assertIn('Unable to migrate %s: ' % self.server['id'], log_out)
+        self.assertIn('Source mdev types ', log_out)
+        self.assertIn('are not supported by this compute : ', log_out)
+
+    def test_live_migrate_server(self):
+        self.server = self._create_server(
+            image_uuid='155d900f-4e14-4e4c-a73d-069cbf4541e6',
+            flavor_id=self.flavor, networks='auto', host=self.src.host)
+        inst = objects.Instance.get_by_uuid(self.context, self.server['id'])
+        mdevs = self.src.driver._get_all_assigned_mediated_devices(inst)
+        self.assertEqual(1, len(mdevs))
+        self._live_migrate(self.server, 'completed')
+        # Now the destination XML is updated, so the destination mdev is
+        # correctly used.
+        self.assert_mdev_usage(self.dest, 1)
+
+
+class VGPULiveMigrationTestsLMFailed(VGPULiveMigrationTests):
+    """Tests that expect the live migration to fail, and exist to test the
+    rollback code. Stubs out fakelibvirt's migrateToURI3() with a stub that
+    "fails" the migration.
+    """
+
+    def _migrate_stub(self, domain, destination, params, flags):
+        """Designed to stub fakelibvirt's migrateToURI3 and "fail" the
+        live migration by monkeypatching jobStats() to return an error.
+        """
+
+        # During the migration, we reserved a mdev in the dest
+        self.assert_mdev_usage(self.src, 1)
+        self.assert_mdev_usage(self.dest, 1)
+
+        # The resource update periodic task should not change the consumed
+        # mdevs, as the migration is still happening. As usual, running
+        # periodics is not necessary to make the test pass, but it's good to
+        # make sure it does the right thing.
+        self._run_periodics()
+        self.assert_mdev_usage(self.src, 1)
+        self.assert_mdev_usage(self.dest, 1)
+
+        source = self.computes['src']
+        conn = source.driver._host.get_connection()
+        dom = conn.lookupByUUIDString(self.server['id'])
+        dom.fail_job()
+        self.migrate_stub_ran = True
+
+    def test_live_migrate_server(self):
+        self.server = self._create_server(
+            image_uuid='155d900f-4e14-4e4c-a73d-069cbf4541e6',
+            flavor_id=self.flavor, networks='auto', host=self.src.host)
+        inst = objects.Instance.get_by_uuid(self.context, self.server['id'])
+        mdevs = self.src.driver._get_all_assigned_mediated_devices(inst)
+        self.assertEqual(1, len(mdevs))
+
+        self._live_migrate(self.server, 'failed')
+
+        # We released the reserved mdev after the migration failed.
+        self.assert_mdev_usage(self.src, 1)
+        self.assert_mdev_usage(self.dest, 0)
 
 
 class DifferentMdevClassesTests(VGPUTestBase):

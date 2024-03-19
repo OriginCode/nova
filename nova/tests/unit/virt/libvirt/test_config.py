@@ -12,6 +12,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import ddt
 from lxml import etree
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import units
@@ -22,6 +23,14 @@ from nova import test
 from nova.tests.fixtures import libvirt_data as fake_libvirt_data
 from nova.virt import hardware
 from nova.virt.libvirt import config
+
+
+class LibvirtConfigUtiltest(test.NoDBTestCase):
+    def test_make_parse_alias(self):
+        self.assertEqual('ua-foo', config.make_libvirt_device_alias('foo'))
+        self.assertEqual('foo', config.parse_libvirt_device_alias('ua-foo'))
+        # if the alias is not a user-specified one, it should come back whole
+        self.assertEqual('foo', config.parse_libvirt_device_alias('foo'))
 
 
 class LibvirtConfigBaseTest(test.NoDBTestCase):
@@ -512,6 +521,32 @@ class LibvirtConfigCPUTest(LibvirtConfigBaseTest):
             </cpu>
         """)
 
+    def test_config_maxphysaddr(self):
+        obj = config.LibvirtConfigCPU()
+        obj.maxphysaddr = config.LibvirtConfigCPUMaxPhysAddr()
+        obj.maxphysaddr.mode = "emulate"
+        obj.maxphysaddr.bits = 42
+
+        xml = obj.to_xml()
+        self.assertXmlEqual(xml, """
+            <cpu>
+              <maxphysaddr mode='emulate' bits='42'/>
+            </cpu>
+        """)
+
+    def test_parse_dom(self):
+        xml = """
+            <cpu>
+              <maxphysaddr mode='emulate' bits='42'/>
+            </cpu>
+        """
+        xmldoc = etree.fromstring(xml)
+        obj = config.LibvirtConfigCPU()
+        obj.parse_dom(xmldoc)
+
+        self.assertEqual("emulate", obj.maxphysaddr.mode)
+        self.assertEqual(42, obj.maxphysaddr.bits)
+
 
 class LibvirtConfigGuestCPUTest(LibvirtConfigBaseTest):
 
@@ -588,6 +623,35 @@ class LibvirtConfigGuestCPUTest(LibvirtConfigBaseTest):
                 <cell id="0" cpus="0-1" memory="1000000" memAccess="private"/>
                 <cell id="1" cpus="2-3" memory="1500000"/>
               </numa>
+            </cpu>
+        """)
+
+    def test_config_host_with_maxphysaddr_emulate(self):
+        obj = config.LibvirtConfigGuestCPU()
+
+        m = config.LibvirtConfigGuestCPUMaxPhysAddr()
+        m.mode = "emulate"
+        m.bits = 42
+        obj.maxphysaddr = m
+
+        xml = obj.to_xml()
+        self.assertXmlEqual(xml, """
+            <cpu match="exact">
+              <maxphysaddr mode="emulate" bits="42"/>
+            </cpu>
+        """)
+
+    def test_config_host_with_maxphysaddr_passthrough(self):
+        obj = config.LibvirtConfigGuestCPU()
+
+        m = config.LibvirtConfigGuestCPUMaxPhysAddr()
+        m.mode = "passthrough"
+        obj.maxphysaddr = m
+
+        xml = obj.to_xml()
+        self.assertXmlEqual(xml, """
+            <cpu match="exact">
+              <maxphysaddr mode="passthrough"/>
             </cpu>
         """)
 
@@ -675,6 +739,7 @@ class LibvirtConfigGuestSysinfoTest(LibvirtConfigBaseTest):
         """)
 
 
+@ddt.ddt
 class LibvirtConfigGuestDiskTest(LibvirtConfigBaseTest):
 
     def test_config_file(self):
@@ -919,7 +984,8 @@ class LibvirtConfigGuestDiskTest(LibvirtConfigBaseTest):
         obj.parse_dom(xmldoc)
         self.assertEqual(obj.mirror.ready, "yes")
 
-    def test_config_disk_encryption_format(self):
+    @ddt.data('volume_encryption', 'ephemeral_encryption')
+    def test_config_disk_encryption_format(self, encryption):
         d = config.LibvirtConfigGuestDisk()
         e = config.LibvirtConfigGuestDiskEncryption()
         s = config.LibvirtConfigGuestDiskEncryptionSecret()
@@ -938,42 +1004,57 @@ class LibvirtConfigGuestDiskTest(LibvirtConfigBaseTest):
         s.type = "passphrase"
         s.uuid = uuids.secret
         e.secret = s
-        d.encryption = e
+        setattr(d, encryption, e)
 
         xml = d.to_xml()
-        expected_xml = """
-            <disk type="file" device="disk">
-              <driver name="qemu" type="qcow2" cache="none" io="native"/>
-              <source file="/tmp/hello.qcow2"/>
-              <target bus="ide" dev="/dev/hda"/>
-              <serial>%s</serial>
-              <boot order="1"/>
-              <encryption format='luks'>
-                <secret type='passphrase' uuid='%s'/>
-              </encryption>
-            </disk>""" % (uuids.serial, uuids.secret)
+        if encryption == 'volume_encryption':
+            expected_xml = """
+                <disk type="file" device="disk">
+                  <driver name="qemu" type="qcow2" cache="none" io="native"/>
+                  <source file="/tmp/hello.qcow2"/>
+                  <target bus="ide" dev="/dev/hda"/>
+                  <serial>%s</serial>
+                  <boot order="1"/>
+                  <encryption format='luks'>
+                    <secret type='passphrase' uuid='%s'/>
+                  </encryption>
+                </disk>""" % (uuids.serial, uuids.secret)
+        elif encryption == 'ephemeral_encryption':
+            expected_xml = """
+                <disk type="file" device="disk">
+                  <driver name="qemu" type="qcow2" cache="none" io="native"/>
+                  <source file="/tmp/hello.qcow2">
+                    <encryption format='luks'>
+                      <secret type='passphrase' uuid='%s'/>
+                    </encryption>
+                  </source>
+                  <target bus="ide" dev="/dev/hda"/>
+                  <serial>%s</serial>
+                  <boot order="1"/>
+                </disk>""" % (uuids.secret, uuids.serial)
         self.assertXmlEqual(expected_xml, xml)
 
     def test_config_disk_encryption_parse(self):
         xml = """
 <disk type="file" device="disk">
   <driver name="qemu" type="qcow2" cache="none" io="native"/>
-  <source file="/tmp/hello.qcow2"/>
+  <source file="/tmp/hello.qcow2">
+    <encryption format='luks'>
+      <secret type='passphrase' uuid='%s'/>
+    </encryption>
+  </source>
   <target bus="ide" dev="/dev/hda"/>
   <serial>%s</serial>
   <boot order="1"/>
-  <encryption format='luks'>
-    <secret type='passphrase' uuid='%s'/>
-  </encryption>
-</disk>""" % (uuids.serial, uuids.secret)
+</disk>""" % (uuids.secret, uuids.serial)
 
         xmldoc = etree.fromstring(xml)
         d = config.LibvirtConfigGuestDisk()
         d.parse_dom(xmldoc)
 
-        self.assertEqual(d.encryption.format, "luks")
-        self.assertEqual(d.encryption.secret.type, "passphrase")
-        self.assertEqual(d.encryption.secret.uuid, uuids.secret)
+        self.assertEqual(d.ephemeral_encryption.format, "luks")
+        self.assertEqual(d.ephemeral_encryption.secret.type, "passphrase")
+        self.assertEqual(d.ephemeral_encryption.secret.uuid, uuids.secret)
 
     def test_config_boot_order_parse(self):
         xml = """
@@ -997,11 +1078,13 @@ class LibvirtConfigGuestDiskTest(LibvirtConfigBaseTest):
         obj.driver_name = "qemu"
         obj.target_dev = "/dev/hdc"
         obj.target_bus = "ide"
+        obj.alias = "ua-this-is-my-disk"
 
         xml = obj.to_xml()
         self.assertXmlEqual(xml, """
             <disk type="block" device="cdrom">
               <driver name="qemu"/>
+              <alias name="ua-this-is-my-disk"/>
               <source dev="/tmp/hello"/>
               <target bus="ide" dev="/dev/hdc"/>
             </disk>""")
@@ -1441,6 +1524,22 @@ class LibvirtConfigGuestFilesysTest(LibvirtConfigBaseTest):
               <target dir="/mnt"/>
             </filesystem>""")
 
+    def test_config_virtiofs(self):
+        obj = config.LibvirtConfigGuestFilesys()
+        obj.source_type = "mount"
+        obj.accessmode = "passthrough"
+        obj.driver_type = "virtiofs"
+        obj.source_dir = "/mnt/nfsmount"
+        obj.target_dir = "mount_tag"
+
+        xml = obj.to_xml()
+        self.assertXmlEqual(xml, """
+            <filesystem type="mount" accessmode='passthrough'>
+              <driver type='virtiofs'/>
+              <source dir="/mnt/nfsmount"/>
+              <target dir="mount_tag"/>
+            </filesystem>""")
+
     def test_config_block(self):
         obj = config.LibvirtConfigGuestFilesys()
         obj.source_type = "block"
@@ -1482,6 +1581,22 @@ class LibvirtConfigGuestFilesysTest(LibvirtConfigBaseTest):
         self.assertEqual('mount', obj.source_type)
         self.assertEqual('/tmp/hello', obj.source_dir)
         self.assertEqual('/mnt', obj.target_dir)
+
+    def test_parse_virtiofs(self):
+        xmldoc = """
+            <filesystem type="mount" accessmode='passthrough'>
+              <driver type='virtiofs'/>
+              <source dir="/mnt/nfsmount"/>
+              <target dir="mount_tag"/>
+            </filesystem>
+        """
+        obj = config.LibvirtConfigGuestFilesys()
+        obj.parse_str(xmldoc)
+        self.assertEqual('mount', obj.source_type)
+        self.assertEqual('passthrough', obj.accessmode)
+        self.assertEqual('virtiofs', obj.driver_type)
+        self.assertEqual('/mnt/nfsmount', obj.source_dir)
+        self.assertEqual('mount_tag', obj.target_dir)
 
     def test_parse_block(self):
         xmldoc = """
@@ -1922,6 +2037,26 @@ class LibvirtConfigGuestInterfaceTest(LibvirtConfigBaseTest):
         obj.target_dev = "vnet0"
         self.assertTrue(obj.uses_virtio)
         return obj
+
+    def test_config_driver_packed_options(self):
+        obj = self._get_virtio_interface()
+        obj.driver_name = "vhost"
+        obj.driver_packed = True
+
+        xml = obj.to_xml()
+        self.assertXmlEqual(xml, """
+            <interface type="ethernet">
+              <mac address="DE:AD:BE:EF:CA:FE"/>
+              <model type="virtio"/>
+              <driver name="vhost" packed="on"/>
+              <target dev="vnet0"/>
+            </interface>""")
+
+        # parse the xml from the first object into a new object and make sure
+        # they are the same
+        obj2 = config.LibvirtConfigGuestInterface()
+        obj2.parse_str(xml)
+        self.assertXmlEqual(xml, obj2.to_xml())
 
     def test_config_driver_options(self):
         obj = self._get_virtio_interface()

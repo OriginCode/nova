@@ -751,6 +751,9 @@ class API:
         if flavor['memory_mb'] < int(image.get('min_ram') or 0):
             raise exception.FlavorMemoryTooSmall()
 
+        # Verify flavor/image Virtio Packed Ring configuration conflict.
+        hardware.get_packed_virtqueue_constraint(flavor, image)
+
         # Image min_disk is in gb, size is in bytes. For sanity, have them both
         # in bytes.
         image_min_disk = int(image.get('min_disk') or 0) * units.Gi
@@ -1030,7 +1033,7 @@ class API:
                             context,
                             ['nova-compute']))
                     if min_version < SUPPORT_VNIC_TYPE_ACCELERATOR:
-                        msg = ("Port with cyborg profile is not avaliable"
+                        msg = ("Port with cyborg profile is not available"
                             " until upgrade finished.")
                         raise exception.ForbiddenPortsWithAccelerator(msg)
 
@@ -3002,7 +3005,7 @@ class API:
 
         The results will be sorted based on the list of sort keys in the
         'sort_keys' parameter (first value is primary sort key, second value is
-        secondary sort ket, etc.). For each sort key, the associated sort
+        secondary sort key, etc.). For each sort key, the associated sort
         direction is based on the list of sort directions in the 'sort_dirs'
         parameter.
 
@@ -3387,7 +3390,7 @@ class API:
                              "error_msg": str(exc)})
             attr = 'task_state'
             state = task_states.DELETING
-            if type(ex) == exception.InstanceNotFound:
+            if type(ex) is exception.InstanceNotFound:
                 attr = 'vm_state'
                 state = vm_states.DELETED
             raise exception.InstanceInvalidState(attr=attr,
@@ -4122,7 +4125,7 @@ class API:
             desired destination of the instance during the cold migration
         :param allow_cross_cell_resize: If True, cross-cell resize is allowed
             for this operation and the host could be in a different cell from
-            the one that the instance is currently in. If False, the speciifed
+            the one that the instance is currently in. If False, the specified
             host must be in the same cell as the instance.
         :returns: ComputeNode object of the requested host
         :raises: CannotMigrateToSameHost if the host is the same as the
@@ -4848,15 +4851,6 @@ class API:
     def get_spice_console(self, context, instance, console_type):
         """Get a url to an instance Console."""
         connect_info = self.compute_rpcapi.get_spice_console(context,
-                instance=instance, console_type=console_type)
-        return {'url': connect_info['access_url']}
-
-    @check_instance_host()
-    @reject_instance_state(
-        task_state=[task_states.DELETING, task_states.MIGRATING])
-    def get_rdp_console(self, context, instance, console_type):
-        """Get a url to an instance Console."""
-        connect_info = self.compute_rpcapi.get_rdp_console(context,
                 instance=instance, console_type=console_type)
         return {'url': connect_info['access_url']}
 
@@ -6196,6 +6190,45 @@ class HostAPI:
                                                payload)
         return result
 
+    def _service_get_all_cells(self, context, disabled, set_zones,
+                               cell_down_support):
+        services = []
+        service_dict = nova_context.scatter_gather_all_cells(context,
+            objects.ServiceList.get_all, disabled, set_zones=set_zones)
+
+        cell0_computes = [
+            x for x in
+            service_dict.get(objects.CellMapping.CELL0_UUID, [])
+            if x.binary == 'nova-compute']
+        for cn in cell0_computes:
+            LOG.warning(
+                'Found compute service %(service)s in cell0; '
+                'This should never happen!',
+                {'service': cn.host})
+
+        for cell_uuid, cell_services in service_dict.items():
+            if not nova_context.is_cell_failure_sentinel(cell_services):
+                services.extend(cell_services)
+            elif cell_down_support:
+                unavailable_services = objects.ServiceList()
+                cid = [cm.id for cm in nova_context.CELLS
+                        if cm.uuid == cell_uuid]
+                # We know cid[0] is in the list because we are using the
+                # same list that scatter_gather_all_cells used
+                hms = objects.HostMappingList.get_by_cell_id(context,
+                                                                cid[0])
+                for hm in hms:
+                    unavailable_services.objects.append(objects.Service(
+                        binary='nova-compute', host=hm.host))
+                LOG.warning("Cell %s is not responding and hence only "
+                            "partial results are available from this "
+                            "cell.", cell_uuid)
+                services.extend(unavailable_services)
+            else:
+                LOG.warning("Cell %s is not responding and hence skipped "
+                            "from the results.", cell_uuid)
+        return services
+
     def service_get_all(self, context, filters=None, set_zones=False,
                         all_cells=False, cell_down_support=False):
         """Returns a list of services, optionally filtering the results.
@@ -6220,30 +6253,9 @@ class HostAPI:
         # and we should always iterate over the cells. However, certain
         # callers need the legacy behavior for now.
         if all_cells:
-            services = []
-            service_dict = nova_context.scatter_gather_all_cells(context,
-                objects.ServiceList.get_all, disabled, set_zones=set_zones)
-            for cell_uuid, service in service_dict.items():
-                if not nova_context.is_cell_failure_sentinel(service):
-                    services.extend(service)
-                elif cell_down_support:
-                    unavailable_services = objects.ServiceList()
-                    cid = [cm.id for cm in nova_context.CELLS
-                           if cm.uuid == cell_uuid]
-                    # We know cid[0] is in the list because we are using the
-                    # same list that scatter_gather_all_cells used
-                    hms = objects.HostMappingList.get_by_cell_id(context,
-                                                                 cid[0])
-                    for hm in hms:
-                        unavailable_services.objects.append(objects.Service(
-                            binary='nova-compute', host=hm.host))
-                    LOG.warning("Cell %s is not responding and hence only "
-                                "partial results are available from this "
-                                "cell.", cell_uuid)
-                    services.extend(unavailable_services)
-                else:
-                    LOG.warning("Cell %s is not responding and hence skipped "
-                                "from the results.", cell_uuid)
+            services = self._service_get_all_cells(context, disabled,
+                                                   set_zones,
+                                                   cell_down_support)
         else:
             services = objects.ServiceList.get_all(context, disabled,
                                                    set_zones=set_zones)

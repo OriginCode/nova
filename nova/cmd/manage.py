@@ -22,6 +22,7 @@
 """
 
 import collections
+from contextlib import contextmanager
 import functools
 import os
 import re
@@ -145,6 +146,33 @@ def format_dict(dct, dict_property="Property", dict_value='Value',
             pt.add_row([k, v])
 
     return encodeutils.safe_encode(pt.get_string()).decode()
+
+
+@contextmanager
+def locked_instance(cell_mapping, instance, reason):
+    """Context manager to lock and unlock instance,
+    lock state will be restored regardless of the success or failure
+    of target functionality.
+
+    :param cell_mapping: instance-cell-mapping
+    :param instance: instance to be lock and unlock
+    :param reason: reason, why lock is required
+    """
+
+    compute_api = api.API()
+
+    initial_state = 'locked' if instance.locked else 'unlocked'
+    if not instance.locked:
+        with context.target_cell(
+                context.get_admin_context(), cell_mapping) as cctxt:
+            compute_api.lock(cctxt, instance, reason=reason)
+    try:
+        yield
+    finally:
+        if initial_state == 'unlocked':
+            with context.target_cell(
+                    context.get_admin_context(), cell_mapping) as cctxt:
+                compute_api.unlock(cctxt, instance)
 
 
 class DbCommands(object):
@@ -623,6 +651,47 @@ class DbCommands(object):
         # "there are more migrations, but not completable right now"
         return ran and 1 or 0
 
+    @args('--ironic-node-uuid', metavar='<uuid>', dest='compute_node_uuid',
+          help='UUID of Ironic node to be moved between services')
+    @args('--destination-host', metavar='<host>',
+          dest='destination_service_host',
+          help='Destination ironic nova-compute service CONF.host')
+    def ironic_compute_node_move(self, compute_node_uuid,
+                                 destination_service_host):
+        ctxt = context.get_admin_context()
+
+        destination_service = objects.Service.get_by_compute_host(
+            ctxt, destination_service_host)
+        if destination_service.forced_down:
+            raise exception.NovaException(
+                "Destination compute is forced down!")
+
+        target_compute_node = objects.ComputeNode.get_by_uuid(
+            ctxt, compute_node_uuid)
+        source_service = objects.Service.get_by_id(
+            ctxt, target_compute_node.service_id)
+        if not source_service.forced_down:
+            raise exception.NovaException(
+                "Source service is not yet forced down!")
+
+        instances = objects.InstanceList.get_by_host_and_node(
+            ctxt, target_compute_node.host,
+            target_compute_node.hypervisor_hostname)
+        if len(instances) > 1:
+            raise exception.NovaException(
+                "Found an ironic host with more than one instance! "
+                "Please delete all Nova instances that do not match "
+                "the instance uuid recorded on the Ironic node.")
+
+        target_compute_node.service_id = destination_service.id
+        target_compute_node.host = destination_service.host
+        target_compute_node.save()
+
+        for instance in instances:
+            # this is a bit like evacuate, except no need to rebuild
+            instance.host = destination_service.host
+            instance.save()
+
 
 class ApiDbCommands(object):
     """Class for managing the api database."""
@@ -760,7 +829,7 @@ class CellV2Commands(object):
         return 0
 
     def _map_cell0(self, database_connection=None):
-        """Faciliate creation of a cell mapping for cell0.
+        """Facilitate creation of a cell mapping for cell0.
         See map_cell0 for more.
         """
         def cell0_default_connection():
@@ -855,7 +924,7 @@ class CellV2Commands(object):
         # iteration, we search for the special name and unmunge the UUID to
         # pick up where we left off. This is done until all mappings are
         # processed. The munging is necessary as there's a unique constraint on
-        # the UUID field and we need something reversable. For more
+        # the UUID field and we need something reversible. For more
         # information, see commit 9038738d0.
 
         if max_count is not None:
@@ -2624,7 +2693,7 @@ class PlacementCommands(object):
                     # By default we suspect the orphaned allocation was for a
                     # migration...
                     consumer_type = 'migration'
-                    if not(consumer_uuid in inst_uuids):
+                    if consumer_uuid not in inst_uuids:
                         # ... but if we can't find it either for an instance,
                         # that means it was for this.
                         consumer_type = 'instance'
@@ -2798,8 +2867,8 @@ class LibvirtCommands(object):
                 print(mtype)
                 return 0
             else:
-                print(_('No machine type registered for instance %s' %
-                        instance_uuid))
+                print(_('No machine type registered for instance %s') %
+                      instance_uuid)
                 return 3
         except (exception.InstanceNotFound,
                 exception.InstanceMappingNotFound) as e:
@@ -3013,15 +3082,13 @@ class VolumeAttachmentCommands(object):
 
         We can do that here as the command requires that the instance is
         stopped, something that isn't always the case with the current driver
-        BDM approach and thus the two are kept seperate for the time being.
+        BDM approach and thus the two are kept separate for the time being.
 
         :param instance_uuid: UUID of instance
         :param volume_id: ID of volume attached to the instance
         :param connector: Connector with which to create the new attachment
+        :return status_code: volume-refresh status_code 0 on success
         """
-        volume_api = cinder.API()
-        compute_rpcapi = rpcapi.ComputeAPI()
-        compute_api = api.API()
 
         ctxt = context.get_admin_context()
         im = objects.InstanceMapping.get_by_instance_uuid(ctxt, instance_uuid)
@@ -3037,111 +3104,95 @@ class VolumeAttachmentCommands(object):
                     state=instance.vm_state,
                     method='refresh connection_info (must be stopped)')
 
-            if instance.locked:
-                raise exception.InstanceInvalidState(
-                    instance_uuid=instance_uuid, attr='locked', state='True',
-                    method='refresh connection_info (must be unlocked)')
+            locking_reason = (
+                f'Refreshing connection_info for BDM {bdm.uuid} '
+                f'associated with instance {instance_uuid} and volume '
+                f'{volume_id}.')
 
-            compute_api.lock(
-                cctxt, instance,
-                reason=(
-                    f'Refreshing connection_info for BDM {bdm.uuid} '
-                    f'associated with instance {instance_uuid} and volume '
-                    f'{volume_id}.'))
+            with locked_instance(im.cell_mapping, instance, locking_reason):
+                return self._do_refresh(
+                    cctxt, instance, volume_id, bdm, connector)
 
-        # NOTE(lyarwood): Yes this is weird but we need to recreate the admin
-        # context here to ensure the lock above uses a unique request-id
-        # versus the following refresh and eventual unlock.
-        ctxt = context.get_admin_context()
-        with context.target_cell(ctxt, im.cell_mapping) as cctxt:
-            instance_action = None
-            new_attachment_id = None
-            try:
-                # Log this as an instance action so operators and users are
-                # aware that this has happened.
-                instance_action = objects.InstanceAction.action_start(
-                    cctxt, instance_uuid,
-                    instance_actions.NOVA_MANAGE_REFRESH_VOLUME_ATTACHMENT)
+    def _do_refresh(self, cctxt, instance,
+            volume_id, bdm, connector):
+        volume_api = cinder.API()
+        compute_rpcapi = rpcapi.ComputeAPI()
 
-                # Create a blank attachment to keep the volume reserved
-                new_attachment_id = volume_api.attachment_create(
-                    cctxt, volume_id, instance_uuid)['id']
+        new_attachment_id = None
+        try:
+            # Log this as an instance action so operators and users are
+            # aware that this has happened.
+            instance_action = objects.InstanceAction.action_start(
+                cctxt, instance.uuid,
+                instance_actions.NOVA_MANAGE_REFRESH_VOLUME_ATTACHMENT)
 
-                # RPC call to the compute to cleanup the connections, which
-                # will in turn unmap the volume from the compute host
-                # TODO(lyarwood): Add delete_attachment as a kwarg to
-                # remove_volume_connection as is available in the private
-                # method within the manager.
+            # Create a blank attachment to keep the volume reserved
+            new_attachment_id = volume_api.attachment_create(
+                cctxt, volume_id, instance.uuid)['id']
+
+            # RPC call to the compute to cleanup the connections, which
+            # will in turn unmap the volume from the compute host
+            if instance.host == connector['host']:
                 compute_rpcapi.remove_volume_connection(
-                    cctxt, instance, volume_id, instance.host)
+                    cctxt, instance, volume_id, instance.host,
+                    delete_attachment=True)
+            else:
+                msg = (
+                    f"The compute host '{connector['host']}' in the "
+                    f"connector does not match the instance host "
+                    f"'{instance.host}'.")
+                raise exception.HostConflict(_(msg))
 
-                # Delete the existing volume attachment if present in the bdm.
-                # This isn't present when the original attachment was made
-                # using the legacy cinderv2 APIs before the cinderv3 attachment
-                # based APIs were present.
-                if bdm.attachment_id:
-                    volume_api.attachment_delete(cctxt, bdm.attachment_id)
+            # Update the attachment with host connector, this regenerates
+            # the connection_info that we can now stash in the bdm.
+            new_connection_info = volume_api.attachment_update(
+                cctxt, new_attachment_id, connector,
+                bdm.device_name)['connection_info']
 
-                # Update the attachment with host connector, this regenerates
-                # the connection_info that we can now stash in the bdm.
-                new_connection_info = volume_api.attachment_update(
-                    cctxt, new_attachment_id, connector,
-                    bdm.device_name)['connection_info']
+            # Before we save it to the BDM ensure the serial is stashed as
+            # is done in various other codepaths when attaching volumes.
+            if 'serial' not in new_connection_info:
+                new_connection_info['serial'] = bdm.volume_id
 
-                # Before we save it to the BDM ensure the serial is stashed as
-                # is done in various other codepaths when attaching volumes.
-                if 'serial' not in new_connection_info:
-                    new_connection_info['serial'] = bdm.volume_id
+            # Save the new attachment id and connection_info to the DB
+            bdm.attachment_id = new_attachment_id
+            bdm.connection_info = jsonutils.dumps(new_connection_info)
+            bdm.save()
 
-                # Save the new attachment id and connection_info to the DB
-                bdm.attachment_id = new_attachment_id
-                bdm.connection_info = jsonutils.dumps(new_connection_info)
+            # Finally mark the attachment as complete, moving the volume
+            # status from attaching to in-use ahead of the instance
+            # restarting
+            volume_api.attachment_complete(cctxt, new_attachment_id)
+            return 0
+
+        finally:
+            # If the bdm.attachment_id wasn't updated make sure we clean
+            # up any attachments created during the run.
+            bdm = objects.BlockDeviceMapping.get_by_volume_and_instance(
+                cctxt, volume_id, instance.uuid)
+            if (
+                new_attachment_id and
+                bdm.attachment_id != new_attachment_id
+            ):
+                volume_api.attachment_delete(cctxt, new_attachment_id)
+
+            # If we failed during attachment_update the bdm.attachment_id
+            # has already been deleted so recreate it now to ensure the
+            # volume is still associated with the instance and clear the
+            # now stale connection_info.
+            try:
+                volume_api.attachment_get(cctxt, bdm.attachment_id)
+            except exception.VolumeAttachmentNotFound:
+                bdm.attachment_id = volume_api.attachment_create(
+                    cctxt, volume_id, instance.uuid)['id']
+                bdm.connection_info = None
                 bdm.save()
 
-                # Finally mark the attachment as complete, moving the volume
-                # status from attaching to in-use ahead of the instance
-                # restarting
-                volume_api.attachment_complete(cctxt, new_attachment_id)
-                return 0
-
-            finally:
-                # If the bdm.attachment_id wasn't updated make sure we clean
-                # up any attachments created during the run.
-                bdm = objects.BlockDeviceMapping.get_by_volume_and_instance(
-                    cctxt, volume_id, instance_uuid)
-                if (
-                    new_attachment_id and
-                    bdm.attachment_id != new_attachment_id
-                ):
-                    volume_api.attachment_delete(cctxt, new_attachment_id)
-
-                # If we failed during attachment_update the bdm.attachment_id
-                # has already been deleted so recreate it now to ensure the
-                # volume is still associated with the instance and clear the
-                # now stale connection_info.
-                try:
-                    volume_api.attachment_get(cctxt, bdm.attachment_id)
-                except exception.VolumeAttachmentNotFound:
-                    bdm.attachment_id = volume_api.attachment_create(
-                        cctxt, volume_id, instance_uuid)['id']
-                    bdm.connection_info = None
-                    bdm.save()
-
-                # Finish the instance action if it was created and started
-                # TODO(lyarwood): While not really required we should store
-                # the exec and traceback in here on failure.
-                if instance_action:
-                    instance_action.finish()
-
-                # NOTE(lyarwood): As above we need to unlock the instance with
-                # a fresh context and request-id to keep it unique. It's safe
-                # to assume that the instance is locked as this point as the
-                # earlier call to lock isn't part of this block.
-                with context.target_cell(
-                    context.get_admin_context(),
-                    im.cell_mapping
-                ) as u_cctxt:
-                    compute_api.unlock(u_cctxt, instance)
+            # Finish the instance action if it was created and started
+            # TODO(lyarwood): While not really required we should store
+            # the exec and traceback in here on failure.
+            if instance_action:
+                instance_action.finish()
 
     @action_description(
         _("Refresh the connection info for a given volume attachment"))
@@ -3165,6 +3216,7 @@ class VolumeAttachmentCommands(object):
         * 4: Instance does not exist.
         * 5: Instance state invalid.
         * 6: Volume is not attached to instance.
+        * 7: Connector host is not correct.
         """
         try:
             # TODO(lyarwood): Make this optional and provide a rpcapi capable
@@ -3180,6 +3232,12 @@ class VolumeAttachmentCommands(object):
             # Refresh the volume attachment
             return self._refresh(instance_uuid, volume_id, connector)
 
+        except exception.HostConflict as e:
+            print(
+                f"The command 'nova-manage volume_attachment get_connector' "
+                f"may have been run on the wrong compute host. Or the "
+                f"instance host may be wrong and in need of repair.\n{e}")
+            return 7
         except exception.VolumeBDMNotFound as e:
             print(str(e))
             return 6
@@ -3192,11 +3250,14 @@ class VolumeAttachmentCommands(object):
         ) as e:
             print(str(e))
             return 4
-        except (ValueError, OSError):
+        except ValueError as e:
             print(
                 f'Failed to open {connector_path}. Does it contain valid '
-                f'connector_info data?'
+                f'connector_info data?\nError: {str(e)}'
             )
+            return 3
+        except OSError as e:
+            print(str(e))
             return 3
         except exception.InvalidInput as e:
             print(str(e))

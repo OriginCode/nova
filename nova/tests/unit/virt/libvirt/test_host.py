@@ -890,6 +890,8 @@ class HostTestCase(test.NoDBTestCase):
         if supported:
             self.assertEqual(47, sev.cbitpos)
             self.assertEqual(1, sev.reduced_phys_bits)
+            self.assertIsNone(sev.max_guests)
+            self.assertIsNone(sev.max_es_guests)
 
     @mock.patch.object(
         fakelibvirt.virConnect, '_domain_capability_features', new=
@@ -903,6 +905,22 @@ class HostTestCase(test.NoDBTestCase):
         new=fakelibvirt.virConnect._domain_capability_features_with_SEV)
     def test_get_domain_capabilities_sev_supported(self):
         self._test_get_domain_capabilities_sev(True)
+
+    @mock.patch.object(
+        fakelibvirt.virConnect, '_domain_capability_features', new=
+        fakelibvirt.virConnect._domain_capability_features_with_SEV_max_guests)
+    def test_get_domain_capabilities_sev_max_guests(self):
+        caps = self._test_get_domain_capabilities()
+        self.assertEqual(vconfig.LibvirtConfigDomainCaps, type(caps))
+        features = caps.features
+        self.assertEqual(1, len(features))
+        sev = features[0]
+        self.assertEqual(vconfig.LibvirtConfigDomainCapsFeatureSev, type(sev))
+        self.assertTrue(sev.supported)
+        self.assertEqual(47, sev.cbitpos)
+        self.assertEqual(1, sev.reduced_phys_bits)
+        self.assertEqual(100, sev.max_guests)
+        self.assertEqual(15, sev.max_es_guests)
 
     @mock.patch.object(fakelibvirt.virConnect, "getHostname")
     def test_get_hostname_caching(self, mock_hostname):
@@ -1345,7 +1363,7 @@ Active:          8381604 kB
             "parent_ifname": "ens1",
             "capabilities": {
                 "network": ["rx", "tx", "sg", "tso", "gso", "gro", "rxvlan",
-                            "txvlan", "rxhash"],
+                            "txvlan", "rxhash", "switchdev"],
                 "sriov": {"pf_mac_address": "52:54:00:1e:59:c6",
                           "vf_num": 1},
                 # Should be obtained from the parent PF in this case.

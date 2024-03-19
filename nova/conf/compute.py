@@ -40,7 +40,6 @@ Possible values:
 * ``fake.FakeDriver``
 * ``ironic.IronicDriver``
 * ``vmwareapi.VMwareVCDriver``
-* ``hyperv.HyperVDriver``
 * ``zvm.ZVMDriver``
 """),
     cfg.BoolOpt('allow_resize_to_same_host',
@@ -363,7 +362,7 @@ Related options:
     cfg.MultiOpt('reserved_huge_pages',
         item_type=types.Dict(),
         help="""
-Number of huge/large memory pages to reserved per NUMA host cell.
+Number of huge/large memory pages to reserve per NUMA host cell.
 
 Possible values:
 

@@ -67,6 +67,8 @@ def get_updated_guest_xml(instance, guest, migrate_data, get_volume_config,
         xml_doc = _update_vif_xml(xml_doc, migrate_data, get_vif_config)
     if 'dst_numa_info' in migrate_data:
         xml_doc = _update_numa_xml(xml_doc, migrate_data)
+    if 'target_mdevs' in migrate_data:
+        xml_doc = _update_mdev_xml(xml_doc, migrate_data.target_mdevs)
     if new_resources:
         xml_doc = _update_device_resources_xml(xml_doc, new_resources)
     return etree.tostring(xml_doc, encoding='unicode')
@@ -103,6 +105,28 @@ def _update_vpmems_xml(xml_doc, vpmems):
         if memory_dev.get('model') == 'nvdimm':
             devpath = memory_dev.find('./source/path')
             devpath.text = vpmems[pos].devpath
+    return xml_doc
+
+
+def _update_mdev_xml(xml_doc, target_mdevs):
+    for dev in xml_doc.findall('./devices/hostdev'):
+        if dev.get('type') == 'mdev':
+            address_tag = dev.find('source/address')
+            if address_tag is None:
+                continue
+            src_mdev = address_tag.get('uuid')
+            if src_mdev is not None:
+                dst_mdev = target_mdevs.get(src_mdev)
+                if dst_mdev is None:
+                    # For some reason, we don't know which mdev to use
+                    # so we prefer to abort the live-migration.
+                    raise exception.NovaException(
+                        'Unable to find the destination mediated device UUID '
+                        'to use for this source mdev UUID : %s' % src_mdev)
+                else:
+                    address_tag.set('uuid', dst_mdev)
+    LOG.debug('_update_mdev_xml output xml=%s',
+              etree.tostring(xml_doc, encoding='unicode', pretty_print=True))
     return xml_doc
 
 
@@ -226,12 +250,12 @@ def _update_volume_xml(xml_doc, migrate_data, instance, get_volume_config):
             instance, bdm_info.connection_info, bdm_info.as_disk_info())
 
         if bdm_info.obj_attr_is_set('encryption_secret_uuid'):
-            conf.encryption = vconfig.LibvirtConfigGuestDiskEncryption()
-            conf.encryption.format = 'luks'
+            conf.volume_encryption = vconfig.LibvirtConfigGuestDiskEncryption()
+            conf.volume_encryption.format = 'luks'
             secret = vconfig.LibvirtConfigGuestDiskEncryptionSecret()
             secret.type = 'passphrase'
             secret.uuid = bdm_info.encryption_secret_uuid
-            conf.encryption.secret = secret
+            conf.volume_encryption.secret = secret
 
         xml_doc2 = etree.XML(conf.to_xml(), parser)
         serial_dest = xml_doc2.findtext('serial')
@@ -253,7 +277,7 @@ def _update_volume_xml(xml_doc, migrate_data, instance, get_volume_config):
                         item_dst.tail = None
                         disk_dev.insert(cnt, item_dst)
 
-            # If destination has additional items, thses items should be
+            # If destination has additional items, these items should be
             # added here.
             for item_dst in list(xml_doc2):
                 if item_dst.tag != 'address':

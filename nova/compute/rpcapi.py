@@ -404,6 +404,7 @@ class ComputeAPI(object):
                  flavor
         * 6.1 - Add reimage_boot_volume parameter to rebuild_instance()
         * 6.2 - Add target_state parameter to rebuild_instance()
+        * 6.3 - Add delete_attachment parameter to remove_volume_connection
     '''
 
     VERSION_ALIASES = {
@@ -427,6 +428,7 @@ class ComputeAPI(object):
         'zed': '6.1',
         'antelope': '6.2',
         'bobcat': '6.2',
+        'caracal': '6.3',
     }
 
     @property
@@ -837,13 +839,6 @@ class ComputeAPI(object):
         return cctxt.call(ctxt, 'get_spice_console',
                           instance=instance, console_type=console_type)
 
-    def get_rdp_console(self, ctxt, instance, console_type):
-        version = self._ver(ctxt, '5.0')
-        cctxt = self.router.client(ctxt).prepare(
-                server=_compute_host(None, instance), version=version)
-        return cctxt.call(ctxt, 'get_rdp_console',
-                          instance=instance, console_type=console_type)
-
     def get_mks_console(self, ctxt, instance, console_type):
         version = self._ver(ctxt, '5.0')
         cctxt = self.router.client(ctxt).prepare(
@@ -1140,12 +1135,23 @@ class ComputeAPI(object):
         cctxt.cast(ctxt, 'remove_fixed_ip_from_instance',
                    instance=instance, address=address)
 
-    def remove_volume_connection(self, ctxt, instance, volume_id, host):
-        version = self._ver(ctxt, '5.0')
-        cctxt = self.router.client(ctxt).prepare(
-                server=host, version=version)
-        return cctxt.call(ctxt, 'remove_volume_connection',
-                          instance=instance, volume_id=volume_id)
+    def remove_volume_connection(
+                self, ctxt, instance, volume_id, host,
+                delete_attachment=False
+            ):
+        version = '6.3'
+        client = self.router.client(ctxt)
+        kwargs = {
+            'instance': instance,
+            'volume_id': volume_id,
+            'delete_attachment': delete_attachment
+        }
+        if not client.can_send_version(version):
+            kwargs.pop('delete_attachment')
+            version = self._ver(ctxt, '5.0')
+
+        cctxt = client.prepare(server=host, version=version)
+        return cctxt.call(ctxt, 'remove_volume_connection', **kwargs)
 
     def rescue_instance(self, ctxt, instance, rescue_password,
                         rescue_image_ref=None, clean_shutdown=True):

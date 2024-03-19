@@ -526,6 +526,25 @@ class RNGModel(BaseNovaEnum):
     ALL = (VIRTIO,)
 
 
+class ShareMappingStatus(BaseNovaEnum):
+    """Represents the possible status of a share mapping"""
+
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    ERROR = "error"
+
+    ALL = (ACTIVE, INACTIVE, ERROR)
+
+
+class ShareMappingProto(BaseNovaEnum):
+    """Represents the possible protocol used by a share mapping"""
+
+    NFS = "NFS"
+    CEPHFS = "CEPHFS"
+
+    ALL = (NFS, CEPHFS)
+
+
 class TPMModel(BaseNovaEnum):
 
     TIS = "tpm-tis"
@@ -539,6 +558,13 @@ class TPMVersion(BaseNovaEnum):
     v2_0 = "2.0"
 
     ALL = (v1_2, v2_0)
+
+
+class MaxPhyAddrMode(BaseNovaEnum):
+    PASSTHROUGH = "passthrough"
+    EMULATE = "emulate"
+
+    ALL = (PASSTHROUGH, EMULATE)
 
 
 class SCSIModel(BaseNovaEnum):
@@ -808,8 +834,8 @@ class DiskFormat(BaseNovaEnum):
     ALL = (RBD, LVM, QCOW2, RAW, PLOOP, VHD, VMDK, VDI, ISO)
 
 
-# TODO(stephenfin): Remove the xenapi value when we bump the 'Diagnostics'
-# object (the only user of this enum) to 2.0
+# TODO(stephenfin): Remove the xenapi and hyperv value when we bump the
+# 'Diagnostics' object (the only user of this enum) to 2.0
 class HypervisorDriver(BaseNovaEnum):
     LIBVIRT = "libvirt"
     XENAPI = "xenapi"
@@ -1275,6 +1301,10 @@ class InputBusField(BaseEnumField):
     AUTO_TYPE = InputBus()
 
 
+class MaxPhysAddrModeField(BaseEnumField):
+    AUTO_TYPE = MaxPhyAddrMode()
+
+
 class MigrationTypeField(BaseEnumField):
     AUTO_TYPE = MigrationType()
 
@@ -1285,6 +1315,14 @@ class OSTypeField(BaseEnumField):
 
 class RNGModelField(BaseEnumField):
     AUTO_TYPE = RNGModel()
+
+
+class ShareMappingStatusField(BaseEnumField):
+    AUTO_TYPE = ShareMappingStatus()
+
+
+class ShareMappingProtoField(BaseEnumField):
+    AUTO_TYPE = ShareMappingProto()
 
 
 class TPMModelField(BaseEnumField):

@@ -890,12 +890,26 @@ def _parse_disk_info(element):
         if not disk_info['source']:
             disk_info['source'] = source.get('path')
 
+        encryption = element.find('./source/encryption')
+        if encryption is not None and len(encryption):
+            disk_info['encryption_format'] = encryption.get('format')
+            secret = encryption.find('./secret')
+            if secret is not None:
+                disk_info['encryption_secret'] = secret.get('uuid')
+
     target = element.find('./target')
     if target is not None:
         disk_info['target_dev'] = target.get('dev')
         disk_info['target_bus'] = target.get('bus')
 
     return disk_info
+
+
+def _parse_vcpu_info(element):
+    vcpu_info = {}
+    vcpu_info['number'] = int(element.text)
+    vcpu_info['cpuset'] = element.get('cpuset')
+    return vcpu_info
 
 
 def _parse_nic_info(element):
@@ -925,7 +939,7 @@ def disable_event_thread(self):
     problematic because it means we've got a floating thread calling
     sleep(1) over the life of the unit test. Seems harmless? It's not,
     because we sometimes want to test things like retry loops that
-    should have specific sleep paterns. An unlucky firing of the
+    should have specific sleep patterns. An unlucky firing of the
     libvirt thread will cause a test failure.
 
     """
@@ -1090,7 +1104,7 @@ class Domain(object):
 
         vcpu = tree.find('./vcpu')
         if vcpu is not None:
-            definition['vcpu'] = int(vcpu.text)
+            definition['vcpu'] = _parse_vcpu_info(vcpu)
 
         memory = tree.find('./memory')
         if memory is not None:
@@ -1416,12 +1430,23 @@ class Domain(object):
             else:
                 source_attr = 'dev'
 
-            disks += '''<disk type='%(type)s' device='%(device)s'>
+            strformat = """
+    <disk type='%(type)s' device='%(device)s'>
       <driver name='%(driver_name)s' type='%(driver_type)s'/>
-      <source %(source_attr)s='%(source)s'/>
+      <source %(source_attr)s='%(source)s'"""
+            if 'encryption_format' not in disk:
+                strformat += '/>'
+            else:
+                strformat += """>
+        <encryption format='%(encryption_format)s'>
+          <secret type='passphrase' uuid='%(encryption_secret)s'/>
+        </encryption>
+      </source>"""
+            strformat += """
       <target dev='%(target_dev)s' bus='%(target_bus)s'/>
       <address type='drive' controller='0' bus='0' unit='0'/>
-    </disk>''' % dict(source_attr=source_attr, **disk)
+    </disk>"""
+            disks += strformat % dict(source_attr=source_attr, **disk)
         nics = ''
         for func, nic in enumerate(self._def['devices']['nics']):
             if func > 7:
@@ -1525,12 +1550,16 @@ class Domain(object):
                 <source host="-1" service="-1" mode="bind"/>
                 </serial>"""
 
+        vcpuset = ''
+        if self._def['vcpu'].get('cpuset'):
+            vcpuset = ' cpuset="' + self._def['vcpu']['cpuset'] + '"'
+
         return '''<domain type='kvm'>
   <name>%(name)s</name>
   <uuid>%(uuid)s</uuid>
   <memory>%(memory)s</memory>
   <currentMemory>%(memory)s</currentMemory>
-  <vcpu>%(vcpu)s</vcpu>
+  <vcpu%(vcpuset)s>%(vcpu)s</vcpu>
   <os>
     <type arch='%(arch)s' machine='pc-0.12'>hvm</type>
     <boot dev='hd'/>
@@ -1578,7 +1607,8 @@ class Domain(object):
 </domain>''' % {'name': self._def['name'],
                 'uuid': self._def['uuid'],
                 'memory': self._def['memory'],
-                'vcpu': self._def['vcpu'],
+                'vcpuset': vcpuset,
+                'vcpu': self._def['vcpu']['number'],
                 'arch': self._def['os']['arch'],
                 'disks': disks,
                 'nics': nics,
@@ -1610,7 +1640,7 @@ class Domain(object):
 
     def vcpus(self):
         vcpus = ([], [])
-        for i in range(0, self._def['vcpu']):
+        for i in range(0, self._def['vcpu']['number']):
             vcpus[0].append((i, 1, 120405, i))
             vcpus[1].append((True, True, True, True))
         return vcpus
@@ -1700,6 +1730,11 @@ class Secret(object):
         tree = etree.fromstring(xml)
         self._uuid = tree.find('./uuid').text
         self._private = tree.get('private') == 'yes'
+        self._usage_id = None
+        usage = tree.find('./usage')
+        if usage is not None:
+            if usage.get('type') == 'volume':
+                self._usage_id = usage.find('volume').text
 
     def setValue(self, value, flags=0):
         self._value = value
@@ -1725,6 +1760,14 @@ class Secret(object):
 
     def undefine(self):
         self._connection._remove_secret(self)
+
+    def UUIDString(self):
+        if self._uuid is not None:
+            return self._uuid
+
+    def usageID(self):
+        if self._usage_id is not None:
+            return self._usage_id
 
 
 class Connection(object):
@@ -1990,6 +2033,16 @@ class Connection(object):
     _domain_capability_features_with_SEV_unsupported = \
         _domain_capability_features_with_SEV.replace('yes', 'no')
 
+    _domain_capability_features_with_SEV_max_guests = '''  <features>
+    <gic supported='no'/>
+    <sev supported='yes'>
+      <cbitpos>47</cbitpos>
+      <reducedPhysBits>1</reducedPhysBits>
+      <maxGuests>100</maxGuests>
+      <maxESGuests>15</maxESGuests>
+    </sev>
+  </features>'''
+
     def getCapabilities(self):
         """Return spoofed capabilities."""
         numa_topology = self.host_info.numa_topology
@@ -2118,8 +2171,15 @@ class Connection(object):
                     <feature policy='require' name='aes'/>
                   </cpu>"""
 
+    def listAllSecrets(self, flags):
+        return [secret for secret in self._secrets.values()]
+
     def secretLookupByUsage(self, usage_type_obj, usage_id):
-        pass
+        for secret in self._secrets.values():
+            # Ignore usage_type_obj because we don't have a way to map libvrt
+            # usage type constants to strings.
+            if secret._usage_id == usage_id:
+                return secret
 
     def secretDefineXML(self, xml):
         secret = Secret(self, xml)
@@ -2147,10 +2207,10 @@ class Connection(object):
 
 def openAuth(uri, auth, flags=0):
 
-    if type(auth) != list:
+    if type(auth) is not list:
         raise Exception("Expected a list for 'auth' parameter")
 
-    if type(auth[0]) != list:
+    if type(auth[0]) is not list:
         raise Exception("Expected a function in 'auth[0]' parameter")
 
     if not callable(auth[1]):
