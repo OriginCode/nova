@@ -7,10 +7,10 @@ Index: nova/doc/source/conf.py
 ===================================================================
 --- nova.orig/doc/source/conf.py
 +++ nova/doc/source/conf.py
-@@ -44,7 +44,6 @@ extensions = [
+@@ -42,7 +42,6 @@
+     'ext.versioned_notifications',
+     'ext.feature_matrix',
      'ext.extra_specs',
-     'sphinxcontrib.actdiag',
-     'sphinxcontrib.seqdiag',
 -    'sphinxcontrib.rsvgconverter',
  ]
  

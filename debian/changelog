@@ -2,6 +2,8 @@ nova (2:29.0.0~rc1-1) experimental; urgency=medium
 
   * New upstream release.
   * Fixed (build-)depends for this release.
+  * Rebased remove-svg-converter-from-doc-conf.py.patch.
+  * Removed removed-actdiag-from-doc.patch.
 
  -- Thomas Goirand <zigo@debian.org>  Tue, 19 Mar 2024 12:40:12 +0100
 
