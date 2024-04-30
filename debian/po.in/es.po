@@ -30,16 +30,17 @@
 msgid ""
 msgstr ""
 "Project-Id-Version: nova\n"
-"Report-Msgid-Bugs-To: nova@packages.debian.org\n"
-"POT-Creation-Date: 2020-03-26 12:45+0100\n"
-"PO-Revision-Date: 2014-12-11 18:12+0000\n"
-"Last-Translator: Jonathan Bustillos <jathanblackred@openmailbox.com>\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2022-12-28 19:45+0000\n"
+"PO-Revision-Date: 2023-01-05 15:47+0100\n"
+"Last-Translator: Camaleón <noelamac@gmail.com>\n"
 "Language-Team: Debian Spanish <debian-l10n-spanish@lists.debian.org>\n"
 "Language: es\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=2; plural=(n != 1);\n"
+"X-Generator: Poedit 2.4.2\n"
 
 #. Type: string
 #. Description
@@ -58,13 +59,13 @@ msgstr ""
 #. Description
 #: ../nova-common.templates.in:3001
 msgid "Neutron server URL:"
-msgstr "URL del servidor Neutron"
+msgstr "URL del servidor Neutron:"
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:3001
 msgid "Please enter the URL of the Neutron server."
-msgstr "Introduzca la URL para el servidor Neutron."
+msgstr "Introduzca la URL del servidor Neutron."
 
 #. Type: string
 #. Description
@@ -79,28 +80,28 @@ msgid ""
 "Nova needs to be able to communicate with Neutron through Keystone. "
 "Therefore Nova needs to know the Neutron admin tenant, username and password."
 msgstr ""
-"Nova necesita ser capaz de comunicarse con Neutron a través de Keystone. Por "
-"lo tanto Nova requiere conocer el inquilino («tenant») administrador de "
-"Neutron, el usuario y la contraseña."
+"Nova necesita comunicarse con Neutron a través de Keystone. Por lo tanto, "
+"Nova debe conocer el inquilino («tenant») administrador de Neutron, el "
+"usuario y la contraseña."
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:4001
 msgid "Please enter the name of the admin tenant for Neutron."
 msgstr ""
-"Introduzca el nombre del inquilino («tenant») administrador para Neutron:"
+"Introduzca el nombre del inquilino («tenant») administrador para Neutron."
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:5001
 msgid "Neutron administrator username:"
-msgstr "Nombre para el administrador de Neutron:"
+msgstr "Nombre del administrador de Neutron:"
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:5001
 msgid "Please enter the username of the Neutron administrator."
-msgstr "Introduzca el nombre de administrador de Neutron:"
+msgstr "Introduzca el nombre de usuario del administrador de Neutron."
 
 #. Type: password
 #. Description
@@ -118,7 +119,7 @@ msgstr "Introduzca la contraseña del administrador de Neutron."
 #. Description
 #: ../nova-common.templates.in:7001
 msgid "Metadata proxy shared secret:"
-msgstr ""
+msgstr "Secreto compartido del proxy de metadatos:"
 
 #. Type: password
 #. Description
@@ -128,6 +129,9 @@ msgid ""
 "through the Neutron metadata agent, which serves as a proxy to the Nova "
 "metadata REST API server."
 msgstr ""
+"Las máquinas virtuales que utilizan Neutron para gestionar la red, obtienen "
+"sus metadatos a través del agente de metadatos de Neutron, que actúa como un "
+"proxy para el servidor de metadatos de la API REST de Nova."
 
 #. Type: password
 #. Description
@@ -138,154 +142,125 @@ msgid ""
 "same shared password should be used when setting up the neutron-metadata-"
 "agent package."
 msgstr ""
+"Introduzca la contraseña que se utilizará para proteger las comunicaciones "
+"entre el agente proxy de metadatos de Neutron y el servidor de metadatos de "
+"Nova. Debe usar la misma contraseña compartida cuando configure el paquete "
+"neutron-metadata-agent."
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:8001
 msgid "Cinder os region name:"
-msgstr ""
+msgstr "Nombre de la región del sistema Cinder:"
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:8001
-#, fuzzy
-#| msgid "Please enter the URL of the Neutron server."
 msgid "Please enter the region name for cinder service."
-msgstr "Introduzca la URL para el servidor Neutron."
+msgstr "Introduzca el nombre de la región para el servicio Cinder."
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:9001
-#, fuzzy
-#| msgid "Neutron server URL:"
-msgid "Glance api server URL:"
-msgstr "URL del servidor Neutron"
-
-#. Type: string
-#. Description
-#: ../nova-common.templates.in:9001
-#, fuzzy
-#| msgid "Please enter the URL of the Neutron server."
-msgid "Please enter the URL of the Glance api server."
-msgstr "Introduzca la URL para el servidor Neutron."
-
-#. Type: string
-#. Description
-#: ../nova-common.templates.in:10001
-#, fuzzy
-#| msgid "Neutron admin tenant name:"
 msgid "Placement admin tenant name:"
-msgstr "Nombre del inquilino («tenant») administrador del servidor Neutron:"
+msgstr "Nombre del inquilino («tenant») administrador de Placement:"
 
 #. Type: string
 #. Description
-#: ../nova-common.templates.in:10001
-#, fuzzy
-#| msgid ""
-#| "Nova needs to be able to communicate with Neutron through Keystone. "
-#| "Therefore Nova needs to know the Neutron admin tenant, username and "
-#| "password."
+#: ../nova-common.templates.in:9001
 msgid ""
 "Nova needs to be able to communicate with Placement through Keystone. "
 "Therefore Nova needs to know the Placement admin tenant, username and "
 "password."
 msgstr ""
-"Nova necesita ser capaz de comunicarse con Neutron a través de Keystone. Por "
-"lo tanto Nova requiere conocer el inquilino («tenant») administrador de "
-"Neutron, el usuario y la contraseña."
+"Nova necesita comunicarse con Placement a través de Keystone. Por lo tanto, "
+"Nova debe conocer el inquilino («tenant») administrador de Placement, el "
+"usuario y la contraseña."
+
+#. Type: string
+#. Description
+#: ../nova-common.templates.in:9001
+msgid "Please enter the name of the admin tenant for Placement."
+msgstr ""
+"Introduzca el nombre del inquilino («tenant») administrador para Placement."
 
 #. Type: string
 #. Description
 #: ../nova-common.templates.in:10001
-#, fuzzy
-#| msgid "Please enter the name of the admin tenant for Neutron."
-msgid "Please enter the name of the admin tenant for Placement."
-msgstr ""
-"Introduzca el nombre del inquilino («tenant») administrador para Neutron:"
-
-#. Type: string
-#. Description
-#: ../nova-common.templates.in:11001
-#, fuzzy
-#| msgid "Neutron administrator username:"
 msgid "Placement administrator username:"
-msgstr "Nombre para el administrador de Neutron:"
+msgstr "Nombre de usuario del administrador de Placement:"
 
 #. Type: string
+#. Description
+#: ../nova-common.templates.in:10001
+msgid "Please enter the username of the Placement administrator."
+msgstr "Introduzca el nombre de usuario del administrador de Placement."
+
+#. Type: password
 #. Description
 #: ../nova-common.templates.in:11001
-#, fuzzy
-#| msgid "Please enter the username of the Neutron administrator."
-msgid "Please enter the username of the Placement administrator."
-msgstr "Introduzca el nombre de administrador de Neutron:"
-
-#. Type: password
-#. Description
-#: ../nova-common.templates.in:12001
-#, fuzzy
-#| msgid "Neutron administrator password:"
 msgid "Placement administrator password:"
-msgstr "Contraseña del administrador de Neutron:"
+msgstr "Contraseña del administrador de Placement:"
 
 #. Type: password
 #. Description
-#: ../nova-common.templates.in:12001
-#, fuzzy
-#| msgid "Please enter the password of the Neutron administrator."
+#: ../nova-common.templates.in:11001
 msgid "Please enter the password of the Placement administrator."
-msgstr "Introduzca la contraseña del administrador de Neutron."
+msgstr "Introduzca la contraseña del administrador de Placement."
 
 #. Type: string
 #. Description
-#: ../nova-common.templates.in:13001
+#: ../nova-common.templates.in:12001
 msgid "Placement os region name:"
-msgstr ""
+msgstr "Nombre de la región del sistema Placement:"
 
 #. Type: string
 #. Description
-#: ../nova-common.templates.in:13001
-#, fuzzy
-#| msgid "Please enter the URL of the Neutron server."
+#: ../nova-common.templates.in:12001
 msgid "Please enter the region name for Placement service."
-msgstr "Introduzca la URL para el servidor Neutron."
+msgstr "Introduzca el nombre de la región para el servicio Placement."
 
 #. Type: boolean
 #. Description
-#: ../nova-common.templates.in:14001
+#: ../nova-common.templates.in:13001
 msgid "Manage neutron config through debconf?"
-msgstr ""
+msgstr "¿Quiere gestionar la configuración de Neutron a través de debconf?"
 
 #. Type: boolean
 #. Description
-#: ../nova-common.templates.in:14001
+#: ../nova-common.templates.in:13001
 msgid ""
 "Nova service must contact Neutron, and this is configured through the "
 "[neutron] section of the configuration. Specify if you wish to handle this "
 "configuration through debconf."
 msgstr ""
+"El servicio Nova necesita comunicarse con Neutron y esta configuración se "
+"realiza a través de la sección [neutron] de la configuración. Indique si "
+"quiere llevar a cabo esta configuración a través de debconf."
 
 #. Type: boolean
 #. Description
-#: ../nova-common.templates.in:15001
+#: ../nova-common.templates.in:14001
 msgid "Manage placement config through debconf?"
-msgstr ""
+msgstr "¿Quiere gestionar la configuración de Placement a través de debconf?"
 
 #. Type: boolean
 #. Description
-#: ../nova-common.templates.in:15001
+#: ../nova-common.templates.in:14001
 msgid ""
 "Nova service must contact Placement, and this is configured through the "
 "[placement] section of the configuration. Specify if you wish to handle this "
 "configuration through debconf."
 msgstr ""
+"El servicio Nova necesita comunicarse con Placement y esta configuración se "
+"realiza a través de la sección [placement] de la configuración. Indique si "
+"quiere llevar a cabo esta configuración a través de debconf."
 
 #. Type: boolean
 #. Description
 #: ../nova-api.templates.in:1001
-#, fuzzy
-#| msgid "Set up a database for Nova?"
 msgid "Set up a database for Nova API?"
-msgstr "¿Desea configurar una base de datos para Nova?"
+msgstr "¿Quiere configurar una base de datos para el API de Nova?"
 
 #. Type: boolean
 #. Description
@@ -294,8 +269,8 @@ msgid ""
 "No database has been set up for Nova to use. If you want to set one up now, "
 "please make sure you have all needed information:"
 msgstr ""
-"No se ha configurado ninguna base de datos para Nova. Si desea configurar "
-"una ahora, debe asegurarse de que dispone de los siguientes datos:"
+"No ha configurado ninguna base de datos para Nova. Si quiere configurar una "
+"ahora, debe asegurarse de que dispone de los siguientes datos:"
 
 #. Type: boolean
 #. Description
@@ -306,10 +281,10 @@ msgid ""
 " * a username and password to access the database;\n"
 " * the type of database management software you want to use."
 msgstr ""
-".* El nombre del servidor de la base de datos (el cual debe permitir\n"
+" * El nombre del servidor de la base de datos (el cual debe permitir\n"
 "   conexiones TCP desde esta máquina);\n"
 " * Un nombre de usuario y una contraseña para acceder a la base de datos;\n"
-" * El software para gestión de bases de datos que desea utilizar."
+" * El tipo de programa para gestionar las bases de datos que quiere utilizar."
 
 #. Type: boolean
 #. Description
@@ -318,22 +293,18 @@ msgid ""
 "If you don't choose this option, no database will be set up and Nova will "
 "use regular SQLite support."
 msgstr ""
-"Si no elige esta opción, no se configurará ninguna base de datos y Nova "
-"utilizará SQLite."
+"Si omite este paso, no se configurará ninguna base de datos y Nova utilizará "
+"SQLite."
 
 #. Type: boolean
 #. Description
 #: ../nova-api.templates.in:1001
-#, fuzzy
-#| msgid ""
-#| "You can change this setting later on by running \"dpkg-reconfigure -plow "
-#| "nova-common\"."
 msgid ""
 "You can change this setting later on by running \"dpkg-reconfigure -plow "
 "nova-api\"."
 msgstr ""
 "Podrá cambiar esta configuración más adelante ejecutando «dpkg-reconfigure -"
-"plow nova-common»."
+"plow nova-api»."
 
 #. Type: select
 #. Description
@@ -355,7 +326,7 @@ msgstr ""
 "Xen, llamada XVP (Xen VNC Proxy), y el otro demonio es compatible con KVM. "
 "Si bien el protocolo SPICE es generalmente más rápido que VNC, también "
 "requiere que su navegador sea compatible con conectores web, característica "
-"sólo presente en los navegadores muy modernos."
+"sólo presente en los navegadores más modernos."
 
 #. Type: select
 #. Description
@@ -364,6 +335,16 @@ msgid "This can later be edited in /etc/default/nova-consoleproxy."
 msgstr ""
 "Podrá modificar esta configuración más adelante editando el archivo «/etc/"
 "default/nova-consoleproxy»."
+
+#, fuzzy
+#~| msgid "Neutron server URL:"
+#~ msgid "Glance api server URL:"
+#~ msgstr "URL del servidor Neutron"
+
+#, fuzzy
+#~| msgid "Please enter the URL of the Neutron server."
+#~ msgid "Please enter the URL of the Glance api server."
+#~ msgstr "Introduzca la URL para el servidor Neutron."
 
 #~ msgid "API to activate:"
 #~ msgstr "API para activar:"
