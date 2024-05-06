@@ -1,3 +1,9 @@
+nova (2:29.0.1-4) unstable; urgency=medium
+
+  * Restrict autopkgtest to Architecture: amd64 arm64 ppc64el.
+
+ -- Thomas Goirand <zigo@debian.org>  Mon, 06 May 2024 16:57:01 +0200
+
 nova (2:29.0.1-3) unstable; urgency=medium
 
   * Updated es.po debconf template, thanks to Camaleón (Closes: #1029028).
