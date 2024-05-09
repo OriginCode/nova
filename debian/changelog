@@ -1,3 +1,9 @@
+nova (2:29.0.1-5) unstable; urgency=medium
+
+  * Removed depends on python3-amqplib.
+
+ -- Thomas Goirand <zigo@debian.org>  Thu, 09 May 2024 14:35:39 +0200
+
 nova (2:29.0.1-4) unstable; urgency=medium
 
   * Restrict autopkgtest to Architecture: amd64 arm64 ppc64el.

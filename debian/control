@@ -154,7 +154,6 @@ Depends:
  bridge-utils,
  dbconfig-common,
  iproute2 | iproute,
- python3-amqplib,
  python3-configobj,
  python3-iso8601,
  python3-nova (= ${binary:Version}),
