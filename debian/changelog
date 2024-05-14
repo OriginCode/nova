@@ -1,3 +1,9 @@
+nova (2:29.0.1-6) unstable; urgency=medium
+
+  * Add genisoimage to python3-nova depends.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 14 May 2024 11:28:07 +0200
+
 nova (2:29.0.1-5) unstable; urgency=medium
 
   * Removed depends on python3-amqplib.

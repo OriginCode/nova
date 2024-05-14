@@ -461,6 +461,7 @@ Section: python
 Depends:
  alembic,
  e2fsprogs,
+ genisoimage,
  openssh-client,
  openssl,
  python3-barbicanclient,
