@@ -91,6 +91,7 @@ endif
 		--namespace oslo.middleware \
 		--namespace oslo.concurrency \
 		--namespace oslo.reports \
+		--namespace oslo.versionedobjects \
 		--namespace keystonemiddleware.auth_token \
 		--namespace osprofiler \
 		--namespace os_vif

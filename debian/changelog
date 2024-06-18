@@ -1,3 +1,9 @@
+nova (2:29.0.1-7) unstable; urgency=medium
+
+  * Add missing oslo.versionedobjects namespace when generating nova.conf.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 18 Jun 2024 09:21:19 +0200
+
 nova (2:29.0.1-6) unstable; urgency=medium
 
   * Add genisoimage to python3-nova depends.
