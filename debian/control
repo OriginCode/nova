@@ -258,6 +258,7 @@ Depends:
  adduser,
  dpkg-dev,
  libvirt-daemon-system,
+ libvirt-daemon-driver-storage-rbd,
  nova-common (= ${binary:Version}),
  nova-compute (= ${binary:Version}),
  python3-libvirt,

@@ -1,3 +1,9 @@
+nova (2:29.0.2-2) unstable; urgency=medium
+
+  * Add libvirt-daemon-driver-storage-rbd as depends of nova-compute-kvm.
+
+ -- Thomas Goirand <zigo@debian.org>  Thu, 20 Jun 2024 16:40:25 +0200
+
 nova (2:29.0.2-1) unstable; urgency=medium
 
   * New upstream release.
