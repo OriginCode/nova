@@ -1,3 +1,7 @@
 Install-missed-files.patch
 remove-svg-converter-from-doc-conf.py.patch
 Add-a-healtcheck-url.patch
+CVE-2024-32498_1_nova-stable-2024.1_Reject_qcow_files_with_data-file_attributes.patch
+CVE-2024-32498_2_nova-stable-2024.1_Check_images_with_format_inspector_for_safety.patch
+CVE-2024-32498_3_nova-stable-2024.1_Additional-qemu-safety-checking-on-base-images.patch
+CVE-2024-32498_4_late-nova-fix.patch

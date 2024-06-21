@@ -1,3 +1,14 @@
+nova (2:29.0.2-3) unstable; urgency=high
+
+  * CVE-2024-32498: Arbitrary file access through custom QCOW2 external data.
+    Add upstream patch (Closes: #1074762):
+    - CVE-2024-32498_1_nova-stable-2024.1_Reject_qcow_files_with_data-file_attributes.patch
+    - CVE-2024-32498_2_nova-stable-2024.1_Check_images_with_format_inspector_for_safety.patch
+    - CVE-2024-32498_3_nova-stable-2024.1_Additional-qemu-safety-checking-on-base-images.patch
+    - CVE-2024-32498_4_late-nova-fix.patch
+
+ -- Thomas Goirand <zigo@debian.org>  Fri, 21 Jun 2024 08:59:35 +0200
+
 nova (2:29.0.2-2) unstable; urgency=medium
 
   * Add libvirt-daemon-driver-storage-rbd as depends of nova-compute-kvm.
