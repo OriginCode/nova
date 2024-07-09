@@ -110,6 +110,7 @@ Build-Depends-Indep:
  python3-websockify,
  python3-wsgi-intercept,
  python3-yaml,
+ qemu-utils,
  sqlite3,
  subunit,
 Build-Conflicts:

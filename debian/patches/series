@@ -4,4 +4,8 @@ Add-a-healtcheck-url.patch
 CVE-2024-32498_1_nova-stable-2024.1_Reject_qcow_files_with_data-file_attributes.patch
 CVE-2024-32498_2_nova-stable-2024.1_Check_images_with_format_inspector_for_safety.patch
 CVE-2024-32498_3_nova-stable-2024.1_Additional-qemu-safety-checking-on-base-images.patch
-CVE-2024-32498_4_late-nova-fix.patch
+CVE-2024-32498_4_Fix-vmdk_allowed_types-checking.patch
+CVE-2024-40767_1_port_format_inspector_tests_from_glance.patch
+CVE-2024-40767_2_Reproduce_iso_regression_with_deep_format_inspection.patch
+CVE-2024-40767_3_Add-iso-file-format-inspector.patch
+CVE-2024-40767_4_Change-force_format-strategy-to-catch-mismatches_caracal.patch

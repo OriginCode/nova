@@ -1,3 +1,16 @@
+nova (2:29.0.2-4) unstable; urgency=medium
+
+  * Update CVE-2024-32498 patches from git.
+  * CVE-2024-40767: Regression VMDK/qcow arbitrary file access (CVE-2024-32498)
+    Added upstream patches (Closes: #1076774):
+    - CVE-2024-40767_1_port_format_inspector_tests_from_glance.patch
+    - CVE-2024-40767_2_Reproduce_iso_regression_with_deep_format_inspection.patch
+    - CVE-2024-40767_3_Add-iso-file-format-inspector.patch
+    - CVE-2024-40767_4_Change-force_format-strategy-to-catch-mismatches_caracal.patch
+  * Add qemu-utils as build-depends to run above tests.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 09 Jul 2024 03:54:55 +0200
+
 nova (2:29.0.2-3) unstable; urgency=high
 
   * CVE-2024-32498: Arbitrary file access through custom QCOW2 external data.
