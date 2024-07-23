@@ -1,4 +1,4 @@
-nova (2:29.0.2-4) unstable; urgency=medium
+nova (2:29.0.2-4) unstable; urgency=high
 
   * Update CVE-2024-32498 patches from git.
   * CVE-2024-40767: Regression VMDK/qcow arbitrary file access (CVE-2024-32498)
