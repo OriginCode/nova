@@ -1056,6 +1056,12 @@ class SecurityGroupCannotBeApplied(Invalid):
                 " in order to apply security groups.")
 
 
+class SecurityGroupConnectionStateConflict(Invalid):
+    code = 409
+    msg_fmt = _("Cannot apply both stateful and stateless security groups on "
+                "the same port.")
+
+
 class NoUniqueMatch(NovaException):
     msg_fmt = _("No Unique Match Found.")
     code = 409
@@ -1145,6 +1151,10 @@ class ComputeHostMetricNotFound(NotFound):
 
 class FileNotFound(NotFound):
     msg_fmt = _("File %(file_path)s could not be found.")
+
+
+class DeviceBusy(NovaException):
+    msg_fmt = _("device %(file_path)s is busy.")
 
 
 class ClassNotFound(NotFound):

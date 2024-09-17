@@ -18,7 +18,9 @@ from webob import exc
 
 from nova.api.openstack.api_version_request \
     import MAX_PROXY_API_SUPPORT_VERSION
+from nova.api.openstack.compute.schemas import tenant_networks as schema
 from nova.api.openstack import wsgi
+from nova.api import validation
 import nova.conf
 from nova import context as nova_context
 from nova import exception
@@ -27,11 +29,16 @@ from nova.network import neutron
 from nova.policies import tenant_networks as tn_policies
 from nova import quota
 
-
 CONF = nova.conf.CONF
-
 QUOTAS = quota.QUOTAS
 LOG = logging.getLogger(__name__)
+
+_removal_reason = """\
+This API only works with *nova-network*, which was deprecated in the
+14.0.0 (Newton) release.
+It fails with HTTP 404 starting from microversion 2.36.
+It was removed in the 21.0.0 (Ussuri) release.
+"""
 
 
 def network_dict(network):
@@ -69,6 +76,7 @@ class TenantNetworkController(wsgi.Controller):
 
     @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
     @wsgi.expected_errors(())
+    @validation.query_schema(schema.index_query)
     def index(self, req):
         context = req.environ['nova.context']
         context.can(tn_policies.POLICY_NAME % 'list',
@@ -81,6 +89,7 @@ class TenantNetworkController(wsgi.Controller):
 
     @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
     @wsgi.expected_errors(404)
+    @validation.query_schema(schema.show_query)
     def show(self, req, id):
         context = req.environ['nova.context']
         context.can(tn_policies.POLICY_NAME % 'show',
@@ -93,9 +102,12 @@ class TenantNetworkController(wsgi.Controller):
         return {'network': network_dict(network)}
 
     @wsgi.expected_errors(410)
+    @wsgi.removed('21.0.0', _removal_reason)
     def delete(self, req, id):
         raise exc.HTTPGone()
 
     @wsgi.expected_errors(410)
+    @wsgi.removed('21.0.0', _removal_reason)
+    @validation.schema(schema.create)
     def create(self, req, body):
         raise exc.HTTPGone()

@@ -30,6 +30,18 @@ update_all = {
 update = {
     "title": "Server tag",
     "type": "null",
-    'required': [],
-    'additionalProperties': False
+}
+
+# TODO(stephenfin): Remove additionalProperties in a future API version
+index_query = {
+    'type': 'object',
+    'properties': {},
+    'additionalProperties': True,
+}
+
+# TODO(stephenfin): Remove additionalProperties in a future API version
+show_query = {
+    'type': 'object',
+    'properties': {},
+    'additionalProperties': True,
 }

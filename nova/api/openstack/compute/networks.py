@@ -18,11 +18,22 @@ from webob import exc
 
 from nova.api.openstack.api_version_request \
     import MAX_PROXY_API_SUPPORT_VERSION
+from nova.api.openstack.compute.schemas import networks as schema
 from nova.api.openstack import wsgi
+from nova.api import validation
 from nova import exception
 from nova.i18n import _
 from nova.network import neutron
 from nova.policies import networks as net_policies
+
+_removal_reason = """\
+This %s only works with *nova-network*, which was deprecated in the
+14.0.0 (Newton) release.
+It fails with HTTP 404 starting from microversion 2.36.
+It was removed in the 21.0.0 (Ussuri) release.
+"""
+_removal_reason_action = _removal_reason % 'action'
+_removal_reason_api = _removal_reason % 'API'
 
 
 def network_dict(context, network):
@@ -68,6 +79,7 @@ class NetworkController(wsgi.Controller):
 
     @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
     @wsgi.expected_errors(())
+    @validation.query_schema(schema.index_query)
     def index(self, req):
         context = req.environ['nova.context']
         context.can(net_policies.POLICY_ROOT % 'list',
@@ -78,6 +90,7 @@ class NetworkController(wsgi.Controller):
 
     @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
     @wsgi.expected_errors(404)
+    @validation.query_schema(schema.show_query)
     def show(self, req, id):
         context = req.environ['nova.context']
         context.can(net_policies.POLICY_ROOT % 'show',
@@ -92,17 +105,24 @@ class NetworkController(wsgi.Controller):
 
     @wsgi.expected_errors(410)
     @wsgi.action("disassociate")
+    @wsgi.removed('21.0.0', _removal_reason_action)
+    @validation.schema(schema.disassociate)
     def _disassociate_host_and_project(self, req, id, body):
         raise exc.HTTPGone()
 
     @wsgi.expected_errors(410)
+    @wsgi.removed('21.0.0', _removal_reason_api)
     def delete(self, req, id):
         raise exc.HTTPGone()
 
     @wsgi.expected_errors(410)
+    @wsgi.removed('21.0.0', _removal_reason_api)
+    @validation.schema(schema.create)
     def create(self, req, body):
         raise exc.HTTPGone()
 
     @wsgi.expected_errors(410)
+    @wsgi.removed('21.0.0', _removal_reason_api)
+    @validation.schema(schema.add)
     def add(self, req, body):
         raise exc.HTTPGone()

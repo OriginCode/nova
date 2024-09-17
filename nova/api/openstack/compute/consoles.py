@@ -15,7 +15,15 @@
 
 from webob import exc
 
+from nova.api.openstack.compute.schemas import consoles as schema
 from nova.api.openstack import wsgi
+from nova.api import validation
+
+_removal_reason = """\
+This API only works with the Xen virt driver, which was deprecated in the
+20.0.0 (Train) release.
+It was removed in the 21.0.0 (Ussuri) release.
+"""
 
 
 class ConsolesController(wsgi.Controller):
@@ -26,17 +34,24 @@ class ConsolesController(wsgi.Controller):
     """
 
     @wsgi.expected_errors(410)
+    @wsgi.removed('21.0.0', _removal_reason)
+    @validation.query_schema(schema.index_query)
     def index(self, req, server_id):
         raise exc.HTTPGone()
 
     @wsgi.expected_errors(410)
+    @wsgi.removed('21.0.0', _removal_reason)
+    @validation.schema(schema.create)
     def create(self, req, server_id, body):
         raise exc.HTTPGone()
 
     @wsgi.expected_errors(410)
+    @wsgi.removed('21.0.0', _removal_reason)
+    @validation.query_schema(schema.show_query)
     def show(self, req, server_id, id):
         raise exc.HTTPGone()
 
     @wsgi.expected_errors(410)
+    @wsgi.removed('21.0.0', _removal_reason)
     def delete(self, req, server_id, id):
         raise exc.HTTPGone()

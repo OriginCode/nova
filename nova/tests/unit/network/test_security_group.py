@@ -373,6 +373,38 @@ class TestNeutronDriver(test.NoDBTestCase):
         self.mocked_client.update_port.assert_called_once_with(
             port_id, {'port': {'security_groups': [sg_id]}})
 
+    def test_add_to_instance_with_conflicting_sg(self):
+        sg1_name = 'sg-stateful'
+        sg1_id = '85cc3048-abc3-43cc-89b3-377341426ac5'
+        port_id = 1
+        port_list = {'ports': [{'id': port_id, 'device_id': uuids.instance,
+                     'fixed_ips': [{'ip_address': '10.0.0.1'}],
+                     'port_security_enabled': True, 'security_groups': []}]}
+        self.mocked_client.list_ports.return_value = port_list
+        with mock.patch.object(neutronv20, 'find_resourceid_by_name_or_id',
+                               return_value=sg1_id):
+            sg_api.add_to_instance(
+                self.context, objects.Instance(uuid=uuids.instance), sg1_name)
+        self.mocked_client.list_ports.assert_called_once_with(
+            device_id=uuids.instance)
+        self.mocked_client.update_port.assert_called_once_with(
+            port_id, {'port': {'security_groups': [sg1_id]}})
+
+        sg2_name = 'sg-stateless'
+        sg2_id = '85cc3048-abc3-43cc-89b3-377341426ac5'
+        port_id = 1
+        port_list = {'ports': [{'id': port_id, 'device_id': uuids.instance,
+                     'fixed_ips': [{'ip_address': '10.0.0.1'}],
+                     'port_security_enabled': True, 'security_groups': []}]}
+        self.mocked_client.list_ports.return_value = port_list
+        self.mocked_client.update_port.side_effect = (
+            n_exc.Conflict(message='error'))
+        with mock.patch.object(neutronv20, 'find_resourceid_by_name_or_id',
+                               return_value=sg2_id):
+            self.assertRaises(exception.SecurityGroupConnectionStateConflict,
+                              sg_api.add_to_instance, self.context,
+                              objects.Instance(uuid=uuids.instance), sg2_name)
+
     def test_add_to_instance_duplicate_sg_name(self):
         sg_name = 'web_server'
         with mock.patch.object(neutronv20, 'find_resourceid_by_name_or_id',
@@ -391,14 +423,6 @@ class TestNeutronDriver(test.NoDBTestCase):
 
 
 class TestNeutronDriverWithoutMock(test.NoDBTestCase):
-
-    def test_validate_property(self):
-        sg_api.validate_property('foo', 'name', None)
-        sg_api.validate_property('', 'name', None)
-        self.assertRaises(exception.Invalid, sg_api.validate_property,
-                          'a' * 256, 'name', None)
-        self.assertRaises(exception.Invalid, sg_api.validate_property,
-                          None, 'name', None)
 
     def test_populate_security_groups(self):
         r = sg_api.populate_security_groups(['default', uuids.secgroup_uuid])

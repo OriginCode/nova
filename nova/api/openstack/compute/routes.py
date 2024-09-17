@@ -37,7 +37,6 @@ from nova.api.openstack.compute import evacuate
 from nova.api.openstack.compute import extension_info
 from nova.api.openstack.compute import fixed_ips
 from nova.api.openstack.compute import flavor_access
-from nova.api.openstack.compute import flavor_manage
 from nova.api.openstack.compute import flavors
 from nova.api.openstack.compute import flavors_extraspecs
 from nova.api.openstack.compute import floating_ip_dns
@@ -95,7 +94,7 @@ def _create_controller(main_controller, action_controller_list):
 
     controller = wsgi.Resource(main_controller())
     for ctl in action_controller_list:
-        controller.register_actions(ctl())
+        controller.register_subcontroller_actions(ctl())
     return controller
 
 
@@ -143,7 +142,6 @@ fixed_ips_controller = functools.partial(_create_controller,
 flavor_controller = functools.partial(_create_controller,
     flavors.FlavorsController,
     [
-        flavor_manage.FlavorManageController,
         flavor_access.FlavorActionController
     ]
 )
@@ -880,5 +878,8 @@ class APIRouterV21(base_wsgi.Router):
 
     @classmethod
     def factory(cls, global_config, **local_config):
-        """Simple paste factory, :class:`nova.wsgi.Router` doesn't have one."""
+        """Simple paste factory.
+
+        :class:`nova.api.wsgi.Router` doesn't have one.
+        """
         return cls()

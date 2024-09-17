@@ -15,7 +15,7 @@
 from webob import exc
 
 from nova.api.openstack import common
-from nova.api.openstack.compute.schemas import reset_server_state
+from nova.api.openstack.compute.schemas import admin_actions as schema
 from nova.api.openstack import wsgi
 from nova.api import validation
 from nova.compute import api as compute
@@ -30,6 +30,12 @@ from nova.policies import admin_actions as aa_policies
 # schemas/reset_server_state.py, when updating this state_map.
 state_map = dict(active=vm_states.ACTIVE, error=vm_states.ERROR)
 
+_removal_reason = """\
+This action only works with the Xen virt driver, which was deprecated in the
+20.0.0 (Train) release.
+It was removed in the 23.0.0 (Wallaby) release.
+"""
+
 
 class AdminActionsController(wsgi.Controller):
     def __init__(self):
@@ -38,6 +44,8 @@ class AdminActionsController(wsgi.Controller):
 
     @wsgi.expected_errors(410)
     @wsgi.action('resetNetwork')
+    @wsgi.removed('23.0.0', _removal_reason)
+    @validation.schema(schema.reset_network)
     def _reset_network(self, req, id, body):
         """(Removed) Permit admins to reset networking on a server."""
         raise exc.HTTPGone()
@@ -45,6 +53,7 @@ class AdminActionsController(wsgi.Controller):
     @wsgi.response(202)
     @wsgi.expected_errors((404, 409))
     @wsgi.action('injectNetworkInfo')
+    @validation.schema(schema.inject_network_info)
     def _inject_network_info(self, req, id, body):
         """Permit admins to inject network info into a server."""
         context = req.environ['nova.context']
@@ -59,7 +68,7 @@ class AdminActionsController(wsgi.Controller):
     @wsgi.response(202)
     @wsgi.expected_errors(404)
     @wsgi.action('os-resetState')
-    @validation.schema(reset_server_state.reset_state)
+    @validation.schema(schema.reset_state)
     def _reset_state(self, req, id, body):
         """Permit admins to reset the state of a server."""
         context = req.environ["nova.context"]

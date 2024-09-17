@@ -14,6 +14,76 @@
 
 from nova.api.validation import parameter_types
 
+create = {
+    'type': 'object',
+    'properties': {
+        'security_group': {
+            'type': 'object',
+            'properties': {
+                'name': {
+                    'type': 'string',
+                    'minLength': 0,
+                    'maxLength': 255,
+                },
+                'description': {
+                    'type': 'string',
+                    'minLength': 0,
+                    'maxLength': 255,
+                },
+            },
+            'required': ['name', 'description'],
+            # NOTE(stephenfin): Per gmann's note below
+            'additionalProperties': True,
+        },
+    },
+    'required': ['security_group'],
+    # NOTE(stephenfin): Per gmann's note below
+    'additionalProperties': True,
+}
+
+update = create
+
+create_rules = {
+    'type': 'object',
+    'properties': {
+        'security_group_rule': {
+            'type': 'object',
+            'properties': {
+                'group_id': {
+                    'oneOf': [
+                        {'type': 'null'},
+                        {'type': 'string', 'format': 'uuid'},
+                    ],
+                },
+                'parent_group_id': {
+                    'type': 'string',
+                    'format': 'uuid',
+                },
+                # NOTE(stephenfin): We never validated these and we're not
+                # going to add that validation now.
+                'to_port': {},
+                'from_port': {},
+                'ip_protocol': {},
+                'cidr': {},
+            },
+            'required': ['parent_group_id'],
+            # NOTE(stephenfin): Per gmann's note below
+            'additionalProperties': True,
+        },
+    },
+    'required': ['security_group_rule'],
+    # NOTE(stephenfin): Per gmann's note below
+    'additionalProperties': True,
+
+}
+
+# TODO(stephenfin): Remove additionalProperties in a future API version
+show_query = {
+    'type': 'object',
+    'properties': {},
+    'additionalProperties': True,
+}
+
 index_query = {
     'type': 'object',
     'properties': {
@@ -28,4 +98,35 @@ index_query = {
     # does not raise 400. This API is deprecated in microversion 2.36 so we
     # do not to update the additionalProperties to False.
     'additionalProperties': True
+}
+
+# TODO(stephenfin): Remove additionalProperties in a future API version
+server_sg_index_query = {
+    'type': 'object',
+    'properties': {},
+    'additionalProperties': True,
+}
+
+# TODO(stephenfin): Remove additionalProperties in a future API version
+add_security_group = {
+    'type': 'object',
+    'properties': {
+        'name': {
+            'type': 'string',
+            'minLength': 1,
+        },
+    },
+    'additionalProperties': True,
+}
+
+# TODO(stephenfin): Remove additionalProperties in a future API version
+remove_security_group = {
+    'type': 'object',
+    'properties': {
+        'name': {
+            'type': 'string',
+            'minLength': 1,
+        },
+    },
+    'additionalProperties': True,
 }

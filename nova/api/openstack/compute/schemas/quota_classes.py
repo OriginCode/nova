@@ -18,8 +18,8 @@ from nova.api.openstack.compute.schemas import quota_sets
 update = {
     'type': 'object',
     'properties': {
-        'type': 'object',
         'quota_class_set': {
+            'type': 'object',
             'properties': quota_sets.quota_resources,
             'additionalProperties': False,
         },
@@ -45,3 +45,10 @@ del update_v257['properties']['quota_class_set']['properties'][
     'injected_file_content_bytes']
 del update_v257['properties']['quota_class_set']['properties'][
     'injected_file_path_bytes']
+
+# TODO(stephenfin): Remove additionalProperties in a future API version
+show_query = {
+    'type': 'object',
+    'properties': {},
+    'additionalProperties': True,
+}

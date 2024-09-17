@@ -2529,73 +2529,146 @@ class NUMATopologyTest(test.NoDBTestCase):
 
 
 class VirtNUMATopologyCellUsageTestCase(test.NoDBTestCase):
-    def test_fit_instance_cell_success_no_limit(self):
+    def test_fit_instance_cell_no_host_mempages(self):
+        """Validate fitting without host or guest mempages.
+
+        This tests overcommitting without host mempages, which is allowed, and
+        self overcommit, which is not.
+        """
+        # host cell has 1024 MiB memory with no mempages reported
         host_cell = objects.NUMACell(
             id=4,
             cpuset=set([1, 2]),
+            pcpuset=set(),
             memory=1024,
             cpu_usage=0,
-            memory_usage=0,
-            pinned_cpus=set(),
-            mempages=[objects.NUMAPagesTopology(
-                size_kb=4, total=524288, used=0)],
-            siblings=[set([1]), set([2])])
+            memory_usage=512,
+            mempages=[],
+            siblings=[set([1]), set([2])],
+            pinned_cpus=set([]))
+
+        # instance cell requests 1024 MiB memory, no mempages -> PASS
         instance_cell = objects.InstanceNUMACell(
             id=0, cpuset=set([1, 2]), pcpuset=set(), memory=1024)
         fitted_cell = hw._numa_fit_instance_cell(host_cell, instance_cell)
         self.assertIsInstance(fitted_cell, objects.InstanceNUMACell)
         self.assertEqual(host_cell.id, fitted_cell.id)
 
-    def test_fit_instance_cell_success_w_limit(self):
+        # instance cell requests 4096 MiB memory, no mempages -> FAIL
+        instance_cell = objects.InstanceNUMACell(
+            cpuset=set([1, 2, 3]), memory=4096)
+        fitted_cell = hw._numa_fit_instance_cell(host_cell, instance_cell)
+        self.assertIsNone(fitted_cell)
+
+        # instance cell requests 1024 MiB memory, no mempages, but has
+        # dedicated CPUs -> FAIL
+        instance_cell = objects.InstanceNUMACell(
+            cpuset=set([0, 1]), memory=1024,
+            cpu_policy=fields.CPUAllocationPolicy.DEDICATED)
+        fitted_cell = hw._numa_fit_instance_cell(host_cell, instance_cell)
+        self.assertIsNone(fitted_cell)
+
+    def test_fit_instance_cell_no_guest_mempages(self):
+        """Validate fitting without guest mempages.
+
+        This tests overcommitting with host small mempages, which is allowed,
+        and self overcommit, which is not.
+        """
+        # host cell has 1024 MiB memory, all small pages
         host_cell = objects.NUMACell(
             id=4,
             cpuset=set([1, 2]),
+            pcpuset=set(),
+            memory=1024,
+            cpu_usage=0,
+            memory_usage=512,
+            mempages=[
+                # 262144 * 4 KiB (1024 MiB) 4k pages, which are all currently
+                # "used"
+                objects.NUMAPagesTopology(size_kb=4, total=262144, used=262144)
+            ],
+            siblings=[set([1]), set([2])],
+            pinned_cpus=set([]))
+
+        # instance cell requests 1024 MiB memory, no mempages -> PASS
+        instance_cell = objects.InstanceNUMACell(
+            cpuset=set([1, 2]), memory=1024)
+        fitted_cell = hw._numa_fit_instance_cell(host_cell, instance_cell)
+        self.assertIsInstance(fitted_cell, objects.InstanceNUMACell)
+        self.assertEqual(host_cell.id, fitted_cell.id)
+
+        # instance cell requests 4096 MiB memory, no mempages -> FAIL
+        instance_cell = objects.InstanceNUMACell(
+            id=0, cpuset=set([1, 2, 3]), memory=4096)
+        fitted_cell = hw._numa_fit_instance_cell(host_cell, instance_cell)
+        self.assertIsNone(fitted_cell)
+
+        # instance cell requests 1024 MiB memory, no mempages, but has
+        # dedicated CPUs -> FAIL
+        instance_cell = objects.InstanceNUMACell(
+            cpuset=set([0, 1]), memory=1024,
+            cpu_policy=fields.CPUAllocationPolicy.DEDICATED)
+        fitted_cell = hw._numa_fit_instance_cell(host_cell, instance_cell)
+        self.assertIsNone(fitted_cell)
+
+    def test_fit_instance_cell_mempages(self):
+        """Validate fitting with guest (and host) mempages.
+
+        This also tests overcommitting with explicitly requested guest
+        mempages, which is not allowed.
+        """
+        # host cell has 1024 MiB memory, all small pages
+        host_cell = objects.NUMACell(
+            id=4,
+            cpuset=set([0, 1]),
+            pcpuset=set(),
+            memory=1024,
+            cpu_usage=0, memory_usage=0, mempages=[
+                # 262144 * 4 KiB (1024 MiB) 4k pages, none used
+                objects.NUMAPagesTopology(size_kb=4, total=262144, used=0)
+            ],
+            siblings=[set([0]), set([1])],
+            pinned_cpus=set([]))
+
+        # instance cell requests 1024 MiB memory, all small pages -> PASS
+        instance_cell = objects.InstanceNUMACell(
+            cpuset=set([0, 1]), memory=1024, pagesize=4)
+        fitted_cell = hw._numa_fit_instance_cell(host_cell, instance_cell)
+        self.assertEqual(host_cell.id, fitted_cell.id)
+
+        # host cell now only has 1023 MiB memory, all small pages
+        host_cell.memory_usage = 1
+        host_cell.mempages[0].used = 1
+
+        # instance cell requests 1024 MiB memory again, all small pages -> FAIL
+        instance_cell = objects.InstanceNUMACell(
+            cpuset=set([0, 1]), memory=1024, pagesize=4)
+        fitted_cell = hw._numa_fit_instance_cell(host_cell, instance_cell)
+        self.assertIsNone(fitted_cell)
+
+    def test_fit_instance_cell_with_limit(self):
+        host_cell = objects.NUMACell(
+            id=4,
+            cpuset=set([1, 2]),
+            pcpuset=set(),
             memory=1024,
             cpu_usage=2,
             memory_usage=1024,
-            pinned_cpus=set(),
-            mempages=[objects.NUMAPagesTopology(
-                size_kb=4, total=524288, used=0)],
-            siblings=[set([1]), set([2])])
+            mempages=[
+                objects.NUMAPagesTopology(size_kb=4, total=524288, used=0)
+            ],
+            siblings=[set([1]), set([2])],
+            pinned_cpus=set([]))
         limits = objects.NUMATopologyLimits(
             cpu_allocation_ratio=2, ram_allocation_ratio=2)
+
         instance_cell = objects.InstanceNUMACell(
-            id=0, cpuset=set([1, 2]), pcpuset=set(), memory=1024)
+            cpuset=set([1, 2]), memory=1024)
         fitted_cell = hw._numa_fit_instance_cell(
             host_cell, instance_cell, limits=limits)
         self.assertIsInstance(fitted_cell, objects.InstanceNUMACell)
         self.assertEqual(host_cell.id, fitted_cell.id)
 
-    def test_fit_instance_cell_self_overcommit(self):
-        host_cell = objects.NUMACell(
-            id=4,
-            cpuset=set([1, 2]),
-            memory=1024,
-            cpu_usage=0,
-            memory_usage=0,
-            mempages=[objects.NUMAPagesTopology(
-                size_kb=4, total=524288, used=0)],
-            siblings=[set([1]), set([2])],
-            pinned_cpus=set())
-        limits = objects.NUMATopologyLimits(
-            cpu_allocation_ratio=2, ram_allocation_ratio=2)
-        instance_cell = objects.InstanceNUMACell(
-            id=0, cpuset=set([1, 2, 3]), memory=4096)
-        fitted_cell = hw._numa_fit_instance_cell(
-            host_cell, instance_cell, limits=limits)
-        self.assertIsNone(fitted_cell)
-
-    def test_fit_instance_cell_fail_w_limit(self):
-        host_cell = objects.NUMACell(
-            id=4,
-            cpuset=set([1, 2]),
-            memory=1024,
-            cpu_usage=2,
-            memory_usage=1024,
-            mempages=[objects.NUMAPagesTopology(
-                size_kb=4, total=524288, used=0)],
-            siblings=[set([1]), set([2])],
-            pinned_cpus=set())
         instance_cell = objects.InstanceNUMACell(
             id=0, cpuset=set([1, 2]), pcpuset=set(), memory=4096)
         limits = objects.NUMATopologyLimits(
@@ -3158,30 +3231,6 @@ class CPUPinningCellTestCase(test.NoDBTestCase, _CPUPinningTestCaseBase):
         inst_pin = objects.InstanceNUMACell(
             cpuset=set(),
             pcpuset=set([0, 1, 2, 3]),
-            memory=2048,
-            cpu_policy=fields.CPUAllocationPolicy.DEDICATED,
-        )
-        limits = objects.NUMATopologyLimits(
-            cpu_allocation_ratio=2, ram_allocation_ratio=2,
-        )
-
-        inst_pin = hw._numa_fit_instance_cell(host_pin, inst_pin, limits)
-
-        self.assertIsNone(inst_pin)
-
-    def test_get_pinning_inst_too_large_mem(self):
-        host_pin = objects.NUMACell(
-            id=0,
-            cpuset=set(),
-            pcpuset=set([0, 1, 2]),
-            memory=2048,
-            memory_usage=1024,
-            pinned_cpus=set(),
-            mempages=[],
-            siblings=[set([0]), set([1]), set([2])])
-        inst_pin = objects.InstanceNUMACell(
-            cpuset=set(),
-            pcpuset=set([0, 1, 2]),
             memory=2048,
             cpu_policy=fields.CPUAllocationPolicy.DEDICATED,
         )
@@ -5454,6 +5503,16 @@ class MemEncryptionRequestedWithInvalidMachineTypeTestCase(
                                                    enc_image_prop,
                                                    image_props, error_data)
 
+    def _test_encrypted_memory_support_pc_image_id(self, image_meta,
+                                                       error_data):
+        extra_specs = {'hw:mem_encryption': True}
+        flavor = objects.Flavor(name=self.flavor_name,
+                                extra_specs=extra_specs)
+        exc = self.assertRaises(self.expected_exception,
+                                    hw.get_mem_encryption_constraint,
+                                    flavor, image_meta)
+        self.assertEqual(self.expected_error % error_data, str(exc))
+
     def test_flavor_requires_encrypted_memory_support_pc(self):
         for extra_spec in ('1', 'true', 'True'):
             self._test_encrypted_memory_support_pc(extra_spec, None)
@@ -5467,6 +5526,31 @@ class MemEncryptionRequestedWithInvalidMachineTypeTestCase(
             for image_prop in ('1', 'true', 'True'):
                 self._test_encrypted_memory_support_pc(
                     extra_spec, image_prop)
+
+    def test_encrypted_memory_support_pc_no_image_id(self):
+        image_props = {'hw_mem_encryption': True,
+                       'hw_firmware_type': 'uefi',
+                       'hw_machine_type': 'pc'}
+        image_meta = fake_image_obj(
+            {'name': self.image_name}, {}, image_props)
+        error_data = {'image_id': '<no-id>',
+                      'image_name': self.image_name,
+                      'mtype': 'pc'}
+        self._test_encrypted_memory_support_pc_image_id(image_meta,
+                                                        error_data)
+
+    def test_encrypted_memory_support_pc_has_image_id(self):
+        image_props = {'hw_mem_encryption': True,
+                       'hw_firmware_type': 'uefi',
+                       'hw_machine_type': 'pc'}
+        image_meta = fake_image_obj(
+            {'id': self.image_id, 'name': self.image_name},
+            {}, image_props)
+        error_data = {'image_id': self.image_id,
+                      'image_name': self.image_name,
+                      'mtype': 'pc'}
+        self._test_encrypted_memory_support_pc_image_id(image_meta,
+                                                        error_data)
 
 
 class MemEncryptionRequiredTestCase(test.NoDBTestCase):
@@ -5543,6 +5627,34 @@ class MemEncryptionRequiredTestCase(test.NoDBTestCase):
         self.assertRaises(exception.FlavorImageConflict,
                           hw.get_mem_encryption_constraint, flavor,
                           image_meta)
+
+    @mock.patch.object(hw, 'LOG')
+    def test_encrypted_memory_support_no_id_for_volume(self, mock_log):
+        extra_specs = {'hw:mem_encryption': True}
+        flavor = objects.Flavor(name=self.flavor_name,
+                                extra_specs=extra_specs)
+
+        image_props = {'hw_mem_encryption': True,
+                       'hw_firmware_type': 'uefi'}
+        image_meta = objects.ImageMeta.from_dict({
+            'min_disk': 0,
+            'min_ram': 0,
+            'properties': image_props,
+            'size': 0,
+            'status': 'active'})
+
+        self.assertTrue(hw.get_mem_encryption_constraint(flavor,
+                                                         image_meta))
+
+        requesters = "hw:mem_encryption extra spec in %s flavor and " \
+                     "hw_mem_encryption property of image %s" % \
+                      (self.flavor_name, '<no-id>')
+        # Confirm that it can handle the situation that there is
+        # no image_id when booting from volume. We set it to
+        # '<no-id>' that we can detect later.
+        mock_log.debug.assert_has_calls([
+            mock.call("Memory encryption requested by %s", requesters)
+        ])
 
 
 class PCINUMAAffinityPolicyTest(test.NoDBTestCase):
@@ -5903,6 +6015,40 @@ class MaxphysaddrModeTest(test.NoDBTestCase):
         else:
             self.assertEqual(
                 expected, hw.get_maxphysaddr_mode(flavor, image_meta),
+            )
+
+
+@ddt.ddt
+class StatelessFirmwareConstraintTest(test.NoDBTestCase):
+    @ddt.unpack
+    @ddt.data(
+        # pass: no configuration
+        (None, None, False),
+        # pass: uefi with stateless firmware
+        (True, 'uefi', True),
+        # pass: non-uefi with non-stateless firmware
+        (False, None, False),
+        # fail: non-uefi with stateless fiemware
+        (True, None, exception.Invalid),
+    )
+    def test_get_stateless_firmware_constraint(
+        self, firmware_stateless, firmware_type, expected,
+    ):
+        image_meta_props = {}
+        if firmware_stateless is not None:
+            image_meta_props['hw_firmware_stateless'] = firmware_stateless
+        if firmware_type is not None:
+            image_meta_props['hw_firmware_type'] = firmware_type
+        image_meta = objects.ImageMeta.from_dict(
+            {'name': 'bar', 'properties': image_meta_props})
+
+        if isinstance(expected, type) and issubclass(expected, Exception):
+            self.assertRaises(
+                expected, hw.get_stateless_firmware_constraint, image_meta,
+            )
+        else:
+            self.assertEqual(
+                expected, hw.get_stateless_firmware_constraint(image_meta),
             )
 
 

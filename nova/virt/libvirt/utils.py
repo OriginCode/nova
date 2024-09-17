@@ -30,6 +30,7 @@ import os_traits
 from oslo_concurrency import processutils
 from oslo_log import log as logging
 from oslo_utils import fileutils
+from oslo_utils.imageutils import format_inspector
 
 import nova.conf
 from nova import context as nova_context
@@ -152,7 +153,39 @@ def create_image(
     ]
 
     if backing_file:
+        # NOTE(danms): We need to perform safety checks on the base image
+        # before we inspect it for other attributes. We do this each time
+        # because additional safety checks could have been added since we
+        # downloaded the image.
+        if not CONF.workarounds.disable_deep_image_inspection:
+            inspector = format_inspector.detect_file_format(backing_file)
+            try:
+                inspector.safety_check()
+            except format_inspector.SafetyCheckFailed as e:
+                LOG.warning('Base image %s failed safety check: %s',
+                            backing_file, e)
+                # NOTE(danms): This is the same exception as would be raised
+                # by qemu_img_info() if the disk format was unreadable or
+                # otherwise unsuitable.
+                raise exception.InvalidDiskInfo(
+                    reason=_('Base image failed safety check'))
+
         base_details = images.qemu_img_info(backing_file)
+        if base_details.file_format == 'vmdk':
+            images.check_vmdk_image('base', base_details)
+        if base_details.backing_file is not None:
+            LOG.warning('Base image %s failed safety check', backing_file)
+            raise exception.InvalidDiskInfo(
+                reason=_('Base image failed safety check'))
+        try:
+            data_file = base_details.format_specific['data']['data-file']
+        except (KeyError, TypeError, AttributeError):
+            data_file = None
+        if data_file is not None:
+            LOG.warning('Base image %s failed safety check', backing_file)
+            raise exception.InvalidDiskInfo(
+                reason=_('Base image failed safety check'))
+
         cow_opts = [
             f'backing_file={backing_file}',
             f'backing_fmt={base_details.file_format}'

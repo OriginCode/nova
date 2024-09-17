@@ -943,7 +943,9 @@ def _numa_fit_instance_cell(
         if not pagesize:
             LOG.debug('Host does not support requested memory pagesize, '
                       'or not enough free pages of the requested size. '
-                      'Requested: %d kB', instance_cell.pagesize)
+                      'Requested memory pagesize: %d '
+                      '(small = -1, large = -2, any = -3)',
+                      instance_cell.pagesize)
             return None
         LOG.debug('Selected memory pagesize: %(selected_mem_pagesize)d kB. '
                   'Requested memory pagesize: %(requested_mem_pagesize)d '
@@ -961,10 +963,15 @@ def _numa_fit_instance_cell(
             LOG.debug('No specific pagesize requested for instance, '
                       'selected pagesize: %d', pagesize)
             # we want to allow overcommit in this case as we're not using
-            # hugepages
-            if not host_cell.can_fit_pagesize(pagesize,
-                                              instance_cell.memory * units.Ki,
-                                              use_free=False):
+            # hugepages *except* if using CPU pinning, which for legacy reasons
+            # does not allow overcommit
+            use_free = instance_cell.cpu_policy in (
+                fields.CPUAllocationPolicy.DEDICATED,
+                fields.CPUAllocationPolicy.MIXED,
+            )
+            if not host_cell.can_fit_pagesize(
+                pagesize, instance_cell.memory * units.Ki, use_free=use_free
+            ):
                 LOG.debug('Not enough available memory to schedule instance '
                           'with pagesize %(pagesize)d. Required: '
                           '%(required)s, available: %(available)s, total: '
@@ -977,16 +984,35 @@ def _numa_fit_instance_cell(
         else:
             # The host does not support explicit page sizes. Ignore pagesizes
             # completely.
+
             # NOTE(stephenfin): Do not allow an instance to overcommit against
             # itself on any NUMA cell, i.e. with 'ram_allocation_ratio = 2.0'
             # on a host with 1GB RAM, we should allow two 1GB instances but not
-            # one 2GB instance.
-            if instance_cell.memory > host_cell.memory:
-                LOG.debug('Not enough host cell memory to fit instance cell. '
-                          'Required: %(required)d, actual: %(actual)d',
-                          {'required': instance_cell.memory,
-                           'actual': host_cell.memory})
-                return None
+            # one 2GB instance. If CPU pinning is in use, don't allow
+            # overcommit at all.
+            if instance_cell.cpu_policy in (
+                fields.CPUAllocationPolicy.DEDICATED,
+                fields.CPUAllocationPolicy.MIXED,
+            ):
+                if host_cell.avail_memory < instance_cell.memory:
+                    LOG.debug(
+                        'Not enough host cell memory to fit instance cell. '
+                        'Oversubscription is not possible with pinned '
+                        'instances. '
+                        'Required: %(required)d, available: %(available)d, '
+                        'total: %(total)d. ',
+                        {'required': instance_cell.memory,
+                         'available': host_cell.avail_memory,
+                         'total': host_cell.memory})
+                    return None
+            else:
+                if host_cell.memory < instance_cell.memory:
+                    LOG.debug(
+                        'Not enough host cell memory to fit instance cell. '
+                        'Required: %(required)d, actual: %(total)d',
+                        {'required': instance_cell.memory,
+                         'total': host_cell.memory})
+                    return None
 
     # NOTE(stephenfin): As with memory, do not allow an instance to overcommit
     # against itself on any NUMA cell
@@ -1034,16 +1060,6 @@ def _numa_fit_instance_cell(
                        'vcpus': len(instance_cell.pcpuset),
                        'actual': host_cell.avail_pcpus,
                        'num_cpu_reserved': cpuset_reserved})
-            return None
-
-        if instance_cell.memory > host_cell.avail_memory:
-            LOG.debug('Not enough available memory to schedule instance. '
-                      'Oversubscription is not possible with pinned '
-                      'instances. Required: %(required)s, available: '
-                      '%(available)s, total: %(total)s. ',
-                      {'required': instance_cell.memory,
-                       'available': host_cell.avail_memory,
-                       'total': host_cell.memory})
             return None
 
         # Try to pack the instance cell onto cores
@@ -1191,13 +1207,18 @@ def get_mem_encryption_constraint(
     # If we get this far, either the extra spec or image property explicitly
     # specified a requirement regarding memory encryption, and if both did,
     # they are asking for the same thing.
+    # NOTE(jie, sean): When creating a volume booted instance with memory
+    # encryption enabled, image_meta has no id key. See bug #2041511.
+    # So we check whether id exists. If there is no value, we set it
+    # to a sentinel value we can detect later. i.e. '<no-id>'.
     requesters = []
     if flavor_mem_enc:
         requesters.append("hw:mem_encryption extra spec in %s flavor" %
                           flavor.name)
     if image_mem_enc:
+        image_id = (image_meta.id if 'id' in image_meta else '<no-id>')
         requesters.append("hw_mem_encryption property of image %s" %
-                          image_meta.id)
+                          image_id)
 
     _check_mem_encryption_uses_uefi_image(requesters, image_meta)
     _check_mem_encryption_machine_type(image_meta, machine_type)
@@ -1275,12 +1296,14 @@ def _check_mem_encryption_machine_type(image_meta, machine_type=None):
 
     # image_meta.name is not set if image object represents root Cinder volume.
     image_name = (image_meta.name if 'name' in image_meta else None)
+    # image_meta.id is not set when booting from volume.
+    image_id = (image_meta.id if 'id' in image_meta else '<no-id>')
     # Could be something like pc-q35-2.11 if a specific version of the
     # machine type is required, so do substring matching.
     if 'q35' not in mach_type:
         raise exception.InvalidMachineType(
             mtype=mach_type,
-            image_id=image_meta.id, image_name=image_name,
+            image_id=image_id, image_name=image_name,
             reason=_("q35 type is required for SEV to work"))
 
 
@@ -2060,6 +2083,27 @@ def get_secure_boot_constraint(
         })
 
     return policy
+
+
+def get_stateless_firmware_constraint(
+    image_meta: 'objects.ImageMeta',
+) -> bool:
+    """Validate and return the requested statless firmware policy.
+
+    :param flavor: ``nova.objects.Flavor`` instance
+    :param image_meta: ``nova.objects.ImageMeta`` instance
+    :raises: nova.exception.Invalid if a value or combination of values is
+        invalid
+    """
+    if not image_meta.properties.get('hw_firmware_stateless', False):
+        return False
+
+    if image_meta.properties.get('hw_firmware_type') != 'uefi':
+        raise exception.Invalid(_(
+            'Stateless firmware is supported only when UEFI firmware type is '
+            'used.'
+        ))
+    return True
 
 
 def numa_get_constraints(flavor, image_meta):

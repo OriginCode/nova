@@ -1289,6 +1289,7 @@ class LibvirtBlockInfoTest(test.NoDBTestCase):
 
     @mock.patch('nova.virt.libvirt.blockinfo.get_info_from_bdm')
     def test_get_root_info_bdm(self, mock_get_info):
+        # call get_root_info() with DriverBlockDevice
         instance = objects.Instance(**self.test_instance)
         image_meta = objects.ImageMeta.from_dict(self.test_image_meta)
         root_bdm = {'mount_device': '/dev/vda',
@@ -1317,6 +1318,49 @@ class LibvirtBlockInfoTest(test.NoDBTestCase):
                                                'device_type': 'disk'},
                                               {}, 'virtio')
         mock_get_info.reset_mock()
+
+    @mock.patch('nova.virt.libvirt.blockinfo.get_info_from_bdm')
+    def test_get_root_info_bdm_with_deepcopy(self, mock_get_info):
+        # call get_root_info() with BlockDeviceMapping
+        instance = objects.Instance(**self.test_instance)
+        image_meta = objects.ImageMeta.from_dict(self.test_image_meta)
+        root_bdm = objects.BlockDeviceMapping(self.context,
+            **fake_block_device.FakeDbBlockDeviceDict(
+                {'id': 3, 'instance_uuid': uuids.instance,
+                 'device_name': '/dev/sda',
+                 'source_type': 'blank',
+                 'destination_type': 'local',
+                 'device_type': 'cdrom',
+                 'disk_bus': 'virtio',
+                 'volume_id': 'fake-volume-id-1',
+                 'boot_index': 0}))
+        # No root_device_name
+        blockinfo.get_root_info(
+            instance, 'kvm', image_meta, root_bdm, 'virtio', 'ide')
+        mock_get_info.assert_called_once_with(
+            instance, 'kvm', image_meta, root_bdm, {}, 'virtio')
+        mock_get_info.reset_mock()
+        # Both device names
+        blockinfo.get_root_info(
+            instance, 'kvm', image_meta, root_bdm, 'virtio', 'scsi',
+            root_device_name='/dev/sda')
+        mock_get_info.assert_called_once_with(
+            instance, 'kvm', image_meta, root_bdm, {}, 'virtio')
+        mock_get_info.reset_mock()
+        # Missing device names
+        original_bdm = copy.deepcopy(root_bdm)
+        root_bdm.device_name = ''
+        blockinfo.get_root_info(
+            instance, 'kvm', image_meta, root_bdm, 'virtio', 'scsi',
+            root_device_name='/dev/sda')
+        mock_get_info.assert_called_with(
+            instance, 'kvm', image_meta, mock.ANY, {}, 'virtio')
+        actual_call = mock_get_info.call_args
+        _, _, _, actual_bdm, _, _ = actual_call[0]
+        self.assertEqual(
+            original_bdm.obj_to_primitive(),
+            actual_bdm.obj_to_primitive()
+        )
 
     def test_get_boot_order_simple(self):
         disk_info = {
@@ -1370,6 +1414,20 @@ class LibvirtBlockInfoTest(test.NoDBTestCase):
             }
         }
         expected_order = ['hd', 'cdrom']
+        self.assertEqual(expected_order, blockinfo.get_boot_order(disk_info))
+
+    def test_get_boot_order_lun(self):
+        disk_info = {
+            'disk_bus': 'virtio',
+            'cdrom_bus': 'ide',
+            'mapping': {
+            'disk': {'bus': 'virtio', 'dev': 'vda',
+                     'type': 'disk', 'boot_index': '1'},
+            'root': {'bus': 'virtio', 'dev': 'vda',
+                     'type': 'lun', 'boot_index': '1'},
+            }
+        }
+        expected_order = ['hd']
         self.assertEqual(expected_order, blockinfo.get_boot_order(disk_info))
 
     def _get_rescue_image_meta(self, props_dict):

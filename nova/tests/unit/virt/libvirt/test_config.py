@@ -13,6 +13,8 @@
 #    under the License.
 
 import ddt
+from unittest import mock
+
 from lxml import etree
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import units
@@ -79,6 +81,17 @@ class LibvirtConfigTest(LibvirtConfigBaseTest):
         inxml = "<demo><foo/></demo>"
         obj = config.LibvirtConfigObject(root_name="demo")
         obj.parse_str(inxml)
+
+    @mock.patch.object(config.LOG, 'debug')
+    def test_config_parse_error_xml_logged(self, mock_debug):
+        inxml = "<demo><vendor_field index='Z'>6<1</vendor_field></demo>"
+        obj = config.LibvirtConfigObject(root_name="demo")
+
+        self.assertRaises(etree.XMLSyntaxError, obj.parse_str, inxml)
+
+        mock_debug.assert_called_once_with(
+            'Failed to parse the libvirt XML: %s',
+            "<demo><vendor_field index='Z'>6<1</vendor_field></demo>")
 
     def test_parse_on_off_str(self):
         obj = config.LibvirtConfigObject(root_name="demo")
@@ -1089,6 +1102,48 @@ class LibvirtConfigGuestDiskTest(LibvirtConfigBaseTest):
               <target bus="ide" dev="/dev/hdc"/>
             </disk>""")
 
+    def test_config_block_serial(self):
+        obj = config.LibvirtConfigGuestDisk()
+        obj.source_type = "block"
+        obj.source_path = "/tmp/hello"
+        obj.source_device = "cdrom"
+        obj.driver_name = "qemu"
+        obj.target_dev = "/dev/hdc"
+        obj.target_bus = "ide"
+        obj.alias = "ua-this-is-my-disk"
+        obj.serial = "123"
+
+        xml = obj.to_xml()
+        self.assertXmlEqual(xml, """
+            <disk type="block" device="cdrom">
+              <driver name="qemu"/>
+              <alias name="ua-this-is-my-disk"/>
+              <source dev="/tmp/hello"/>
+              <target bus="ide" dev="/dev/hdc"/>
+              <serial>123</serial>
+            </disk>""")
+
+    def test_config_block_lun_no_serial(self):
+        obj = config.LibvirtConfigGuestDisk()
+        obj.source_type = "block"
+        obj.source_path = "/tmp/hello"
+        obj.source_device = "lun"
+        obj.driver_name = "qemu"
+        obj.target_dev = "/dev/sda"
+        obj.target_bus = "scsi"
+        obj.alias = "ua-this-is-my-disk"
+        # This should not be included in the XML because source_device=lun
+        obj.serial = "123"
+
+        xml = obj.to_xml()
+        self.assertXmlEqual(xml, """
+            <disk type="block" device="lun">
+              <driver name="qemu"/>
+              <alias name="ua-this-is-my-disk"/>
+              <source dev="/tmp/hello"/>
+              <target bus="scsi" dev="/dev/sda"/>
+            </disk>""")
+
     def test_config_block_parse(self):
         xml = """<disk type="block" device="cdrom">
                    <driver name="qemu"/>
@@ -1660,11 +1715,23 @@ class LibvirtConfigGuestGraphicsTest(LibvirtConfigBaseTest):
         obj.listen = "127.0.0.1"
 
         xml = obj.to_xml()
-        self.assertXmlEqual(xml, """
+        self.assertXmlEqual("""
   <graphics type="vnc" autoport="yes" keymap="en_US" listen="127.0.0.1"/>
-                            """)
+                            """, xml)
 
     def test_config_graphics_spice(self):
+        obj = config.LibvirtConfigGuestGraphics()
+        obj.type = "spice"
+        obj.autoport = False
+        obj.keymap = "en_US"
+        obj.listen = "127.0.0.1"
+
+        xml = obj.to_xml()
+        self.assertXmlEqual("""
+  <graphics type="spice" autoport="no" keymap="en_US" listen="127.0.0.1"/>
+                            """, xml)
+
+    def test_config_graphics_spice_compression(self):
         obj = config.LibvirtConfigGuestGraphics()
         obj.type = "spice"
         obj.autoport = False
@@ -1678,7 +1745,7 @@ class LibvirtConfigGuestGraphicsTest(LibvirtConfigBaseTest):
         obj.streaming_mode = "filter"
 
         xml = obj.to_xml()
-        self.assertXmlEqual(xml, """
+        self.assertXmlEqual("""
   <graphics type="spice" autoport="no" keymap="en_US" listen="127.0.0.1">
     <image compression="auto_glz"/>
     <jpeg compression="auto"/>
@@ -1686,7 +1753,64 @@ class LibvirtConfigGuestGraphicsTest(LibvirtConfigBaseTest):
     <playback compression="on"/>
     <streaming mode="filter"/>
   </graphics>
-                            """)
+                            """, xml)
+
+    def test_config_graphics_spice_secure(self):
+        obj = config.LibvirtConfigGuestGraphics()
+        obj.type = "spice"
+        obj.autoport = False
+        obj.keymap = "en_US"
+        obj.listen = "127.0.0.1"
+
+        obj.secure = True
+
+        xml = obj.to_xml()
+        self.assertXmlEqual("""
+  <graphics type="spice" autoport="no" keymap="en_US" listen="127.0.0.1">
+    <channel name="main" mode="secure"/>
+    <channel name="display" mode="secure"/>
+    <channel name="inputs" mode="secure"/>
+    <channel name="cursor" mode="secure"/>
+    <channel name="playback" mode="secure"/>
+    <channel name="record" mode="secure"/>
+    <channel name="smartcard" mode="secure"/>
+    <channel name="usbredir" mode="secure"/>
+  </graphics>
+                            """, xml)
+
+    def test_config_graphics_spice_secure_compression(self):
+        obj = config.LibvirtConfigGuestGraphics()
+        obj.type = "spice"
+        obj.autoport = False
+        obj.keymap = "en_US"
+        obj.listen = "127.0.0.1"
+
+        obj.secure = True
+
+        obj.image_compression = "auto_glz"
+        obj.jpeg_compression = "auto"
+        obj.zlib_compression = "always"
+        obj.playback_compression = True
+        obj.streaming_mode = "filter"
+
+        xml = obj.to_xml()
+        self.assertXmlEqual("""
+  <graphics type="spice" autoport="no" keymap="en_US" listen="127.0.0.1">
+    <image compression="auto_glz"/>
+    <jpeg compression="auto"/>
+    <zlib compression="always"/>
+    <playback compression="on"/>
+    <streaming mode="filter"/>
+    <channel name="main" mode="secure"/>
+    <channel name="display" mode="secure"/>
+    <channel name="inputs" mode="secure"/>
+    <channel name="cursor" mode="secure"/>
+    <channel name="playback" mode="secure"/>
+    <channel name="record" mode="secure"/>
+    <channel name="smartcard" mode="secure"/>
+    <channel name="usbredir" mode="secure"/>
+  </graphics>
+                            """, xml)
 
 
 class LibvirtConfigGuestHostdev(LibvirtConfigBaseTest):
@@ -2675,8 +2799,8 @@ class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
         xml = obj.to_xml()
         self.assertXmlEqual(fake_libvirt_data.FAKE_KVM_GUEST, xml)
 
-    def test_config_uefi(self):
-        obj = config.LibvirtConfigGuest()
+    def _test_config_uefi(self):
+        obj = config.libvirtconfigguest()
         obj.virt_type = "kvm"
         obj.memory = 100 * units.Mi
         obj.vcpus = 1
@@ -2687,9 +2811,10 @@ class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
         obj.os_loader = '/tmp/OVMF_CODE.secboot.fd'
         obj.os_loader_type = 'pflash'
         obj.os_loader_secure = True
+        obj.os_loader_stateless = True
         xml = obj.to_xml()
 
-        self.assertXmlEqual(
+        self.assertxmlequal(
             """
             <domain type="kvm">
               <uuid>f01cf68d-515c-4daf-b85f-ef1424d93bfc</uuid>
@@ -2698,13 +2823,13 @@ class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
               <vcpu>1</vcpu>
               <os>
                 <type machine="pc-q35-5.1">hvm</type>
-                <loader secure='yes' readonly='yes' type='pflash'>/tmp/OVMF_CODE.secboot.fd</loader>
+                <loader stateless='yes' secure='yes' readonly='yes' type='pflash'>/tmp/OVMF_CODE.secboot.fd</loader>
               </os>
             </domain>""",  # noqa: E501
             xml,
         )
 
-    def _test_config_uefi_autoconfigure(self, secure):
+    def _test_config_uefi_autoconfigure(self, secure=False, stateless=None):
         obj = config.LibvirtConfigGuest()
         obj.virt_type = "kvm"
         obj.memory = 100 * units.Mi
@@ -2715,10 +2840,11 @@ class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
         obj.os_firmware = "efi"
         obj.os_mach_type = "pc-q35-5.1"
         obj.os_loader_secure = secure
+        obj.os_loader_stateless = stateless
         return obj.to_xml()
 
     def test_config_uefi_autoconfigure(self):
-        xml = self._test_config_uefi_autoconfigure(secure=False)
+        xml = self._test_config_uefi_autoconfigure()
 
         self.assertXmlEqual(
             xml,
@@ -2749,6 +2875,24 @@ class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
               <os firmware="efi">
                 <type machine="pc-q35-5.1">hvm</type>
                 <loader secure="yes"/>
+              </os>
+            </domain>""",
+        )
+
+    def test_config_uefi_autoconfigure_stateless(self):
+        xml = self._test_config_uefi_autoconfigure(stateless=True)
+
+        self.assertXmlEqual(
+            xml,
+            """
+            <domain type="kvm">
+              <uuid>f01cf68d-515c-4daf-b85f-ef1424d93bfc</uuid>
+              <name>uefi</name>
+              <memory>104857600</memory>
+              <vcpu>1</vcpu>
+              <os firmware="efi">
+                <type machine="pc-q35-5.1">hvm</type>
+                <loader stateless="yes" secure="no"/>
               </os>
             </domain>""",
         )
@@ -3350,6 +3494,9 @@ class LibvirtConfigNodeDeviceTest(LibvirtConfigBaseTest):
         self.assertEqual(12, obj.mdev_information.iommu_group)
         self.assertIsNone(obj.mdev_information.uuid)
 
+        xmlout = obj.to_xml()
+        self.assertXmlEqual(xmlin, xmlout)
+
     def test_config_mdev_device_uuid(self):
         xmlin = """
         <device>
@@ -3374,6 +3521,19 @@ class LibvirtConfigNodeDeviceTest(LibvirtConfigBaseTest):
         self.assertEqual(57, obj.mdev_information.iommu_group)
         self.assertEqual("b2107403-110c-45b0-af87-32cc91597b8a",
                          obj.mdev_information.uuid)
+
+        expected_xml = """
+        <device>
+          <name>mdev_b2107403_110c_45b0_af87_32cc91597b8a_0000_41_00_0</name>
+          <parent>pci_0000_41_00_0</parent>
+          <capability type='mdev'>
+            <type id='nvidia-442'/>
+            <uuid>b2107403-110c-45b0-af87-32cc91597b8a</uuid>
+            <iommuGroup number='57'/>
+          </capability>
+        </device>"""
+        xmlout = obj.to_xml()
+        self.assertXmlEqual(expected_xml, xmlout)
 
     def test_config_vdpa_device(self):
         xmlin = """

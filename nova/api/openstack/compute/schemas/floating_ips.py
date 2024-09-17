@@ -15,6 +15,14 @@
 
 from nova.api.validation import parameter_types
 
+create = {
+    'type': ['object', 'null'],
+    'properties': {
+        'pool': {
+            'type': ['string', 'null'],
+        },
+    },
+}
 
 add_floating_ip = {
     'type': 'object',
@@ -48,3 +56,8 @@ remove_floating_ip = {
     'required': ['removeFloatingIp'],
     'additionalProperties': False
 }
+
+# NOTE(stephenfin): These schemas are intentionally empty since these APIs are
+# deprecated proxy APIs
+show_query = {}
+index_query = {}

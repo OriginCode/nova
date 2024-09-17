@@ -31,8 +31,8 @@ repos:
       - id: hacking
         additional_dependencies: []
         exclude: '^(doc|releasenotes|tools)/.*$'
-  - repo: https://github.com/pre-commit/mirrors-autopep8
-    rev: v2.0.4
+  - repo: https://github.com/hhatto/autopep8
+    rev: v2.1.0
     hooks:
       - id: autopep8
         files: '^.*\.py$'
@@ -75,3 +75,10 @@ repos:
             | nova/virt/libvirt/host.py
             | nova/virt/libvirt/utils.py
           )
+  - repo: https://github.com/sphinx-contrib/sphinx-lint
+    rev: v0.6.8
+    hooks:
+      - id: sphinx-lint
+        args: [--enable=default-role]
+        files: ^doc/|releasenotes|api-guide
+        types: [rst]

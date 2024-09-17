@@ -2,48 +2,6 @@
 # for job naming conventions.
 
 - job:
-    name: nova-tox-functional-py38
-    parent: openstack-tox-functional-py38
-    description: |
-      Run tox-based functional tests for the OpenStack Nova project
-      under cPython version 3.8 with Nova specific irrelevant-files list.
-      Uses tox with the ``functional-py38`` environment.
-
-      This job also provides a parent for other projects to run the nova
-      functional tests on their own changes.
-    required-projects:
-      # including nova here makes this job reusable by other projects
-      - openstack/nova
-      - openstack/placement
-    irrelevant-files: &functional-irrelevant-files
-      - ^.*\.rst$
-      - ^api-.*$
-      - ^doc/(source|test)/.*$
-      - ^nova/locale/.*$
-      - ^releasenotes/.*$
-    vars:
-      # explicitly stating the work dir makes this job reusable by other
-      # projects
-      zuul_work_dir: src/opendev.org/openstack/nova
-      bindep_profile: test py38
-    timeout: 3600
-
-- job:
-    name: nova-tox-py310-with-sqlalchemy-2x
-    parent: openstack-tox-py310
-    description: |
-      Run unit tests with main branch of SQLAlchemy, alembic and oslo.db.
-      Takes advantage of the base tox job's install-siblings feature.
-    # The job only tests the latest and shouldn't be run on the stable branches
-    branches: ^master$
-    required-projects:
-      - name: github.com/sqlalchemy/sqlalchemy
-        override-checkout: main
-      - name: github.com/sqlalchemy/alembic
-        override-checkout: main
-      - name: openstack/oslo.db
-
-- job:
     name: nova-tox-functional-py39
     parent: openstack-tox-functional-py39
     description: |
@@ -57,7 +15,12 @@
       # including nova here makes this job reusable by other projects
       - openstack/nova
       - openstack/placement
-    irrelevant-files: *functional-irrelevant-files
+    irrelevant-files: &functional-irrelevant-files
+      - ^.*\.rst$
+      - ^api-.*$
+      - ^doc/(source|test)/.*$
+      - ^nova/locale/.*$
+      - ^releasenotes/.*$
     vars:
       # explicitly stating the work dir makes this job reusable by other
       # projects
@@ -85,6 +48,28 @@
       # projects
       zuul_work_dir: src/opendev.org/openstack/nova
       bindep_profile: test py310
+    timeout: 3600
+
+- job:
+    name: nova-tox-functional-py312
+    parent: openstack-tox-functional-py312
+    description: |
+      Run tox-based functional tests for the OpenStack Nova project
+      under cPython version 3.12 with Nova specific irrelevant-files list.
+      Uses tox with the ``functional-py312`` environment.
+
+      This job also provides a parent for other projects to run the nova
+      functional tests on their own changes.
+    required-projects:
+      # including nova here makes this job reusable by other projects
+      - openstack/nova
+      - openstack/placement
+    irrelevant-files: *functional-irrelevant-files
+    vars:
+      # explicitly stating the work dir makes this job reusable by other
+      # projects
+      zuul_work_dir: src/opendev.org/openstack/nova
+      bindep_profile: test py312
     timeout: 3600
 
 - job:
@@ -143,13 +128,37 @@
           IMAGE_URLS: http://download.cirros-cloud.net/0.6.2/cirros-0.6.2-x86_64-uec.tar.gz, http://download.cirros-cloud.net/0.6.1/cirros-0.6.1-x86_64-uec.tar.gz
       devstack_services:
         neutron-trunk: true
+        openstack-cli-server: true
       devstack_local_conf:
+        post-config:
+          $NOVA_CPU_CONF:
+            compute:
+              # we want to test live migration of floating instances between hosts with different
+              # cpu_shared_set to ensure the xml is updated properly. This is important when migrating
+              # between hosts with different number of cpu cores even when cpu_shared_set is not defined.
+              # In the ci, we have 8 cpu cores, so we set the cpu_shared_set to 0-5 for the first compute
+              # node and 2-7 for the second compute node.
+              cpu_shared_set: "0-5"
+              cpu_dedicated_set: "6-7"
         test-config:
           $TEMPEST_CONFIG:
             compute-feature-enabled:
               volume_backed_live_migration: true
               block_migration_for_live_migration: true
               block_migrate_cinder_iscsi: true
+    group-vars:
+      subnode:
+        devstack_local_conf:
+          post-config:
+            $NOVA_CPU_CONF:
+              compute:
+                # we want to test live migration of floating instances between hosts with different
+                # cpu_shared_set to ensure the xml is updated properly. This is important when migrating
+                # between hosts with different number of cpu cores even when cpu_shared_set is not defined.
+                # In the ci, we have 8 cpu cores, so we set the cpu_shared_set to 0-5 for the first compute
+                # node and 2-7 for the second compute node.
+                cpu_shared_set: "2-7"
+                cpu_dedicated_set: "0-1"
     post-run: playbooks/nova-live-migration/post-run.yaml
 
 - job:
@@ -182,7 +191,6 @@
       # test_live_migration_with_trunk in this job to keep
       tempest_test_regex: (^tempest\..*compute\..*(migration|resize|reboot).*)
       devstack_localrc:
-        <<: *uec_image_vars
         Q_AGENT: openvswitch
         Q_ML2_TENANT_NETWORK_TYPE: vxlan
         Q_ML2_PLUGIN_MECHANISM_DRIVERS: openvswitch
@@ -213,6 +221,7 @@
         s-container: false
         s-object: false
         s-proxy: false
+        openstack-cli-server: true
       devstack_local_conf:
         post-config:
           "/$NEUTRON_CORE_PLUGIN_CONF":
@@ -224,7 +233,6 @@
     group-vars:
       subnode:
         devstack_localrc:
-          <<: *uec_image_vars
           Q_AGENT: openvswitch
           Q_ML2_TENANT_NETWORK_TYPE: vxlan
           Q_ML2_PLUGIN_MECHANISM_DRIVERS: openvswitch
@@ -276,8 +284,8 @@
       tempest_test_regex: (^tempest\.api\.compute\.admin\.(test_live_migration|test_migration))
       # revert this when bug #1940425 is fixed in neutron
       tempest_exclude_regex: (test_live_migration_with_trunk)
-      devstack_localrc:
-        <<: *uec_image_vars
+      devstack_services:
+        openstack-cli-server: true
       devstack_local_conf:
         test-config:
           $TEMPEST_CONFIG:
@@ -292,24 +300,11 @@
     parent: devstack-tempest
     description: |
       Run tempest compute API tests using LVM image backend. This only runs
-      against nova/virt/libvirt/* changes.
-    # Copy irrelevant-files from nova-dsvm-multinode-base and then exclude
-    # anything that is not in nova/virt/libvirt/* or nova/privsep/*.
-    irrelevant-files:
-      - ^(?!.zuul.yaml)(?!nova/virt/libvirt/)(?!nova/privsep/).*$
-      - ^api-.*$
-      - ^(test-|)requirements.txt$
-      - ^.*\.rst$
-      - ^.git.*$
-      - ^doc/.*$
-      - ^nova/hacking/.*$
-      - ^nova/locale/.*$
-      - ^nova/tests/.*$
-      - ^nova/test.py$
-      - ^releasenotes/.*$
-      - ^setup.cfg$
-      - ^tools/.*$
-      - ^tox.ini$
+      against nova/virt/libvirt/*, nova/privsep/* and .zuul.yaml changes.
+    files:
+      - ^nova/virt/libvirt/.*$
+      - ^nova/privsep/.*$
+      - .zuul.yaml
     vars:
       # Increase the swap size to avoid OOM errors when running the tests.
       configure_swap_size: 8192
@@ -330,7 +325,6 @@
               resize: false
               cold_migration: false
       devstack_localrc:
-        <<: *uec_image_vars
         NOVA_BACKEND: LVM
         # Do not waste time clearing volumes.
         LVM_VOLUME_CLEAR: none
@@ -343,6 +337,7 @@
       devstack_services:
         # Disable non-essential services that we don't need for this job.
         c-bak: false
+        openstack-cli-server: true
 
 - job:
     name: nova-emulation
@@ -352,24 +347,14 @@
     # NOTE(chateaulav): due to constraints with no IDE support for aarch64,
     # tests have been limited to eliminate any items that are incompatible.
     # This is to be re-evaluated as greater support is added and defined.
-    irrelevant-files:
-      - ^(?!.zuul.yaml)(?!nova/virt/libvirt/)(?!nova/objects/)(?!nova/scheduler/).*$
-      - ^api-.*$
-      - ^(test-|)requirements.txt$
-      - ^.*\.rst$
-      - ^.git.*$
-      - ^doc/.*$
-      - ^nova/hacking/.*$
-      - ^nova/locale/.*$
-      - ^nova/policies/.*$
-      - ^nova/tests/.*$
-      - ^nova/test.py$
-      - ^releasenotes/.*$
-      - ^setup.cfg$
-      - ^tools/.*$
-      - ^tox.ini$
+    files:
+      - ^nova/virt/libvirt/.*$
+      - ^nova/objects/.*$
+      - ^nova/scheduler/.*$
+      - .zuul.yaml
     vars:
       tox_envlist: all
+      tempest_concurrency: 4
       tempest_test_regex: ^tempest\.(api\.compute\.servers|scenario\.test_network_basic_ops)
       tempest_exclude_regex: (^tempest\.(api\.compute\.servers\.(test_attach_interfaces.AttachInterfacesTestJSON.test_create_list_show_delete_interfaces_by_network_port|test_delete_server.DeleteServersTestJSON.test_delete_server_while_in_attached_volume.*|test_list_.*|test_disk_config|test_server_rescue.*|test_server_actions\.ServerActionsTestJSON\.test_resize.*|test_device_tag.*))|.*\[.*\bslow\b.*\])
       devstack_localrc:
@@ -381,8 +366,19 @@
         SERVICE_PASSWORD: $ADMIN_PASSWORD
         SWIFT_HASH: 1234abcd
         DOWNLOAD_DEFAULT_IMAGES: False
-        IMAGE_URLS: "http://download.cirros-cloud.net/0.5.2/cirros-0.5.2-aarch64-disk.img"
+        IMAGE_URLS: "http://download.cirros-cloud.net/0.5.3/cirros-0.5.3-aarch64-disk.img"
         DEFAULT_INSTANCE_TYPE: m1.micro
+      devstack_services:
+        openstack-cli-server: true
+      # Increase the swap size to avoid OOM errors when running the tests.
+      configure_swap_size: 8192
+      devstack_local_conf:
+        post-config:
+          $NOVA_CPU_CONF:
+            libvirt:
+              # Use lower TB cache than default(1GiB), only applicable with
+              # libvirt>=8.0.0
+              tb_cache_size: 128
     pre-run:
       - playbooks/nova-emulation/pre.yaml
 
@@ -410,36 +406,10 @@
     irrelevant-files: *nova-base-irrelevant-files
     # Run post-tempest tests like for nova-manage commands.
     post-run: playbooks/nova-next/post.yaml
+    pre-run: playbooks/nova-next/pre.yaml
     required-projects:
         - novnc/novnc
-    nodeset:
-      nodes:
-        - name: controller
-          label: nested-virt-ubuntu-jammy
-        - name: compute1
-          label: nested-virt-ubuntu-jammy
-      groups:
-        # Node where tests are executed and test results collected
-        - name: tempest
-          nodes:
-            - controller
-        # Nodes running the compute service
-        - name: compute
-          nodes:
-            - controller
-            - compute1
-        # Nodes that are not the controller
-        - name: subnode
-          nodes:
-            - compute1
-        # Switch node for multinode networking setup
-        - name: switch
-          nodes:
-            - controller
-        # Peer nodes for multinode networking setup
-        - name: peers
-          nodes:
-            - compute1
+    nodeset: openstack-two-node-noble
     vars:
       # We use the "all" environment for tempest_test_regex and
       # tempest_exclude_regex.
@@ -508,8 +478,7 @@
             neutron_plugin_options:
               available_type_drivers: flat,geneve,vlan,gre,local,vxlan
       devstack_localrc:
-        # For nested virt
-        LIBVIRT_TYPE: kvm
+        LIBVIRT_TYPE: qemu
         Q_AGENT: openvswitch
         Q_ML2_TENANT_NETWORK_TYPE: vxlan
         Q_ML2_PLUGIN_MECHANISM_DRIVERS: openvswitch
@@ -545,6 +514,7 @@
         neutron-qos: true
         # Disable non-essential services that we don't need for this job.
         c-bak: false
+        openstack-cli-server: true
       devstack_plugins:
         # Needed for QoS port heal allocation testing.
         neutron: https://opendev.org/openstack/neutron
@@ -552,8 +522,7 @@
     group-vars:
       subnode:
         devstack_localrc:
-          # For nested virt
-          LIBVIRT_TYPE: kvm
+          LIBVIRT_TYPE: qemu
           Q_AGENT: openvswitch
           Q_ML2_TENANT_NETWORK_TYPE: vxlan
           Q_ML2_PLUGIN_MECHANISM_DRIVERS: openvswitch
@@ -589,7 +558,6 @@
       tox_envlist: all
       tempest_test_regex: api.*compute
       devstack_localrc:
-        <<: *uec_image_vars
         TEMPEST_COMPUTE_TYPE: compute_legacy
 
 - job:
@@ -615,8 +583,6 @@
       "legacy-grenade-dsvm-neutron-multinode-live-migration".
     irrelevant-files: *nova-base-irrelevant-files
     vars:
-      devstack_localrc:
-        <<: *uec_image_vars
       devstack_local_conf:
         test-config:
           $TEMPEST_CONFIG:
@@ -662,8 +628,8 @@
       devstack_services:
         # Disable other non-essential services that we don't need for this job.
         c-bak: false
+        openstack-cli-server: true
       devstack_localrc:
-        <<: *uec_image_vars
         # Setup two non-cell0 cells (cell1 and cell2).
         NOVA_NUM_CELLS: 2
         # Disable resize to the same host so all resizes will move across
@@ -676,7 +642,6 @@
     group-vars:
       peers:
         devstack_localrc:
-          <<: *uec_image_vars
           NOVA_ALLOW_MOVE_TO_SAME_HOST: true
           LIVE_MIGRATION_AVAILABLE: false
       subnode:
@@ -705,8 +670,6 @@
       tox_envlist: all
       # Run compute API and only the test_server_basic_ops scenario tests.
       tempest_test_regex: ^tempest\.(scenario\.test_server_basic_ops|(api\.compute))
-      devstack_localrc:
-        <<: *uec_image_vars
 
 - job:
     name: nova-ceph-multistore
@@ -721,7 +684,9 @@
       - playbooks/ceph/glance-setup.yaml
     vars:
       # revert this when bug #1940425 is fixed in neutron
-      tempest_exclude_regex: (test_live_migration_with_trunk)
+      # FIXME(sean-k-mooney) skip the test_image_formats for now
+      # as we have not configured this job correctly to run them
+      tempest_exclude_regex: (test_live_migration_with_trunk|tempest.api.image.v2.test_images_formats)
       # NOTE(danms): Increase our swap size since we're dealing with
       # larger images and trigger OOMs.
       configure_swap_size: 8192
@@ -729,7 +694,6 @@
       # will refuse because we set never_download_image_if_on_rbd in this job.
       # Just skip these tests for this case.
       devstack_localrc:
-        <<: *uec_image_vars
         GLANCE_STANDALONE: True
         GLANCE_USE_IMPORT_WORKFLOW: True
         DEVSTACK_PARALLEL: True
@@ -744,6 +708,7 @@
         s-container: false
         s-object: false
         s-proxy: false
+        openstack-cli-server: true
       devstack_local_conf:
         test-config:
           $TEMPEST_CONFIG:
@@ -751,6 +716,8 @@
               manage_locations: true
             volume:
               volume_size: 1
+            image:
+              disk_formats: qcow2,ari,aki,vhd,vmdk,raw,ami,vdi,iso,vhdx
         post-config:
           $NOVA_CONF:
             libvirt:
@@ -815,8 +782,9 @@
       - openstack/neutron
       - openstack/neutron-lib
     vars:
+      devstack_services:
+        openstack-cli-server: true
       devstack_localrc:
-        <<: *uec_image_vars
         # Enabeling the scope and new defaults for services implemented it.
         # NOTE (gmann): We need to keep keystone scope check disable as
         # services (except ironic) does not support the system scope and
@@ -834,8 +802,9 @@
     description: |
       This job runs the Tempest tests with Nova RBAC old defaults
     vars:
+      devstack_services:
+        openstack-cli-server: true
       devstack_localrc:
-        <<: *uec_image_vars
         NOVA_ENFORCE_SCOPE: false
 
 - project:
@@ -856,20 +825,15 @@
         - ironic-tempest-ipa-wholedisk-bios-agent_ipmitool-tinyipa:
             voting: false
             irrelevant-files: *nova-base-irrelevant-files
-            vars:
-              devstack_localrc:
-                <<: *uec_image_vars
         - nova-ceph-multistore:
             irrelevant-files: *nova-base-irrelevant-files
         - neutron-linuxbridge-tempest:
-            irrelevant-files:
+            files:
               # NOTE(mriedem): This job has its own irrelevant-files section
               # so that we only run it on changes to networking and libvirt/vif
               # code; we don't need to run this on all changes.
-              - ^(?!nova/network/.*)(?!nova/virt/libvirt/vif.py).*$
-            vars:
-              devstack_localrc:
-                <<: *uec_image_vars
+              - ^nova/network/.*$
+              - nova/virt/libvirt/vif.py
         - nova-live-migration
         - nova-live-migration-ceph
         - nova-lvm
@@ -878,168 +842,101 @@
         - nova-ovs-hybrid-plug
         - nova-tox-validate-backport:
             voting: false
-        - nova-tox-py310-with-sqlalchemy-2x
-        - nova-tox-functional-py38
         - nova-tox-functional-py39
         - nova-tox-functional-py310
+        - nova-tox-functional-py312
+        - openstack-tox-py312:
+            voting: true
         - tempest-integrated-compute:
            # NOTE(gmann): Policies changes do not need to run all the
            # integration test jobs. Running only tempest and grenade
            # common jobs will be enough along with nova functional
            # and unit tests.
            irrelevant-files: *policies-irrelevant-files
-           vars:
-             devstack_localrc:
-               <<: *uec_image_vars
         - tempest-integrated-compute-enforce-scope-new-defaults:
             irrelevant-files: *policies-irrelevant-files
         - tempest-integrated-compute-rbac-old-defaults:
             irrelevant-files: *policies-irrelevant-files
         - grenade-skip-level-always:
             irrelevant-files: *policies-irrelevant-files
-            vars:
-              devstack_localrc:
-                <<: *uec_image_vars
         - nova-grenade-multinode:
             irrelevant-files: *policies-irrelevant-files
         - tempest-ipv6-only:
             irrelevant-files: *nova-base-irrelevant-files
-            vars:
-              devstack_localrc:
-                <<: *uec_image_vars
         - openstacksdk-functional-devstack:
             irrelevant-files: *nova-base-irrelevant-files
-            vars:
-              devstack_localrc:
-                <<: *uec_image_vars
         - cyborg-tempest:
             irrelevant-files: *nova-base-irrelevant-files
             voting: false
-            vars:
-              devstack_localrc:
-                <<: *uec_image_vars
         - barbican-tempest-plugin-simple-crypto:
             irrelevant-files: *nova-base-irrelevant-files
             voting: false
-            vars:
-              devstack_localrc:
-                <<: *uec_image_vars
     gate:
       jobs:
         - nova-live-migration
-        - nova-tox-functional-py38
         - nova-tox-functional-py39
         - nova-tox-functional-py310
+        - nova-tox-functional-py312
         - nova-multi-cell
         - nova-next
         - nova-tox-validate-backport
         - nova-ceph-multistore:
             irrelevant-files: *nova-base-irrelevant-files
         - neutron-linuxbridge-tempest:
-            irrelevant-files:
+            files:
               # NOTE(mriedem): This job has its own irrelevant-files section
               # so that we only run it on changes to networking and libvirt/vif
               # code; we don't need to run this on all changes.
-              - ^(?!nova/network/.*)(?!nova/virt/libvirt/vif.py).*$
-            vars:
-              devstack_localrc:
-                <<: *uec_image_vars
+              - ^nova/network/.*$
+              - nova/virt/libvirt/vif.py
         - tempest-integrated-compute:
             irrelevant-files: *policies-irrelevant-files
-            vars:
-              devstack_localrc:
-                <<: *uec_image_vars
         - tempest-integrated-compute-enforce-scope-new-defaults:
             irrelevant-files: *policies-irrelevant-files
         - tempest-integrated-compute-rbac-old-defaults:
             irrelevant-files: *policies-irrelevant-files
         - grenade-skip-level-always:
             irrelevant-files: *policies-irrelevant-files
-            vars:
-              devstack_localrc:
-                <<: *uec_image_vars
         - nova-grenade-multinode:
            irrelevant-files: *policies-irrelevant-files
         - tempest-ipv6-only:
             irrelevant-files: *nova-base-irrelevant-files
-            vars:
-              devstack_localrc:
-                <<: *uec_image_vars
         - openstacksdk-functional-devstack:
             irrelevant-files: *nova-base-irrelevant-files
-            vars:
-              devstack_localrc:
-                <<: *uec_image_vars
     periodic-weekly:
       jobs:
         # Runs emulation feature functionality test less frequently due
         # to being the initial release and experimental in nature.
         - nova-emulation
         - ironic-tempest-ipa-wholedisk-direct-tinyipa-multinode-shard
-        - tempest-centos9-stream-fips:
-            vars:
-              devstack_localrc:
-                <<: *uec_image_vars
+        - tempest-centos9-stream-fips
     experimental:
       jobs:
         - ironic-tempest-bfv:
             irrelevant-files: *nova-base-irrelevant-files
-            vars:
-              devstack_localrc:
-                <<: *uec_image_vars
         - ironic-tempest-ipa-wholedisk-direct-tinyipa-multinode-shard:
             irrelevant-files: *nova-base-irrelevant-files
-            vars:
-              devstack_localrc:
-                <<: *uec_image_vars
         - devstack-plugin-nfs-tempest-full:
             irrelevant-files: *nova-base-irrelevant-files
-            vars:
-              devstack_localrc:
-                <<: *uec_image_vars
         - nova-osprofiler-redis
         - tempest-pg-full:
             irrelevant-files: *nova-base-irrelevant-files
-            vars:
-              devstack_localrc:
-                <<: *uec_image_vars
         - nova-tempest-full-oslo.versionedobjects:
             irrelevant-files: *nova-base-irrelevant-files
         - nova-tempest-v2-api:
             irrelevant-files: *nova-base-irrelevant-files
         - neutron-ovs-tempest-dvr-ha-multinode-full:
             irrelevant-files: *nova-base-irrelevant-files
-            vars:
-              devstack_localrc:
-                <<: *uec_image_vars
         - neutron-ovs-tempest-iptables_hybrid:
             irrelevant-files: *nova-base-irrelevant-files
-            vars:
-              devstack_localrc:
-                <<: *uec_image_vars
         - os-vif-ovs:
             irrelevant-files: *nova-base-irrelevant-files
-            vars:
-              devstack_localrc:
-                <<: *uec_image_vars
         - devstack-plugin-ceph-compute-local-ephemeral:
             irrelevant-files: *nova-base-irrelevant-files
-            vars:
-              devstack_localrc:
-                <<: *uec_image_vars
         - devstack-tobiko-nova:
             irrelevant-files: *nova-base-irrelevant-files
-            vars:
-              devstack_localrc:
-                <<: *uec_image_vars
         - tempest-centos9-stream-fips:
             irrelevant-files: *nova-base-irrelevant-files
-            vars:
-              devstack_localrc:
-                <<: *uec_image_vars
         - nova-emulation
         - tempest-integrated-compute-centos-9-stream:
             irrelevant-files: *nova-base-irrelevant-files
-            vars:
-              devstack_localrc:
-                <<: *uec_image_vars

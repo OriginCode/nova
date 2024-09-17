@@ -31,7 +31,7 @@ create = {
                     # enumerated values. It's changed to a single string value
                     # in 2.64.
                     'type': 'array',
-                    'items': [
+                    'prefixItems': [
                         {
                             'type': 'string',
                             'enum': ['anti-affinity', 'affinity'],
@@ -53,7 +53,9 @@ create = {
 
 create_v215 = copy.deepcopy(create)
 policies = create_v215['properties']['server_group']['properties']['policies']
-policies['items'][0]['enum'].extend(['soft-anti-affinity', 'soft-affinity'])
+policies['prefixItems'][0]['enum'].extend(
+    ['soft-anti-affinity', 'soft-affinity']
+)
 
 create_v264 = copy.deepcopy(create_v215)
 del create_v264['properties']['server_group']['properties']['policies']
@@ -75,7 +77,7 @@ sg_properties['properties']['rules'] = {
     'additionalProperties': False,
 }
 
-server_groups_query_param = {
+index_query = {
     'type': 'object',
     'properties': {
         'all_projects': parameter_types.multi_params({'type': 'string'}),
@@ -89,5 +91,11 @@ server_groups_query_param = {
     'additionalProperties': True
 }
 
-server_groups_query_param_275 = copy.deepcopy(server_groups_query_param)
-server_groups_query_param_275['additionalProperties'] = False
+index_query_v275 = copy.deepcopy(index_query)
+index_query_v275['additionalProperties'] = False
+
+show_query = {
+    'type': 'object',
+    'properties': {},
+    'additionalProperties': True,
+}

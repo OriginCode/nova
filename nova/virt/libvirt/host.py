@@ -1254,6 +1254,59 @@ class Host(object):
         """
         return self.get_connection().nodeDeviceLookupByName(name)
 
+    def device_create(self, conf):
+        """Create a node device from specified device XML
+
+        This creates the device as transient.
+
+        :param conf: A LibvirtConfigObject of the device to create
+
+        :returns: a virNodeDevice instance if successful, else None
+        """
+        device_xml = conf.to_xml()
+        return self.get_connection().nodeDeviceCreateXML(device_xml, flags=0)
+
+    def device_define(self, conf):
+        """Define a node device from specified device XML
+
+        This defines the device to make it persistent.
+
+        :param conf: A LibvirtConfigObject of the device to create
+
+        :returns: a virNodeDevice instance if successful, else None
+        """
+        device_xml = conf.to_xml()
+        return self.get_connection().nodeDeviceDefineXML(device_xml, flags=0)
+
+    def device_start(self, dev):
+        """Start a defined node device
+
+        :param dev: The virNodeDevice instance to start
+        """
+        # extra flags; not used yet, so callers should always pass 0
+        #   https://libvirt.org/html/libvirt-libvirt-nodedev.html
+        flags = 0
+        result = dev.create(flags)
+        if result == -1:
+            msg = f'Failed to start node device {dev.name()}'
+            raise exception.InternalError(_(msg))
+
+    def device_set_autostart(self, dev, autostart=True):
+        """Set a node device to automatically start when the host boots
+
+        This can set whether the node device should automatically start when
+        the host machine boots or when the parent device becomes available.
+
+        :param dev: The virNodeDevice instance to set the autostart value
+        :param autostart: Whether to set the device to automatically start
+        """
+        result = dev.setAutostart(autostart=autostart)
+        if result == -1:
+            msg = (
+                f'Failed to set autostart to {autostart} for node device '
+                f'{dev.name()}')
+            raise exception.InternalError(_(msg))
+
     def _get_pcinet_info(
         self,
         dev: 'libvirt.virNodeDevice',
@@ -1611,7 +1664,7 @@ class Host(object):
         """Lookup devices.
 
         :param flags: a bitmask of flags to filter the returned devices.
-        :returns: a list of virNodeDevice xml strings.
+        :returns: a list of virNodeDevice instances.
         """
         try:
             return self.get_connection().listAllDevices(flags) or []
@@ -1791,6 +1844,57 @@ class Host(object):
         LOG.debug('No Secure Boot support detected')
         self._supports_secure_boot = False
         return False
+
+    @property
+    def supports_vtpm(self) -> ty.Optional[bool]:
+        # we only check the host architecture and the first machine type
+        # because vtpm support is independent from cpu architecture
+        arch = self.get_capabilities().host.cpu.arch
+        domain_caps = self.get_domain_capabilities()
+        for machine_type in domain_caps[arch]:
+            _tpm = domain_caps[arch][machine_type].devices.tpm
+            # TODO(tkajinam): Remove this once libvirt >= 8.0.0 is required
+            if _tpm is None:
+                return None
+            return (_tpm.supported and 'emulator' in _tpm.backend_models)
+        # safe guard
+        return False
+
+    @property
+    def tpm_versions(self) -> ty.Optional[ty.List[str]]:
+        # we only check the host architecture and the first machine type
+        # because vtpm support is independent from cpu architecture
+        arch = self.get_capabilities().host.cpu.arch
+        domain_caps = self.get_domain_capabilities()
+        for machine_type in domain_caps[arch]:
+            _tpm = domain_caps[arch][machine_type].devices.tpm
+            # TODO(tkajinam): Remove first check once libvirt >= 8.0.0 is
+            # required
+            # TODO(tkajinam): Remove second check once libvirt >= 8.6.0 is
+            # required
+            if _tpm is None or _tpm.backend_versions is None:
+                return None
+            return _tpm.backend_versions
+        # safe guard
+        return []
+
+    @property
+    def tpm_models(self) -> ty.Optional[ty.List[str]]:
+        # we only check the host architecture and the first machine type
+        # because vtpm support is independent from cpu architecture
+        arch = self.get_capabilities().host.cpu.arch
+        domain_caps = self.get_domain_capabilities()
+        for machine_type in domain_caps[arch]:
+            _tpm = domain_caps[arch][machine_type].devices.tpm
+            # TODO(tkajinam): Remove first check once libvirt >= 8.0.0 is
+            # required
+            # TODO(tkajinam): Remove second check once libvirt >= 8.6.0 is
+            # required
+            if _tpm is None or _tpm.models is None:
+                return None
+            return _tpm.models
+        # safe guard
+        return []
 
     def _kernel_supports_amd_sev(self) -> bool:
         if not os.path.exists(SEV_KERNEL_PARAM_FILE):

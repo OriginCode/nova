@@ -1,5 +1,3 @@
-# Copyright 2014 NEC Corporation.  All rights reserved.
-#
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
 #    a copy of the License at
@@ -12,21 +10,16 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-reset_state = {
+# TODO(stephenfin): Remove additionalProperties in a future API version
+index_query = {
     'type': 'object',
-    'properties': {
-        'os-resetState': {
-            'type': 'object',
-            'properties': {
-                'state': {
-                    'type': 'string',
-                    'enum': ['active', 'error'],
-                },
-            },
-            'required': ['state'],
-            'additionalProperties': False,
-        },
-    },
-    'required': ['os-resetState'],
-    'additionalProperties': False,
+    'properties': {},
+    'additionalProperties': True,
+}
+
+# TODO(stephenfin): Remove additionalProperties in a future API version
+show_query = {
+    'type': 'object',
+    'properties': {},
+    'additionalProperties': True,
 }

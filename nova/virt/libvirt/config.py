@@ -28,6 +28,7 @@ import typing as ty
 
 from collections import OrderedDict
 from lxml import etree
+from oslo_log import log as logging
 from oslo_utils import strutils
 from oslo_utils import units
 
@@ -37,6 +38,7 @@ from nova.objects import fields
 from nova.pci import utils as pci_utils
 from nova.virt import hardware
 
+LOG = logging.getLogger(__name__)
 
 # Namespace to use for Nova specific metadata items in XML
 NOVA_NS = "http://openstack.org/xmlns/libvirt/nova/1.1"
@@ -83,7 +85,11 @@ class LibvirtConfigObject(object):
         return self._new_node(self.root_name)
 
     def parse_str(self, xmlstr):
-        self.parse_dom(etree.fromstring(xmlstr))
+        try:
+            self.parse_dom(etree.fromstring(xmlstr))
+        except etree.Error:
+            LOG.debug("Failed to parse the libvirt XML: %s", xmlstr)
+            raise
 
     def parse_dom(self, xmldoc):
         if self.root_name != xmldoc.tag:
@@ -247,10 +253,45 @@ class LibvirtConfigDomainCapsDiskBuses(LibvirtConfigObject):
                       xmldoc.xpath("//enum[@name='bus']/value/text()")}
 
 
+class LibvirtConfigDomainCapsTpm(LibvirtConfigObject):
+
+    def __init__(self, **kwargs):
+        super().__init__(root_name='tpm', **kwargs)
+        self.supported = False
+        self.models = []
+        self.backend_models = []
+        # TODO(tkajinam): Change default to [] once libvirt >= 8.6.0 is
+        #                 required
+        self.backend_versions = None
+
+    def parse_dom(self, xmldoc):
+        super(LibvirtConfigDomainCapsTpm, self).parse_dom(xmldoc)
+
+        if xmldoc.get('supported'):
+            self.supported = (xmldoc.get('supported') == 'yes')
+        for c in xmldoc:
+            if c.tag == 'enum':
+                if c.get('name') == 'model':
+                    for c2 in c:
+                        if c2.tag == 'value':
+                            self.models.append(c2.text)
+                if c.get('name') == 'backendModel':
+                    for c2 in c:
+                        if c2.tag == 'value':
+                            self.backend_models.append(c2.text)
+                if c.get('name') == 'backendVersion':
+                    for c2 in c:
+                        if c2.tag == 'value':
+                            if self.backend_versions is None:
+                                self.backend_versions = []
+                            self.backend_versions.append(c2.text)
+
+
 class LibvirtConfigDomainCapsDevices(LibvirtConfigObject):
     DEVICE_PARSERS = {
         'video': LibvirtConfigDomainCapsVideoModels,
         'disk': LibvirtConfigDomainCapsDiskBuses,
+        'tpm': LibvirtConfigDomainCapsTpm,
     }
 
     def __init__(self, **kwargs):
@@ -280,6 +321,10 @@ class LibvirtConfigDomainCapsDevices(LibvirtConfigObject):
     @property
     def video(self):
         return self._get_device('video')
+
+    @property
+    def tpm(self):
+        return self._get_device('tpm')
 
 
 class LibvirtConfigDomainCapsFeatures(LibvirtConfigObject):
@@ -1308,7 +1353,7 @@ class LibvirtConfigGuestDisk(LibvirtConfigGuestDevice):
             dev.append(etree.Element("target", dev=self.target_dev,
                                      bus=self.target_bus))
 
-        if self.serial is not None:
+        if self.serial is not None and self.source_device != 'lun':
             dev.append(self._text_node("serial", self.serial))
 
         self._format_iotune(dev)
@@ -2143,6 +2188,7 @@ class LibvirtConfigGuestGraphics(LibvirtConfigGuestDevice):
         self.autoport = True
         self.keymap = None
         self.listen = None
+        self.secure = None
 
         self.image_compression = None
         self.jpeg_compression = None
@@ -2177,6 +2223,11 @@ class LibvirtConfigGuestGraphics(LibvirtConfigGuestDevice):
             if self.streaming_mode is not None:
                 dev.append(etree.Element(
                     'streaming', mode=self.streaming_mode))
+            if self.secure:
+                for channel in ['main', 'display', 'inputs', 'cursor',
+                                'playback', 'record', 'smartcard', 'usbredir']:
+                    dev.append(etree.Element('channel', name=channel,
+                                             mode='secure'))
 
         return dev
 
@@ -3024,6 +3075,7 @@ class LibvirtConfigGuest(LibvirtConfigObject):
         self.os_firmware = None
         self.os_loader_type = None
         self.os_loader_secure = None
+        self.os_loader_stateless = None
         self.os_nvram = None
         self.os_nvram_template = None
         self.os_kernel = None
@@ -3089,7 +3141,8 @@ class LibvirtConfigGuest(LibvirtConfigObject):
         if (
             self.os_loader is not None or
             self.os_loader_type is not None or
-            self.os_loader_secure is not None
+            self.os_loader_secure is not None or
+            self.os_loader_stateless is not None
         ):
             loader = self._text_node("loader", self.os_loader)
             if self.os_loader_type is not None:
@@ -3098,6 +3151,9 @@ class LibvirtConfigGuest(LibvirtConfigObject):
             if self.os_loader_secure is not None:
                 loader.set(
                     "secure", self.get_yes_no_str(self.os_loader_secure))
+            if self.os_loader_stateless is not None:
+                loader.set(
+                    "stateless", self.get_yes_no_str(self.os_loader_stateless))
             os.append(loader)
 
         if (
@@ -3367,6 +3423,16 @@ class LibvirtConfigNodeDevice(LibvirtConfigObject):
         self.vdpa_capability = None
         self.vpd_capability = None
 
+    def format_dom(self):
+        dev = super().format_dom()
+        if self.name:
+            dev.append(self._text_node('name', str(self.name)))
+        if self.parent:
+            dev.append(self._text_node('parent', str(self.parent)))
+        if self.mdev_information:
+            dev.append(self.mdev_information.format_dom())
+        return dev
+
     def parse_dom(self, xmldoc):
         super(LibvirtConfigNodeDevice, self).parse_dom(xmldoc)
 
@@ -3519,6 +3585,21 @@ class LibvirtConfigNodeDeviceMdevInformation(LibvirtConfigObject):
         self.type = None
         self.iommu_group = None
         self.uuid = None
+
+    def format_dom(self):
+        dev = super().format_dom()
+        dev.set('type', 'mdev')
+        if self.type:
+            mdev_type = self._new_node('type')
+            mdev_type.set('id', self.type)
+            dev.append(mdev_type)
+        if self.uuid:
+            dev.append(self._text_node('uuid', self.uuid))
+        if self.iommu_group:
+            iommu_group = self._new_node('iommuGroup')
+            iommu_group.set('number', str(self.iommu_group))
+            dev.append(iommu_group)
+        return dev
 
     def parse_dom(self, xmldoc):
         super(LibvirtConfigNodeDeviceMdevInformation,

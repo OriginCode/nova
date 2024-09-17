@@ -28,6 +28,7 @@ from oslo_serialization import jsonutils
 from oslo_service import loopingcall
 from oslo_utils import excutils
 from oslo_utils import fileutils
+from oslo_utils.imageutils import format_inspector
 from oslo_utils import strutils
 from oslo_utils import units
 
@@ -673,6 +674,22 @@ class Qcow2(Image):
         # Download the unmodified base image unless we already have a copy.
         if not os.path.exists(base):
             prepare_template(target=base, *args, **kwargs)
+
+        # NOTE(danms): We need to perform safety checks on the base image
+        # before we inspect it for other attributes. We do this each time
+        # because additional safety checks could have been added since we
+        # downloaded the image.
+        if not CONF.workarounds.disable_deep_image_inspection:
+            inspector = format_inspector.detect_file_format(base)
+            try:
+                inspector.safety_check()
+            except format_inspector.SafetyCheckFailed as e:
+                LOG.warning('Base image %s failed safety check: %s', base, e)
+                # NOTE(danms): This is the same exception as would be raised
+                # by qemu_img_info() if the disk format was unreadable or
+                # otherwise unsuitable.
+                raise exception.InvalidDiskInfo(
+                    reason=_('Base image failed safety check'))
 
         # NOTE(ankit): Update the mtime of the base file so the image
         # cache manager knows it is in use.
