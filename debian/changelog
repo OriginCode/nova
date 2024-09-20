@@ -1,4 +1,4 @@
-nova (2:30.0.0~rc1~git.2024.09.13.b16445df86-1) experimental; urgency=medium
+nova (2:30.0.0~rc1-1) unstable; urgency=medium
 
   * New upstream release.
   * Fixed (build-)depends for this release.
