@@ -1,6 +1,8 @@
 nova (2:30.0.0~rc1-2) UNRELEASED; urgency=medium
 
   * Add {bash,zsh}-completion for nova-manage and nova-status.
+  * Build-Depends on python3-oslo.config >= 1:9.6.0 because of the completion
+    feature otherwise not available.
 
  -- Thomas Goirand <zigo@debian.org>  Tue, 24 Sep 2024 17:09:26 +0200
 
