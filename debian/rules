@@ -177,6 +177,15 @@ endif
 	done
 	find $(CURDIR)/debian -name .gitignore -delete
 
+	echo "Generating bash completion..."
+	mkdir -p $(CURDIR)/debian/nova-common/usr/share/bash-completion/completions
+	mkdir -p $(CURDIR)/debian/nova-common/usr/share/zsh/vendor-completions
+	set -e ; set -x ; for i in manage status ; do \
+		echo "nova-$$i" ; \
+		PYTHONPATH=$(CURDIR)/debian/python3-nova/usr/lib/python3/dist-packages $(CURDIR)/debian/nova-common/usr/bin/nova-$$i --shell_completion bash >$(CURDIR)/debian/nova-common/usr/share/bash-completion/completions/nova-$$i ; \
+		PYTHONPATH=$(CURDIR)/debian/python3-nova/usr/lib/python3/dist-packages $(CURDIR)/debian/nova-common/usr/bin/nova-$$i --shell_completion zsh >$(CURDIR)/debian/nova-common/usr/share/zsh/vendor-completions/_nova-$$i ; \
+	done
+
 override_dh_fixperms:
 	dh_fixperms -Xnova_sudoers
 	dh_fixperms -Xnova_tgt
