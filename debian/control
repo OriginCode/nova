@@ -192,6 +192,7 @@ Depends:
  gawk,
  iptables,
  kpartx,
+ mdevctl,
  nova-common (= ${binary:Version}),
  nova-compute-kvm | nova-compute-hypervisor,
  open-iscsi,

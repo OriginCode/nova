@@ -1,3 +1,9 @@
+nova (2:30.0.0-2) unstable; urgency=medium
+
+  * Add mdevctl as dependency for nova-compute, as it can be used for VGPUs.
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 13 Nov 2024 10:01:37 +0100
+
 nova (2:30.0.0-1) unstable; urgency=medium
 
   * Add {bash,zsh}-completion for nova-manage and nova-status.
