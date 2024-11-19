@@ -1,0 +1,33 @@
+Description: Fix fake_get_by_flavor_id
+Author: Thomas Goirand <zigo@debian.org>
+Forwarded: no
+Last-Update: 2024-11-19
+
+--- nova-30.0.0.orig/nova/tests/unit/api/openstack/fakes.py
++++ nova-30.0.0/nova/tests/unit/api/openstack/fakes.py
+@@ -14,6 +14,7 @@
+ #    under the License.
+ 
+ import datetime
++import sys
+ 
+ from oslo_serialization import jsonutils
+ from oslo_utils import timeutils
+@@ -734,9 +735,14 @@ FLAVORS = {
+ 
+ 
+ def stub_out_flavor_get_by_flavor_id(test):
+-    @staticmethod
+-    def fake_get_by_flavor_id(context, flavor_id, read_deleted=None):
+-        return FLAVORS[flavor_id]
++    if sys.version_info >= (3, 13):
++        @staticmethod
++        def fake_get_by_flavor_id(self, context, flavor_id, read_deleted=None):
++            return FLAVORS[flavor_id]
++    else:
++        @staticmethod
++        def fake_get_by_flavor_id(context, flavor_id, read_deleted=None):
++            return FLAVORS[flavor_id]
+ 
+     test.stub_out('nova.objects.Flavor.get_by_flavor_id',
+                   fake_get_by_flavor_id)
