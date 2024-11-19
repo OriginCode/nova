@@ -3,3 +3,4 @@ remove-svg-converter-from-doc-conf.py.patch
 Add-a-healtcheck-url.patch
 python-3.13-crypt.crypt-support-is-removed.patch
 fix-fake_get_by_flavor_id.patch
+fix-exception.NovaException.patch

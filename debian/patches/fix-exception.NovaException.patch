@@ -1,0 +1,24 @@
+Description: Fix exception.NovaException
+Author: Thomas Goirand <zigo@debian.org>
+Forwarded: no
+Last-Update: 2024-11-19
+
+--- nova-30.0.0.orig/nova/virt/disk/api.py
++++ nova-30.0.0/nova/virt/disk/api.py
+@@ -664,7 +664,7 @@ def _set_passwd(username, admin_passwd,
+             break
+     else:
+         msg = _('User %(username)s not found in password file.')
+-        raise exception.NovaException(msg % username)
++        raise exception.NovaException(msg % {'username': username})
+ 
+     # update password in the shadow file. It's an error if the
+     # user doesn't exist.
+@@ -680,6 +680,6 @@ def _set_passwd(username, admin_passwd,
+ 
+     if not found:
+         msg = _('User %(username)s not found in shadow file.')
+-        raise exception.NovaException(msg % username)
++        raise exception.NovaException(msg % {'username': username})
+ 
+     return "\n".join(new_shadow)
