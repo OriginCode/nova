@@ -1,3 +1,9 @@
+nova (2:30.0.0-4) unstable; urgency=medium
+
+  * Switch to pybuild (Closes: #1090451).
+
+ -- Thomas Goirand <zigo@debian.org>  Thu, 19 Dec 2024 12:24:10 +0100
+
 nova (2:30.0.0-3) unstable; urgency=medium
 
   * Add python-3.13-crypt.crypt-support-is-removed.patch, fixing FTBFS with
