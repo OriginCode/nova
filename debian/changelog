@@ -1,3 +1,9 @@
+nova (2:30.0.0-5) unstable; urgency=medium
+
+  * Add Add-context-switch-chance-to-other-th...-get_available_resources.patch.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 24 Dec 2024 12:11:10 +0100
+
 nova (2:30.0.0-4) unstable; urgency=medium
 
   * Switch to pybuild (Closes: #1090451).
