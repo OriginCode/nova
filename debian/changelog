@@ -1,3 +1,9 @@
+nova (2:30.0.0-6) unstable; urgency=medium
+
+  * Removed python3-pep8 from build-depends.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 14 Jan 2025 08:56:32 +0100
+
 nova (2:30.0.0-5) unstable; urgency=medium
 
   * Add Add-context-switch-chance-to-other-th...-get_available_resources.patch.
