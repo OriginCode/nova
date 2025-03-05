@@ -1,3 +1,9 @@
+nova (2:30.0.0-7) unstable; urgency=medium
+
+  * Add swtpm-tools depends to nova-compute-kvm.
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 05 Mar 2025 12:02:54 +0100
+
 nova (2:30.0.0-6) unstable; urgency=medium
 
   * Removed python3-pep8 from build-depends.

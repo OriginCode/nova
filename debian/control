@@ -266,6 +266,7 @@ Depends:
  qemu-block-extra,
  qemu-system-x86,
  swtpm,
+ swtpm-tools,
  ${misc:Depends},
 Provides:
  nova-compute-hypervisor,
