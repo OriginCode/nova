@@ -2,6 +2,8 @@ nova (2:31.0.0~rc1-1) experimental; urgency=medium
 
   * New upstream release.
   * Fixed (build-)depends for this release.
+  * Removed patch applied upstream:
+    - python-3.13-crypt.crypt-support-is-removed.patch
 
  -- Thomas Goirand <zigo@debian.org>  Thu, 20 Mar 2025 18:24:08 +0100
 
