@@ -6,6 +6,7 @@ nova (2:31.0.0~rc1-1) experimental; urgency=medium
     - python-3.13-crypt.crypt-support-is-removed.patch
   * Deactivate patch, as not sure still needed:
     - fix-fake_get_by_flavor_id.patch
+  * Refreshed patches.
 
  -- Thomas Goirand <zigo@debian.org>  Thu, 20 Mar 2025 18:24:08 +0100
 
