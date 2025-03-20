@@ -19,12 +19,13 @@ import functools
 import inspect
 import itertools
 import math
+import socket
 import traceback
 
-import netifaces
 from oslo_log import log
 from oslo_serialization import jsonutils
 from oslo_utils import excutils
+import psutil
 
 from nova.accelerator import cyborg
 from nova import block_device
@@ -586,6 +587,37 @@ def notify_about_volume_attach_detach(context, instance, host, action, phase,
 
 
 @rpc.if_notifications_enabled
+def notify_about_share_attach_detach(context, instance, host, action, phase,
+                                      share_id=None, exception=None):
+    """Send versioned notification about the action made on the instance
+    :param instance: the instance which the action performed on
+    :param host: the host emitting the notification
+    :param action: the name of the action
+    :param phase: the phase of the action
+    :param share_info: share related information
+    :param exception: the thrown exception (used in error notifications)
+    """
+    fault, priority = _get_fault_and_priority_from_exception(exception)
+    payload = instance_notification.InstanceActionSharePayload(
+        context=context,
+        instance=instance,
+        fault=fault,
+        share_id=share_id
+    )
+    notification = instance_notification.InstanceActionShareNotification(
+        context=context,
+        priority=priority,
+        publisher=notification_base.NotificationPublisher(
+            host=host, source=fields.NotificationSource.API),
+        event_type=notification_base.EventType(
+            object='instance',
+            action=action,
+            phase=phase),
+        payload=payload)
+    notification.emit(context)
+
+
+@rpc.if_notifications_enabled
 def notify_about_instance_rescue_action(context, instance, host,
                                         rescue_image_ref, phase=None,
                                         exception=None):
@@ -1040,22 +1072,20 @@ def get_machine_ips():
     :returns: list of Strings of ip addresses
     """
     addresses = []
-    for interface in netifaces.interfaces():
-        try:
-            iface_data = netifaces.ifaddresses(interface)
-            for family in iface_data:
-                if family not in (netifaces.AF_INET, netifaces.AF_INET6):
-                    continue
-                for address in iface_data[family]:
-                    addr = address['addr']
+    for interface, ifaddresses in psutil.net_if_addrs().items():
+        for ifaddress in ifaddresses:
+            if ifaddress.family not in (socket.AF_INET, socket.AF_INET6):
+                continue
 
-                    # If we have an ipv6 address remove the
-                    # %ether_interface at the end
-                    if family == netifaces.AF_INET6:
-                        addr = addr.split('%')[0]
-                    addresses.append(addr)
-        except ValueError:
-            pass
+            addr = ifaddress.address
+
+            # If we have an ipv6 address remove the
+            # %ether_interface at the end
+            if ifaddress.family == socket.AF_INET6:
+                addr = addr.split('%')[0]
+
+            addresses.append(addr)
+
     return addresses
 
 

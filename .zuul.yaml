@@ -20,6 +20,7 @@
       - ^api-.*$
       - ^doc/(source|test)/.*$
       - ^nova/locale/.*$
+      - ^\.pre-commit-config\.yaml$
       - ^releasenotes/.*$
     vars:
       # explicitly stating the work dir makes this job reusable by other
@@ -101,6 +102,7 @@
       - ^nova/tests/.*$
       - ^nova/test.py$
       - ^nova/virt/ironic/.*$
+      - ^\.pre-commit-config\.yaml$
       - ^releasenotes/.*$
       - ^setup.cfg$
       - ^tools/.*$
@@ -130,40 +132,18 @@
         neutron-trunk: true
         openstack-cli-server: true
       devstack_local_conf:
-        post-config:
-          $NOVA_CPU_CONF:
-            compute:
-              # we want to test live migration of floating instances between hosts with different
-              # cpu_shared_set to ensure the xml is updated properly. This is important when migrating
-              # between hosts with different number of cpu cores even when cpu_shared_set is not defined.
-              # In the ci, we have 8 cpu cores, so we set the cpu_shared_set to 0-5 for the first compute
-              # node and 2-7 for the second compute node.
-              cpu_shared_set: "0-5"
-              cpu_dedicated_set: "6-7"
         test-config:
           $TEMPEST_CONFIG:
             compute-feature-enabled:
               volume_backed_live_migration: true
               block_migration_for_live_migration: true
               block_migrate_cinder_iscsi: true
-    group-vars:
-      subnode:
-        devstack_local_conf:
-          post-config:
-            $NOVA_CPU_CONF:
-              compute:
-                # we want to test live migration of floating instances between hosts with different
-                # cpu_shared_set to ensure the xml is updated properly. This is important when migrating
-                # between hosts with different number of cpu cores even when cpu_shared_set is not defined.
-                # In the ci, we have 8 cpu cores, so we set the cpu_shared_set to 0-5 for the first compute
-                # node and 2-7 for the second compute node.
-                cpu_shared_set: "2-7"
-                cpu_dedicated_set: "0-1"
     post-run: playbooks/nova-live-migration/post-run.yaml
 
 - job:
     name: nova-ovs-hybrid-plug
     parent: tempest-multinode-full-py3
+    nodeset: devstack-two-node-debian-bookworm
     description: |
       Run move operations, reboot, and evacuation (via the same post-run hook
       as the nova-live-migration job) tests with the OVS network backend and
@@ -181,6 +161,7 @@
       - ^nova/policies/.*$
       - ^nova/tests/.*$
       - ^nova/test.py$
+      - ^\.pre-commit-config\.yaml$
       - ^releasenotes/.*$
       - ^setup.cfg$
       - ^tools/.*$
@@ -189,12 +170,13 @@
       tox_envlist: all
       # bug #1940425  only affect ml2/ovn so we execute
       # test_live_migration_with_trunk in this job to keep
-      tempest_test_regex: (^tempest\..*compute\..*(migration|resize|reboot).*)
+      tempest_test_regex: (^tempest\..*compute\..*(migration|resize|reboot|spice).*)
       devstack_localrc:
         Q_AGENT: openvswitch
         Q_ML2_TENANT_NETWORK_TYPE: vxlan
         Q_ML2_PLUGIN_MECHANISM_DRIVERS: openvswitch
         ML2_L3_PLUGIN: router
+        NOVA_VNC_ENABLED: False
       devstack_services:
         # Disable OVN services
         br-ex-tcpdump: false
@@ -222,6 +204,9 @@
         s-object: false
         s-proxy: false
         openstack-cli-server: true
+        # disable vnc and enable spice
+        n-novnc: false
+        n-spice: true
       devstack_local_conf:
         post-config:
           "/$NEUTRON_CORE_PLUGIN_CONF":
@@ -230,6 +215,9 @@
           $NEUTRON_CONF:
             nova:
               live_migration_events: True
+          $NOVA_CPU_CONF:
+              compute:
+                heal_instance_info_cache_interval: 60
     group-vars:
       subnode:
         devstack_localrc:
@@ -237,6 +225,8 @@
           Q_ML2_TENANT_NETWORK_TYPE: vxlan
           Q_ML2_PLUGIN_MECHANISM_DRIVERS: openvswitch
           ML2_L3_PLUGIN: router
+          NOVA_VNC_ENABLED: False
+          NOVA_SPICE_ENABLED: true
         devstack_services:
           # Disable OVN services
           br-ex-tcpdump: false
@@ -270,6 +260,9 @@
             $NEUTRON_CONF:
               nova:
                 live_migration_events: True
+            $NOVA_CPU_CONF:
+              compute:
+                heal_instance_info_cache_interval: 60
     post-run: playbooks/nova-live-migration/post-run.yaml
 
 - job:
@@ -401,7 +394,8 @@
       Starting in Train, the job enabled counting quota usage from placement.
       Starting in Ussuri, the job was changed to multinode.
       Starting in Wallaby, the job defaults to the q35 machine type.
-      Starting in Yoga, the job tests noVNC from source.
+      Starting in Yoga, the job tests noVNC from source and enables unified limits.
+      Starting in Caracal, the job compiles the mdev sample drivers from source.
       Runs all tempest compute API and most scenario tests concurrently.
     irrelevant-files: *nova-base-irrelevant-files
     # Run post-tempest tests like for nova-manage commands.
@@ -493,7 +487,7 @@
         # Added in Yoga.
         NOVNC_FROM_PACKAGE: False
         NOVA_USE_UNIFIED_LIMITS: True
-        MYSQL_REDUCE_MEMORY: True
+        # Added in Caracal.
         NOVA_COMPILE_MDEV_SAMPLES: True
       devstack_services:
         # Disable OVN services
@@ -750,16 +744,15 @@
             image_conversion:
               output_format: raw
 
-# TODO(gmann): Remove this jobs once all the required services for intergrate
-# compute gate (Cinder, Glance, Neutron) by default enable scope and new
-# defaults which means all the nova jobs will be tested with new RBAC in
-# integrated way and we do not need this separate job.
 - job:
-    name: tempest-integrated-compute-enforce-scope-new-defaults
+    name: tempest-integrated-compute-rbac-old-defaults
     parent: tempest-integrated-compute
+    # TODO(gmann): As per the 2025.1 testing runtime, we need to run at least
+    # one job on jammy. This job can be moved to Noble in the next cycle
+    # (2025.2).
+    nodeset: openstack-single-node-jammy
     description: |
-      This job runs the Tempest tests with scope and new defaults enabled
-      for Nova, Neutron, Glance, and Cinder services.
+      This job runs the Tempest tests with Nova RBAC old defaults
     irrelevant-files: &policies-irrelevant-files
       - ^api-.*$
       - ^(test-|)requirements.txt$
@@ -770,37 +763,11 @@
       - ^nova/locale/.*$
       - ^nova/tests/.*$
       - ^nova/test.py$
+      - ^\.pre-commit-config\.yaml$
       - ^releasenotes/.*$
       - ^setup.cfg$
       - ^tools/.*$
       - ^tox.ini$
-# TODO (gmann): There were few fixes in neutron and neutron-lib for the
-    # RBAC but they are not yet released so we need to add both projcts as
-    # the required-projects. Those can be removed once new version of neutron
-    # and neutron-lib is released.
-    required-projects:
-      - openstack/neutron
-      - openstack/neutron-lib
-    vars:
-      devstack_services:
-        openstack-cli-server: true
-      devstack_localrc:
-        # Enabeling the scope and new defaults for services implemented it.
-        # NOTE (gmann): We need to keep keystone scope check disable as
-        # services (except ironic) does not support the system scope and
-        # they need keystone to continue working with project scope. Until
-        # Keystone policies are changed to work for project scoped also, we
-        # need to keep scope check disable for keystone.
-        # Nova and Glance scope and new defaults are enabled by default in
-        # Devstack so we do not need to explicitly set that to True.
-        CINDER_ENFORCE_SCOPE: true
-        NEUTRON_ENFORCE_SCOPE: true
-
-- job:
-    name: tempest-integrated-compute-rbac-old-defaults
-    parent: tempest-integrated-compute
-    description: |
-      This job runs the Tempest tests with Nova RBAC old defaults
     vars:
       devstack_services:
         openstack-cli-server: true
@@ -853,10 +820,6 @@
            # common jobs will be enough along with nova functional
            # and unit tests.
            irrelevant-files: *policies-irrelevant-files
-        - tempest-integrated-compute-enforce-scope-new-defaults:
-            irrelevant-files: *policies-irrelevant-files
-        - tempest-integrated-compute-rbac-old-defaults:
-            irrelevant-files: *policies-irrelevant-files
         - grenade-skip-level-always:
             irrelevant-files: *policies-irrelevant-files
         - nova-grenade-multinode:
@@ -891,10 +854,6 @@
               - nova/virt/libvirt/vif.py
         - tempest-integrated-compute:
             irrelevant-files: *policies-irrelevant-files
-        - tempest-integrated-compute-enforce-scope-new-defaults:
-            irrelevant-files: *policies-irrelevant-files
-        - tempest-integrated-compute-rbac-old-defaults:
-            irrelevant-files: *policies-irrelevant-files
         - grenade-skip-level-always:
             irrelevant-files: *policies-irrelevant-files
         - nova-grenade-multinode:
@@ -910,6 +869,8 @@
         - nova-emulation
         - ironic-tempest-ipa-wholedisk-direct-tinyipa-multinode-shard
         - tempest-centos9-stream-fips
+        - whitebox-devstack-multinode
+        - tempest-integrated-compute-rbac-old-defaults
     experimental:
       jobs:
         - ironic-tempest-bfv:
@@ -940,3 +901,6 @@
         - nova-emulation
         - tempest-integrated-compute-centos-9-stream:
             irrelevant-files: *nova-base-irrelevant-files
+        - whitebox-devstack-multinode
+        - tempest-integrated-compute-rbac-old-defaults:
+            irrelevant-files: *policies-irrelevant-files

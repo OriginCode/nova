@@ -26,6 +26,7 @@ from eventlet import event as eventlet_event
 from eventlet import timeout as eventlet_timeout
 from keystoneauth1 import exceptions as keystone_exception
 import netaddr
+from openstack import exceptions as sdk_exc
 from oslo_log import log as logging
 import oslo_messaging as messaging
 from oslo_serialization import jsonutils
@@ -115,6 +116,79 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
                 }
             }
         }
+
+    def get_fake_share_mapping(self):
+        share_mapping = objects.ShareMapping(self.context)
+        share_mapping.uuid = uuids.uuid
+        share_mapping.instance_uuid = uuids.instance
+        share_mapping.share_id = uuids.share_id
+        share_mapping.status = 'inactive'
+        share_mapping.tag = 'fake_tag'
+        share_mapping.export_location = '192.168.122.152:/manila/share'
+        share_mapping.share_proto = 'NFS'
+        return share_mapping
+
+    def get_fake_share_access(self):
+        access = {
+            "access_level": "rw",
+            "state": "active",
+            "id": "507bf114-36f2-4f56-8cf4-857985ca87c1",
+            "access_type": "ip",
+            "access_to": "192.168.0.1",
+            "access_key": None,
+        }
+        return nova.share.manila.Access.from_dict(access)
+
+    def get_fake_share_mapping_cephfs(self):
+        share_mapping = self.get_fake_share_mapping()
+        share_mapping.share_proto = 'CEPHFS'
+        return share_mapping
+
+    def get_fake_share_access_cephfs(self):
+        access = {
+            "access_level": "rw",
+            "state": "active",
+            "id": "507bf114-36f2-4f56-8cf4-857985ca87c1",
+            "access_type": "cephx",
+            "access_to": "nova",
+            "access_key": "mykey",
+        }
+        return nova.share.manila.Access.from_dict(access)
+
+    def fake_share_info(self):
+        share_mapping = {}
+        share_mapping['id'] = 1
+        share_mapping['created_at'] = None
+        share_mapping['updated_at'] = None
+        share_mapping['uuid'] = uuids.share_mapping
+        share_mapping['instance_uuid'] = (
+            '386dbea6-0338-4104-8eb9-42b214b40311')
+        share_mapping['share_id'] = '232a4b40-306b-4cce-8bf4-689d2e671552'
+        share_mapping['status'] = 'inactive'
+        share_mapping['tag'] = 'fake_tag'
+        share_mapping['export_location'] = 'fake_export_location'
+        share_mapping['share_proto'] = 'NFS'
+
+        # This share_mapping status is error so it should be filtered
+        share_mapping2 = {}
+        share_mapping2['id'] = 2
+        share_mapping2['created_at'] = None
+        share_mapping2['updated_at'] = None
+        share_mapping2['uuid'] = uuids.share_mapping2
+        share_mapping2['instance_uuid'] = (
+            '386dbea6-0338-4104-8eb9-42b214b40312')
+        share_mapping2['share_id'] = '232a4b40-306b-4cce-8bf4-689d2e671553'
+        share_mapping2['status'] = 'error'
+        share_mapping2['tag'] = 'fake_tag2'
+        share_mapping2['export_location'] = 'fake_export_location2'
+        share_mapping2['share_proto'] = 'NFS'
+
+        share_info = objects.base.obj_make_list(
+            self.context,
+            objects.ShareMappingList(self.context),
+            objects.ShareMapping,
+            [share_mapping, share_mapping2])
+        return share_info
 
     @mock.patch.object(manager.ComputeManager, '_get_power_state')
     @mock.patch.object(manager.ComputeManager, '_sync_instance_power_state')
@@ -1438,8 +1512,16 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
             mock.patch.object(self.compute.driver, 'plug_vifs',
                 side_effect=exception.VirtualInterfacePlugException(
                     "Unexpected vif_type=binding_failed")),
-            mock.patch.object(self.compute, '_set_instance_obj_error_state')
-        ) as (get_admin_context, get_nw_info, plug_vifs, set_error_state):
+            mock.patch.object(self.compute, '_set_instance_obj_error_state'),
+            mock.patch('nova.compute.manager.ComputeManager._get_share_info',
+                return_value=objects.ShareMappingList()),
+        ) as (
+            get_admin_context,
+            get_nw_info,
+            plug_vifs,
+            set_error_state,
+            mock_shares,
+        ):
             self.compute._init_instance(self.context, instance)
             set_error_state.assert_called_once_with(instance)
 
@@ -1462,7 +1544,14 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
             mock.patch.object(self.compute.driver, 'plug_vifs',
                 side_effect=exception.PciDeviceNotFoundById("pci-addr")),
             mock.patch("nova.compute.manager.LOG.exception"),
-        ) as (get_admin_context, get_nw_info, plug_vifs, log_exception):
+            mock.patch("nova.compute.manager.ComputeManager._get_share_info",
+            return_value=objects.ShareMappingList()),
+        ) as (
+                get_admin_context,
+                get_nw_info, plug_vifs,
+                log_exception,
+                mock_shares
+            ):
             # as this does not raise, we are sure that the compute service
             # continues initializing the rest of the instances
             self.compute._init_instance(self.context, instance)
@@ -1664,6 +1753,8 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
                               self.compute._get_power_state,
                               instance)
 
+    @mock.patch.object(manager.ComputeManager, '_mount_all_shares')
+    @mock.patch.object(manager.ComputeManager, '_get_share_info')
     @mock.patch.object(manager.ComputeManager, '_get_power_state')
     @mock.patch.object(fake_driver.FakeDriver, 'plug_vifs')
     @mock.patch.object(fake_driver.FakeDriver, 'resume_state_on_host_boot')
@@ -1671,7 +1762,8 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
                        '_get_instance_block_device_info')
     @mock.patch.object(manager.ComputeManager, '_set_instance_obj_error_state')
     def test_init_instance_failed_resume_sets_error(self, mock_set_inst,
-                mock_get_inst, mock_resume, mock_plug, mock_get_power):
+        mock_get_inst, mock_resume, mock_plug, mock_get_power,
+        mock_get_share_info, mock_mount):
         instance = fake_instance.fake_instance_obj(
                 self.context,
                 uuid=uuids.instance,
@@ -1687,14 +1779,19 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
                                       power_state.SHUTDOWN)
         mock_get_inst.return_value = 'fake-bdm'
         mock_resume.side_effect = test.TestingException
+        share_info = objects.ShareMappingList()
+        mock_get_share_info.return_value = share_info
+
         self.compute._init_instance('fake-context', instance)
         mock_get_power.assert_has_calls([mock.call(instance),
                                          mock.call(instance)])
         mock_plug.assert_called_once_with(instance, mock.ANY)
         mock_get_inst.assert_called_once_with(mock.ANY, instance)
         mock_resume.assert_called_once_with(mock.ANY, instance, mock.ANY,
-                                            'fake-bdm')
+                                            share_info, 'fake-bdm')
         mock_set_inst.assert_called_once_with(instance)
+        mock_get_share_info.assert_called_once_with(mock.ANY, instance)
+        mock_mount.assert_called_once_with(mock.ANY, instance, share_info)
 
     @mock.patch.object(objects.BlockDeviceMapping, 'destroy')
     @mock.patch.object(objects.BlockDeviceMappingList, 'get_by_instance_uuid')
@@ -1737,7 +1834,11 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
                                                instance.user_id)
         mock_inst_destroy.side_effect = fake_inst_destroy()
 
-        self.compute._init_instance(self.context, instance)
+        with mock.patch(
+            "nova.compute.manager.ComputeManager._get_share_info",
+            return_value=objects.ShareMappingList(),
+        ):
+            self.compute._init_instance(self.context, instance)
 
         # Make sure that instance.destroy method was called and
         # instance was deleted from db.
@@ -1762,8 +1863,11 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
                 system_metadata={},
                 expected_attrs=['metadata', 'system_metadata'])
 
-        with mock.patch.object(self.compute,
-                               '_complete_partial_deletion') as mock_deletion:
+        with test.nested(
+            mock.patch.object(self.compute, '_complete_partial_deletion'),
+            mock.patch("nova.compute.manager.ComputeManager._get_share_info",
+                return_value=objects.ShareMappingList())
+        ) as (mock_deletion, mock_shares):
             mock_deletion.side_effect = test.TestingException()
             self.compute._init_instance(self, instance)
             msg = u'Failed to complete a deletion'
@@ -1788,8 +1892,11 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
                                   'get_by_instance_uuid',
                                   return_value=bdms),
                 mock.patch.object(self.compute, '_delete_instance'),
-                mock.patch.object(instance, 'obj_load_attr')
-        ) as (mock_get, mock_delete, mock_load):
+                mock.patch.object(instance, 'obj_load_attr'),
+                mock.patch(
+                    'nova.compute.manager.ComputeManager._get_share_info',
+                    return_value=objects.ShareMappingList()),
+        ) as (mock_get, mock_delete, mock_load, mock_shares):
             self.compute._init_instance(self.context, instance)
             mock_get.assert_called_once_with(self.context, instance.uuid)
             mock_delete.assert_called_once_with(self.context, instance,
@@ -1827,7 +1934,11 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
         mock_get_by_instance_uuid.return_value = bdms
         mock_get_by_uuid.return_value = instance
         mock_delete_instance.side_effect = test.TestingException('test')
-        self.compute._init_instance(self.context, instance)
+        with mock.patch(
+            "nova.compute.manager.ComputeManager._get_share_info",
+            return_value=objects.ShareMappingList(),
+        ):
+            self.compute._init_instance(self.context, instance)
         mock_set_instance_error_state.assert_called_once_with(instance)
 
     def _test_init_instance_reverts_crashed_migrations(self,
@@ -1862,9 +1973,13 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
             mock.patch.object(self.compute, '_retry_reboot',
                               return_value=(False, None)),
             mock.patch.object(objects.Migration, 'get_by_id_and_instance',
-                              return_value=migration)
+                              return_value=migration),
+            mock.patch(
+                "nova.compute.manager.ComputeManager._get_share_info",
+                return_value=objects.ShareMappingList(),
+            ),
         ) as (mock_get_nw, mock_plug, mock_finish, mock_get_inst,
-              mock_get_info, mock_save, mock_retry, mock_get_mig):
+              mock_get_info, mock_save, mock_retry, mock_get_mig, mock_shares):
             mock_get_info.side_effect = (
                 hardware.InstanceInfo(state=power_state.SHUTDOWN),
                 hardware.InstanceInfo(state=power_state.SHUTDOWN))
@@ -1911,8 +2026,18 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
             mock.patch.object(objects.Migration, 'get_by_instance_and_status',
                               return_value=migration),
             mock.patch.object(self.compute, 'live_migration_abort'),
-            mock.patch.object(self.compute, '_set_migration_status')
-        ) as (save, get_nw_info, mock_get_status, mock_abort, mock_set_migr):
+            mock.patch.object(self.compute, '_set_migration_status'),
+            mock.patch(
+                "nova.compute.manager.ComputeManager._get_share_info",
+                return_value=objects.ShareMappingList())
+        ) as (
+                save,
+                get_nw_info,
+                mock_get_status,
+                mock_abort,
+                mock_set_migr,
+                mock_shares,
+            ):
             self.compute._init_instance(self.context, instance)
             save.assert_called_once_with(expected_task_state=['migrating'])
             get_nw_info.assert_called_once_with()
@@ -1932,7 +2057,11 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
                 vm_state=vm_state,
                 host=self.compute.host,
                 task_state=task_state)
-        with mock.patch.object(instance, 'save') as save:
+        with test.nested(
+            mock.patch.object(instance, 'save'),
+            mock.patch("nova.compute.manager.ComputeManager._get_share_info",
+                       return_value=objects.ShareMappingList()),
+        ) as (save, mock_shares):
             self.compute._init_instance(self.context, instance)
             save.assert_called_once_with()
         self.assertIsNone(instance.task_state)
@@ -1952,7 +2081,12 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
                 self._test_init_instance_sets_building_error(
                     vm_state, task_state)
 
-    def _test_init_instance_sets_building_tasks_error(self, instance):
+    @mock.patch(
+        "nova.compute.manager.ComputeManager._get_share_info",
+        return_value=objects.ShareMappingList()
+    )
+    def _test_init_instance_sets_building_tasks_error(
+            self, instance, mock_shares):
         instance.host = self.compute.host
         with mock.patch.object(instance, 'save') as save:
             self.compute._init_instance(self.context, instance)
@@ -1990,7 +2124,11 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
         self._test_init_instance_sets_building_tasks_error(instance)
 
     def _test_init_instance_cleans_image_states(self, instance):
-        with mock.patch.object(instance, 'save') as save:
+        with test.nested(
+            mock.patch.object(instance, 'save'),
+            mock.patch("nova.compute.manager.ComputeManager._get_share_info",
+                       return_value=objects.ShareMappingList()),
+        ) as (save, mock_shares):
             self.compute._get_power_state = mock.Mock()
             instance.info_cache = None
             instance.power_state = power_state.RUNNING
@@ -1999,11 +2137,13 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
             save.assert_called_once_with()
         self.assertIsNone(instance.task_state)
 
+    @mock.patch("nova.compute.manager.ComputeManager._get_share_info",
+                return_value=objects.ShareMappingList())
     @mock.patch('nova.compute.manager.ComputeManager._get_power_state',
                 return_value=power_state.RUNNING)
     @mock.patch.object(objects.BlockDeviceMappingList, 'get_by_instance_uuid')
     def _test_init_instance_cleans_task_states(self, powerstate, state,
-            mock_get_uuid, mock_get_power_state):
+            mock_get_uuid, mock_get_power_state, mock_shares):
         instance = objects.Instance(self.context)
         instance.uuid = uuids.instance
         instance.info_cache = None
@@ -2091,8 +2231,11 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
                                   'get_by_instance_uuid',
                                   return_value=bdms),
                 mock.patch.object(self.compute, '_delete_instance'),
-                mock.patch.object(instance, 'obj_load_attr')
-        ) as (mock_get, mock_delete, mock_load):
+                mock.patch.object(instance, 'obj_load_attr'),
+                mock.patch(
+                    "nova.compute.manager.ComputeManager._get_share_info",
+                    return_value=objects.ShareMappingList()),
+        ) as (mock_get, mock_delete, mock_load, mock_shares):
             self.compute._init_instance(self.context, instance)
             mock_get.assert_called_once_with(self.context, instance.uuid)
             mock_delete.assert_called_once_with(self.context, instance,
@@ -2111,28 +2254,1296 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
             mock.patch.object(self.compute, '_get_power_state',
                               return_value=power_state.RUNNING),
             mock.patch.object(objects.Instance, 'get_network_info'),
-            mock.patch.object(instance, 'save', autospec=True)
-        ) as (mock_get_power_state, mock_nw_info, mock_instance_save):
+            mock.patch.object(instance, 'save', autospec=True),
+            mock.patch("nova.compute.manager.ComputeManager._get_share_info",
+                       return_value=objects.ShareMappingList())
+        ) as (
+                mock_get_power_state,
+                mock_nw_info,
+                mock_instance_save,
+                mock_shares
+            ):
             self.compute._init_instance(self.context, instance)
             mock_instance_save.assert_called_once_with()
             self.assertIsNone(instance.task_state)
 
+    @mock.patch('nova.compute.manager.ComputeManager._get_share_info')
     @mock.patch('nova.virt.fake.FakeDriver.power_off')
     @mock.patch.object(compute_utils, 'get_value_from_system_metadata',
             return_value=CONF.shutdown_timeout)
-    def test_power_off_values(self, mock_get_metadata, mock_power_off):
+    def test_power_off_values(
+        self, mock_get_metadata, mock_power_off, mock_share
+    ):
         self.flags(shutdown_retry_interval=20, group='compute')
         instance = fake_instance.fake_instance_obj(
                 self.context,
                 uuid=uuids.instance,
                 vm_state=vm_states.ACTIVE,
                 task_state=task_states.POWERING_OFF)
-        self.compute._power_off_instance(instance, clean_shutdown=True)
+        self.compute._power_off_instance(
+            self.context, instance, clean_shutdown=True
+        )
         mock_power_off.assert_called_once_with(
                 instance,
                 CONF.shutdown_timeout,
                 20)
 
+    @mock.patch('nova.objects.ShareMappingList.get_by_instance_uuid')
+    def test_get_share_info(self, mock_db):
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        mock_db.return_value = self.fake_share_info()
+        # Delete the second share_mapping which is in error state
+        del mock_db.return_value.objects[1]
+
+        share_info = self.compute._get_share_info(self.context, instance)
+        self.assertIsInstance(
+            share_info, objects.share_mapping.ShareMappingList)
+        self.assertEqual(len(share_info), 1)
+        self.assertIsInstance(
+            share_info[0], objects.share_mapping.ShareMapping)
+        self.assertEqual(share_info[0].id, 1)
+        self.assertEqual(
+            share_info[0].instance_uuid,
+            '386dbea6-0338-4104-8eb9-42b214b40311')
+        self.assertEqual(
+            share_info[0].share_id, '232a4b40-306b-4cce-8bf4-689d2e671552')
+        self.assertEqual(share_info[0].status, 'inactive')
+        self.assertEqual(share_info[0].tag, 'fake_tag')
+        self.assertEqual(share_info[0].export_location, 'fake_export_location')
+        self.assertEqual(share_info[0].share_proto, 'NFS')
+
+    @mock.patch('nova.objects.ShareMappingList.get_by_instance_uuid')
+    def test_get_share_info_check_status_false(self, mock_db):
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        # Set the first share_mapping status to attaching, the second is in
+        # error
+        share_mappings = self.fake_share_info()
+        share_mappings.objects[0].status = "attaching"
+        mock_db.return_value = share_mappings
+
+        share_info = self.compute._get_share_info(
+            self.context, instance, check_status=False
+        )
+        self.assertIsInstance(
+            share_info, objects.share_mapping.ShareMappingList)
+        self.assertEqual(len(share_info), 2)
+        self.assertIsInstance(
+            share_info[0], objects.share_mapping.ShareMapping)
+        self.assertEqual(share_info[0].id, 1)
+        self.assertEqual(
+            share_info[0].instance_uuid,
+            '386dbea6-0338-4104-8eb9-42b214b40311')
+        self.assertEqual(
+            share_info[0].share_id, '232a4b40-306b-4cce-8bf4-689d2e671552')
+        self.assertEqual(share_info[0].status, 'attaching')
+        self.assertEqual(share_info[0].tag, 'fake_tag')
+        self.assertEqual(share_info[0].export_location, 'fake_export_location')
+        self.assertEqual(share_info[0].share_proto, 'NFS')
+        self.assertIsInstance(
+            share_info[1], objects.share_mapping.ShareMapping)
+        self.assertEqual(share_info[1].id, 2)
+        self.assertEqual(
+            share_info[1].instance_uuid,
+            '386dbea6-0338-4104-8eb9-42b214b40312')
+        self.assertEqual(
+            share_info[1].share_id, '232a4b40-306b-4cce-8bf4-689d2e671553')
+        self.assertEqual(share_info[1].status, 'error')
+        self.assertEqual(share_info[1].tag, 'fake_tag2')
+        self.assertEqual(
+            share_info[1].export_location, 'fake_export_location2')
+        self.assertEqual(share_info[1].share_proto, 'NFS')
+
+    @mock.patch('nova.compute.manager.LOG', autospec=True)
+    @mock.patch('nova.objects.instance.Instance.save')
+    @mock.patch('nova.objects.ShareMappingList.get_by_instance_uuid')
+    def test_get_share_info_warning_share_mapping_in_error(
+        self, mock_db, mock_instance, mock_log
+    ):
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        mock_db.return_value = self.fake_share_info()
+
+        output = self.compute._get_share_info(self.context, instance)
+
+        mock_log.warning.assert_called_once_with(
+            "Share id '%s' attached to server id '%s' is in " "error state.",
+            "232a4b40-306b-4cce-8bf4-689d2e671553",
+            instance.id,
+        )
+
+        self.assertEqual(
+            output[0].share_id, "232a4b40-306b-4cce-8bf4-689d2e671552"
+        )
+        self.assertEqual(
+            output[1].share_id, "232a4b40-306b-4cce-8bf4-689d2e671553"
+        )
+
+    @mock.patch('nova.compute.manager.LOG', autospec=True)
+    @mock.patch('nova.objects.instance.Instance.save')
+    @mock.patch('nova.objects.ShareMappingList.get_by_instance_uuid')
+    def test_get_share_info_fails_share_mapping_in_attaching(
+        self, mock_db, mock_instance, mock_log
+    ):
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        share_mappings = self.fake_share_info()
+        share_mappings.objects[0].status = "attaching"
+        mock_db.return_value = share_mappings
+
+        self.assertRaises(
+            exception.ShareErrorUnexpectedStatus,
+            self.compute._get_share_info,
+            self.context,
+            instance
+        )
+
+        mock_log.error.assert_called_once_with(
+            "Share id '%s' attached to server id '%s' is "
+            "still in '%s' state. Setting the instance "
+            "in error.",
+            share_mappings.objects[0].share_id,
+            instance.id,
+            "attaching",
+        )
+
+    @mock.patch('nova.compute.manager.LOG', autospec=True)
+    @mock.patch('nova.objects.instance.Instance.save')
+    @mock.patch('nova.objects.ShareMappingList.get_by_instance_uuid')
+    def test_get_share_info_fails_share_mapping_in_detaching(
+        self, mock_db, mock_instance, mock_log
+    ):
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        share_mappings = self.fake_share_info()
+        share_mappings.objects[0].status = "detaching"
+        mock_db.return_value = share_mappings
+
+        self.assertRaises(
+            exception.ShareErrorUnexpectedStatus,
+            self.compute._get_share_info,
+            self.context,
+            instance
+        )
+
+        mock_log.error.assert_called_once_with(
+            "Share id '%s' attached to server id '%s' is "
+            "still in '%s' state. Setting the instance "
+            "in error.",
+            share_mappings.objects[0].share_id,
+            instance.id,
+            "detaching",
+        )
+
+    @mock.patch(
+        'nova.compute.utils.notify_about_share_attach_detach',
+        return_value=None
+    )
+    @mock.patch('nova.share.manila.API.allow')
+    @mock.patch('nova.share.manila.API.get_access')
+    @mock.patch('nova.objects.share_mapping.ShareMapping.save')
+    def test_allow_share(
+        self, mock_db, mock_get_access, mock_allow, mock_notifications
+    ):
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        mock_get_access.side_effect = [None, self.get_fake_share_access()]
+        # Ensure CONF.my_shared_fs_storage_ip default is my_ip
+        self.flags(my_ip="10.0.0.2")
+        self.assertEqual(CONF.my_shared_fs_storage_ip, '10.0.0.2')
+        # Set CONF.my_shared_fs_storage_ip to ensure it is used by the code
+        self.flags(my_shared_fs_storage_ip="192.168.0.1")
+        compute_ip = CONF.my_shared_fs_storage_ip
+        self.assertEqual(compute_ip, '192.168.0.1')
+        share_mapping = self.get_fake_share_mapping()
+        self.compute.allow_share(self.context, instance, share_mapping)
+        mock_get_access.assert_called_with(
+            self.context, share_mapping.share_id, 'ip', compute_ip)
+        mock_allow.assert_called_once_with(
+            mock.ANY, share_mapping.share_id, 'ip', compute_ip, 'rw')
+        mock_notifications.assert_has_calls([
+            mock.call(
+                mock.ANY,
+                instance,
+                "fake-host",
+                action=fields.NotificationAction.SHARE_ATTACH,
+                phase=fields.NotificationPhase.START,
+                share_id=share_mapping.share_id,
+            ),
+            mock.call(
+                mock.ANY,
+                instance,
+                "fake-host",
+                action=fields.NotificationAction.SHARE_ATTACH,
+                phase=fields.NotificationPhase.END,
+                share_id=share_mapping.share_id,
+            ),
+        ])
+
+    @mock.patch.object(db, 'instance_fault_create')
+    @mock.patch(
+        'nova.compute.utils.notify_about_share_attach_detach',
+        return_value=None
+    )
+    @mock.patch('nova.share.manila.API.allow')
+    @mock.patch('nova.share.manila.API.get_access')
+    @mock.patch('nova.objects.share_mapping.ShareMapping.save')
+    def test_allow_share_fails_share_grant_failure(
+        self, mock_db, mock_get_access, mock_allow, mock_notifications,
+        mock_instance_fault_create
+    ):
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        mock_get_access.side_effect = [None, self.get_fake_share_access()]
+        mock_instance_fault_create.return_value = (
+            test_instance_fault.fake_faults['fake-uuid'][0])
+        # Ensure CONF.my_shared_fs_storage_ip default is my_ip
+        self.flags(my_ip="10.0.0.2")
+        self.assertEqual(CONF.my_shared_fs_storage_ip, '10.0.0.2')
+        # Set CONF.my_shared_fs_storage_ip to ensure it is used by the code
+        self.flags(my_shared_fs_storage_ip="192.168.0.1")
+        compute_ip = CONF.my_shared_fs_storage_ip
+        self.assertEqual(compute_ip, '192.168.0.1')
+        share_mapping = self.get_fake_share_mapping()
+
+        exc = exception.ShareAccessGrantError(
+            share_id=share_mapping.share_id,
+            reason="fake_reason"
+        )
+        mock_allow.side_effect = exc
+
+        self.assertRaises(
+            exception.ShareAccessGrantError,
+            self.compute.allow_share,
+            self.context,
+            instance,
+            share_mapping,
+        )
+
+        self.assertEqual(share_mapping.status, 'error')
+
+        mock_get_access.assert_called_with(
+            self.context, share_mapping.share_id, 'ip', compute_ip)
+        mock_allow.assert_called_once_with(
+            mock.ANY, share_mapping.share_id, 'ip', compute_ip, 'rw')
+        mock_notifications.assert_has_calls([
+            mock.call(
+                mock.ANY,
+                instance,
+                "fake-host",
+                action=fields.NotificationAction.SHARE_ATTACH,
+                phase=fields.NotificationPhase.START,
+                share_id=share_mapping.share_id,
+            ),
+            mock.call(
+                mock.ANY,
+                instance,
+                "fake-host",
+                action=fields.NotificationAction.SHARE_ATTACH,
+                phase=fields.NotificationPhase.ERROR,
+                share_id=share_mapping.share_id,
+                exception=exc
+            ),
+        ])
+
+    @mock.patch('nova.compute.utils.add_instance_fault_from_exc')
+    @mock.patch(
+        'nova.compute.utils.notify_about_share_attach_detach',
+        return_value=None
+    )
+    @mock.patch('nova.share.manila.API.allow')
+    @mock.patch('nova.share.manila.API.get_access')
+    @mock.patch('nova.objects.share_mapping.ShareMapping.save')
+    def test_allow_share_fails_share_not_found(
+        self, mock_db, mock_get_access, mock_allow, mock_notifications,
+            mock_instance_fault
+    ):
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        mock_get_access.side_effect = [None, self.get_fake_share_access()]
+        # Ensure CONF.my_shared_fs_storage_ip default is my_ip
+        self.flags(my_ip="10.0.0.2")
+        self.assertEqual(CONF.my_shared_fs_storage_ip, '10.0.0.2')
+        # Set CONF.my_shared_fs_storage_ip to ensure it is used by the code
+        self.flags(my_shared_fs_storage_ip="192.168.0.1")
+        compute_ip = CONF.my_shared_fs_storage_ip
+        self.assertEqual(compute_ip, '192.168.0.1')
+        share_mapping = self.get_fake_share_mapping()
+        mock_allow.side_effect = exception.ShareNotFound(
+            share_id=share_mapping.share_id
+        )
+        exc = self.assertRaises(
+            exception.ShareNotFound,
+            self.compute.allow_share,
+            self.context,
+            instance,
+            share_mapping
+        )
+        mock_get_access.assert_called_with(
+            self.context, share_mapping.share_id, 'ip', compute_ip)
+        mock_allow.assert_called_once_with(
+            mock.ANY, share_mapping.share_id, 'ip', compute_ip, 'rw')
+
+        mock_instance_fault.assert_called_once_with(
+            mock.ANY,
+            instance,
+            exc,
+            mock.ANY
+        )
+
+    @mock.patch('nova.compute.utils.add_instance_fault_from_exc')
+    @mock.patch(
+        'nova.compute.utils.notify_about_share_attach_detach',
+        return_value=None
+    )
+    @mock.patch('nova.share.manila.API.allow')
+    @mock.patch('nova.share.manila.API.get_access')
+    @mock.patch('nova.objects.share_mapping.ShareMapping.save')
+    def test_allow_share_fails_share_access_grant_error(
+        self, mock_db, mock_get_access, mock_allow, mock_notifications,
+            mock_instance_fault
+    ):
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        mock_get_access.side_effect = [None, self.get_fake_share_access()]
+        # Ensure CONF.my_shared_fs_storage_ip default is my_ip
+        self.flags(my_ip="10.0.0.2")
+        self.assertEqual(CONF.my_shared_fs_storage_ip, '10.0.0.2')
+        # Set CONF.my_shared_fs_storage_ip to ensure it is used by the code
+        self.flags(my_shared_fs_storage_ip="192.168.0.1")
+        compute_ip = CONF.my_shared_fs_storage_ip
+        self.assertEqual(compute_ip, '192.168.0.1')
+        share_mapping = self.get_fake_share_mapping()
+        mock_allow.side_effect = exception.ShareAccessGrantError(
+            share_id=share_mapping.share_id,
+            reason="fake_reason"
+        )
+        exc = self.assertRaises(
+            exception.ShareAccessGrantError,
+            self.compute.allow_share,
+            self.context,
+            instance,
+            share_mapping
+        )
+        mock_get_access.assert_called_with(
+            self.context, share_mapping.share_id, 'ip', compute_ip)
+        mock_allow.assert_called_once_with(
+            mock.ANY, share_mapping.share_id, 'ip', compute_ip, 'rw')
+
+        mock_instance_fault.assert_called_once_with(
+            mock.ANY,
+            instance,
+            exc,
+            mock.ANY
+        )
+
+    @mock.patch('nova.compute.utils.add_instance_fault_from_exc')
+    @mock.patch(
+        'nova.compute.utils.notify_about_share_attach_detach',
+        return_value=None
+    )
+    @mock.patch('nova.share.manila.API.allow')
+    @mock.patch('nova.share.manila.API.get_access')
+    @mock.patch('nova.objects.share_mapping.ShareMapping.save')
+    def test_allow_share_fails_bad_request_exception(
+        self, mock_db, mock_get_access, mock_allow, mock_notifications,
+            mock_instance_fault
+    ):
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        mock_get_access.side_effect = [None, self.get_fake_share_access()]
+        # Ensure CONF.my_shared_fs_storage_ip default is my_ip
+        self.flags(my_ip="10.0.0.2")
+        self.assertEqual(CONF.my_shared_fs_storage_ip, '10.0.0.2')
+        # Set CONF.my_shared_fs_storage_ip to ensure it is used by the code
+        self.flags(my_shared_fs_storage_ip="192.168.0.1")
+        compute_ip = CONF.my_shared_fs_storage_ip
+        self.assertEqual(compute_ip, '192.168.0.1')
+        share_mapping = self.get_fake_share_mapping()
+        mock_allow.side_effect = sdk_exc.BadRequestException()
+        exc = self.assertRaises(
+            sdk_exc.BadRequestException,
+            self.compute.allow_share,
+            self.context,
+            instance,
+            share_mapping
+        )
+        mock_get_access.assert_called_with(
+            self.context, share_mapping.share_id, 'ip', compute_ip)
+        mock_allow.assert_called_once_with(
+            mock.ANY, share_mapping.share_id, 'ip', compute_ip, 'rw')
+
+        mock_instance_fault.assert_called_once_with(
+            mock.ANY,
+            instance,
+            exc,
+            mock.ANY
+        )
+
+    @mock.patch('nova.compute.utils.add_instance_fault_from_exc')
+    @mock.patch(
+        'nova.compute.utils.notify_about_share_attach_detach',
+        return_value=None
+    )
+    @mock.patch('nova.share.manila.API.allow')
+    @mock.patch('nova.share.manila.API.get_access')
+    @mock.patch('nova.objects.share_mapping.ShareMapping.save')
+    def test_allow_share_fails_keystone_exception(
+        self, mock_db, mock_get_access, mock_allow, mock_notifications,
+            mock_instance_fault
+    ):
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        mock_get_access.side_effect = [None, self.get_fake_share_access()]
+        # Ensure CONF.my_shared_fs_storage_ip default is my_ip
+        self.flags(my_ip="10.0.0.2")
+        self.assertEqual(CONF.my_shared_fs_storage_ip, '10.0.0.2')
+        # Set CONF.my_shared_fs_storage_ip to ensure it is used by the code
+        self.flags(my_shared_fs_storage_ip="192.168.0.1")
+        compute_ip = CONF.my_shared_fs_storage_ip
+        self.assertEqual(compute_ip, '192.168.0.1')
+        share_mapping = self.get_fake_share_mapping()
+        mock_allow.side_effect = keystone_exception.http.Unauthorized(
+            message="Unauthorized"
+        )
+        exc = self.assertRaises(
+            keystone_exception.http.Unauthorized,
+            self.compute.allow_share,
+            self.context,
+            instance,
+            share_mapping
+        )
+        mock_get_access.assert_called_with(
+            self.context, share_mapping.share_id, 'ip', compute_ip)
+        mock_allow.assert_called_once_with(
+            mock.ANY, share_mapping.share_id, 'ip', compute_ip, 'rw')
+
+        mock_instance_fault.assert_called_once_with(
+            mock.ANY,
+            instance,
+            exc,
+            mock.ANY
+        )
+
+    @mock.patch('nova.compute.utils.add_instance_fault_from_exc')
+    @mock.patch(
+        'nova.compute.utils.notify_about_share_attach_detach',
+        return_value=None
+    )
+    @mock.patch('nova.share.manila.API.allow')
+    @mock.patch('nova.share.manila.API.get_access')
+    @mock.patch('nova.objects.share_mapping.ShareMapping.save')
+    def test_allow_share_fails_protocol_not_supported(
+        self, mock_db, mock_get_access, mock_allow, mock_notifications,
+            mock_instance_fault
+    ):
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        mock_get_access.side_effect = [None, self.get_fake_share_access()]
+        # Ensure CONF.my_shared_fs_storage_ip default is my_ip
+        self.flags(my_ip="10.0.0.2")
+        self.assertEqual(CONF.my_shared_fs_storage_ip, '10.0.0.2')
+        # Set CONF.my_shared_fs_storage_ip to ensure it is used by the code
+        self.flags(my_shared_fs_storage_ip="192.168.0.1")
+        compute_ip = CONF.my_shared_fs_storage_ip
+        self.assertEqual(compute_ip, '192.168.0.1')
+        share_mapping = self.get_fake_share_mapping()
+        mock_allow.side_effect = exception.ShareProtocolNotSupported(
+            share_proto=share_mapping.share_proto
+        )
+        exc = self.assertRaises(
+            exception.ShareProtocolNotSupported,
+            self.compute.allow_share,
+            self.context,
+            instance,
+            share_mapping
+        )
+        mock_get_access.assert_called_with(
+            self.context, share_mapping.share_id, 'ip', compute_ip)
+        mock_allow.assert_called_once_with(
+            mock.ANY, share_mapping.share_id, 'ip', compute_ip, 'rw')
+
+        mock_instance_fault.assert_called_once_with(
+            mock.ANY,
+            instance,
+            exc,
+            mock.ANY
+        )
+
+    @mock.patch(
+        'nova.compute.utils.notify_about_share_attach_detach',
+        return_value=None
+    )
+    @mock.patch('nova.objects.share_mapping.ShareMapping.delete')
+    @mock.patch('nova.share.manila.API.deny')
+    @mock.patch('nova.share.manila.API.get_access')
+    @mock.patch('nova.objects.share_mapping.ShareMappingList.get_by_share_id')
+    def test_deny_share(
+        self, mock_db_get_share, mock_get_access, mock_deny, mock_db_delete,
+        mock_notifications
+    ):
+        """Ensure we can deny the instance share.
+        """
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        mock_db_get_share.return_value = (
+            objects.share_mapping.ShareMappingList()
+        )
+        share_mapping = self.get_fake_share_mapping()
+        mock_db_get_share.return_value.objects.append(share_mapping)
+        # Ensure CONF.my_shared_fs_storage_ip default is my_ip
+        self.flags(my_ip="10.0.0.2")
+        self.assertEqual(CONF.my_shared_fs_storage_ip, '10.0.0.2')
+        # Set CONF.my_shared_fs_storage_ip to ensure it is used by the code
+        self.flags(my_shared_fs_storage_ip="192.168.0.1")
+        compute_ip = CONF.my_shared_fs_storage_ip
+        self.assertEqual(compute_ip, '192.168.0.1')
+        self.compute.deny_share(self.context, instance, share_mapping)
+        mock_deny.assert_called_once_with(
+            mock.ANY, share_mapping.share_id, 'ip', compute_ip)
+        mock_db_delete.assert_called_once()
+        mock_notifications.assert_has_calls([
+            mock.call(
+                mock.ANY,
+                instance,
+                "fake-host",
+                action=fields.NotificationAction.SHARE_DETACH,
+                phase=fields.NotificationPhase.START,
+                share_id=share_mapping.share_id,
+            ),
+            mock.call(
+                mock.ANY,
+                instance,
+                "fake-host",
+                action=fields.NotificationAction.SHARE_DETACH,
+                phase=fields.NotificationPhase.END,
+                share_id=share_mapping.share_id,
+            ),
+        ])
+
+    @mock.patch('nova.compute.utils.add_instance_fault_from_exc')
+    @mock.patch(
+        'nova.compute.utils.notify_about_share_attach_detach',
+        return_value=None
+    )
+    @mock.patch('nova.objects.share_mapping.ShareMapping.delete')
+    @mock.patch('nova.share.manila.API.deny')
+    @mock.patch('nova.share.manila.API.get_access')
+    @mock.patch('nova.objects.share_mapping.ShareMappingList.get_by_share_id')
+    @mock.patch('nova.objects.share_mapping.ShareMapping.save')
+    def test_deny_share_fails_access_removal(
+        self, mock_db, mock_db_get_share, mock_get_access, mock_deny,
+        mock_db_delete, mock_notifications, mock_instance_fault
+    ):
+        """Make sure we can remove a share even if we have an error with
+        the access or the access is not existing anymore for any reason.
+        """
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        mock_db_get_share.return_value = (
+            objects.share_mapping.ShareMappingList()
+        )
+        share_mapping = self.get_fake_share_mapping()
+        mock_db_get_share.return_value.objects.append(share_mapping)
+        mock_instance_fault.return_value = (
+            test_instance_fault.fake_faults['fake-uuid'][0])
+        # Ensure CONF.my_shared_fs_storage_ip default is my_ip
+        self.flags(my_ip="10.0.0.2")
+        self.assertEqual(CONF.my_shared_fs_storage_ip, '10.0.0.2')
+        # Set CONF.my_shared_fs_storage_ip to ensure it is used by the code
+        self.flags(my_shared_fs_storage_ip="192.168.0.1")
+        compute_ip = CONF.my_shared_fs_storage_ip
+        self.assertEqual(compute_ip, '192.168.0.1')
+
+        exc = exception.ShareAccessRemovalError(
+            share_id=share_mapping.share_id,
+            reason="fake_reason"
+        )
+        mock_deny.side_effect = exc
+
+        self.assertRaises(
+            exception.ShareAccessRemovalError,
+            self.compute.deny_share,
+            self.context,
+            instance,
+            share_mapping,
+        )
+        mock_deny.assert_called_once_with(
+            mock.ANY, share_mapping.share_id, 'ip', compute_ip)
+        mock_notifications.assert_has_calls([
+            mock.call(
+                mock.ANY,
+                instance,
+                "fake-host",
+                action=fields.NotificationAction.SHARE_DETACH,
+                phase=fields.NotificationPhase.START,
+                share_id=share_mapping.share_id,
+            ),
+            mock.call(
+                mock.ANY,
+                instance,
+                "fake-host",
+                action=fields.NotificationAction.SHARE_DETACH,
+                phase=fields.NotificationPhase.ERROR,
+                share_id=share_mapping.share_id,
+                exception=exc
+            ),
+        ])
+
+        mock_instance_fault.assert_called_once_with(
+            mock.ANY,
+            instance,
+            exc,
+            mock.ANY
+        )
+
+    @mock.patch(
+        'nova.compute.utils.notify_about_share_attach_detach',
+        return_value=None
+    )
+    @mock.patch('nova.objects.share_mapping.ShareMapping.delete')
+    @mock.patch('nova.share.manila.API.deny')
+    @mock.patch('nova.share.manila.API.get_access')
+    @mock.patch('nova.objects.share_mapping.ShareMappingList.get_by_share_id')
+    def test_deny_share_in_use(
+        self, mock_db_get_share, mock_get_access, mock_deny, mock_db_delete,
+        mock_notifications
+    ):
+        """Ensure we cannot deny a share used by an instance.
+        """
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        mock_db_get_share.return_value = (
+            objects.share_mapping.ShareMappingList()
+        )
+        share_mapping = self.get_fake_share_mapping()
+        share_mapping.status = 'active'
+        mock_db_get_share.return_value.objects.append(share_mapping)
+        self.compute.deny_share(self.context, instance, share_mapping)
+        mock_deny.assert_not_called()
+        mock_db_delete.assert_called_once()
+        mock_notifications.assert_has_calls([
+            mock.call(
+                mock.ANY,
+                instance,
+                "fake-host",
+                action=fields.NotificationAction.SHARE_DETACH,
+                phase=fields.NotificationPhase.START,
+                share_id=share_mapping.share_id,
+            ),
+            mock.call(
+                mock.ANY,
+                instance,
+                "fake-host",
+                action=fields.NotificationAction.SHARE_DETACH,
+                phase=fields.NotificationPhase.END,
+                share_id=share_mapping.share_id,
+            ),
+        ])
+
+    @mock.patch(
+        'nova.compute.utils.notify_about_share_attach_detach',
+        return_value=None
+    )
+    @mock.patch('nova.objects.share_mapping.ShareMapping.delete')
+    @mock.patch('nova.share.manila.API.deny')
+    @mock.patch('nova.share.manila.API.get_access')
+    @mock.patch('nova.objects.share_mapping.ShareMappingList.get_by_share_id')
+    def test_deny_share_in_error(
+        self, mock_db_get_share, mock_get_access, mock_deny, mock_db_delete,
+        mock_notifications
+    ):
+        """Ensure we can deny a share in error on the instance detaching the
+        share.
+        """
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        mock_db_get_share.return_value = (
+            objects.share_mapping.ShareMappingList()
+        )
+        share_mapping = self.get_fake_share_mapping()
+        share_mapping.status = 'error'
+        mock_db_get_share.return_value.objects.append(share_mapping)
+        # Ensure CONF.my_shared_fs_storage_ip default is my_ip
+        self.flags(my_ip="10.0.0.2")
+        self.assertEqual(CONF.my_shared_fs_storage_ip, '10.0.0.2')
+        # Set CONF.my_shared_fs_storage_ip to ensure it is used by the code
+        self.flags(my_shared_fs_storage_ip="192.168.0.1")
+        compute_ip = CONF.my_shared_fs_storage_ip
+        self.assertEqual(compute_ip, '192.168.0.1')
+        self.compute.deny_share(self.context, instance, share_mapping)
+        mock_deny.assert_called_once_with(
+            mock.ANY, share_mapping.share_id, 'ip', compute_ip)
+        mock_db_delete.assert_called_once()
+        mock_notifications.assert_has_calls([
+            mock.call(
+                mock.ANY,
+                instance,
+                "fake-host",
+                action=fields.NotificationAction.SHARE_DETACH,
+                phase=fields.NotificationPhase.START,
+                share_id=share_mapping.share_id,
+            ),
+            mock.call(
+                mock.ANY,
+                instance,
+                "fake-host",
+                action=fields.NotificationAction.SHARE_DETACH,
+                phase=fields.NotificationPhase.END,
+                share_id=share_mapping.share_id,
+            ),
+        ])
+
+    @mock.patch(
+        'nova.compute.utils.notify_about_share_attach_detach',
+        return_value=None
+    )
+    @mock.patch('nova.objects.share_mapping.ShareMapping.delete')
+    @mock.patch('nova.share.manila.API.deny')
+    @mock.patch('nova.share.manila.API.get_access')
+    @mock.patch('nova.objects.share_mapping.ShareMappingList.get_by_share_id')
+    def test_deny_share_access_not_found_in_manila(
+        self, mock_db_get_share, mock_get_access, mock_deny, mock_db_delete,
+            mock_notifications
+    ):
+        """Ensure we can deny a share even if access is not found in manila.
+        """
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        mock_db_get_share.return_value = (
+            objects.share_mapping.ShareMappingList()
+        )
+        share_mapping = self.get_fake_share_mapping()
+        share_mapping.status = 'detaching'
+        compute_ip = CONF.my_shared_fs_storage_ip
+        mock_db_get_share.return_value.objects.append(share_mapping)
+        mock_get_access.side_effect = exception.ShareNotFound(
+            share_id=share_mapping.share_id
+        )
+        self.compute.deny_share(self.context, instance, share_mapping)
+        mock_deny.assert_called_once_with(
+            mock.ANY, share_mapping.share_id, 'ip', compute_ip)
+        mock_db_delete.assert_called_once()
+        mock_notifications.assert_has_calls([
+            mock.call(
+                mock.ANY,
+                instance,
+                "fake-host",
+                action=fields.NotificationAction.SHARE_DETACH,
+                phase=fields.NotificationPhase.START,
+                share_id=share_mapping.share_id,
+            ),
+            mock.call(
+                mock.ANY,
+                instance,
+                "fake-host",
+                action=fields.NotificationAction.SHARE_DETACH,
+                phase=fields.NotificationPhase.END,
+                share_id=share_mapping.share_id,
+            ),
+        ])
+
+    @mock.patch(
+        'nova.compute.utils.notify_about_share_attach_detach',
+        return_value=None
+    )
+    @mock.patch('nova.objects.share_mapping.ShareMapping.delete')
+    @mock.patch('nova.share.manila.API.deny')
+    @mock.patch('nova.share.manila.API.get_access')
+    @mock.patch('nova.objects.share_mapping.ShareMappingList.get_by_share_id')
+    def test_deny_share_not_found_in_manila(
+        self, mock_db_get_share, mock_get_access, mock_deny, mock_db_delete,
+            mock_notifications
+    ):
+        """Ensure we can deny a share even if the share is not found in manila.
+        """
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        mock_db_get_share.return_value = (
+            objects.share_mapping.ShareMappingList()
+        )
+        share_mapping = self.get_fake_share_mapping()
+        share_mapping.status = 'detaching'
+        compute_ip = CONF.my_shared_fs_storage_ip
+        mock_db_get_share.return_value.objects.append(share_mapping)
+        mock_deny.side_effect = exception.ShareNotFound(
+            share_id=share_mapping.share_id
+        )
+        self.compute.deny_share(self.context, instance, share_mapping)
+        mock_deny.assert_called_once_with(
+            mock.ANY, share_mapping.share_id, 'ip', compute_ip)
+        mock_db_delete.assert_called_once()
+        mock_notifications.assert_has_calls([
+            mock.call(
+                mock.ANY,
+                instance,
+                "fake-host",
+                action=fields.NotificationAction.SHARE_DETACH,
+                phase=fields.NotificationPhase.START,
+                share_id=share_mapping.share_id,
+            ),
+            mock.call(
+                mock.ANY,
+                instance,
+                "fake-host",
+                action=fields.NotificationAction.SHARE_DETACH,
+                phase=fields.NotificationPhase.END,
+                share_id=share_mapping.share_id,
+            ),
+        ])
+
+    @mock.patch('nova.compute.utils.add_instance_fault_from_exc')
+    @mock.patch(
+        'nova.compute.utils.notify_about_share_attach_detach',
+        return_value=None
+    )
+    @mock.patch('nova.objects.share_mapping.ShareMapping.save')
+    @mock.patch('nova.objects.share_mapping.ShareMapping.delete')
+    @mock.patch('nova.share.manila.API.deny')
+    @mock.patch('nova.share.manila.API.get_access')
+    @mock.patch('nova.objects.share_mapping.ShareMappingList.get_by_share_id')
+    def test_deny_share_fails_access_removal_error(
+        self, mock_db_get_share, mock_get_access, mock_deny, mock_db_delete,
+            mock_db_save, mock_notifications, mock_instance_fault
+    ):
+        """Ensure we have an exception if the access cannot be removed
+        by manila.
+        """
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        mock_db_get_share.return_value = (
+            objects.share_mapping.ShareMappingList()
+        )
+        share_mapping = self.get_fake_share_mapping()
+        share_mapping.status = 'detaching'
+        mock_db_get_share.return_value.objects.append(share_mapping)
+        mock_deny.side_effect = exception.ShareAccessRemovalError(
+            share_id=share_mapping.share_id,
+            reason="fake_reason"
+        )
+        exc = self.assertRaises(
+            exception.ShareAccessRemovalError,
+            self.compute.deny_share,
+            self.context,
+            instance,
+            share_mapping,
+        )
+        mock_db_delete.assert_not_called()
+        self.assertEqual(share_mapping.status, 'error')
+        mock_notifications.assert_has_calls([
+            mock.call(
+                mock.ANY,
+                instance,
+                "fake-host",
+                action=fields.NotificationAction.SHARE_DETACH,
+                phase=fields.NotificationPhase.START,
+                share_id=share_mapping.share_id,
+            ),
+            mock.call(
+                mock.ANY,
+                instance,
+                "fake-host",
+                action=fields.NotificationAction.SHARE_DETACH,
+                phase=fields.NotificationPhase.ERROR,
+                share_id=share_mapping.share_id,
+                exception=exc,
+            ),
+        ])
+
+        mock_instance_fault.assert_called_once_with(
+            mock.ANY,
+            instance,
+            exc,
+            mock.ANY
+        )
+
+    @mock.patch('nova.compute.utils.add_instance_fault_from_exc')
+    @mock.patch(
+        'nova.compute.utils.notify_about_share_attach_detach',
+        return_value=None
+    )
+    @mock.patch('nova.objects.share_mapping.ShareMapping.save')
+    @mock.patch('nova.objects.share_mapping.ShareMapping.delete')
+    @mock.patch('nova.share.manila.API.deny')
+    @mock.patch('nova.share.manila.API.get_access')
+    @mock.patch('nova.objects.share_mapping.ShareMappingList.get_by_share_id')
+    def test_deny_share_fails_keystone_unauthorized(
+        self, mock_db_get_share, mock_get_access, mock_deny, mock_db_delete,
+            mock_db_save, mock_notifications, mock_instance_fault
+    ):
+        """Ensure we have an exception if the access cannot be removed
+        by manila.
+        """
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        mock_db_get_share.return_value = (
+            objects.share_mapping.ShareMappingList()
+        )
+        share_mapping = self.get_fake_share_mapping()
+        share_mapping.status = 'detaching'
+        mock_db_get_share.return_value.objects.append(share_mapping)
+        mock_deny.side_effect = keystone_exception.http.Unauthorized(
+            message="Unauthorized"
+        )
+        exc = self.assertRaises(
+            keystone_exception.http.Unauthorized,
+            self.compute.deny_share,
+            self.context,
+            instance,
+            share_mapping
+        )
+        mock_db_delete.assert_not_called()
+        self.assertEqual(share_mapping.status, 'error')
+        mock_notifications.assert_has_calls([
+            mock.call(
+                mock.ANY,
+                instance,
+                "fake-host",
+                action=fields.NotificationAction.SHARE_DETACH,
+                phase=fields.NotificationPhase.START,
+                share_id=share_mapping.share_id,
+            ),
+            mock.call(
+                mock.ANY,
+                instance,
+                "fake-host",
+                action=fields.NotificationAction.SHARE_DETACH,
+                phase=fields.NotificationPhase.ERROR,
+                share_id=share_mapping.share_id,
+                exception=exc,
+            ),
+        ])
+
+        mock_instance_fault.assert_called_once_with(
+            mock.ANY,
+            instance,
+            exc,
+            mock.ANY
+        )
+
+    @mock.patch('nova.compute.utils.add_instance_fault_from_exc')
+    @mock.patch(
+        'nova.compute.utils.notify_about_share_attach_detach',
+        return_value=None
+    )
+    @mock.patch('nova.objects.share_mapping.ShareMapping.save')
+    @mock.patch('nova.objects.share_mapping.ShareMapping.delete')
+    @mock.patch('nova.share.manila.API.deny')
+    @mock.patch('nova.share.manila.API.get_access')
+    @mock.patch('nova.objects.share_mapping.ShareMappingList.get_by_share_id')
+    def test_deny_share_fails_protocol_not_supported(
+        self, mock_db_get_share, mock_get_access, mock_deny, mock_db_delete,
+            mock_db_save, mock_notifications, mock_instance_fault
+    ):
+        """Ensure we have an exception if the access cannot be removed
+        by manila.
+        """
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        mock_db_get_share.return_value = (
+            objects.share_mapping.ShareMappingList()
+        )
+        share_mapping = self.get_fake_share_mapping()
+        share_mapping.status = 'detaching'
+        mock_db_get_share.return_value.objects.append(share_mapping)
+        mock_deny.side_effect = exception.ShareProtocolNotSupported(
+            share_proto=share_mapping.share_proto
+        )
+        exc = self.assertRaises(
+            exception.ShareProtocolNotSupported,
+            self.compute.deny_share,
+            self.context,
+            instance,
+            share_mapping
+        )
+        mock_db_delete.assert_not_called()
+        self.assertEqual(share_mapping.status, 'error')
+        mock_notifications.assert_has_calls([
+            mock.call(
+                mock.ANY,
+                instance,
+                "fake-host",
+                action=fields.NotificationAction.SHARE_DETACH,
+                phase=fields.NotificationPhase.START,
+                share_id=share_mapping.share_id,
+            ),
+            mock.call(
+                mock.ANY,
+                instance,
+                "fake-host",
+                action=fields.NotificationAction.SHARE_DETACH,
+                phase=fields.NotificationPhase.ERROR,
+                share_id=share_mapping.share_id,
+                exception=exc,
+            ),
+        ])
+
+        mock_instance_fault.assert_called_once_with(
+            mock.ANY,
+            instance,
+            exc,
+            mock.ANY
+        )
+
+    @mock.patch(
+        'nova.compute.utils.notify_about_share_attach_detach',
+        return_value=None
+    )
+    @mock.patch('nova.objects.share_mapping.ShareMapping.delete')
+    @mock.patch('nova.share.manila.API.deny')
+    @mock.patch('nova.share.manila.API.get_access')
+    @mock.patch('nova.objects.share_mapping.ShareMappingList.get_by_share_id')
+    def test_deny_share_in_use_by_another_instance(
+        self, mock_db_get_share, mock_get_access, mock_deny, mock_db_delete,
+            mock_notifications
+    ):
+        """Ensure we do not deny a share used by another instance.
+        """
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        mock_db_get_share.return_value = (
+            objects.share_mapping.ShareMappingList()
+        )
+        share_mapping1 = self.get_fake_share_mapping()
+        share_mapping2 = self.get_fake_share_mapping()
+        share_mapping2.instance_uuid = uuidutils.generate_uuid()
+        mock_db_get_share.return_value.objects.append(share_mapping1)
+        mock_db_get_share.return_value.objects.append(share_mapping2)
+        self.compute.deny_share(self.context, instance, share_mapping1)
+        mock_deny.assert_not_called()
+        mock_db_delete.assert_called_once()
+        mock_notifications.assert_has_calls([
+            mock.call(
+                mock.ANY,
+                instance,
+                "fake-host",
+                action=fields.NotificationAction.SHARE_DETACH,
+                phase=fields.NotificationPhase.START,
+                share_id=share_mapping1.share_id,
+            ),
+            mock.call(
+                mock.ANY,
+                instance,
+                "fake-host",
+                action=fields.NotificationAction.SHARE_DETACH,
+                phase=fields.NotificationPhase.END,
+                share_id=share_mapping1.share_id,
+            ),
+        ])
+
+    @mock.patch(
+        'nova.compute.utils.notify_about_share_attach_detach',
+        return_value=None
+    )
+    @mock.patch('nova.objects.share_mapping.ShareMapping.delete')
+    @mock.patch('nova.share.manila.API.deny')
+    @mock.patch('nova.share.manila.API.get_access')
+    @mock.patch('nova.objects.share_mapping.ShareMappingList.get_by_share_id')
+    def test_deny_share_in_error_on_another_instance(
+        self, mock_db_get_share, mock_get_access, mock_deny, mock_db_delete,
+        mock_notifications
+    ):
+        """Ensure we cannot deny a share in error state on another instance.
+        If the other instance is hard rebooted, it might need the share.
+        """
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        mock_db_get_share.return_value = (
+            objects.share_mapping.ShareMappingList()
+        )
+        share_mapping1 = self.get_fake_share_mapping()
+        share_mapping2 = self.get_fake_share_mapping()
+        share_mapping2.instance_uuid = uuidutils.generate_uuid()
+        share_mapping2.status = 'error'
+        mock_db_get_share.return_value.objects.append(share_mapping1)
+        mock_db_get_share.return_value.objects.append(share_mapping2)
+        self.compute.deny_share(self.context, instance, share_mapping1)
+        mock_deny.assert_not_called()
+        mock_db_delete.assert_called_once()
+        mock_notifications.assert_has_calls([
+            mock.call(
+                mock.ANY,
+                instance,
+                "fake-host",
+                action=fields.NotificationAction.SHARE_DETACH,
+                phase=fields.NotificationPhase.START,
+                share_id=share_mapping1.share_id,
+            ),
+            mock.call(
+                mock.ANY,
+                instance,
+                "fake-host",
+                action=fields.NotificationAction.SHARE_DETACH,
+                phase=fields.NotificationPhase.END,
+                share_id=share_mapping1.share_id,
+            ),
+        ])
+
+    @mock.patch('nova.objects.share_mapping.ShareMapping.save')
+    @mock.patch('nova.virt.fake.FakeDriver.mount_share')
+    def test_mount_nfs_share(
+        self, mock_drv, mock_db
+    ):
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        share_mapping = self.get_fake_share_mapping()
+        self.compute._mount_share(self.context, instance, share_mapping)
+        mock_drv.assert_called_once_with(self.context, instance, share_mapping)
+
+    @mock.patch('nova.objects.share_mapping.ShareMapping.save')
+    @mock.patch('nova.virt.fake.FakeDriver.mount_share')
+    @mock.patch('nova.share.manila.API.get_access')
+    def test_mount_cephfs_share(
+        self, mock_get_access, mock_drv, mock_db
+    ):
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        share_mapping = self.get_fake_share_mapping_cephfs()
+        mock_get_access.side_effect = [
+            self.get_fake_share_access_cephfs(),
+        ]
+        self.compute._mount_share(self.context, instance, share_mapping)
+        mock_get_access.assert_called_with(
+            self.context, share_mapping.share_id, 'cephx', 'nova')
+        mock_drv.assert_called_once_with(self.context, instance, share_mapping)
+        self.assertEqual(share_mapping.access_to, 'nova')
+        self.assertEqual(share_mapping.access_key, 'mykey')
+
+    @mock.patch('nova.share.manila.API.deny')
+    @mock.patch('nova.virt.fake.FakeDriver.umount_share', return_value=False)
+    def test_umount_nfs_share(
+            self, mock_drv, mock_deny):
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        share_mapping = self.get_fake_share_mapping()
+        self.compute._umount_share(self.context, instance, share_mapping)
+        mock_drv.assert_called_once_with(self.context, instance, share_mapping)
+
+    @mock.patch('nova.share.manila.API.get_access')
+    @mock.patch('nova.virt.fake.FakeDriver.umount_share', return_value=False)
+    def test_umount_cephfs_share(
+            self, mock_drv, mock_get_access):
+        self.flags(shutdown_retry_interval=20, group='compute')
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ACTIVE,
+                task_state=task_states.POWERING_OFF)
+        share_mapping = self.get_fake_share_mapping_cephfs()
+        mock_get_access.return_value = self.get_fake_share_access_cephfs()
+        self.compute._umount_share(self.context, instance, share_mapping)
+        mock_get_access.assert_called_once()
+        mock_drv.assert_called_once_with(
+            self.context, instance, share_mapping)
+
+    @mock.patch('nova.compute.manager.ComputeManager._umount_share')
+    @mock.patch('nova.compute.manager.ComputeManager.deny_share')
+    @mock.patch('nova.compute.manager.ComputeManager._get_share_info')
     @mock.patch('nova.context.RequestContext.elevated')
     @mock.patch('nova.objects.Instance.get_network_info')
     @mock.patch(
@@ -2142,10 +3553,21 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
     @mock.patch('nova.compute.utils.notify_about_instance_action')
     @mock.patch(
         'nova.compute.manager.ComputeManager._notify_about_instance_usage')
-    def test_shutdown_instance_versioned_notifications(self,
-            mock_notify_unversioned, mock_notify, mock_connector,
-            mock_destroy, mock_blk_device_info, mock_nw_info, mock_elevated):
+    def test_shutdown_instance_versioned_notifications(
+        self,
+        mock_notify_unversioned,
+        mock_notify,
+        mock_connector,
+        mock_destroy,
+        mock_blk_device_info,
+        mock_nw_info,
+        mock_elevated,
+        mock_share,
+        mock_deny,
+        mock_umount,
+    ):
         mock_elevated.return_value = self.context
+        mock_share.return_value = objects.ShareMappingList()
         instance = fake_instance.fake_instance_obj(
                 self.context,
                 uuid=uuids.instance,
@@ -2159,15 +3581,83 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
                       action='shutdown', phase='start', bdms=bdms),
             mock.call(self.context, instance, 'fake-mini',
                       action='shutdown', phase='end', bdms=bdms)])
+        mock_deny.assert_not_called()
+        mock_umount.assert_not_called()
 
+    @mock.patch('nova.objects.share_mapping.ShareMapping.deactivate')
+    @mock.patch('nova.compute.manager.ComputeManager._umount_share')
+    @mock.patch('nova.compute.manager.ComputeManager.deny_share')
+    @mock.patch('nova.compute.manager.ComputeManager._get_share_info')
     @mock.patch('nova.context.RequestContext.elevated')
     @mock.patch('nova.objects.Instance.get_network_info')
     @mock.patch(
         'nova.compute.manager.ComputeManager._get_instance_block_device_info')
     @mock.patch('nova.virt.driver.ComputeDriver.destroy')
     @mock.patch('nova.virt.fake.FakeDriver.get_volume_connector')
-    def _test_shutdown_instance_exception(self, exc, mock_connector,
-            mock_destroy, mock_blk_device_info, mock_nw_info, mock_elevated):
+    @mock.patch('nova.compute.utils.notify_about_instance_action')
+    @mock.patch(
+        'nova.compute.manager.ComputeManager._notify_about_instance_usage')
+    def test_shutdown_instance_versioned_notifications_with_share(
+        self,
+        mock_notify_unversioned,
+        mock_notify,
+        mock_connector,
+        mock_destroy,
+        mock_blk_device_info,
+        mock_nw_info,
+        mock_elevated,
+        mock_share,
+        mock_deny,
+        mock_umount,
+        mock_deactivate,
+    ):
+        mock_elevated.return_value = self.context
+        share_info = self.fake_share_info()
+        mock_share.return_value = share_info
+        instance = fake_instance.fake_instance_obj(
+                self.context,
+                uuid=uuids.instance,
+                vm_state=vm_states.ERROR,
+                task_state=task_states.DELETING)
+        bdms = [mock.Mock(id=1, is_volume=True)]
+        self.compute._shutdown_instance(self.context, instance, bdms,
+                        notify=True, try_deallocate_networks=False)
+        mock_notify.assert_has_calls([
+            mock.call(self.context, instance, 'fake-mini',
+                      action='shutdown', phase='start', bdms=bdms),
+            mock.call(self.context, instance, 'fake-mini',
+                      action='shutdown', phase='end', bdms=bdms)])
+        mock_deny.assert_has_calls([
+            mock.call(self.context, instance, share_info[0]),
+            mock.call(self.context, instance, share_info[1])
+        ])
+        mock_umount.assert_has_calls([
+            mock.call(self.context, instance, share_info[0]),
+            mock.call(self.context, instance, share_info[1])
+        ])
+        mock_deactivate.assert_has_calls([
+            mock.call(),
+            mock.call()
+        ])
+
+    @mock.patch('nova.compute.manager.ComputeManager._get_share_info',
+                return_value=[])
+    @mock.patch('nova.context.RequestContext.elevated')
+    @mock.patch('nova.objects.Instance.get_network_info')
+    @mock.patch(
+        'nova.compute.manager.ComputeManager._get_instance_block_device_info')
+    @mock.patch('nova.virt.driver.ComputeDriver.destroy')
+    @mock.patch('nova.virt.fake.FakeDriver.get_volume_connector')
+    def _test_shutdown_instance_exception(
+        self,
+        exc,
+        mock_connector,
+        mock_destroy,
+        mock_blk_device_info,
+        mock_nw_info,
+        mock_elevated,
+        mock_share,
+    ):
         mock_connector.side_effect = exc
         mock_elevated.return_value = self.context
         instance = fake_instance.fake_instance_obj(
@@ -2201,8 +3691,12 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
         exc = Exception('some other exception')
         self._test_shutdown_instance_exception(exc)
 
+    @mock.patch(
+        "nova.compute.manager.ComputeManager._get_share_info",
+        return_value=objects.ShareMappingList()
+    )
     def _test_init_instance_retries_reboot(self, instance, reboot_type,
-                                           return_power_state):
+                                           return_power_state, mock_shares):
         instance.host = self.compute.host
         with test.nested(
             mock.patch.object(self.compute, '_get_power_state',
@@ -2282,11 +3776,14 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
             mock.patch.object(instance, 'save', autospec=True),
             mock.patch.object(objects.Instance, 'get_network_info'),
             mock.patch.object(self.compute, 'reboot_instance'),
+            mock.patch("nova.compute.manager.ComputeManager._get_share_info",
+                       return_value=objects.ShareMappingList())
           ) as (
             _get_power_state,
             instance_save,
             get_network_info,
             reboot_instance,
+            mock_shares,
           ):
             self.compute._init_instance(self.context, instance)
             # If instance was running, the instance should stay running,
@@ -2374,7 +3871,13 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
         instance.vm_state = vm_states.ACTIVE
         instance.task_state = task_states.POWERING_OFF
         instance.host = self.compute.host
-        with mock.patch.object(self.compute, 'stop_instance'):
+        with test.nested(
+            mock.patch.object(self.compute, "stop_instance"),
+            mock.patch(
+                "nova.compute.manager.ComputeManager._get_share_info",
+                return_value=objects.ShareMappingList(),
+            ),
+        ):
             self.compute._init_instance(self.context, instance)
             call = mock.call(self.context, instance, True)
             self.compute.stop_instance.assert_has_calls([call])
@@ -2386,7 +3889,13 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
         instance.vm_state = vm_states.ACTIVE
         instance.task_state = task_states.POWERING_ON
         instance.host = self.compute.host
-        with mock.patch.object(self.compute, 'start_instance'):
+        with test.nested(
+            mock.patch.object(self.compute, "start_instance"),
+            mock.patch(
+                "nova.compute.manager.ComputeManager._get_share_info",
+                return_value=objects.ShareMappingList(),
+            ),
+        ):
             self.compute._init_instance(self.context, instance)
             call = mock.call(self.context, instance)
             self.compute.start_instance.assert_has_calls([call])
@@ -2398,8 +3907,15 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
         instance.vm_state = vm_states.ACTIVE
         instance.task_state = task_states.POWERING_ON
         instance.host = self.compute.host
-        with mock.patch.object(self.compute, 'start_instance',
-                              return_value=Exception):
+        with test.nested(
+            mock.patch.object(
+                self.compute, "start_instance", return_value=Exception
+            ),
+            mock.patch(
+                "nova.compute.manager.ComputeManager._get_share_info",
+                return_value=objects.ShareMappingList(),
+            ),
+        ):
             init_return = self.compute._init_instance(self.context, instance)
             call = mock.call(self.context, instance)
             self.compute.start_instance.assert_has_calls([call])
@@ -2412,8 +3928,16 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
         instance.vm_state = vm_states.ACTIVE
         instance.task_state = task_states.POWERING_OFF
         instance.host = self.compute.host
-        with mock.patch.object(self.compute, 'stop_instance',
-                              return_value=Exception):
+        with test.nested(
+            mock.patch.object(
+                self.compute, "stop_instance", return_value=Exception
+            ),
+            mock.patch(
+                "nova.compute.manager.ComputeManager._get_share_info",
+                return_value=objects.ShareMappingList(),
+            ),
+        ):
+
             init_return = self.compute._init_instance(self.context, instance)
             call = mock.call(self.context, instance, True)
             self.compute.stop_instance.assert_has_calls([call])
@@ -3694,9 +5218,10 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
                 None)
             return result
 
+    @mock.patch.object(objects.Instance, 'pci_requests')
     @mock.patch('nova.objects.InstanceGroup.get_by_instance_uuid', mock.Mock(
         side_effect=exception.InstanceGroupNotFound(group_uuid='')))
-    def test_check_can_live_migrate_destination_success(self):
+    def test_check_can_live_migrate_destination_success(self, mock_pci):
         self.useFixture(std_fixtures.MonkeyPatch(
             'nova.network.neutron.API.has_port_binding_extension',
             lambda *args: True))
@@ -3713,9 +5238,10 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
             self._test_check_can_live_migrate_destination,
             do_raise=True)
 
+    @mock.patch.object(objects.Instance, 'pci_requests')
     @mock.patch('nova.objects.InstanceGroup.get_by_instance_uuid', mock.Mock(
         side_effect=exception.InstanceGroupNotFound(group_uuid='')))
-    def test_check_can_live_migrate_destination_contains_vifs(self):
+    def test_check_can_live_migrate_destination_contains_vifs(self, mock_pci):
         self.useFixture(std_fixtures.MonkeyPatch(
             'nova.network.neutron.API.has_port_binding_extension',
             lambda *args: True))
@@ -3723,26 +5249,134 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
         self.assertIn('vifs', migrate_data)
         self.assertIsNotNone(migrate_data.vifs)
 
+    @mock.patch.object(objects.PciDeviceList, 'get_by_instance_uuid')
+    @mock.patch(
+        'nova.compute.resource_tracker.ResourceTracker.claim_pci_devices')
+    @mock.patch.object(objects.Instance, 'migration_context')
+    @mock.patch.object(objects.Instance, 'pci_requests')
     @mock.patch('nova.objects.InstanceGroup.get_by_instance_uuid', mock.Mock(
         side_effect=exception.InstanceGroupNotFound(group_uuid='')))
-    def test_check_can_live_migrate_destination_no_binding_extended(self):
+    def test_check_can_live_migrate_destination_contains_pci_lm(
+        self, mock_pci, mock_ctxt, mock_rt, mock_devs
+    ):
+        self.useFixture(std_fixtures.MonkeyPatch(
+            'nova.network.neutron.API.has_port_binding_extension',
+            lambda *args: False))
+
+        mock_pci.requests = [
+            objects.InstancePCIRequest(
+                request_id=uuids.req0,
+                requester_id=None,
+                alias_name="spec_alias_1",
+                spec=[
+                    {
+                        "vendor_id": "1377",
+                        "product_id": "0047",
+                        "live_migratable": "true",
+                    }
+                ],
+            ),
+            objects.InstancePCIRequest(
+                request_id=uuids.req1,
+                requester_id=None,
+                alias_name="spec_alias_2",
+                spec=[
+                    {
+                        "vendor_id": "1378",
+                        "product_id": "0048",
+                        "live_migratable": "yes",
+                    }
+                ],
+            ),
+        ]
+
+        fake_devs_src = objects.PciDeviceList(
+            objects=[
+                objects.PciDevice(
+                    compute_node_id=1,
+                    address="0000:04:00.2",
+                    vendor_id="1377",
+                    product_id="0047",
+                    extra_info={"live_migratable": "yes"},
+                    request_id=uuids.req0,
+                ),
+                objects.PciDevice(
+                    compute_node_id=1,
+                    address="0000:04:00.3",
+                    vendor_id="1378",
+                    product_id="0048",
+                    extra_info={"live_migratable": "yes"},
+                    request_id=uuids.req1,
+                )
+            ]
+        )
+
+        fake_devs_dst = objects.PciDeviceList(
+            objects=[
+                objects.PciDevice(
+                    compute_node_id=2,
+                    address="0000:05:00.2",
+                    vendor_id="1378",
+                    product_id="0048",
+                    extra_info={"live_migratable": "yes"},
+                    request_id=uuids.req1,
+                ),
+                objects.PciDevice(
+                    compute_node_id=2,
+                    address="0000:05:00.3",
+                    vendor_id="1377",
+                    product_id="0047",
+                    extra_info={"live_migratable": "yes"},
+                    request_id=uuids.req0,
+                )
+            ]
+        )
+
+        mock_devs.return_value = fake_devs_src
+        mock_rt.return_value = fake_devs_dst
+
+        migrate_data = self._test_check_can_live_migrate_destination()
+        mock_rt.assert_called_once()
+        self.assertIn('pci_dev_map_src_dst', migrate_data)
+        self.assertIsNotNone(migrate_data.pci_dev_map_src_dst)
+        # {'0000:04:00.2': '0000:05:00.3', '0000:04:00.3': '0000:05:00.2'}
+        self.assertEqual(
+            {
+                fake_devs_src[0].address: fake_devs_dst[1].address,
+                fake_devs_src[1].address: fake_devs_dst[0].address,
+            },
+            migrate_data.pci_dev_map_src_dst,
+        )
+
+    @mock.patch.object(objects.Instance, 'pci_requests')
+    @mock.patch('nova.objects.InstanceGroup.get_by_instance_uuid', mock.Mock(
+        side_effect=exception.InstanceGroupNotFound(group_uuid='')))
+    def test_check_can_live_migrate_destination_no_binding_extended(
+        self, mock_pci
+    ):
         self.useFixture(std_fixtures.MonkeyPatch(
             'nova.network.neutron.API.has_port_binding_extension',
             lambda *args: False))
         migrate_data = self._test_check_can_live_migrate_destination()
         self.assertNotIn('vifs', migrate_data)
 
+    @mock.patch.object(objects.Instance, 'pci_requests')
     @mock.patch('nova.objects.InstanceGroup.get_by_instance_uuid', mock.Mock(
         side_effect=exception.InstanceGroupNotFound(group_uuid='')))
-    def test_check_can_live_migrate_destination_src_numa_lm_false(self):
+    def test_check_can_live_migrate_destination_src_numa_lm_false(
+        self, mock_pci
+    ):
         self.useFixture(std_fixtures.MonkeyPatch(
             'nova.network.neutron.API.has_port_binding_extension',
             lambda *args: True))
         self._test_check_can_live_migrate_destination(src_numa_lm=False)
 
+    @mock.patch.object(objects.Instance, 'pci_requests')
     @mock.patch('nova.objects.InstanceGroup.get_by_instance_uuid', mock.Mock(
         side_effect=exception.InstanceGroupNotFound(group_uuid='')))
-    def test_check_can_live_migrate_destination_src_numa_lm_true(self):
+    def test_check_can_live_migrate_destination_src_numa_lm_true(
+        self, mock_pci
+    ):
         self.useFixture(std_fixtures.MonkeyPatch(
             'nova.network.neutron.API.has_port_binding_extension',
             lambda *args: True))
@@ -4802,6 +6436,7 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
         fake_nw_info = network_model.NetworkInfo()
         rescue_image_meta = objects.ImageMeta.from_dict(
             {'id': uuids.image_id, 'name': uuids.image_name})
+
         with test.nested(
             mock.patch.object(self.context, 'elevated',
                               return_value=self.context),
@@ -4820,13 +6455,18 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
             mock.patch.object(compute_utils, 'notify_usage_exists'),
             mock.patch.object(self.compute, '_get_power_state',
                               return_value=power_state.RUNNING),
-            mock.patch.object(instance, 'save')
+            mock.patch.object(instance, 'save'),
+            mock.patch('nova.compute.manager.ComputeManager._get_share_info')
         ) as (
             elevated_context, get_nw_info, get_rescue_image,
             get_bdm_list, get_block_info, notify_instance_usage,
             power_off_instance, driver_rescue, notify_usage_exists,
-            get_power_state, instance_save
+            get_power_state, instance_save, mock_get_share_info
         ):
+
+            share_info = objects.ShareMappingList()
+            mock_get_share_info.return_value = share_info
+
             self.compute.rescue_instance(
                 self.context, instance, rescue_password='verybadpass',
                 rescue_image_ref=None, clean_shutdown=clean_shutdown)
@@ -4856,12 +6496,12 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
             ]
             notify_instance_usage.assert_has_calls(notify_calls)
 
-            power_off_instance.assert_called_once_with(instance,
+            power_off_instance.assert_called_once_with(self.context, instance,
                                                        clean_shutdown)
 
             driver_rescue.assert_called_once_with(
                 self.context, instance, fake_nw_info, rescue_image_meta,
-                'verybadpass', mock.sentinel.block_device_info)
+                'verybadpass', mock.sentinel.block_device_info, share_info)
 
             notify_usage_exists.assert_called_once_with(self.compute.notifier,
                 self.context, instance, 'fake-mini', current_period=True)
@@ -5086,6 +6726,7 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
         # Consider the migration successful
         migration.status = 'done'
         migration.source_node = 'fake-node'
+        migration.dest_compute = 'dest-host'
 
         node_cache = {
             uuids.our_node_uuid:
@@ -5151,11 +6792,13 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
         # compute was down
         migration_1.status = 'done'
         migration_1.source_node = 'deleted-node'
+        migration_1.dest_compute = 'dest-host'
 
         migration_2 = objects.Migration(instance_uuid=instance_2.uuid)
         # Consider the migration successful
         migration_2.status = 'done'
         migration_2.source_node = 'fake-node'
+        migration_2.dest_compute = 'dest-host'
 
         node_cache = {
             uuids.our_node_uuid:
@@ -5447,7 +7090,10 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
         mock_detach.assert_called_once_with(
             self.context, bdms[0], instance, destroy_bdm=False)
 
-    def test_stop_instance_task_state_none_power_state_shutdown(self):
+    @mock.patch('nova.compute.manager.ComputeManager._get_share_info',
+                return_value=[])
+    def test_stop_instance_task_state_none_power_state_shutdown(self,
+            mock_get_share_info):
         # Tests that stop_instance doesn't puke when the instance power_state
         # is shutdown and the task_state is None.
         instance = fake_instance.fake_instance_obj(
@@ -5476,7 +7122,8 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
                 mock.call(self.context, instance, 'fake-mini',
                           action='power_off', phase='end'),
             ])
-            power_off_mock.assert_called_once_with(instance, True)
+            power_off_mock.assert_called_once_with(
+                    self.context, instance, True)
             save_mock.assert_called_once_with(
                 expected_task_state=[task_states.POWERING_OFF, None])
             self.assertEqual(power_state.SHUTDOWN, instance.power_state)
@@ -5890,7 +7537,7 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
             mock_destroy.assert_called_once_with(
                 self.context, instance,
                 network_info=None, block_device_info=fake_block_device_info)
-            mock_power_off.assert_called_once_with(
+            mock_power_off.assert_called_once_with(self.context,
                 instance, clean_shutdown=True)
             if is_vol_backed and reimage_boot_vol:
                 mock_rebuild_vol_backed_inst.assert_called_once_with(
@@ -6243,8 +7890,11 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase,
         mock_delete_instance.assert_called_once_with(
             self.context, instance, bdms)
 
+    @mock.patch('nova.compute.manager.ComputeManager._get_share_info',
+                return_value=[])
     @mock.patch('nova.context.RequestContext.elevated')
-    def test_terminate_instance_no_network_info(self, mock_elevated):
+    def test_terminate_instance_no_network_info(
+            self, mock_elevated, mock_share):
         # Tests that we refresh the network info if it was empty
         instance = fake_instance.fake_instance_obj(
             self.context, vm_state=vm_states.ACTIVE)
@@ -12129,7 +13779,8 @@ class ComputeManagerMigrationTestCase(test.NoDBTestCase,
             mock.call(self.context, self.instance, get_bdms.return_value,
                       get_instance_nw_info.return_value,
                       fields.NotificationPhase.END)])
-        _power_off_instance.assert_called_once_with(self.instance)
+        _power_off_instance.assert_called_once_with(
+                self.context, self.instance)
         self.assertEqual(power_state.SHUTDOWN, self.instance.power_state)
         if snapshot_id is None:
             _snapshot_for_resize.assert_not_called()
@@ -12181,7 +13832,8 @@ class ComputeManagerMigrationTestCase(test.NoDBTestCase,
                 exception.InstancePowerOffFailure,
                 self.compute._prep_snapshot_based_resize_at_source,
                 self.context, self.instance, self.migration)
-        _power_off_instance.assert_called_once_with(self.instance)
+        _power_off_instance.assert_called_once_with(
+                self.context, self.instance)
 
     @mock.patch('nova.objects.Instance.get_bdms',
                 return_value=objects.BlockDeviceMappingList())
@@ -13362,3 +15014,120 @@ class ComputeManagerSetHostEnabledTestCase(test.NoDBTestCase):
         self.assertIn('An error occurred while updating '
                       'COMPUTE_STATUS_DISABLED trait',
                       m_exc.call_args_list[0][0][0])
+
+
+class ComputeManagerBDMUpdateTestCase(test.TestCase):
+
+    def setUp(self):
+        super(ComputeManagerBDMUpdateTestCase, self).setUp()
+        self.compute = manager.ComputeManager()
+        self.context = context.RequestContext(fakes.FAKE_USER_ID,
+                                              fakes.FAKE_PROJECT_ID)
+        self.instance = mock.Mock()
+
+    @mock.patch('nova.block_device.create_blank_bdm')
+    @mock.patch('nova.objects.BlockDeviceMapping')
+    def test_no_flavor_change(self, mock_bdm_obj, mock_create_bdm):
+        self.instance.get_bdms.return_value = []
+        self.instance.old_flavor = None
+        self.instance.new_flavor = None
+
+        bdms = self.compute._update_bdm_for_swap_to_finish_resize(
+            self.context, self.instance)
+
+        self.assertEqual(bdms, [])
+        self.instance.get_bdms.assert_called_once()
+
+    @mock.patch('nova.block_device.create_blank_bdm')
+    @mock.patch('nova.objects.BlockDeviceMapping.create')
+    def test_no_swap_change(self, mock_bdm_obj, mock_create_bdm):
+        self.instance.old_flavor = mock.Mock(swap=1024)
+        self.instance.new_flavor = mock.Mock(swap=1024)
+
+        existing_swap_bdm = objects.BlockDeviceMapping(
+            guest_format='swap',
+            device_type='disk',
+            volume_size=1024)
+
+        bdms = objects.BlockDeviceMappingList(objects=[existing_swap_bdm])
+
+        self.instance.get_bdms.return_value = bdms
+
+        new_bdms = self.compute._update_bdm_for_swap_to_finish_resize(
+            self.context, self.instance)
+
+        self.assertEqual(new_bdms, bdms)
+        self.instance.get_bdms.assert_called_once()
+
+    @mock.patch('nova.block_device.create_blank_bdm')
+    @mock.patch('nova.objects.BlockDeviceMapping')
+    def test_add_new_swap_bdm(self, mock_bdm_obj, mock_create_bdm):
+        self.instance.old_flavor = mock.Mock(swap=0)
+        self.instance.new_flavor = mock.Mock(swap=1024)
+
+        self.instance.get_bdms.return_value = []
+
+        new_swap_bdm = {
+            'guest_format': 'swap',
+            'device_type': 'disk',
+            'volume_size': 1024}
+        mock_create_bdm.return_value = new_swap_bdm
+        mock_bdm_instance = mock_bdm_obj.return_value
+
+        self.compute._update_bdm_for_swap_to_finish_resize(
+            self.context, self.instance)
+
+        mock_bdm_obj.assert_called_once_with(
+            self.context, instance_uuid=self.instance.uuid, **new_swap_bdm
+        )
+        mock_bdm_instance.update_or_create.assert_called_once()
+        # called twice
+        self.assertEqual(self.instance.get_bdms.call_count, 2)
+
+    @mock.patch('nova.block_device.create_blank_bdm')
+    @mock.patch('nova.objects.BlockDeviceMapping.create')
+    @mock.patch('nova.objects.BlockDeviceMapping.save')
+    def test_update_swap_bdm(
+            self, mock_bdm_save, mock_bdm_create,
+            mock_create_blank_bdm):
+        self.instance.old_flavor = mock.Mock(swap=1024)  # Existing swap size
+        self.instance.new_flavor = mock.Mock(swap=2048)  # New swap size
+
+        existing_swap_bdm = objects.BlockDeviceMapping(
+            guest_format='swap',
+            device_type='disk',
+            volume_size=1024)
+
+        bdms = objects.BlockDeviceMappingList(objects=[existing_swap_bdm])
+
+        self.instance.get_bdms.return_value = bdms
+
+        self.compute._update_bdm_for_swap_to_finish_resize(
+            self.context, self.instance)
+
+        # assert bdm get saved in DB
+        existing_swap_bdm.save.assert_called_once()
+        # here we are returning same bdms object, not freh from DB
+        self.assertEqual(existing_swap_bdm.volume_size, 2048)
+        # get_bdms is called only once
+        self.assertEqual(self.instance.get_bdms.call_count, 1)
+
+    @mock.patch('nova.block_device.create_blank_bdm')
+    @mock.patch('nova.objects.BlockDeviceMapping.destroy')
+    def test_delete_swap_bdm(self, mock_bdm_destroy, mock_create_bdm):
+        self.instance.old_flavor = mock.Mock(swap=1024)
+        self.instance.new_flavor = mock.Mock(swap=0)
+
+        existing_swap_bdm = objects.BlockDeviceMapping(
+            guest_format='swap',
+            device_type='disk',
+            volume_size=1024)
+
+        self.instance.get_bdms.return_value = objects.BlockDeviceMappingList(
+            objects=[existing_swap_bdm])
+
+        self.compute._update_bdm_for_swap_to_finish_resize(
+            self.context, self.instance)
+
+        mock_bdm_destroy.assert_called_once()
+        self.instance.get_bdms.assert_called_once()

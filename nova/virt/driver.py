@@ -221,6 +221,8 @@ CAPABILITY_TRAITS_MAP = {
         os_traits.COMPUTE_ADDRESS_SPACE_EMULATED,
     "supports_stateless_firmware":
         os_traits.COMPUTE_SECURITY_STATELESS_FIRMWARE,
+    "supports_virtio_fs": os_traits.COMPUTE_STORAGE_VIRTIO_FS,
+    "supports_mem_backing_file": os_traits.COMPUTE_MEM_BACKING_FILE,
 }
 
 
@@ -292,6 +294,8 @@ class ComputeDriver(object):
         "supports_remote_managed_ports": False,
         "supports_address_space_passthrough": False,
         "supports_address_space_emulated": False,
+        "supports_virtio_fs": False,
+        "supports_mem_backing_file": False,
 
         # Ephemeral encryption support flags
         "supports_ephemeral_encryption": False,
@@ -608,7 +612,7 @@ class ComputeDriver(object):
 
     def reboot(self, context, instance, network_info, reboot_type,
                block_device_info=None, bad_volumes_callback=None,
-               accel_info=None):
+               accel_info=None, share_info=None):
         """Reboot the specified instance.
 
         After this is called successfully, the instance's state
@@ -968,7 +972,14 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
-    def resume(self, context, instance, network_info, block_device_info=None):
+    def resume(
+        self,
+        context,
+        instance,
+        network_info,
+        block_device_info=None,
+        share_info=None
+    ):
         """resume the specified suspended instance.
 
         The suspended instance gets resumed and will use CPU cycles and memory
@@ -984,21 +995,28 @@ class ComputeDriver(object):
             Necessary network information for the resume.
         :param dict block_device_info:
             Instance volume block device info.
+        :param nova.objects.share_mapping.ShareMapingList share_info
+            optional list of share_mapping
 
         :return: None
         """
         raise NotImplementedError()
 
     def resume_state_on_host_boot(self, context, instance, network_info,
-                                  block_device_info=None):
+                                  share_info, block_device_info=None):
         """resume guest state when a host is booted.
 
         :param instance: nova.objects.instance.Instance
+        :param nova.network.model.NetworkInfo network_info:
+            Necessary network information for the resume.
+        :param share_info: a ShareMappingList containing the attached shares.
+        :param dict block_device_info:
+            The block device mapping of the instance.
         """
         raise NotImplementedError()
 
     def rescue(self, context, instance, network_info, image_meta,
-               rescue_password, block_device_info):
+               rescue_password, block_device_info, share_info):
         """Rescue the specified instance.
 
         :param nova.context.RequestContext context:
@@ -1012,6 +1030,8 @@ class ComputeDriver(object):
         :param rescue_password: new root password to set for rescue.
         :param dict block_device_info:
             The block device mapping of the instance.
+        :param nova.objects.share_mapping.ShareMapingList share_info
+            list of share_mapping
         """
         raise NotImplementedError()
 
@@ -1038,14 +1058,37 @@ class ComputeDriver(object):
         raise NotImplementedError()
 
     def power_on(self, context, instance, network_info,
-                 block_device_info=None, accel_info=None):
+                 block_device_info=None, accel_info=None, share_info=None):
         """Power on the specified instance.
 
+        :param context: security context
         :param instance: nova.objects.instance.Instance
         :param network_info: instance network information
         :param block_device_info: instance volume block device info
         :param accel_info: List of accelerator request dicts. The exact
             data struct is doc'd in nova/virt/driver.py::spawn().
+        :param share_info: a ShareMappingList containing the attached shares.
+        """
+        raise NotImplementedError()
+
+    def mount_share(self, context, instance, share_mapping):
+        """Mount a manila share to the compute node.
+
+        :param context: security context
+        :param instance: nova.objects.instance.Instance
+        :param share_mapping: nova.objects.share_mapping.ShareMapping object
+            that define the share
+        """
+        raise NotImplementedError()
+
+    def umount_share(self, context, instance, share_mapping):
+        """Unmount a manila share from the compute node.
+
+        :param context: security context
+        :param instance: nova.objects.instance.Instance
+        :param share_mapping: nova.objects.share_mapping.ShareMapping object
+            that define the share
+        :returns: True if the mountpoint is still in used by another instance
         """
         raise NotImplementedError()
 

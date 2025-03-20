@@ -276,15 +276,17 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
     @catch_notimplementederror
     def test_resume_state_on_host_boot(self):
         instance_ref, network_info = self._get_running_instance()
+        share_info = objects.ShareMappingList()
         self.connection.resume_state_on_host_boot(self.ctxt, instance_ref,
-                                                  network_info)
+                                                  network_info, share_info)
 
     @catch_notimplementederror
     def test_rescue(self):
         image_meta = objects.ImageMeta.from_dict({})
         instance_ref, network_info = self._get_running_instance()
+        share_info = objects.ShareMappingList()
         self.connection.rescue(self.ctxt, instance_ref, network_info,
-                               image_meta, '', None)
+                               image_meta, '', None, share_info)
 
     @catch_notimplementederror
     def test_unrescue_unrescued_instance(self):
@@ -296,8 +298,9 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
     def test_unrescue_rescued_instance(self, mock_unlink):
         image_meta = objects.ImageMeta.from_dict({})
         instance_ref, network_info = self._get_running_instance()
+        share_info = objects.ShareMappingList()
         self.connection.rescue(self.ctxt, instance_ref, network_info,
-                               image_meta, '', None)
+                               image_meta, '', None, share_info)
         self.connection.unrescue(self.ctxt, instance_ref)
 
     @catch_notimplementederror
@@ -604,8 +607,10 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
 
     @catch_notimplementederror
     def test_get_available_resource(self):
-        available_resource = self.connection.get_available_resource(
-                'myhostname')
+        with mock.patch('nova.virt.libvirt.host.Host._get_avail_memory_kb',
+                        mock.Mock(return_value=1024)):
+            available_resource = self.connection.get_available_resource(
+                    'myhostname')
         self._check_available_resource_fields(available_resource)
 
     @catch_notimplementederror

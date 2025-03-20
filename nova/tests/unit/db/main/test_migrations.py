@@ -364,6 +364,21 @@ class NovaMigrationsWalk(
         self.assertForeignKeyExists(
             connection, 'share_mapping', 'instance_uuid')
 
+    def _pre_upgrade_d60bddf7a903(self, connection):
+        # Verifying the presence or absence of the uniqueness constraint
+        # does not seem trivial, especially for SQLite. Instead of checking
+        # here, the test "test_share_mapping_duplicate" ensures that we cannot
+        # introduce two identical keys into the share_mapping table.
+        pass
+
+    def _check_d60bddf7a903(self, connection):
+        pass
+
+    def _check_2903cd72dc14(self, connection):
+        self.assertColumnExists(connection,
+                                'console_auth_tokens',
+                                'tls_port')
+
     def test_single_base_revision(self):
         """Ensure we only have a single base revision.
 

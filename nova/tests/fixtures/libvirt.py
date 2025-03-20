@@ -519,7 +519,7 @@ class HostPCIDevicesInfo(object):
 
     def __init__(self, num_pci=0, num_pfs=2, num_vfs=8, num_mdevcap=0,
                  numa_node=None, multiple_gpu_types=False,
-                 generic_types=False):
+                 generic_types=False, bus=0x81, product_ids=["1515"]):
         """Create a new HostPCIDevicesInfo object.
 
         :param num_pci: (int) The number of (non-SR-IOV) and (non-MDEV capable)
@@ -533,6 +533,14 @@ class HostPCIDevicesInfo(object):
             split between ``$TOTAL_NUMA_NODES`` nodes.
         :param multiple_gpu_types: (bool) Supports different vGPU types
         :param generic_types: (bool) Supports both nvidia-12 and mlx5 types
+        :param bus: (int) PCI bus number, allow to specify a different bus to
+            have an asymmetric configuration between src and dst computes.
+        :param product_ids: (list) List of product IDs.
+            Warning: This multiplies the number of PF and VF devices
+            by the number of product IDs. It creates separate sets of VF
+            devices, one for each product ID.
+            The first set is assigned to slot 0, and each subsequent set
+            is assigned to the next slot incrementally.
         """
         self.devices = {}
 
@@ -545,7 +553,7 @@ class HostPCIDevicesInfo(object):
         if num_pfs and num_vfs % num_pfs:
             raise ValueError('num_vfs must be a factor of num_pfs')
 
-        bus = 0x81
+        bus = bus
         slot = 0x0
         function = 0
         iommu_group = 40  # totally arbitrary number
@@ -581,41 +589,43 @@ class HostPCIDevicesInfo(object):
         vf_ratio = num_vfs // num_pfs if num_pfs else 0
 
         # Generate PFs
-        for dev in range(num_pfs):
-            function = 0
-            numa_node_pf = self._calc_numa_node(dev, numa_node)
-
-            self.add_device(
-                dev_type='PF',
-                bus=bus,
-                slot=slot,
-                function=function,
-                iommu_group=iommu_group,
-                numa_node=numa_node_pf,
-                vf_ratio=vf_ratio)
-
-            parent = (bus, slot, function)
-            # Generate VFs
-            for _ in range(vf_ratio):
-                function += 1
-                iommu_group += 1
-
-                if function % 8 == 0:
-                    # functions must be 0-7
-                    slot += 1
-                    function = 0
+        for prod_id in product_ids:
+            for dev in range(num_pfs):
+                function = 0
+                numa_node_pf = self._calc_numa_node(dev, numa_node)
 
                 self.add_device(
-                    dev_type='VF',
+                    dev_type='PF',
                     bus=bus,
                     slot=slot,
                     function=function,
                     iommu_group=iommu_group,
                     numa_node=numa_node_pf,
-                    vf_ratio=vf_ratio,
-                    parent=parent)
+                    vf_ratio=vf_ratio)
 
-            slot += 1
+                parent = (bus, slot, function)
+                # Generate VFs
+                for _ in range(vf_ratio):
+                    function += 1
+                    iommu_group += 1
+
+                    if function % 8 == 0:
+                        # functions must be 0-7
+                        slot += 1
+                        function = 0
+
+                    self.add_device(
+                        dev_type='VF',
+                        bus=bus,
+                        prod_id=prod_id,
+                        slot=slot,
+                        function=function,
+                        iommu_group=iommu_group,
+                        numa_node=numa_node_pf,
+                        vf_ratio=vf_ratio,
+                        parent=parent)
+
+                slot += 1
 
     def add_device(
         self, dev_type, bus, slot, function, iommu_group, numa_node,
@@ -914,6 +924,25 @@ def _parse_vcpu_info(element):
     return vcpu_info
 
 
+def _parse_filesystem_info(element):
+    filesystem_info = {}
+    filesystem_info['type'] = element.get('type', 'mount')
+
+    driver = element.find('./driver')
+    if driver is not None:
+        filesystem_info['driver_type'] = driver.get('type')
+
+    source = element.find('./source')
+    if source is not None:
+        filesystem_info['source'] = source.get('dir')
+
+    target = element.find('./target')
+    if target is not None:
+        filesystem_info['target'] = target.get('dir')
+
+    return filesystem_info
+
+
 def _parse_nic_info(element):
     nic_info = {}
     nic_info['type'] = element.get('type', 'bridge')
@@ -931,6 +960,23 @@ def _parse_nic_info(element):
         nic_info['target_dev'] = target.get('dev')
 
     return nic_info
+
+
+def _parse_hostdev_info(element):
+    hostdev_info = {}
+    hostdev_info['type'] = element.get('type', 'pci')
+    hostdev_info['managed'] = element.get('managed', 'pci')
+
+    source = element.find('./source')
+    if source is not None:
+        address = source.find('./address')
+        if address is not None:
+            hostdev_info['domain'] = address.get('domain')
+            hostdev_info['bus'] = address.get('bus')
+            hostdev_info['slot'] = address.get('slot')
+            hostdev_info['function'] = address.get('function')
+
+    return hostdev_info
 
 
 def disable_event_thread(self):
@@ -1050,7 +1096,7 @@ class NodeDevice(object):
     def attach(self):
         pass
 
-    def dettach(self):
+    def detach(self):
         pass
 
     def reset(self):
@@ -1177,6 +1223,13 @@ class Domain(object):
                 disks_info += [_parse_disk_info(disk)]
             devices['disks'] = disks_info
 
+            # Manage shares
+            filesystems_info = []
+            filesystems = device_nodes.findall('./filesystem')
+            for filesystem in filesystems:
+                filesystems_info += [_parse_filesystem_info(filesystem)]
+            devices['filesystem'] = filesystems_info
+
             nics_info = []
             nics = device_nodes.findall('./interface')
             for nic in nics:
@@ -1226,6 +1279,8 @@ class Domain(object):
                         'model': hostdev.get('model'),
                         'address_uuid': address.get('uuid')
                     })
+                if dev_type == 'pci':
+                    hostdev_info.append(_parse_hostdev_info(hostdev))
             devices['hostdevs'] = hostdev_info
 
             vpmem_info = []
@@ -1358,11 +1413,12 @@ class Domain(object):
             nic_info['_attached'] = True
             self._def['devices']['nics'] += [nic_info]
             result = True
+        elif xml.startswith("<hostdev"):
+            hostdev_info = _parse_hostdev_info(etree.fromstring(xml))
+            hostdev_info['_attached'] = True
+            self._def['devices']['hostdevs'] += [hostdev_info]
+            result = True
         else:
-            # FIXME(sean-k-mooney): We don't currently handle attaching
-            # or detaching hostdevs but we have tests that assume we do so
-            # this is an error not an exception. This affects PCI passthough,
-            # vGPUs and PF neutron ports.
             LOG.error(
                 "Trying to attach an unsupported device type."
                 "The fakelibvirt implementation is incomplete "
@@ -1410,10 +1466,25 @@ class Domain(object):
 
             return attached_nic_info is not None
 
-        # FIXME(sean-k-mooney): We don't currently handle attaching or
-        # detaching hostdevs but we have tests that assume we do so this is
-        # an error not an exception. This affects PCI passthough, vGPUs and
-        # PF neutron ports
+        if xml.startswith("<hostdev"):
+            hostdev_info = _parse_hostdev_info(etree.fromstring(xml))
+            attached_hostdev_info = None
+            for attached_hostdev in self._def['devices']['hostdevs']:
+                if (
+                    attached_hostdev["domain"] == hostdev_info["domain"] and
+                    attached_hostdev["bus"] == hostdev_info["bus"] and
+                    attached_hostdev["slot"] == hostdev_info["slot"] and
+                    attached_hostdev["function"] ==
+                    hostdev_info["function"]
+                ):
+                    attached_hostdev_info = attached_hostdev
+                    break
+
+            if attached_hostdev_info:
+                self._def['devices']['hostdevs'].remove(attached_hostdev_info)
+
+            return attached_hostdev_info is not None
+
         LOG.error(
             "Trying to detach an unsupported device type."
             "The fakelibvirt implementation is incomplete "
@@ -1458,6 +1529,13 @@ class Domain(object):
       <address type='drive' controller='0' bus='0' unit='0'/>
     </disk>"""
             disks += strformat % dict(source_attr=source_attr, **disk)
+        filesystems = ''
+        for filesystem in self._def['devices']['filesystem']:
+            filesystems += '''<filesystem type='%(type)s'>
+      <driver type='%(driver_type)s'/>
+      <source dir='%(source)s'/>
+      <target dir='%(target)s'/>
+    </filesystem>''' % dict(source_attr=source_attr, **filesystem)
         nics = ''
         for func, nic in enumerate(self._def['devices']['nics']):
             if func > 7:
@@ -1511,9 +1589,17 @@ class Domain(object):
 
         hostdevs = ''
         for hostdev in self._def['devices']['hostdevs']:
-            hostdevs += '''<hostdev mode='subsystem' type='%(type)s' model='%(model)s'>
+            if hostdev['type'] == 'mdev':
+                hostdevs += '''<hostdev mode='subsystem' type='%(type)s' model='%(model)s'>
     <source>
       <address uuid='%(address_uuid)s'/>
+    </source>
+    </hostdev>
+            ''' % hostdev  # noqa
+            if hostdev['type'] == 'pci':
+                hostdevs += '''<hostdev mode='subsystem' type='%(type)s' managed='%(managed)s'>
+    <source>
+      <address domain='%(domain)s' bus='%(bus)s' slot='%(slot)s' function='%(function)s'/>
     </source>
     </hostdev>
             ''' % hostdev  # noqa
@@ -1590,6 +1676,7 @@ class Domain(object):
   <devices>
     <emulator>/usr/bin/kvm</emulator>
     %(disks)s
+    %(filesystems)s
     <controller type='ide' index='0'>
       <address type='pci' domain='0x0000' bus='0x00' slot='0x01'
                function='0x1'/>
@@ -1624,6 +1711,7 @@ class Domain(object):
                 'arch': self._def['os']['arch'],
                 'loader': loader,
                 'disks': disks,
+                'filesystems': filesystems,
                 'nics': nics,
                 'hostdevs': hostdevs,
                 'vpmems': vpmems,
@@ -2247,6 +2335,17 @@ class Connection(object):
         return self.pci_info.get_device_by_name(dev_name)
 
     def nodeDeviceLookupByName(self, name):
+        # See bug https://bugs.launchpad.net/nova/+bug/2098892
+        # We don't test this by importing the libvirt module because the
+        # libvirt module is forbidden to be imported into our test
+        # environment. It is excluded from test-requirements.txt and we
+        # also use the ImportModulePoisonFixture in nova/test.py to prevent
+        # use of modules such as libvirt.
+        if not isinstance(name, str) and name is not None:
+            raise TypeError(
+                'virNodeDeviceLookupByName() argument 2 must be str or '
+                f'None, not {type(name)}')
+
         if name.startswith('mdev'):
             return self.mdev_info.get_device_by_name(name)
 
@@ -2477,6 +2576,8 @@ class LibvirtFixture(fixtures.Fixture):
             'Linux', '', '5.4.0-0-generic', '', obj_fields.Architecture.X86_64)
         self.mock_uname = self.useFixture(
             fixtures.MockPatch('os.uname', return_value=fake_uname)).mock
+        self.useFixture(fixtures.MonkeyPatch(
+            'nova.virt.libvirt.driver.sys.platform', 'linux'))
 
         real_exists = os.path.exists
 

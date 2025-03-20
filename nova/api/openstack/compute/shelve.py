@@ -38,6 +38,7 @@ class ShelveController(wsgi.Controller):
     @wsgi.expected_errors((404, 403, 409, 400))
     @wsgi.action('shelve')
     @validation.schema(schema.shelve)
+    @validation.response_body_schema(schema.shelve_response)
     def _shelve(self, req, id, body):
         """Move an instance into shelved mode."""
         context = req.environ["nova.context"]
@@ -58,11 +59,16 @@ class ShelveController(wsgi.Controller):
                                                                   'shelve', id)
         except exception.ForbiddenPortsWithAccelerator as e:
             raise exc.HTTPBadRequest(explanation=e.format_message())
+        except (
+            exception.ForbiddenSharesNotSupported,
+            exception.ForbiddenWithShare) as e:
+            raise exc.HTTPConflict(explanation=e.format_message())
 
     @wsgi.response(202)
     @wsgi.expected_errors((400, 404, 409))
     @wsgi.action('shelveOffload')
     @validation.schema(schema.shelve_offload)
+    @validation.response_body_schema(schema.shelve_offload_response)
     def _shelve_offload(self, req, id, body):
         """Force removal of a shelved instance from the compute node."""
         context = req.environ["nova.context"]
@@ -95,6 +101,7 @@ class ShelveController(wsgi.Controller):
     # 'availability_zone' = None is supported as well to unpin the
     # availability zone of an instance bonded to this availability_zone
     @validation.schema(schema.unshelve_v291, '2.91')
+    @validation.response_body_schema(schema.unshelve_response)
     def _unshelve(self, req, id, body):
         """Restore an instance from shelved mode."""
         context = req.environ["nova.context"]

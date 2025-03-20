@@ -119,3 +119,102 @@ create_v28 = {
     'required': ['remote_console'],
     'additionalProperties': False,
 }
+
+create_v299 = {
+    'type': 'object',
+    'properties': {
+        'remote_console': {
+            'type': 'object',
+            'properties': {
+                'protocol': {
+                    'type': 'string',
+                    'enum': ['vnc', 'spice', 'rdp', 'serial', 'mks'],
+                },
+                'type': {
+                    'type': 'string',
+                    'enum': ['novnc', 'xvpvnc', 'spice-html5', 'spice-direct',
+                             'serial', 'webmks'],
+                },
+            },
+            'required': ['protocol', 'type'],
+            'additionalProperties': False,
+        },
+    },
+    'required': ['remote_console'],
+    'additionalProperties': False,
+}
+
+get_vnc_console_response = {
+    'type': 'object',
+    'properties': {
+        'console': {
+            'type': 'object',
+            'properties': {
+                'type': {
+                    'type': 'string',
+                    'enum': ['novnc', 'xvpvnc'],
+                    'description': '',
+                },
+                'url': {
+                    'type': 'string',
+                    'format': 'uri',
+                    'description': '',
+                },
+            },
+            'required': ['type', 'url'],
+            'additionalProperties': False,
+        },
+    },
+    'required': ['console'],
+    'additionalProperties': False,
+}
+
+get_spice_console_response = {
+    'type': 'object',
+    'properties': {
+        'console': {
+            'type': 'object',
+            'properties': {
+                'type': {
+                    'type': 'string',
+                    'enum': ['spice-html5'],
+                    'description': '',
+                },
+                'url': {
+                    'type': 'string',
+                    'format': 'uri',
+                    'description': '',
+                },
+            },
+            'required': ['type', 'url'],
+            'additionalProperties': False,
+        },
+    },
+    'required': ['console'],
+    'additionalProperties': False,
+}
+
+get_serial_console_response = {
+    'type': 'object',
+    'properties': {
+        'console': {
+            'type': 'object',
+            'properties': {
+                'type': {
+                    'type': 'string',
+                    'enum': ['serial'],
+                    'description': '',
+                },
+                'url': {
+                    'type': 'string',
+                    'format': 'uri',
+                    'description': '',
+                },
+            },
+            'required': ['type', 'url'],
+            'additionalProperties': False,
+        },
+    },
+    'required': ['console'],
+    'additionalProperties': False,
+}

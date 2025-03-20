@@ -36,7 +36,24 @@ to use move operations, for each ``nova-compute`` service.
 
 Possible Values:
 
-* A dictionary of JSON values which describe the aliases. For example::
+* A JSON dictionary which describe a PCI device. It should take
+  the following format::
+
+    alias = {
+      "name": "<name>",
+      ["product_id": "<id>"],
+      ["vendor_id": "<id>"],
+      "device_type": "<type>",
+      ["numa_policy": "<policy>"],
+      ["resource_class": "<resource_class>"],
+      ["traits": "<traits>"]
+      ["live_migratable": "<live_migratable>"],
+    }
+
+  Where ``[`` indicates zero or one occurrences, ``{`` indicates zero or
+  multiple occurrences, and ``|`` mutually exclusive options.
+
+  For example::
 
     alias = {
       "name": "QuickAssist",
@@ -46,8 +63,17 @@ Possible Values:
       "numa_policy": "required"
     }
 
-  This defines an alias for the Intel QuickAssist card. (multi valued). Valid
-  key values are :
+  This defines an alias for the Intel QuickAssist card. (multi valued).
+
+  Another example::
+
+    alias = {
+      "name": "A16_16A",
+      "device_type": "type-VF",
+      resource_class: "CUSTOM_A16_16A",
+    }
+
+  Valid key values are :
 
   ``name``
     Name of the PCI alias.
@@ -65,7 +91,7 @@ Possible Values:
 
   ``numa_policy``
     Required NUMA affinity of device. Valid values are: ``legacy``,
-    ``preferred`` and ``required``.
+    ``preferred``, ``required``, and ``socket``.
 
   ``resource_class``
     The optional Placement resource class name that is used
@@ -97,6 +123,22 @@ Possible Values:
     scheduling the request. This field can only be used only if
     ``[filter_scheduler]pci_in_placement`` is enabled.
 
+  ``live_migratable``
+    Specify if live-migratable devices are desired.
+    May have boolean-like string values case-insensitive values:
+    "yes" or "no".
+
+    - ``live_migratable='yes'`` means that the user wants a device(s)
+      allowing live migration to a similar device(s) on another host.
+
+    - ``live_migratable='no'`` This explicitly indicates that the user
+      requires a non-live migratable device, making migration impossible.
+
+    - If not specified, the default is ``live_migratable=None``, meaning that
+      either a live migratable or non-live migratable device will be picked
+      automatically. However, in such cases, migration will **not** be
+      possible.
+
 * Supports multiple aliases by repeating the option (not by specifying
   a list value)::
 
@@ -112,7 +154,8 @@ Possible Values:
       "product_id": "0444",
       "vendor_id": "8086",
       "device_type": "type-PCI",
-      "numa_policy": "required"
+      "numa_policy": "required",
+      "live_migratable": "yes",
     }
 """),
     cfg.MultiStrOpt('device_spec',
@@ -165,7 +208,9 @@ Possible values:
     Supported ``<tag>`` values are :
 
     - ``physical_network``
+
     - ``trusted``
+
     - ``remote_managed`` - a VF is managed remotely by an off-path networking
       backend. May have boolean-like string values case-insensitive values:
       "true" or "false". By default, "false" is assumed for all devices.
@@ -174,9 +219,38 @@ Possible values:
       VPD capability with a card serial number (either on a VF itself on
       its corresponding PF), otherwise they will be ignored and not
       available for allocation.
+
+    - ``managed`` - Specify if the PCI device is managed by libvirt.
+      May have boolean-like string values case-insensitive values:
+      "yes" or "no". By default, "yes" is assumed for all devices.
+
+      - ``managed='yes'`` means that nova will use libvirt to detach the
+        device from the host before attaching it to the guest and re-attach
+        it to the host after the guest is deleted.
+
+      - ``managed='no'`` means that nova will not request libvirt to
+        detach / attach the device from / to the host. In this case nova
+        assumes that the operator configured the host in a way that these
+        VFs are not attached to the host.
+
+       Warning: Incorrect configuration of this parameter may result in compute
+       node crashes.
+
+    - ``live_migratable`` - Specify if the PCI device is live_migratable by
+      libvirt.
+      May have boolean-like string values case-insensitive values:
+      "yes" or "no". By default, "no" is assumed for all devices.
+
+      - ``live_migratable='yes'`` means that the device can be live migrated.
+        Of course, this requires hardware support, as well as proper system
+        and hypervisor configuration.
+
+      - ``live_migratable='no'`` means that the device cannot be live migrated.
+
     - ``resource_class`` - optional Placement resource class name to be used
-      to track the matching PCI devices in Placement when [pci]device_spec is
-      True. It can be a standard resource class from the
+      to track the matching PCI devices in Placement when
+      [pci]report_in_placement is True.
+      It can be a standard resource class from the
       ``os-resource-classes`` lib. Or can be any string. In that case Nova will
       normalize it to a proper Placement resource class by making it upper
       case, replacing any consecutive character outside of ``[A-Z0-9_]`` with a
@@ -186,6 +260,7 @@ Possible values:
       device's ``vendor_id`` and ``product_id`` in the form of
       ``CUSTOM_PCI_{vendor_id}_{product_id}``.
       The ``resource_class`` can be requested from a ``[pci]alias``
+
     - ``traits`` - optional comma separated list of Placement trait names to
       report on the resource provider that will represent the matching PCI
       device. Each trait can be a standard trait from ``os-traits`` lib or can
@@ -233,6 +308,15 @@ Possible values:
                    "address": "0000:82:00.0",
                    "resource_class": "PGPU",
                    "traits": "HW_GPU_API_VULKAN,my-awesome-gpu"}
+    device_spec = {"vendor_id":"10de",
+                   "product_id":"25b6",
+                   "address": "0000:25:00.4",
+                   "managed": "no"}
+    device_spec = {"vendor_id":"10de",
+                   "product_id":"25b6",
+                   "address": "0000:25:00.4",
+                   "resource_class": "CUSTOM_A16_16A",
+                   "managed": "no"}
 
   The following are invalid, as they specify mutually exclusive options::
 

@@ -15,12 +15,12 @@ from nova.tests.fixtures import libvirt as fakelibvirt
 from nova.tests.functional.libvirt import test_vgpu
 
 
-class VGPUTestsLibvirt7_7(test_vgpu.VGPUTestBase):
+class VGPUTestVolumeOPs(test_vgpu.VGPUTestBase):
 
-    FAKE_LIBVIRT_VERSION = 7007000
+    FAKE_LIBVIRT_VERSION = 8000000
 
     def setUp(self):
-        super(VGPUTestsLibvirt7_7, self).setUp()
+        super().setUp()
         extra_spec = {"resources:VGPU": "1"}
         self.flavor = self._create_flavor(extra_spec=extra_spec)
 
@@ -31,19 +31,36 @@ class VGPUTestsLibvirt7_7(test_vgpu.VGPUTestBase):
 
         self.compute1 = self.start_compute_with_vgpu('host1')
 
-    def test_create_servers_with_vgpu(self):
+    def test_create_vgpu_server_volume_attach(self):
 
         # Create a single instance against a specific compute node.
-        self._create_server(
+        server = self._create_server(
             image_uuid='155d900f-4e14-4e4c-a73d-069cbf4541e6',
             flavor_id=self.flavor, host=self.compute1.host,
             networks='auto', expected_state='ACTIVE')
+        server_id = server['id']
 
         self.assert_mdev_usage(self.compute1, expected_amount=1)
 
-        self._create_server(
-            image_uuid='155d900f-4e14-4e4c-a73d-069cbf4541e6',
-            flavor_id=self.flavor, host=self.compute1.host,
-            networks='auto', expected_state='ACTIVE')
+        # Attach a volume to the instance
+        # reuse IMAGE_BACKED_VOL for simplicity
+        self.api.post_server_volume(
+            server_id,
+            {
+                'volumeAttachment': {
+                    'volumeId': self.cinder.IMAGE_BACKED_VOL
+                }
+            }
+        )
+        self._wait_for_volume_attach(server_id, self.cinder.IMAGE_BACKED_VOL)
+        return server_id
 
-        self.assert_mdev_usage(self.compute1, expected_amount=2)
+    def test_create_vgpu_server_volume_detach(self):
+        server_id = self.test_create_vgpu_server_volume_attach()
+        # Detach the volume from the instance
+        # DELETE /servers/{server_id}/os-volume_attachments/{volume_id} is
+        # async but as we are using CastAsCall it's sync in our func tests
+        self.api.delete_server_volume(
+            server_id, self.cinder.IMAGE_BACKED_VOL)
+        self._wait_for_volume_detach(
+            server_id, self.cinder.IMAGE_BACKED_VOL)

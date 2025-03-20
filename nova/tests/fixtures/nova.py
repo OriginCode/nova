@@ -19,6 +19,7 @@
 import collections
 import contextlib
 from contextlib import contextmanager
+import copy
 import functools
 from importlib.abc import MetaPathFinder
 import logging as std_logging
@@ -31,6 +32,7 @@ import warnings
 import eventlet
 import fixtures
 import futurist
+from openstack.cloud import _utils
 from openstack import service_description
 from oslo_concurrency import lockutils
 from oslo_config import cfg
@@ -836,6 +838,53 @@ class WarningsFixture(fixtures.Fixture):
             category=UserWarning,
         )
 
+        # NOTE(stephenfin): Ignore deprecation warnings related to eventlet: we
+        # know it needs to go, there's no point having our unit tests
+        # continuously shout about it
+        warnings.filterwarnings(
+            'ignore',
+            message=(
+                "Using class 'GreenThreadPoolExecutor' \\(either directly or "
+                "via inheritance\\) is deprecated: Eventlet support is "
+                "deprecated. Please migrate your code and stop using Green "
+                "executor."
+            ),
+            category=DeprecationWarning,
+        )
+        warnings.filterwarnings(
+            'ignore',
+            message=(
+                "Using class 'GreenFuture' \\(either directly or "
+                "via inheritance\\) is deprecated: Eventlet support is "
+                "deprecated. Please migrate your code and stop using Green "
+                "future."
+            ),
+            category=DeprecationWarning,
+        )
+        warnings.filterwarnings(
+            'ignore',
+            message='Eventlet support is deprecated and will be removed.',
+            category=DeprecationWarning,
+        )
+        warnings.filterwarnings(
+            'ignore',
+            message=(
+                "Using the 'executor' argument is deprecated: the eventlet "
+                "executor is now deprecated. Threading will be the only "
+                "execution model available."
+            ),
+            category=DeprecationWarning,
+        )
+        warnings.filterwarnings(
+            'ignore',
+            message=(
+                "Eventlet usages are deprecated and the removal of Eventlet "
+                "from OpenStack is planned, for this reason the Eventlet "
+                "executor is deprecated."
+            ),
+            category=DeprecationWarning,
+        )
+
         # NOTE(gibi): The UUIDFields emits a warning if the value is not a
         # valid UUID. Let's escalate that to an exception in the test to
         # prevent adding violations.
@@ -1020,6 +1069,7 @@ class OSAPIFixture(fixtures.Fixture):
         self.other_api = client.TestOpenStackClient(
             'other', base_url, project_id=self.project_id,
             roles=['other'])
+        self.base_url = base_url
         # Provide a way to access the wsgi application to tests using
         # the fixture.
         self.app = app
@@ -1088,13 +1138,7 @@ class PoisonFunctions(fixtures.Fixture):
     def setUp(self):
         super(PoisonFunctions, self).setUp()
 
-        try:
-            self._poison_libvirt_driver()
-        except ImportError:
-            # The libvirt driver uses modules that are not available
-            # on Windows.
-            if os.name != 'nt':
-                raise
+        self._poison_libvirt_driver()
 
     def _poison_libvirt_driver(self):
         # The nova libvirt driver starts an event thread which only
@@ -1666,6 +1710,8 @@ class OpenStackSDKFixture(fixtures.Fixture):
         self.useFixture(fixtures.MockPatchObject(
             service_description.ServiceDescription, '_make_proxy',
             fake_make_proxy))
+        self.useFixture(fixtures.MockPatchObject(
+            _utils, 'localhost_supports_ipv6', return_value=False))
 
 
 class HostNameWeigher(weights.BaseHostWeigher):
@@ -1720,7 +1766,7 @@ class HostNameWeigherFixture(fixtures.Fixture):
 class GenericPoisonFixture(fixtures.Fixture):
     POISON_THESE = (
         (
-            'netifaces.interfaces',
+            'psutil.net_if_addrs',
             'tests should not be inspecting real interfaces on the test node',
         ),
         (
@@ -2035,19 +2081,37 @@ class GreenThreadPoolShutdownWait(fixtures.Fixture):
 
 
 class UnifiedLimitsFixture(fixtures.Fixture):
+    """A fixture that models Keystone unified limits for testing.
+
+    Although there exists a LimitFixture in oslo.limit, we need a fixture that
+    both oslo.limit and bare OpenStack SDK calls could hook into for unified
+    limits testing. We do some of our own logic outside of oslo.limit and call
+    the OpenStack SDK directly and we need them both to see the same limits.
+    """
+
     def setUp(self):
         super().setUp()
         self.mock_sdk_adapter = mock.Mock()
         real_get_sdk_adapter = utils.get_sdk_adapter
 
-        def fake_get_sdk_adapter(service_type, **kwargs):
+        def fake_get_sdk_adapter(service_type, admin, **kwargs):
             if service_type == 'identity':
                 return self.mock_sdk_adapter
-            return real_get_sdk_adapter(service_type, **kwargs)
+            return real_get_sdk_adapter(service_type, admin, **kwargs)
 
         self.useFixture(fixtures.MockPatch(
             'nova.utils.get_sdk_adapter', fake_get_sdk_adapter))
+        self.useFixture(fixtures.MockPatch(
+            'oslo_limit.limit._get_keystone_connection',
+            return_value=self.mock_sdk_adapter))
 
+        # These are needed by oslo.limit.
+        self.mock_sdk_adapter.get.return_value.json.return_value = {
+            'model': {'name': 'flat'}}
+        self.mock_sdk_adapter.get_endpoint.return_value.service_id = None
+        self.mock_sdk_adapter.get_endpoint.return_value.region_id = None
+
+        # These are Keystone API calls that oslo.limit will also use.
         self.mock_sdk_adapter.registered_limits.side_effect = (
             self.registered_limits)
         self.mock_sdk_adapter.limits.side_effect = self.limits
@@ -2058,21 +2122,33 @@ class UnifiedLimitsFixture(fixtures.Fixture):
         self.registered_limits_list = []
         self.limits_list = []
 
-    def registered_limits(self, region_id=None):
+    def registered_limits(
+            self, region_id=None, resource_name=None, service_id=None):
+        registered_limits_list = copy.deepcopy(self.registered_limits_list)
         if region_id:
-            return [rl for rl in self.registered_limits_list
-                    if rl.region_id == region_id]
-        return self.registered_limits_list
+            registered_limits_list = [rl for rl in registered_limits_list
+                                      if rl.region_id == region_id]
+        if resource_name:
+            registered_limits_list = [rl for rl in registered_limits_list
+                                      if rl.resource_name == resource_name]
+        for registered_limit in registered_limits_list:
+            yield registered_limit
 
-    def limits(self, project_id=None, region_id=None):
-        limits_list = self.limits_list
+    def limits(
+            self, project_id=None, region_id=None, resource_name=None,
+            service_id=None):
+        limits_list = copy.deepcopy(self.limits_list)
         if project_id:
             limits_list = [pl for pl in limits_list
                            if pl.project_id == project_id]
         if region_id:
             limits_list = [pl for pl in limits_list
                            if pl.region_id == region_id]
-        return limits_list
+        if resource_name:
+            limits_list = [pl for pl in limits_list
+                           if pl.resource_name == resource_name]
+        for limit in limits_list:
+            yield limit
 
     def create_registered_limit(self, **attrs):
         rl = collections.namedtuple(

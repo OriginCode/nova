@@ -164,6 +164,8 @@ class IronicDriver(virt_driver.ComputeDriver):
         "supports_address_space_passthrough": False,
         "supports_address_space_emulated": False,
         "supports_stateless_firmware": False,
+        "supports_virtio_fs": False,
+        "supports_mem_backing_file": False,
 
         # Image type support flags
         "supports_image_type_aki": False,
@@ -198,7 +200,7 @@ class IronicDriver(virt_driver.ComputeDriver):
             # service isn't ready yet. Consumers of ironic_connection are set
             # up to handle this and raise VirtDriverNotReady as appropriate.
             self._ironic_connection = utils.get_sdk_adapter(
-                'baremetal', check_service=True)
+                'baremetal', admin=True, check_service=True)
         return self._ironic_connection
 
     def _get_node(self, node_id):
@@ -502,12 +504,10 @@ class IronicDriver(virt_driver.ComputeDriver):
                              'reason': e},
                             instance=instance)
 
-    def _cleanup_deploy(self, node, instance, network_info=None,
-                        remove_instance_info=True):
+    def _cleanup_deploy(self, node, instance, network_info=None):
         self._cleanup_volume_target_info(instance)
         self._unplug_vifs(node, instance, network_info)
-        if remove_instance_info:
-            self._remove_instance_info_from_node(node)
+        self._remove_instance_info_from_node(node)
 
     def _wait_for_active(self, instance):
         """Wait for the node to be marked as ACTIVE in Ironic."""
@@ -1364,28 +1364,23 @@ class IronicDriver(virt_driver.ComputeDriver):
             #             without raising any exceptions.
             return
 
-        try:
-            if node.provision_state in _UNPROVISION_STATES:
-                self._unprovision(instance, node)
-            else:
-                # NOTE(hshiina): if spawn() fails before ironic starts
-                #                provisioning, instance information should be
-                #                removed from ironic node.
-                self._remove_instance_info_from_node(node)
-        finally:
-            # NOTE(mgoddard): We don't need to remove instance info at this
-            # point since we will have already done it. The destroy will only
-            # succeed if this method returns without error, so we will end up
-            # removing the instance info eventually.
-            self._cleanup_deploy(node, instance, network_info,
-                                 remove_instance_info=False)
+        if node.provision_state in _UNPROVISION_STATES:
+            # NOTE(mgoddard): Ironic's node tear-down procedure includes all of
+            # the things we do in _cleanup_deploy, so let's not repeat them
+            # here. Doing so would also race with the node cleaning process,
+            # which may acquire the node lock and prevent us from making
+            # changes to the node. See
+            # https://bugs.launchpad.net/nova/+bug/2019977
+            self._unprovision(instance, node)
+        else:
+            self._cleanup_deploy(node, instance, network_info)
 
         LOG.info('Successfully unprovisioned Ironic node %s',
                  node.id, instance=instance)
 
     def reboot(self, context, instance, network_info, reboot_type,
                block_device_info=None, bad_volumes_callback=None,
-               accel_info=None):
+               accel_info=None, share_info=None):
         """Reboot the specified instance.
 
         NOTE: Unlike the libvirt driver, this method does not delete
@@ -1402,6 +1397,8 @@ class IronicDriver(virt_driver.ComputeDriver):
             encountered. Ignored by this driver.
         :param accel_info: List of accelerator request dicts. The exact
             data struct is doc'd in nova/virt/driver.py::spawn().
+        :param share_info: share mapping information used to mount Manila
+            shares on the compute and then on the instance using virtiofs.
         """
         LOG.debug('Reboot(type %s) called for instance',
                   reboot_type, instance=instance)
@@ -1496,7 +1493,7 @@ class IronicDriver(virt_driver.ComputeDriver):
                  node.id, instance=instance)
 
     def power_on(self, context, instance, network_info,
-                 block_device_info=None, accel_info=None):
+                 block_device_info=None, accel_info=None, share_info=None):
         """Power on the specified instance.
 
         NOTE: Unlike the libvirt driver, this method does not delete
@@ -1510,6 +1507,7 @@ class IronicDriver(virt_driver.ComputeDriver):
             information. Ignored by this driver.
         :param accel_info: List of accelerator requests for this instance.
                            Ignored by this driver.
+        :param share_info: instance share attached list.
         """
         LOG.debug('Power on called for instance', instance=instance)
         node = self._validate_instance_and_node(instance)
@@ -1744,8 +1742,9 @@ class IronicDriver(virt_driver.ComputeDriver):
         node = self._get_node(node_id)
 
         metadata = self.get_instance_driver_metadata(instance, network_info)
-        self._add_instance_info_to_node(node, instance, image_meta, metadata,
-                                        instance.flavor, preserve_ephemeral)
+        self._add_instance_info_to_node(node, instance, image_meta,
+                                        instance.flavor, metadata,
+                                        preserve_ephemeral=preserve_ephemeral)
 
         # Config drive
         configdrive_value = None
@@ -1859,7 +1858,10 @@ class IronicDriver(virt_driver.ComputeDriver):
         def _enable_console(mode):
             """Request to enable/disable node console."""
             try:
-                self.ironic_connection.set_node_console_mode(node_id, mode)
+                if mode:
+                    self.ironic_connection.enable_node_console(node_id)
+                else:
+                    self.ironic_connection.disable_node_console(node_id)
             except sdk_exc.SDKException as e:
                 LOG.error('Failed to set console mode to "%(mode)s" '
                           'for instance %(inst)s: %(reason)s',
@@ -2145,7 +2147,7 @@ class IronicDriver(virt_driver.ComputeDriver):
             raise exception.IronicAPIVersionNotAvailable(version=version)
 
     def rescue(self, context, instance, network_info, image_meta,
-               rescue_password, block_device_info):
+               rescue_password, block_device_info, share_info):
         """Rescue the specified instance.
 
         :param nova.context.RequestContext context:
@@ -2160,6 +2162,8 @@ class IronicDriver(virt_driver.ComputeDriver):
         :param rescue_password: new root password to set for rescue.
         :param dict block_device_info:
             The block device mapping of the instance.
+        :param nova.objects.share_mapping.ShareMapingList share_info
+            optional list of share_mapping
         :raise InstanceRescueFailure if rescue fails.
         """
         LOG.debug('Rescue called for instance', instance=instance)

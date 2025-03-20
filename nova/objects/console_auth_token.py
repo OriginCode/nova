@@ -41,13 +41,15 @@ class ConsoleAuthToken(base.NovaTimestampObject, base.NovaObject):
     #              was deprecated.
     # Version 1.2: Add expires field.
     #              This is to see token expire time.
-    VERSION = '1.2'
+    # Version 1.3: Added tls_port field.
+    VERSION = '1.3'
 
     fields = {
         'id': fields.IntegerField(),
         'console_type': fields.StringField(nullable=False),
         'host': fields.StringField(nullable=False),
         'port': fields.IntegerField(nullable=False),
+        'tls_port': fields.IntegerField(nullable=True),
         'internal_access_path': fields.StringField(nullable=True),
         'instance_uuid': fields.UUIDField(nullable=False),
         'access_url_base': fields.StringField(nullable=True),
@@ -75,15 +77,23 @@ class ConsoleAuthToken(base.NovaTimestampObject, base.NovaObject):
                 # top-level 'token' query parameter was removed. The 'path'
                 # parameter is supported in older noVNC versions, so it is
                 # backward compatible.
-                qparams = {'path': '?token=%s' % self.token}
-                return '%s?%s' % (self.access_url_base,
-                                  urlparse.urlencode(qparams))
+                parsed_base_url = urlparse.urlparse(self.access_url_base)
+                qparams = urlparse.parse_qs(parsed_base_url.query)
+                qpath = '%s?token=%s' % (qparams.get('path', [''])[0],
+                                         self.token)
+                qparams.update({'path': qpath})
+                return parsed_base_url._replace(
+                    query=urlparse.urlencode(qparams, doseq=True)).geturl()
             else:
                 return '%s?token=%s' % (self.access_url_base, self.token)
 
     def obj_make_compatible(self, primitive, target_version):
         super().obj_make_compatible(primitive, target_version)
         target_version = versionutils.convert_version_to_tuple(target_version)
+
+        if target_version < (1, 3) and 'tls_port' in primitive:
+            primitive.pop('tls_port', None)
+
         if target_version < (1, 2) and 'expires' in primitive:
             primitive.pop('expires', None)
 
@@ -94,7 +104,7 @@ class ConsoleAuthToken(base.NovaTimestampObject, base.NovaObject):
         # field is populated in the authorize method after the token
         # authorization is created in the database.
         for field in obj.fields:
-            setattr(obj, field, db_obj[field])
+            setattr(obj, field, db_obj.get(field))
         obj._context = context
         obj.obj_reset_changes()
         return obj

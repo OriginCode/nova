@@ -637,6 +637,7 @@ Response
   - image: image
   - image.id: image_id_body
   - image.links: links
+  - image.properties: image_properties
   - links: server_links
   - metadata: metadata_object
   - name: server_name
@@ -646,6 +647,7 @@ Response
   - updated: updated
   - user_id: user_id
   - adminPass: adminPass_response
+  - pinned_availability_zone: pinned_availability_zone
   - progress: progress
   - locked: locked
   - description: server_description_resp
@@ -674,9 +676,24 @@ Response
   - os-extended-volumes:volumes_attached.delete_on_termination: os-extended-volumes:volumes_attached.delete_on_termination_update_rebuild
   - OS-SRV-USG:launched_at: OS-SRV-USG:launched_at_update_rebuild
   - OS-SRV-USG:terminated_at: OS-SRV-USG:terminated_at_update_rebuild
+  - scheduler_hints: scheduler_hints
   - security_groups: security_groups_obj_update_rebuild
   - security_group.name: name_update_rebuild
   - host_status: host_status_update_rebuild
+
+**Example Rebuild Server (rebuild Action) (v2.100)**
+
+.. literalinclude:: /../../doc/api_samples/servers/v2.100/server-action-rebuild-resp.json
+
+**Example Rebuild Server (rebuild Action) (v2.98)**
+
+.. literalinclude:: ../../doc/api_samples/servers/v2.98/server-action-rebuild-resp.json
+   :language: javascript
+
+**Example Rebuild Server (rebuild Action) (v2.96)**
+
+.. literalinclude:: ../../doc/api_samples/servers/v2.96/server-action-rebuild-resp.json
+   :language: javascript
 
 **Example Rebuild Server (rebuild Action) (v2.75)**
 

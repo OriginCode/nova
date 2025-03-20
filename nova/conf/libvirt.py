@@ -1113,6 +1113,22 @@ Use multipath connection of the iSCSI or FC volume
 Volumes can be connected in the LibVirt as multipath devices. This will
 provide high availability and fault tolerance.
 """),
+    cfg.BoolOpt('volume_enforce_multipath',
+                default=False,
+                help="""
+Require multipathd when attaching a volume to an instance.
+
+When enabled, attachment of volumes will be aborted when multipathd is not
+running. Otherwise, it will fallback to single path without error.
+
+When enabled, the libvirt driver checks availability of mulitpathd when it is
+initialized, and the compute service fails to start if multipathd is not
+running.
+
+Related options:
+
+* volume_use_multipath must be True when this is True
+"""),
     cfg.IntOpt('num_volume_scan_tries',
                deprecated_name='num_iscsi_scan_tries',
                default=5,
@@ -1240,9 +1256,43 @@ Possible values:
 """),
 ]
 
+libvirt_volume_ceph_opts = [
+    cfg.StrOpt('ceph_mount_point_base',
+               default=paths.state_path_def('mnt'),
+               help="""
+Directory where the ceph volume for each manila share is mounted on the
+compute node.
+The default is 'mnt' directory of the location where nova's Python module
+is installed.
+
+Possible values:
+
+* A string representing absolute path of mount point.
+"""),
+    cfg.ListOpt('ceph_mount_options',
+               help="""
+Mount options passed to the ceph client. See section of the ceph man page
+for details.
+
+Mount options controls the way the filesystem is mounted and how the
+ceph client behaves when accessing files on this mount point.
+
+Possible values:
+
+* Any string representing mount options separated by commas.
+* Example string: vers=3,lookupcache=pos
+"""),
+]
+
 libvirt_volume_quobyte_opts = [
     cfg.StrOpt('quobyte_mount_point_base',
                default=paths.state_path_def('mnt'),
+               deprecated_for_removal=True,
+               deprecated_since="31.0.0",
+               deprecated_reason="""
+Quobyte volume driver in cinder was marked unsupported. Quobyte volume support
+will be removed from nova when the volume driver is removed from cinder.
+""",
                help="""
 Directory where the Quobyte volume is mounted on the compute node.
 
@@ -1255,17 +1305,37 @@ Possible values:
 * A string representing absolute path of mount point.
 """),
     cfg.StrOpt('quobyte_client_cfg',
+               deprecated_for_removal=True,
+               deprecated_since="31.0.0",
+               deprecated_reason="""
+Quobyte volume driver in cinder was marked unsupported. Quobyte volume support
+will be removed from nova when the volume driver is removed from cinder.
+""",
                help='Path to a Quobyte Client configuration file.'),
 ]
 
 libvirt_volume_smbfs_opts = [
     cfg.StrOpt('smbfs_mount_point_base',
                default=paths.state_path_def('mnt'),
+               deprecated_for_removal=True,
+               deprecated_since="31.0.0",
+               deprecated_reason="""
+Windows SMB volume driver in cinder was marked unsupported. SMBFS volume
+support will be removed from nova when the volume driver is removed from
+cinder.
+""",
                help="""
 Directory where the SMBFS shares are mounted on the compute node.
 """),
     cfg.StrOpt('smbfs_mount_options',
                default='',
+               deprecated_for_removal=True,
+               deprecated_since="31.0.0",
+               deprecated_reason="""
+Windows SMB volume driver in cinder was marked unsupported. SMBFS volume
+support will be removed from nova when the volume driver is removed from
+cinder.
+""",
                help="""
 Mount options passed to the SMBFS client.
 
@@ -1295,6 +1365,13 @@ compute nodes, other method must be used for:
 libvirt_volume_vzstorage_opts = [
     cfg.StrOpt('vzstorage_mount_point_base',
                default=paths.state_path_def('mnt'),
+               deprecated_for_removal=True,
+               deprecated_since="31.0.0",
+               deprecated_reason="""
+Virtuozzo Storage volume driver in cinder was marked unsupported. Virtuozzo
+Storage volume support will be removed from nova when the volume driver is
+removed from cinder.
+""",
                help="""
 Directory where the Virtuozzo Storage clusters are mounted on the compute
 node.
@@ -1308,6 +1385,13 @@ Related options:
               ),
     cfg.StrOpt('vzstorage_mount_user',
                default='stack',
+               deprecated_for_removal=True,
+               deprecated_since="31.0.0",
+               deprecated_reason="""
+Virtuozzo Storage volume driver in cinder was marked unsupported. Virtuozzo
+Storage volume support will be removed from nova when the volume driver is
+removed from cinder.
+""",
                help="""
 Mount owner user name.
 
@@ -1547,6 +1631,7 @@ ALL_OPTS = list(itertools.chain(
     libvirt_volume_iser_opts,
     libvirt_volume_net_opts,
     libvirt_volume_nfs_opts,
+    libvirt_volume_ceph_opts,
     libvirt_volume_quobyte_opts,
     libvirt_volume_smbfs_opts,
     libvirt_remotefs_opts,

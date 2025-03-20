@@ -32,6 +32,7 @@ class SuspendServerController(wsgi.Controller):
     @wsgi.expected_errors((403, 404, 409, 400))
     @wsgi.action('suspend')
     @validation.schema(schema.suspend)
+    @validation.response_body_schema(schema.suspend_response)
     def _suspend(self, req, id, body):
         """Permit admins to suspend the server."""
         context = req.environ['nova.context']
@@ -48,11 +49,16 @@ class SuspendServerController(wsgi.Controller):
                     'suspend', id)
         except exception.ForbiddenPortsWithAccelerator as e:
             raise exc.HTTPBadRequest(explanation=e.format_message())
+        except (
+            exception.ForbiddenSharesNotSupported,
+            exception.ForbiddenWithShare) as e:
+            raise exc.HTTPConflict(explanation=e.format_message())
 
     @wsgi.response(202)
     @wsgi.expected_errors((404, 409))
     @wsgi.action('resume')
     @validation.schema(schema.resume)
+    @validation.response_body_schema(schema.resume_response)
     def _resume(self, req, id, body):
         """Permit admins to resume the server from suspend."""
         context = req.environ['nova.context']

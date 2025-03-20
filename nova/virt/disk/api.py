@@ -30,6 +30,7 @@ import tempfile
 from oslo_concurrency import processutils
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
+from oslo_utils import secretutils
 
 import nova.conf
 from nova import exception
@@ -40,9 +41,6 @@ from nova.virt.disk.mount import api as mount
 from nova.virt.disk.vfs import api as vfs
 from nova.virt.image import model as imgmodel
 from nova.virt import images
-
-if os.name != 'nt':
-    import crypt
 
 
 LOG = logging.getLogger(__name__)
@@ -621,9 +619,6 @@ def _set_passwd(username, admin_passwd, passwd_data, shadow_data):
     :raises: exception.NovaException(), IOError()
 
     """
-    if os.name == 'nt':
-        raise exception.NovaException(_('Not implemented on Windows'))
-
     # encryption algo - id pairs for crypt()
     algos = {'SHA-512': '$6$', 'SHA-256': '$5$', 'MD5': '$1$', 'DES': ''}
 
@@ -636,9 +631,13 @@ def _set_passwd(username, admin_passwd, passwd_data, shadow_data):
     # md5 is the default because it's widely supported. Although the
     # local crypt() might support stronger SHA, the target instance
     # might not.
-    encrypted_passwd = crypt.crypt(admin_passwd, algos['MD5'] + salt)
+    encrypted_passwd = secretutils.crypt_password(
+        admin_passwd, algos['MD5'] + salt
+    )
     if len(encrypted_passwd) == 13:
-        encrypted_passwd = crypt.crypt(admin_passwd, algos['DES'] + salt)
+        encrypted_passwd = secretutils.crypt_password(
+            admin_passwd, algos['DES'] + salt
+        )
 
     p_file = passwd_data.split("\n")
     s_file = shadow_data.split("\n")

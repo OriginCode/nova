@@ -396,6 +396,9 @@ class InstanceHelperMixin:
 
         return flavor['id']
 
+    def _delete_flavor(self, flavor_id):
+        self.api_fixture.admin_api.delete_flavor(flavor_id)
+
     def _create_image(self, metadata):
         image = {
             'id': 'c456eb30-91d7-4f43-8f46-2efd9eccd744',
@@ -546,6 +549,37 @@ class InstanceHelperMixin:
         self.api.detach_interface(server['id'], port_uuid)
         self.notifier.wait_for_versioned_notifications(
             'instance.interface_detach.end')
+
+    def _get_share(self, server, share_id, admin=False):
+        if admin:
+            return (self.admin_api.get_server_share(server['id'], share_id))
+        return (self.api.get_server_share(server['id'], share_id))
+
+    def _attach_share(self, server, share_id, tag=None):
+        if not tag:
+            self.api.post_server_share(
+                server['id'], {"share": {"share_id": share_id}})
+        else:
+            self.api.post_server_share(
+                server['id'], {"share": {"share_id": share_id, "tag": tag}})
+        self.notifier.wait_for_versioned_notifications(
+            'instance.share_attach.end')
+
+    def _attach_share_with_error(self, server, share_id):
+        self.api.post_server_share(
+            server['id'], {"share": {"share_id": share_id}})
+        self.notifier.wait_for_versioned_notifications(
+            'instance.share_attach.error')
+
+    def _detach_share(self, server, share_id):
+        self.api.delete_server_share(server['id'], share_id)
+        self.notifier.wait_for_versioned_notifications(
+            'instance.share_detach.end')
+
+    def _detach_share_with_error(self, server, share_id):
+        self.api.delete_server_share(server['id'], share_id)
+        self.notifier.wait_for_versioned_notifications(
+            'instance.share_detach.error')
 
     def _rebuild_server(self, server, image_uuid, expected_state='ACTIVE'):
         """Rebuild a server."""
@@ -740,6 +774,15 @@ class InstanceHelperMixin:
             'volume_size': 1,
         }]
         server = self.api.post_server({'server': server})
+        return self._wait_for_state_change(server, 'ACTIVE')
+
+    def _rescue_server(self, server):
+        self.api.post_server_action(
+            server['id'], {'rescue': {"adminPass": "MySecretPass"}})
+        return self._wait_for_state_change(server, 'RESCUE')
+
+    def _unrescue_server(self, server):
+        self.api.post_server_action(server['id'], {'unrescue': None})
         return self._wait_for_state_change(server, 'ACTIVE')
 
 

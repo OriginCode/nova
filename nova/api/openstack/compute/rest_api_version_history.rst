@@ -1253,5 +1253,50 @@ behavior.
 2.96 (Maximum in 2024.1 Caracal and 2024.2 Dalmatian)
 -----------------------------------------------------
 
-The ``server show`` and ``server list --long`` responses now include the
-pinned availability zone as well.
+The ``server show``, ``server list --long``, ``server update``, and
+``server rebuild`` responses now include the pinned availability zone as well.
+
+.. _microversion 2.97:
+
+2.97
+----
+
+This microversion introduces the new Manila Share Attachment feature,
+streamlining the process of attaching and mounting Manila file shares to
+instances. It includes a new set of APIs to easily add, remove, list, and
+display shares. For detailed insights and usage instructions, please refer
+to the `manage-shares documentation`_.
+
+.. _manage-shares documentation: https://docs.openstack.org/nova/latest/admin/manage-shares.html
+
+.. _microversion 2.98:
+
+2.98
+----
+
+Add support for including image properties as new ``properties`` subkey
+under the struct at the existing ``image`` key in the response for
+``GET /servers/{server_id}`` (server show), ``GET /servers/detail``
+(list server --long), ``PUT /servers/{server_id}`` (server update), and in the
+rebuild case of ``POST /server/{server_id}/action`` (server rebuild)
+API response.
+
+.. _microversion 2.99:
+
+2.99
+----
+
+Add the ``spice-direct`` console type to the spice console protocol. Also
+add a ``tls_port`` field to the return value from
+``GET /os-console-auth-tokens/{console_token}`` and no longer allow random
+query string parameters.
+
+.. _microversion 2.100:
+
+2.100 (Maximum in 2025.1 Epoxy)
+-----------------------------------------------------
+
+The ``GET /servers/{server_id}``, ``GET /servers/detail``
+``PUT /servers/{server_id}`` and ``POST /server/{server_id}/action``
+(rebuild) responses now include the scheduler hints provided during
+server creation.

@@ -126,9 +126,11 @@ class KeypairsTestV21(test.TestCase):
 
     def test_keypair_create_with_empty_name(self):
         body = {'keypair': {'name': ''}}
-        self._test_keypair_create_bad_request_case(body,
-                                                   self.validation_error,
-                                                   'is too short')
+        self._test_keypair_create_bad_request_case(
+            body,
+            self.validation_error,
+            '(is too short)|'  # jsonschema < 4.23.0
+            '(should be non-empty)')  # jsonschema >= 4.23.0
 
     def test_keypair_create_with_name_too_long(self):
         body = {
@@ -395,7 +397,7 @@ class KeypairsTestV210(KeypairsTestV22):
         with mock.patch.object(self.controller.api, 'get_key_pairs') as mock_g:
             self.controller.index(req)
             userid = mock_g.call_args_list[0][0][1]
-            self.assertEqual('fake_user', userid)
+            self.assertEqual(fakes.FAKE_USER_ID, userid)
 
 
 class KeypairsTestV235(test.TestCase):
@@ -421,7 +423,7 @@ class KeypairsTestV235(test.TestCase):
         res_dict = self.controller.index(req)
 
         mock_kp_get.assert_called_once_with(
-            req.environ['nova.context'], 'fake_user',
+            req.environ['nova.context'], fakes.FAKE_USER_ID,
             limit=3, marker='fake_marker')
         response = {'keypairs': [{'keypair': dict(keypair_data, name='FAKE',
                                                   type='ssh')}]}
@@ -458,7 +460,7 @@ class KeypairsTestV235(test.TestCase):
         self.controller.index(req)
 
         mock_kp_get.assert_called_once_with(
-            req.environ['nova.context'], 'fake_user',
+            req.environ['nova.context'], fakes.FAKE_USER_ID,
             limit=None, marker=None)
 
 

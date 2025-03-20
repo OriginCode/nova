@@ -1260,6 +1260,10 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         return objects.BlockDeviceMappingList.get_by_instance_uuid(
             self._context, self.uuid)
 
+    def get_shares(self):
+        return objects.ShareMappingList.get_by_instance_uuid(
+            self._context, self.uuid)
+
     def remove_pci_device_and_request(self, pci_device):
         """Remove the PciDevice and the related InstancePciRequest"""
         if pci_device in self.pci_devices.objects:
@@ -1583,6 +1587,26 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
             instance.obj_reset_changes(['fault'])
 
         return faults_by_uuid.keys()
+
+    def fill_metadata(self):
+        # NOTE(danms): This only fills system_metadata currently, but could
+        # be extended to support user metadata if needed in the future.
+        # Make a uuid-indexed dict of non-object instance dicts that the DB
+        # layer can use. They need only contain the uuid of the instances
+        # we are looking up. Any of them that already have system_metadata
+        # need not be included.
+        db_inst_shells = {inst.uuid: {'uuid': inst.uuid} for inst in self
+                          if 'system_metadata' not in inst}
+        if db_inst_shells:
+            updates = db.instances_fill_metadata(
+                self._context,
+                db_inst_shells.values(),
+                manual_joins=['system_metadata'])
+            updated = {i['uuid']: i for i in updates}
+            for inst in [i for i in self if i.uuid in updated]:
+                # Patch up our instances with system_metadata from the fill
+                # operation
+                inst.system_metadata = utils.instance_sys_meta(updated)
 
     @base.remotable_classmethod
     def get_uuids_by_host(cls, context, host):

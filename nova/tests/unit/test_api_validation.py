@@ -158,7 +158,7 @@ class APIValidationTestCase(test.NoDBTestCase):
 class FormatCheckerTestCase(test.NoDBTestCase):
 
     def _format_checker(self, format, value, error_message):
-        format_checker = validators.FormatChecker()
+        format_checker = validators._FORMAT_CHECKER
         exc = self.assertRaises(jsonschema_exc.FormatError,
                                 format_checker.check, value, format)
         self.assertIsInstance(exc.cause, exception.InvalidName)
@@ -500,8 +500,12 @@ class StringLengthTestCase(APIValidationTestCase):
                          'Validation succeeded.')
 
     def test_validate_string_length_fails(self):
-        detail = ("Invalid input for field/attribute foo. Value: ."
-                  " '' is too short")
+        detail = [
+            "Invalid input for field/attribute foo. Value: . '' "
+            "is too short",  # jsonschema < 4.23.0
+            "Invalid input for field/attribute foo. Value: . '' "
+            "should be non-empty",  # jsonschema >= 4.23.0
+        ]
         self.check_validation_error(self.post, body={'foo': ''},
                                     expected_detail=detail)
 

@@ -1061,9 +1061,9 @@ def _virtual_interface_query(context):
 
 @require_context
 @pick_context_manager_writer
-def virtual_interface_update(context, address, values):
+def virtual_interface_update(context, vif_uuid, values):
     """Create a virtual interface record in the database."""
-    vif_ref = virtual_interface_get_by_address(context, address)
+    vif_ref = virtual_interface_get_by_uuid(context, vif_uuid)
     vif_ref.update(values)
     vif_ref.save(context.session)
     return vif_ref
@@ -1519,6 +1519,18 @@ def _instances_fill_metadata(context, instances, manual_joins=None):
         filled_instances.append(inst)
 
     return filled_instances
+
+
+@require_context
+@pick_context_manager_reader
+def instances_fill_metadata(context, instances, manual_joins=None):
+    """Selectively fill instances with manually-joined metadata.
+
+    See _instances_fill_metadata(). This is only for use as a standalone
+    operation in its own transaction.
+    """
+    return _instances_fill_metadata(context, instances,
+                                    manual_joins=manual_joins)
 
 
 def _manual_join_columns(columns_to_join):

@@ -132,21 +132,14 @@ class PciDevice(base.NovaPersistentObject, base.NovaObject):
         if target_version < (1, 5) and 'parent_addr' in primitive:
             added_statuses = (fields.PciDeviceStatus.UNCLAIMABLE,
                               fields.PciDeviceStatus.UNAVAILABLE)
-            status = primitive['status']
-            if status in added_statuses:
-                raise exception.ObjectActionError(
-                    action='obj_make_compatible',
-                    reason='status=%s not supported in version %s' % (
-                        status, target_version))
+            base.raise_on_too_new_values(
+                target_version, primitive, 'status', added_statuses)
         if target_version < (1, 6) and 'uuid' in primitive:
             del primitive['uuid']
         if target_version < (1, 7) and 'dev_type' in primitive:
-            dev_type = primitive['dev_type']
-            if dev_type == fields.PciDeviceType.VDPA:
-                raise exception.ObjectActionError(
-                    action='obj_make_compatible',
-                    reason='dev_type=%s not supported in version %s' % (
-                        dev_type, target_version))
+            base.raise_on_too_new_values(
+                target_version, primitive,
+                'dev_type', (fields.PciDeviceType.VDPA,))
 
     def __repr__(self):
         return (
@@ -184,9 +177,24 @@ class PciDevice(base.NovaPersistentObject, base.NovaObject):
                 #     - "parent_ifname": the netdev name of the parent (PF)
                 #        device of a VF
                 #     - "mac_address": the MAC address of the PF
+                #     - "managed": "true"/"false" if the device is managed by
+                #       hypervisor
+                #     - "live_migratable": true/false if the device can be live
+                #       migratable
                 extra_info = self.extra_info
                 data = v if isinstance(v, str) else jsonutils.dumps(v)
                 extra_info.update({k: data})
+                self.extra_info = extra_info
+
+        # Remove the "managed" key if it was set previously
+        # As with the previous case, we must explicitly assign to
+        # self.extra_info so that obj_what_changed detects the modification
+        # and triggers a save later.
+        spec_tags = ["managed", "live_migratable"]
+        for tag in spec_tags:
+            if tag not in dev_dict and tag in self.extra_info:
+                extra_info = self.extra_info
+                del extra_info[tag]
                 self.extra_info = extra_info
 
     def __init__(self, *args, **kwargs):

@@ -529,11 +529,13 @@ class RNGModel(BaseNovaEnum):
 class ShareMappingStatus(BaseNovaEnum):
     """Represents the possible status of a share mapping"""
 
+    ATTACHING = "attaching"
+    DETACHING = "detaching"
     ACTIVE = "active"
     INACTIVE = "inactive"
     ERROR = "error"
 
-    ALL = (ACTIVE, INACTIVE, ERROR)
+    ALL = (ATTACHING, DETACHING, ACTIVE, INACTIVE, ERROR)
 
 
 class ShareMappingProto(BaseNovaEnum):
@@ -935,6 +937,8 @@ class NotificationAction(BaseNovaEnum):
     RESCUE = 'rescue'
     VOLUME_ATTACH = 'volume_attach'
     VOLUME_DETACH = 'volume_detach'
+    SHARE_ATTACH = 'share_attach'
+    SHARE_DETACH = 'share_detach'
     CREATE = 'create'
     IMPORT = 'import'
     EVACUATE = 'evacuate'
@@ -975,9 +979,9 @@ class NotificationAction(BaseNovaEnum):
     ALL = (UPDATE, EXCEPTION, DELETE, PAUSE, UNPAUSE, RESIZE, VOLUME_SWAP,
            SUSPEND, POWER_ON, REBOOT, SHUTDOWN, SNAPSHOT, INTERFACE_ATTACH,
            POWER_OFF, SHELVE, RESUME, RESTORE, EXISTS, RESCUE, VOLUME_ATTACH,
-           VOLUME_DETACH, CREATE, IMPORT, EVACUATE, RESIZE_FINISH,
-           LIVE_MIGRATION_ABORT, LIVE_MIGRATION_POST_DEST, LIVE_MIGRATION_POST,
-           LIVE_MIGRATION_PRE, LIVE_MIGRATION_ROLLBACK,
+           VOLUME_DETACH, SHARE_ATTACH, SHARE_DETACH, CREATE, IMPORT, EVACUATE,
+           RESIZE_FINISH, LIVE_MIGRATION_ABORT, LIVE_MIGRATION_POST_DEST,
+           LIVE_MIGRATION_POST, LIVE_MIGRATION_PRE, LIVE_MIGRATION_ROLLBACK,
            LIVE_MIGRATION_ROLLBACK_DEST, REBUILD, INTERFACE_DETACH,
            RESIZE_CONFIRM, RESIZE_PREP, RESIZE_REVERT, SHELVE_OFFLOAD,
            SOFT_DELETE, TRIGGER_CRASH_DUMP, UNRESCUE, UNSHELVE, ADD_HOST,

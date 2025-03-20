@@ -671,6 +671,7 @@ Response
   - fault.details: fault_details
   - pinned_availability_zone: pinned_availability_zone
   - progress: progress
+  - scheduler_hints: scheduler_hints
   - security_groups: security_groups_obj_optional
   - security_group.name: name
   - servers_links: servers_links
@@ -680,6 +681,16 @@ Response
   - tags: tags
   - trusted_image_certificates: server_trusted_image_certificates_resp
   - locked_reason: locked_reason_resp
+
+**Example List Servers Detailed (2.100)**
+
+.. literalinclude:: /../../doc/api_samples/servers/v2.100/servers-details-resp.json
+   :language: javascript
+
+**Example List Servers Detailed (2.98)**
+
+.. literalinclude:: /../../doc/api_samples/servers/v2.98/servers-details-resp.json
+   :language: javascript
 
 **Example List Servers Detailed (2.96)**
 
@@ -801,6 +812,7 @@ Response
   - fault.details: fault_details
   - pinned_availability_zone: pinned_availability_zone
   - progress: progress
+  - scheduler_hints: scheduler_hints
   - security_groups: security_groups_obj_optional
   - security_group.name: name
   - locked: locked
@@ -810,6 +822,16 @@ Response
   - trusted_image_certificates: server_trusted_image_certificates_resp
   - server_groups: server_groups_2_71
   - locked_reason: locked_reason_resp
+
+**Example Show Server Details (2.100)**
+
+.. literalinclude:: ../../doc/api_samples/servers/v2.100/server-get-resp.json
+   :language: javascript
+
+**Example Show Server Details (2.98)**
+
+.. literalinclude:: ../../doc/api_samples/servers/v2.98/server-get-resp.json
+   :language: javascript
 
 **Example Show Server Details (2.96)**
 
@@ -904,6 +926,7 @@ Response
   - fault.created: fault_created
   - fault.message: fault_message
   - fault.details: fault_details
+  - pinned_availability_zone: pinned_availability_zone
   - progress: progress
   - locked: locked
   - description: server_description_resp
@@ -935,6 +958,16 @@ Response
   - security_group.name: name_update_rebuild
   - host_status: host_status_update_rebuild
   - key_name: key_name_resp_update
+
+**Example Update Server Details (2.98)**
+
+.. literalinclude:: ../../doc/api_samples/servers/v2.98/server-update-resp.json
+   :language: javascript
+
+**Example Update Server Details (2.96)**
+
+.. literalinclude:: ../../doc/api_samples/servers/v2.96/server-update-resp.json
+   :language: javascript
 
 **Example Update Server (2.75)**
 

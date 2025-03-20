@@ -143,6 +143,10 @@ class CinderConnectionFailed(NovaException):
     msg_fmt = _("Connection to cinder host failed: %(reason)s")
 
 
+class ManilaConnectionFailed(NovaException):
+    msg_fmt = _("Connection to manila service failed: %(reason)s")
+
+
 class UnsupportedCinderAPIVersion(NovaException):
     msg_fmt = _('Nova does not support Cinder API version %(version)s')
 
@@ -173,6 +177,19 @@ class NotSupported(NovaException):
 
 class ForbiddenWithAccelerators(NotSupported):
     msg_fmt = _("Feature not supported with instances that have accelerators.")
+
+
+class ForbiddenSharesNotSupported(NotSupported):
+    msg_fmt = _("Feature not supported until computes have not been updated.")
+
+
+class ForbiddenSharesNotConfiguredCorrectly(NotSupported):
+    msg_fmt = _("Feature not supported because either compute or instance "
+                "are not configured correctly.")
+
+
+class ForbiddenWithShare(NotSupported):
+    msg_fmt = _("Feature not supported with instances that have shares.")
 
 
 class ForbiddenPortsWithAccelerator(NotSupported):
@@ -704,6 +721,34 @@ class ShareNotFound(NotFound):
     msg_fmt = _("Share %(share_id)s could not be found.")
 
 
+class ShareStatusIncorect(NotFound):
+    msg_fmt = _("Share %(share_id)s is in '%(status)s' instead of "
+                "'available' status.")
+
+
+class ShareMappingAlreadyExists(NotFound):
+    msg_fmt = _("Share '%(share_id)s' or tag '%(tag)s' already associated "
+                "to this server.")
+
+
+class ShareProtocolNotSupported(NotFound):
+    msg_fmt = _("Share protocol %(share_proto)s is not supported.")
+
+
+class ShareMissingExportLocation(NotFound):
+    msg_fmt = _("Share %(share_id)s export location is missing.")
+
+
+class ShareError(NovaException):
+    msg_fmt = _("Share %(share_id)s used by instance %(instance_uuid)s "
+                "is in error state.")
+
+
+class ShareErrorUnexpectedStatus(NovaException):
+    msg_fmt = _("Share %(share_id)s used by instance %(instance_uuid)s "
+                "is in an unexpected state.")
+
+
 class ShareUmountError(NovaException):
     msg_fmt = _("Share id %(share_id)s umount error "
                 "from server %(server_id)s.\n"
@@ -713,6 +758,46 @@ class ShareUmountError(NovaException):
 class ShareMountError(NovaException):
     msg_fmt = _("Share id %(share_id)s mount error "
                 "from server %(server_id)s.\n"
+                "Reason: %(reason)s.")
+
+
+class ShareAccessNotFound(NotFound):
+    msg_fmt = _("Share access from Manila could not be found for "
+                "share id %(share_id)s.")
+
+
+class ShareAccessGrantError(NovaException):
+    msg_fmt = _("Share access could not be granted to "
+                "share id %(share_id)s.\n"
+                "Reason: %(reason)s.")
+
+
+class ShareAccessRemovalError(NovaException):
+    msg_fmt = _("Share access could not be removed from "
+                "share id %(share_id)s.\n"
+                "Reason: %(reason)s.")
+
+
+class ShareLockNotFound(NovaException):
+    msg_fmt = _("Share lock can not be found for "
+                "share id %(share_id)s.\n")
+
+
+class ShareLockError(NovaException):
+    msg_fmt = _("Share lock can not be acquired from "
+                "share id %(share_id)s.\n"
+                "Reason: %(reason)s.")
+
+
+class ShareLockAlreadyExists(NovaException):
+    msg_fmt = _("Share lock can not be acquired from "
+                "share id %(share_id)s.\n"
+                "Reason: lock already exists.")
+
+
+class ShareUnlockError(NovaException):
+    msg_fmt = _("Share can not be unlocked from "
+                "share id %(share_id)s.\n"
                 "Reason: %(reason)s.")
 
 

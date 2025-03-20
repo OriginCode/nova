@@ -332,8 +332,6 @@ class Guest(object):
         flags |= live and libvirt.VIR_DOMAIN_AFFECT_LIVE or 0
 
         device_xml = conf.to_xml()
-        if isinstance(device_xml, bytes):
-            device_xml = device_xml.decode('utf-8')
 
         LOG.debug("attach device xml: %s", device_xml)
         self._domain.attachDeviceFlags(device_xml, flags=flags)
@@ -416,7 +414,7 @@ class Guest(object):
     def get_device_by_alias(self, devalias, devtype=None,
                             from_persistent_config=False):
         for dev in self.get_all_devices(devtype):
-            if dev.alias == devalias:
+            if hasattr(dev, 'alias') and dev.alias == devalias:
                 return dev
 
     def get_all_devices(
@@ -464,8 +462,6 @@ class Guest(object):
         flags |= live and libvirt.VIR_DOMAIN_AFFECT_LIVE or 0
 
         device_xml = conf.to_xml()
-        if isinstance(device_xml, bytes):
-            device_xml = device_xml.decode('utf-8')
 
         LOG.debug("detach device xml: %s", device_xml)
         self._domain.detachDeviceFlags(device_xml, flags=flags)
@@ -568,8 +564,6 @@ class Guest(object):
         flags |= quiesce and libvirt.VIR_DOMAIN_SNAPSHOT_CREATE_QUIESCE or 0
 
         device_xml = conf.to_xml()
-        if isinstance(device_xml, bytes):
-            device_xml = device_xml.decode('utf-8')
 
         self._domain.snapshotCreateXML(device_xml, flags=flags)
 

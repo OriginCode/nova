@@ -11,18 +11,34 @@
 #    under the License.
 
 import logging
+
+from oslo_utils import versionutils
+
+import nova.conf
 from nova.db.main import api as db
 from nova import exception
 from nova.objects import base
 from nova.objects import fields
+from nova.share import manila as manila_api
 
+CONF = nova.conf.CONF
 LOG = logging.getLogger(__name__)
+
+EPHEMERAL_FIELDS = [
+    "access_type",
+    "access_to",
+    "access_key",
+]
 
 
 @base.NovaObjectRegistry.register
 class ShareMapping(base.NovaTimestampObject, base.NovaObject):
-    # Version 1.0: Initial version
-    VERSION = '1.0'
+    # Version 1.0: Initial version.
+    # Version 1.1: Add "attaching" and "detaching" to possible values
+    #              of status field.
+    # Version 1.2: Add ephemeral fields 'access_type', 'access_to',
+    #              'access_key' to manage CephFS protocol and access.
+    VERSION = '1.2'
 
     fields = {
         'id': fields.IntegerField(read_only=True),
@@ -32,13 +48,34 @@ class ShareMapping(base.NovaTimestampObject, base.NovaObject):
         'status': fields.ShareMappingStatusField(),
         'tag': fields.StringField(nullable=False),
         'export_location': fields.StringField(nullable=False),
-        'share_proto': fields.ShareMappingProtoField()
+        'share_proto': fields.ShareMappingProtoField(),
+        # Next fields are ephemeral
+        'access_type': fields.StringField(nullable=True),
+        'access_to': fields.StringField(nullable=True),
+        'access_key': fields.StringField(nullable=True),
     }
+
+    def obj_make_compatible(self, primitive, target_version):
+        super(ShareMapping, self).obj_make_compatible(
+            primitive, target_version
+        )
+        target_version = versionutils.convert_version_to_tuple(target_version)
+        if target_version < (1, 1):
+            status = primitive.get('status')
+            if status in (
+                fields.ShareMappingStatus.ATTACHING,
+                fields.ShareMappingStatus.DETACHING,
+            ):
+                raise exception.ObjectActionError(
+                    action='obj_make_compatible',
+                    reason='status=%s not supported in version %s' % (
+                        status, target_version))
 
     @staticmethod
     def _from_db_object(context, share_mapping, db_share_mapping):
         for field in share_mapping.fields:
-            setattr(share_mapping, field, db_share_mapping[field])
+            if field not in EPHEMERAL_FIELDS:
+                setattr(share_mapping, field, db_share_mapping[field])
         share_mapping._context = context
         share_mapping.obj_reset_changes()
         return share_mapping
@@ -52,7 +89,7 @@ class ShareMapping(base.NovaTimestampObject, base.NovaObject):
 
     def create(self):
         LOG.info(
-            "Associate share '%s' to instance '%s'.",
+            "Attaching share '%s' to instance '%s'.",
             self.share_id, self.instance_uuid)
 
         self.save()
@@ -60,7 +97,7 @@ class ShareMapping(base.NovaTimestampObject, base.NovaObject):
     @base.remotable
     def delete(self):
         LOG.info(
-            "Dissociate share '%s' from instance '%s'.",
+            "Detaching share '%s' from instance '%s'.",
             self.share_id,
             self.instance_uuid,
         )
@@ -68,17 +105,17 @@ class ShareMapping(base.NovaTimestampObject, base.NovaObject):
             self._context, self.instance_uuid, self.share_id
         )
 
-    def attach(self):
+    def activate(self):
         LOG.info(
-            "Share '%s' about to be attached to instance '%s'.",
+            "Share '%s' about to be activated on instance '%s'.",
             self.share_id, self.instance_uuid)
 
         self.status = fields.ShareMappingStatus.ACTIVE
         self.save()
 
-    def detach(self):
+    def deactivate(self):
         LOG.info(
-            "Share '%s' about to be detached from instance '%s'.",
+            "Share '%s' about to be deactivated on instance '%s'.",
             self.share_id,
             self.instance_uuid,
         )
@@ -112,6 +149,29 @@ class ShareMapping(base.NovaTimestampObject, base.NovaObject):
             raise NotImplementedError()
         return rhost
 
+    def enhance_with_ceph_credentials(self, context):
+        # Enhance the share_mapping object by adding Ceph
+        # credential information
+        access = manila_api.API().get_access(
+            context,
+            self.share_id,
+            self.access_type,
+            self.access_to
+        )
+        self.access_key = access.access_key
+
+    def set_access_according_to_protocol(self):
+        if self.share_proto == fields.ShareMappingProto.NFS:
+            self.access_type = 'ip'
+            self.access_to = CONF.my_shared_fs_storage_ip
+        elif self.share_proto == fields.ShareMappingProto.CEPHFS:
+            self.access_type = 'cephx'
+            self.access_to = 'nova'
+        else:
+            raise exception.ShareProtocolNotSupported(
+                share_proto=self.share_proto
+            )
+
 
 @base.NovaObjectRegistry.register
 class ShareMappingList(base.ObjectListBase, base.NovaObject):
@@ -135,10 +195,18 @@ class ShareMappingList(base.ObjectListBase, base.NovaObject):
         return base.obj_make_list(
             context, cls(context), ShareMapping, db_share_mappings)
 
-    def attach_all(self):
+    def activate_all(self):
         for share in self:
-            share.attach()
+            share.activate()
 
-    def detach_all(self):
+    def deactivate_all(self):
         for share in self:
-            share.detach()
+            share.deactivate()
+
+    def contains_error(self):
+        return any(
+            [
+                share_mapping.status == fields.ShareMappingStatus.ERROR
+                for share_mapping in self
+            ]
+        )

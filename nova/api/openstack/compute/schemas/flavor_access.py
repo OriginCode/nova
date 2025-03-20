@@ -12,6 +12,11 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import copy
+
+from nova.api.validation import parameter_types
+
+
 add_tenant_access = {
     'type': 'object',
     'properties': {
@@ -30,7 +35,6 @@ add_tenant_access = {
     'required': ['addTenantAccess'],
     'additionalProperties': False,
 }
-
 
 remove_tenant_access = {
     'type': 'object',
@@ -57,3 +61,29 @@ index_query = {
     'properties': {},
     'additionalProperties': True,
 }
+
+_common_response = {
+    'type': 'object',
+    'properties': {
+        'flavor_access': {
+            'type': 'array',
+            'items': {
+                'type': 'object',
+                'properties': {
+                    'flavor_id': {'type': 'string'},
+                    'tenant_id': parameter_types.project_id,
+                },
+                'required': ['flavor_id', 'tenant_id'],
+                'additionalProperties': True,
+            },
+        },
+    },
+    'required': ['flavor_access'],
+    'additionalProperties': True,
+}
+
+index_response = copy.deepcopy(_common_response)
+
+add_tenant_access_response = copy.deepcopy(_common_response)
+
+remove_tenant_access_response = copy.deepcopy(_common_response)

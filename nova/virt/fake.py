@@ -122,6 +122,8 @@ class FakeDriver(driver.ComputeDriver):
         "supports_address_space_passthrough": True,
         "supports_address_space_emulated": True,
         "supports_stateless_firmware": True,
+        "supports_virtio_fs": True,
+        "supports_mem_backing_file": True,
 
         # Supported image types
         "supports_image_type_raw": True,
@@ -218,7 +220,7 @@ class FakeDriver(driver.ComputeDriver):
 
     def reboot(self, context, instance, network_info, reboot_type,
                block_device_info=None, bad_volumes_callback=None,
-               accel_info=None):
+               accel_info=None, share_info=None):
         # If the guest is not on the hypervisor and we're doing a hard reboot
         # then mimic the libvirt driver by spawning the guest.
         if (instance.uuid not in self.instances and
@@ -239,11 +241,11 @@ class FakeDriver(driver.ComputeDriver):
         pass
 
     def resume_state_on_host_boot(self, context, instance, network_info,
-                                  block_device_info=None):
+                                  share_info, block_device_info=None):
         pass
 
     def rescue(self, context, instance, network_info, image_meta,
-               rescue_password, block_device_info):
+               rescue_password, block_device_info, share_info):
         pass
 
     def unrescue(
@@ -286,11 +288,20 @@ class FakeDriver(driver.ComputeDriver):
             raise exception.InstanceNotFound(instance_id=instance.uuid)
 
     def power_on(self, context, instance, network_info,
-                 block_device_info=None, accel_info=None):
+                 block_device_info=None, accel_info=None, share_info=None):
         if instance.uuid in self.instances:
             self.instances[instance.uuid].state = power_state.RUNNING
+            if share_info:
+                for share in share_info:
+                    share.activate()
         else:
             raise exception.InstanceNotFound(instance_id=instance.uuid)
+
+    def mount_share(self, context, instance, share_mapping):
+        pass
+
+    def umount_share(self, context, instance, share_mapping):
+        pass
 
     def trigger_crash_dump(self, instance):
         pass
@@ -310,7 +321,14 @@ class FakeDriver(driver.ComputeDriver):
     def suspend(self, context, instance):
         pass
 
-    def resume(self, context, instance, network_info, block_device_info=None):
+    def resume(
+        self,
+        context,
+        instance,
+        network_info,
+        block_device_info=None,
+        share_info=None
+    ):
         pass
 
     def destroy(self, context, instance, network_info, block_device_info=None,
@@ -458,25 +476,29 @@ class FakeDriver(driver.ComputeDriver):
         return 'FAKE CONSOLE OUTPUT\nANOTHER\nLAST LINE'
 
     def get_vnc_console(self, context, instance):
-        return ctype.ConsoleVNC(internal_access_path='FAKE',
-                                host='fakevncconsole.com',
-                                port=6969)
+        return ctype.ConsoleVNC(
+            internal_access_path=uuids.vnc_access_path,
+            host='fakevncconsole.com',
+            port=6969)
 
     def get_spice_console(self, context, instance):
-        return ctype.ConsoleSpice(internal_access_path='FAKE',
-                                  host='fakespiceconsole.com',
-                                  port=6969,
-                                  tlsPort=6970)
+        return ctype.ConsoleSpice(
+            internal_access_path=uuids.spice_access_path,
+            host='fakespiceconsole.com',
+            port=6969,
+            tlsPort=6970)
 
     def get_serial_console(self, context, instance):
-        return ctype.ConsoleSerial(internal_access_path='FAKE',
-                                   host='fakerdpconsole.com',
-                                   port=6969)
+        return ctype.ConsoleSerial(
+            internal_access_path=uuids.serial_access_path,
+            host='fakerdpconsole.com',
+            port=6969)
 
     def get_mks_console(self, context, instance):
-        return ctype.ConsoleMKS(internal_access_path='FAKE',
-                                host='fakemksconsole.com',
-                                port=6969)
+        return ctype.ConsoleMKS(
+            internal_access_path=uuids.mks_access_path,
+            host='fakemksconsole.com',
+            port=6969)
 
     def get_available_resource(self, nodename):
         """Updates compute manager resource info on ComputeNode table.

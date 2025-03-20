@@ -98,6 +98,21 @@ class ServerActionsControllerTestV21(test.TestCase):
         ).mock
         self.mock_neutron_extension_list.return_value = {'extensions': []}
 
+        # Do not mock functions in Testcase because it is called
+        # by functional tests.
+        self.mock_check_shares_supported = self.useFixture(
+            fixtures.MonkeyPatch(
+                'nova.compute.api.check_shares_supported',
+                mock.Mock(return_value=False),
+            )
+        )
+        self.mock_instance_has_share = self.useFixture(
+            fixtures.MonkeyPatch(
+                'nova.compute.api.instance_has_share',
+                mock.Mock(return_value=False),
+            )
+        )
+
     def _get_controller(self):
         return self.servers.ServersController()
 
@@ -1002,12 +1017,15 @@ class ServerActionsControllerTestV21(test.TestCase):
         response = self.controller._action_create_image(self.req, FAKE_UUID,
                                                         body=body)
 
-        location = response.headers['Location']
-        self.assertEqual(self.image_url + '123' if self.image_url else
-            self.image_api.generate_image_url('123', self.context),
-            location)
+        if self.image_url:
+            expected_location = self.image_url + uuids.snapshot_id
+        else:
+            expected_location = self.image_api.generate_image_url(
+                uuids.snapshot_id, self.context
+            )
+        self.assertEqual(response.headers['Location'], expected_location)
 
-    def test_create_image_v2_45(self):
+    def test_create_image_v245(self):
         """Tests the createImage server action API with the 2.45 microversion
         where there is a response body but no Location header.
         """
@@ -1020,7 +1038,7 @@ class ServerActionsControllerTestV21(test.TestCase):
         response = self.controller._action_create_image(req, FAKE_UUID,
                                                         body=body)
         self.assertIsInstance(response, dict)
-        self.assertEqual('123', response['image_id'])
+        self.assertEqual(uuids.snapshot_id, response['image_id'])
 
     def test_create_image_name_too_long(self):
         long_name = 'a' * 260
@@ -1254,9 +1272,13 @@ class ServerActionsControllerTestV21(test.TestCase):
         response = self.controller._action_create_image(self.req, FAKE_UUID,
                                                         body=body)
 
-        location = response.headers['Location']
-        self.assertEqual(self.image_url + '123' if self.image_url else
-            self.image_api.generate_image_url('123', self.context), location)
+        if self.image_url:
+            expected_location = self.image_url + uuids.snapshot_id
+        else:
+            expected_location = self.image_api.generate_image_url(
+                uuids.snapshot_id, self.context
+            )
+        self.assertEqual(response.headers['Location'], expected_location)
 
     def test_create_image_with_too_much_metadata(self):
         body = {

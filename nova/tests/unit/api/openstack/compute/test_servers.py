@@ -69,6 +69,7 @@ from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit import fake_block_device
 from nova.tests.unit import fake_flavor
 from nova.tests.unit import fake_instance
+from nova.tests.unit import fake_request_spec
 from nova.tests.unit import matchers
 from nova import utils as nova_utils
 
@@ -171,7 +172,7 @@ def fake_get_inst_mappings_by_instance_uuids_from_db(*args, **kwargs):
             'transport_url': 'fake://nowhere/', 'updated_at': None,
             'database_connection': uuids.cell1, 'created_at': None,
             'disabled': False},
-        'project_id': 'fake-project'
+        'project_id': fakes.FAKE_PROJECT_ID,
     }]
 
 
@@ -233,6 +234,21 @@ class ControllerTest(test.TestCase):
         mock_conductor.start()
         self.addCleanup(mock_conductor.stop)
 
+        # Do not mock functions in Testcase because it is called
+        # by functional tests.
+        self.mock_check_shares_supported = self.useFixture(
+            fixtures.MonkeyPatch(
+                'nova.compute.api.check_shares_supported',
+                mock.Mock(return_value=False),
+            )
+        )
+        self.mock_instance_has_share = self.useFixture(
+            fixtures.MonkeyPatch(
+                'nova.compute.api.instance_has_share',
+                mock.Mock(return_value=False),
+            )
+        )
+
     def req(self, url, use_admin_context=False):
         return fakes.HTTPRequest.blank(
             url,
@@ -265,7 +281,7 @@ class _ServersControllerTest(ControllerTest):
         return {
             "server": {
                 "id": uuid,
-                "user_id": "fake_user",
+                "user_id": fakes.FAKE_USER_ID,
                 "created": "2010-10-10T12:00:00Z",
                 "updated": "2010-11-11T11:00:00Z",
                 "progress": progress,
@@ -2803,6 +2819,10 @@ class ServersControllerTestV290(ControllerTest):
         self.assertEqual(uuids.fake, servers[0]['id'])
 
 
+class ServersControllerTestV298(ServersControllerTestV290):
+    microversion = '2.98'
+
+
 class ServersControllerDeleteTest(ControllerTest):
 
     def setUp(self):
@@ -3655,7 +3675,10 @@ class ServersControllerRebuildTestV263(ControllerTest):
         ex = self.assertRaises(exception.ValidationError,
                                self.controller._action_rebuild,
                                self.req, FAKE_UUID, body=self.body)
-        self.assertIn('is too short', str(ex))
+        self.assertRegex(
+            str(ex),
+            '(is too short)|'  # jsonschema < 4.23.0
+            '(should be non-empty)')  # jsonschema >= 4.23.0
 
     def test_rebuild_server_with_empty_trusted_certs(self):
         """Make sure that we can't rebuild with an empty array of IDs"""
@@ -3664,7 +3687,10 @@ class ServersControllerRebuildTestV263(ControllerTest):
         ex = self.assertRaises(exception.ValidationError,
                                self.controller._action_rebuild,
                                self.req, FAKE_UUID, body=self.body)
-        self.assertIn('is too short', str(ex))
+        self.assertRegex(
+            str(ex),
+            '(is too short)|'  # jsonschema < 4.23.0
+            '(should be non-empty)')  # jsonschema >= 4.23.0
 
     def test_rebuild_server_with_too_many_trusted_certs(self):
         """Make sure that we can't rebuild with an array of >50 unique IDs"""
@@ -3767,6 +3793,21 @@ class ServersControllerRebuildTestV275(ControllerTest):
     microversion = '2.75'
     image_uuid = '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6'
 
+    def setUp(self):
+        super().setUp()
+
+        mock_rebuild = mock.patch(
+            'nova.compute.api.API.rebuild', return_value=None)
+        self.mock_rebuild = mock_rebuild.start()
+        self.addCleanup(mock_rebuild.stop)
+
+        self.mock_get_instance_host_status = self.useFixture(
+            fixtures.MockPatchObject(
+                compute_api.API, 'get_instance_host_status',
+                return_value='UP'
+            )
+        ).mock
+
     def test_rebuild_response_no_show_server_only_attributes_old_version(self):
         # There are some old server attributes which were added only for
         # GET server APIs not for Rebuild. GET server and Rebuild server share
@@ -3799,11 +3840,29 @@ class ServersControllerRebuildTestV275(ControllerTest):
         req = fakes.HTTPRequest.blank(self.path_with_query % 'unknown=1',
                                       use_admin_context=True,
                                       version=self.microversion)
-        fake_get = fakes.fake_compute_get(
+        self.mock_get.side_effect = fakes.fake_compute_get(
+            id=2,
+            display_description="",
+            uuid=FAKE_UUID,
+            node="node-fake",
+            reservation_id="r-1",
+            launch_index=0,
+            kernel_id=UUID1,
+            ramdisk_id=UUID2,
+            display_name="server2",
+            host='host',
+            root_device_name="/dev/vda",
+            user_data="userdata",
+            metadata={"seq": "2"},
+            availability_zone='nova',
+            launched_at=None,
+            terminated_at=None,
+            task_state="ACTIVE",
             vm_state=vm_states.ACTIVE,
+            power_state=1,
             project_id=req.environ['nova.context'].project_id,
             user_id=req.environ['nova.context'].user_id)
-        self.mock_get.side_effect = fake_get
+
         res_dict = self.controller._action_rebuild(req, FAKE_UUID,
                                                    body=body).obj
         for field in GET_ONLY_FIELDS:
@@ -3829,6 +3888,13 @@ class ServersControllerRebuildTestV290(ControllerTest):
         self.mock_rebuild = mock_rebuild.start()
         self.addCleanup(mock_rebuild.stop)
 
+        self.mock_get_instance_host_status = self.useFixture(
+            fixtures.MockPatchObject(
+                compute_api.API, 'get_instance_host_status',
+                return_value='UP'
+            )
+        ).mock
+
     def _get_request(self, body=None):
         req = fakes.HTTPRequest.blank(
             self.path_action % FAKE_UUID,
@@ -3850,6 +3916,29 @@ class ServersControllerRebuildTestV290(ControllerTest):
             }
         }
         req = self._get_request(body)
+
+        self.mock_get.side_effect = fakes.fake_compute_get(
+            id=2,
+            display_description="",
+            uuid=FAKE_UUID,
+            node="node-fake",
+            reservation_id="r-1",
+            launch_index=0,
+            kernel_id=UUID1,
+            ramdisk_id=UUID2,
+            display_name="server2",
+            host='host',
+            root_device_name="/dev/vda",
+            user_data="userdata",
+            metadata={"seq": "2"},
+            availability_zone='nova',
+            launched_at=None,
+            terminated_at=None,
+            task_state="ACTIVE",
+            vm_state=vm_states.ACTIVE,
+            power_state=1,
+            project_id=req.environ['nova.context'].project_id,
+            user_id=req.environ['nova.context'].user_id)
 
         # There's nothing to check here from the return value since the
         # 'rebuild' API is a cast and we immediately fetch the instance from
@@ -5826,7 +5915,7 @@ class ServersControllerCreateTest(_ServersControllerCreateTest):
         mock_count.return_value = count
         mock_get_all_p.return_value = {'project_id': fakes.FAKE_PROJECT_ID}
         mock_get_all_pu.return_value = {'project_id': fakes.FAKE_PROJECT_ID,
-                                        'user_id': 'fake_user'}
+                                        'user_id': fakes.FAKE_USER_ID}
         if resource in db.PER_PROJECT_QUOTAS:
             mock_get_all_p.return_value[resource] = quota
         else:
@@ -7094,7 +7183,10 @@ class ServersControllerCreateTestV263(_ServersControllerCreateTest):
         ex = self.assertRaises(
             exception.ValidationError, self.controller.create, self.req,
             body=self.body)
-        self.assertIn('is too short', str(ex))
+        self.assertRegex(
+            str(ex),
+            '(is too short)|'  # jsonschema < 4.23.0
+            '(should be non-empty)')  # jsonschema >= 4.23.0
 
     def test_create_instance_with_empty_trusted_certs(self):
         """Make sure we can't create with an empty array of IDs"""
@@ -7105,7 +7197,10 @@ class ServersControllerCreateTestV263(_ServersControllerCreateTest):
         ex = self.assertRaises(
             exception.ValidationError, self.controller.create, self.req,
             body=self.body)
-        self.assertIn('is too short', str(ex))
+        self.assertRegex(
+            str(ex),
+            '(is too short)|'  # jsonschema < 4.23.0
+            '(should be non-empty)')  # jsonschema >= 4.23.0
 
     def test_create_instance_with_too_many_trusted_certs(self):
         """Make sure we can't create with an array of >50 unique IDs"""
@@ -7235,7 +7330,7 @@ class ServersControllerCreateTestV274(_ServersControllerCreateTest):
     def setUp(self):
         super(ServersControllerCreateTestV274, self).setUp()
         self.req.environ['nova.context'] = fakes.FakeRequestContext(
-            user_id='fake_user',
+            user_id=fakes.FAKE_USER_ID,
             project_id=self.project_id,
             is_admin=True)
         self.mock_get = self.useFixture(
@@ -7533,8 +7628,8 @@ class ServersViewBuilderTest(_ServersViewBuilderTest):
         expected_server = {
             "server": {
                 "id": self.uuid,
-                "user_id": "fake_user",
-                "tenant_id": "fake_project",
+                "user_id": fakes.FAKE_USER_ID,
+                "tenant_id": fakes.FAKE_PROJECT_ID,
                 "updated": "2010-11-11T11:00:00Z",
                 "created": "2010-10-10T12:00:00Z",
                 "progress": 0,
@@ -7552,12 +7647,12 @@ class ServersViewBuilderTest(_ServersViewBuilderTest):
                 },
                 "flavor": {
                     "id": "1",
-                  "links": [
-                                            {
-                          "rel": "bookmark",
-                          "href": flavor_bookmark,
-                      },
-                  ],
+                    "links": [
+                        {
+                            "rel": "bookmark",
+                            "href": flavor_bookmark,
+                        },
+                    ],
                 },
                 "addresses": {
                     'test1': [
@@ -7623,8 +7718,8 @@ class ServersViewBuilderTest(_ServersViewBuilderTest):
         expected_server = {
             "server": {
                 "id": self.uuid,
-                "user_id": "fake_user",
-                "tenant_id": "fake_project",
+                "user_id": fakes.FAKE_USER_ID,
+                "tenant_id": fakes.FAKE_PROJECT_ID,
                 "updated": "2010-11-11T11:00:00Z",
                 "created": "2010-10-10T12:00:00Z",
                 "name": "test_server",
@@ -7641,12 +7736,12 @@ class ServersViewBuilderTest(_ServersViewBuilderTest):
                 },
                 "flavor": {
                     "id": "1",
-                  "links": [
-                                            {
-                          "rel": "bookmark",
-                          "href": flavor_bookmark,
-                      },
-                  ],
+                    "links": [
+                        {
+                            "rel": "bookmark",
+                            "href": flavor_bookmark,
+                        },
+                    ],
                 },
                 "addresses": {
                     'test1': [
@@ -7822,8 +7917,8 @@ class ServersViewBuilderTest(_ServersViewBuilderTest):
         expected_server = {
             "server": {
                 "id": self.uuid,
-                "user_id": "fake_user",
-                "tenant_id": "fake_project",
+                "user_id": fakes.FAKE_USER_ID,
+                "tenant_id": fakes.FAKE_PROJECT_ID,
                 "updated": "2010-11-11T11:00:00Z",
                 "created": "2010-10-10T12:00:00Z",
                 "progress": 100,
@@ -7841,12 +7936,12 @@ class ServersViewBuilderTest(_ServersViewBuilderTest):
                 },
                 "flavor": {
                     "id": "1",
-                  "links": [
-                                            {
-                          "rel": "bookmark",
-                          "href": flavor_bookmark,
-                      },
-                  ],
+                    "links": [
+                        {
+                            "rel": "bookmark",
+                            "href": flavor_bookmark,
+                        },
+                    ],
                 },
                 "addresses": {
                     'test1': [
@@ -7914,8 +8009,8 @@ class ServersViewBuilderTest(_ServersViewBuilderTest):
         expected_server = {
             "server": {
                 "id": self.uuid,
-                "user_id": "fake_user",
-                "tenant_id": "fake_project",
+                "user_id": fakes.FAKE_USER_ID,
+                "tenant_id": fakes.FAKE_PROJECT_ID,
                 "updated": "2010-11-11T11:00:00Z",
                 "created": "2010-10-10T12:00:00Z",
                 "progress": 0,
@@ -7934,7 +8029,7 @@ class ServersViewBuilderTest(_ServersViewBuilderTest):
                 "flavor": {
                     "id": "1",
                     "links": [
-                                              {
+                        {
                             "rel": "bookmark",
                             "href": flavor_bookmark,
                         },
@@ -8042,8 +8137,8 @@ class ServersViewBuilderTestV269(_ServersViewBuilderTest):
         expected = {
             "servers": [{
                 "id": self.uuid,
-                "user_id": "fake_user",
-                "tenant_id": "fake_project",
+                "user_id": fakes.FAKE_USER_ID,
+                "tenant_id": fakes.FAKE_PROJECT_ID,
                 "updated": "2010-11-11T11:00:00Z",
                 "created": "2010-10-10T12:00:00Z",
                 "progress": 0,
@@ -8225,8 +8320,8 @@ class ServersViewBuilderTestV269(_ServersViewBuilderTest):
         expected = {
             "server": {
                 "id": self.uuid,
-                "user_id": "fake_user",
-                "tenant_id": "fake_project",
+                "user_id": fakes.FAKE_USER_ID,
+                "tenant_id": fakes.FAKE_PROJECT_ID,
                 "created": '1955-11-05T00:00:00Z',
                 "status": "UNKNOWN",
                 "image": {
@@ -8288,7 +8383,7 @@ class ServersViewBuilderTestV269(_ServersViewBuilderTest):
             "server": {
                 "id": self.uuid,
                 "user_id": "UNKNOWN",
-                "tenant_id": "fake_project",
+                "tenant_id": fakes.FAKE_PROJECT_ID,
                 "created": '1955-11-05T00:00:00Z',
                 "status": "UNKNOWN",
                 "image": "",
@@ -8318,6 +8413,120 @@ class ServersViewBuilderTestV269(_ServersViewBuilderTest):
             }
         }
         self.assertThat(output, matchers.DictMatches(expected))
+
+
+class ServersViewBuilderTestV296(_ServersViewBuilderTest):
+    """Server ViewBuilder test for microversion 2.96
+
+    The test targets of this class is regression test for bugs
+    related to this microversion.
+    """
+    microversion = '2.96'
+
+    def setUp(self):
+        super(ServersViewBuilderTestV296, self).setUp()
+        self.view_builder = views.servers.ViewBuilder()
+        self.ctxt = context.RequestContext('fake', self.project_id)
+
+    def req(self, url, use_admin_context=False):
+        return fakes.HTTPRequest.blank(
+            url,
+            use_admin_context=use_admin_context,
+            version=self.microversion)
+
+    def create_instance(self, instance_id, uuid, display_name):
+        db_inst = fakes.stub_instance(
+            id=instance_id,
+            image_ref="5",
+            uuid=uuid,
+            display_name=display_name,
+            include_fake_metadata=False,
+            availability_zone='nova',
+            launched_at=None,
+            terminated_at=None,
+            task_state=None,
+            vm_state=vm_states.ACTIVE,
+            power_state=1)
+
+        return fake_instance.fake_instance_obj(
+            self.request.context,
+            expected_attrs=instance_obj.INSTANCE_DEFAULT_FIELDS,
+            **db_inst)
+
+    @mock.patch('nova.objects.RequestSpec.get_by_instance_uuids')
+    def test_list_view_with_missing_request_specs(self, m_rs):
+
+        self.instances = [
+            self.instance,
+            self.create_instance(2, uuids.fake1, 'fake-server')
+        ]
+        # Return only first instance's request spec
+        m_rs.return_value = [objects.RequestSpec(
+            instance_uuid=self.instance.uuid,
+            availability_zone=self.instance.availability_zone)]
+
+        req = self.req('/%s/servers' % self.project_id)
+        self.assertRaises(KeyError, self.view_builder.index,
+                          req, self.instances, False)
+
+
+class ServersViewBuilderTestV2100(_ServersViewBuilderTest):
+    """Server ViewBuilder test for microversion 2.100
+
+    The intent is simply to verify that when showing server details
+    after microversion 2.100 the response will always have a dict for
+    scheduler_hints.
+    """
+
+    def setUp(self):
+        super(ServersViewBuilderTestV2100, self).setUp()
+        self.view_builder = views.servers.ViewBuilder()
+        self.ctxt = context.RequestContext('fake', self.project_id)
+        self.request.api_version_request = (
+            api_version_request.APIVersionRequest('2.100'))
+
+    @mock.patch('nova.objects.RequestSpec.get_by_instance_uuid')
+    def test_build_server_detail_v2100(self, mock_get_req_spec):
+        mock_get_req_spec.return_value = fake_request_spec.fake_spec_obj()
+        expected_hints = {'hint': ['over-there']}
+
+        output = self.view_builder.show(self.request, self.instance)
+
+        self.assertIn('scheduler_hints', output['server'].keys())
+        self.assertThat(output['server']['scheduler_hints'],
+                        matchers.DictMatches(expected_hints))
+        exp_call = mock.call(
+            self.request.environ['nova.context'], self.instance.uuid)
+        mock_get_req_spec.assert_has_calls([exp_call, exp_call])
+
+    @mock.patch('nova.objects.RequestSpec.get_by_instance_uuid')
+    def test_build_server_detail_v2100_no_spec(self, mock_get_req_spec):
+        mock_get_req_spec.side_effect = exception.RequestSpecNotFound(
+            instance_uuid='foo')
+        expected_hints = {}
+
+        output = self.view_builder.show(self.request, self.instance)
+
+        self.assertIn('scheduler_hints', output['server'].keys())
+        self.assertThat(output['server']['scheduler_hints'],
+                        matchers.DictMatches(expected_hints))
+        exp_call = mock.call(
+            self.request.environ['nova.context'], self.instance.uuid)
+        mock_get_req_spec.assert_has_calls([exp_call, exp_call])
+
+    @mock.patch('nova.objects.RequestSpec.get_by_instance_uuid')
+    def test_build_server_detail_v299_no_hints(self, mock_get_req_spec):
+        # req_spec is retrieved since 2.96, but no scheduler_hints
+        # should be returned
+        self.request.api_version_request = (
+            api_version_request.APIVersionRequest('2.99'))
+        mock_get_req_spec.return_value = fake_request_spec.fake_spec_obj()
+
+        output = self.view_builder.show(self.request, self.instance)
+
+        self.assertNotIn('scheduler_hints', output['server'].keys())
+        mock_get_req_spec.assert_called_once_with(
+            self.request.environ['nova.context'], self.instance.uuid)
 
 
 class ServersActionsJsonTestV239(test.NoDBTestCase):

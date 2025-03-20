@@ -23,6 +23,7 @@ import os
 import re
 
 import os_resource_classes as orc
+import os_traits as ot
 from oslo_log import log as logging
 from oslo_utils import excutils
 from oslo_utils import units
@@ -75,6 +76,8 @@ class VMwareVCDriver(driver.ComputeDriver):
         "supports_address_space_passthrough": False,
         "supports_address_space_emulated": False,
         "supports_stateless_firmware": False,
+        "supports_virtio_fs": False,
+        "supports_mem_backing_file": False,
 
         # Image type support flags
         "supports_image_type_aki": False,
@@ -231,7 +234,7 @@ class VMwareVCDriver(driver.ComputeDriver):
         pass
 
     def resume_state_on_host_boot(self, context, instance, network_info,
-                                  block_device_info=None):
+                                  share_info, block_device_info=None):
         """resume guest state when a host is booted."""
         # Check if the instance is running already and avoid doing
         # anything if it is.
@@ -529,6 +532,11 @@ class VMwareVCDriver(driver.ComputeDriver):
         # where cpu traits are added. In the vmware world, this is where we
         # would add nested providers representing tenant VDC and similar.
 
+        # nova with vmware only supports HW_ARCH_X86_64
+        cpu_arch_trait = 'HW_ARCH_X86_64'
+        if cpu_arch_trait in ot.get_traits('HW_ARCH_'):
+            provider_tree.add_traits(nodename, cpu_arch_trait)
+
     def prepare_for_spawn(self, instance):
         """Perform pre-checks for spawn."""
         self._vmops.prepare_for_spawn(instance)
@@ -566,7 +574,7 @@ class VMwareVCDriver(driver.ComputeDriver):
 
     def reboot(self, context, instance, network_info, reboot_type,
                block_device_info=None, bad_volumes_callback=None,
-               accel_info=None):
+               accel_info=None, share_info=None):
         """Reboot VM instance."""
         self._vmops.reboot(instance, network_info, reboot_type)
 
@@ -636,12 +644,19 @@ class VMwareVCDriver(driver.ComputeDriver):
         """Suspend the specified instance."""
         self._vmops.suspend(instance)
 
-    def resume(self, context, instance, network_info, block_device_info=None):
+    def resume(
+        self,
+        context,
+        instance,
+        network_info,
+        block_device_info=None,
+        share_info=None
+    ):
         """Resume the suspended VM instance."""
         self._vmops.resume(instance)
 
     def rescue(self, context, instance, network_info, image_meta,
-               rescue_password, block_device_info):
+               rescue_password, block_device_info, share_info):
         """Rescue the specified instance."""
         self._vmops.rescue(context, instance, network_info, image_meta)
 
@@ -658,7 +673,7 @@ class VMwareVCDriver(driver.ComputeDriver):
         self._vmops.power_off(instance, timeout, retry_interval)
 
     def power_on(self, context, instance, network_info,
-                 block_device_info=None, accel_info=None):
+                 block_device_info=None, accel_info=None, share_info=None):
         """Power on the specified instance."""
         self._vmops.power_on(instance)
 

@@ -1233,9 +1233,9 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
 
     def test_snapshot_no_root_disk(self):
         self._iso_disk_type_created(flavor='m1.micro')
-        self.assertRaises(error_util.NoRootDiskDefined, self.conn.snapshot,
-                          self.context, self.instance, "Test-Snapshot",
-                          lambda *args, **kwargs: None)
+        self.assertRaises(error_util.NoRootDiskDefined,
+                          self.conn.snapshot, self.context, self.instance,
+                          "Test-Snapshot", lambda *args, **kwargs: None)
 
     def test_snapshot_non_existent(self):
         self._create_instance()
@@ -1424,8 +1424,9 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
     def test_resume_state_on_host_boot(self, mock_get_vm_state,
                                        mock_reboot):
         self._create_instance()
+        share_info = objects.ShareMappingList()
         self.conn.resume_state_on_host_boot(self.context, self.instance,
-                'network_info')
+                'network_info', share_info)
         mock_get_vm_state.assert_called_once_with(self.conn._session,
                                                   self.instance)
         mock_reboot.assert_called_once_with(self.context, self.instance,
@@ -1439,9 +1440,9 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
                 mock.patch.object(vm_util, 'get_vm_state',
                                   return_value=state)
             ) as (mock_reboot, mock_get_vm_state):
-                self.conn.resume_state_on_host_boot(self.context,
-                                                    self.instance,
-                                                    'network_info')
+                share_info = objects.ShareMappingList()
+                self.conn.resume_state_on_host_boot(
+                    self.context, self.instance, 'network_info', share_info)
                 mock_get_vm_state.assert_called_once_with(self.conn._session,
                                                           self.instance)
                 self.assertFalse(mock_reboot.called)
@@ -2144,6 +2145,9 @@ class VMwareAPIVMTestCase(test.NoDBTestCase,
         }
         inventory = self.pt.data(self.node_name).inventory
         self.assertEqual(expected, inventory)
+        traits = self.pt.data(self.node_name).traits
+        # nova with vmware only supports HW_ARCH_X86_64
+        self.assertEqual(traits, {'HW_ARCH_X86_64'})
 
     def test_invalid_datastore_regex(self):
 
