@@ -94,7 +94,8 @@ endif
 		--namespace oslo.versionedobjects \
 		--namespace keystonemiddleware.auth_token \
 		--namespace osprofiler \
-		--namespace os_vif
+		--namespace os_vif \
+		--namespace os_brick
 
 	pkgos-readd-keystone-authtoken-missing-options $(NOVA_CONF) keystone_authtoken nova
 
