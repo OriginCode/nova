@@ -1,3 +1,9 @@
+nova (2:31.0.0-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 02 Apr 2025 13:24:33 +0200
+
 nova (2:31.0.0~rc1-2) unstable; urgency=medium
 
   * Add os_brick namespace when generating config file.
