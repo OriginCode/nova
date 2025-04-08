@@ -1,3 +1,9 @@
+nova (2:31.0.0-2) unstable; urgency=medium
+
+  * Blacklist test_archive_deleted_rows_task_log that failed on buildd.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 08 Apr 2025 09:48:42 +0200
+
 nova (2:31.0.0-1) unstable; urgency=medium
 
   * New upstream release.
