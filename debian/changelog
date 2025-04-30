@@ -1,3 +1,10 @@
+nova (2:31.0.0-3) unstable; urgency=medium
+
+  * Blacklist test_instance_get_all_by_filters_sort_keys that is not
+    deterministic (Closes: #1104396).
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 30 Apr 2025 08:49:36 +0200
+
 nova (2:31.0.0-2) unstable; urgency=medium
 
   * Blacklist test_archive_deleted_rows_task_log that failed on buildd.
