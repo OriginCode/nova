@@ -1,0 +1,72 @@
+Description: Fix neutron client dict grabbing
+ Due to a bug in python3.13 [1] the following code will leads to an
+ emptied dict by the GC even though we hold a reference to the dict.
+ .
+ import gc
+ .
+ class A:
+ .
+    def __init__(self, client):
+        self.__dict__ = client.__dict__
+        self.client = client
+ .
+ class B:
+    def __init__(self):
+        self.test_attr = "foo"
+ .
+ a = A(B())
+ print(a.__dict__)
+ print(a.client.__dict__)
+ gc.collect()
+ print("##  After gc.collect()")
+ print(a.__dict__)
+ print(a.client.__dict__)
+ .
+  # Output with Python 13
+ {'test_attr': 'foo', 'client': <__main__.B object at 0x73ea355a8590>}
+ {'test_attr': 'foo', 'client': <__main__.B object at 0x73ea355a8590>}
+  ##  After gc.collect()
+ {'test_attr': 'foo', 'client': <__main__.B object at 0x73ea355a8590>}
+ {}
+ .
+  # Output with Python 12
+ {'test_attr': 'foo', 'client': <__main__.B object at 0x79c86f355400>}
+ {'test_attr': 'foo', 'client': <__main__.B object at 0x79c86f355400>}
+  ##  After gc.collect()
+ {'test_attr': 'foo', 'client': <__main__.B object at 0x79c86f355400>}
+ {'test_attr': 'foo', 'client': <__main__.B object at 0x79c86f355400>
+ .
+ Our neutron client has this kind of code and therefore failing in
+ python3.13. This patch adds __getattr__ instead of trying to hold a
+ direct reference to the __dict__. This seems to work around the
+ problem.
+ .
+ [1] https://github.com/python/cpython/issues/130327
+Author: Balazs Gibizer <gibi@redhat.com>
+Date: Fri, 20 Jun 2025 11:09:24 +0200
+Co-Authored-By: Johannes Kulik <johannes.kulik@sap.com>
+Bug: https://launchpad.net/bugs/2103413
+Change-Id: I87c9fbb9331135674232c6e77d700966a938b0ac
+Origin: upstream, https://review.opendev.org/c/openstack/nova/+/952966
+Last-Update: 2025-06-20
+
+diff --git a/nova/network/neutron.py b/nova/network/neutron.py
+index f24177d..76c8a68f 100644
+--- a/nova/network/neutron.py
++++ b/nova/network/neutron.py
+@@ -179,11 +179,13 @@
+     """
+ 
+     def __init__(self, base_client, admin):
+-        # Expose all attributes from the base_client instance
+-        self.__dict__ = base_client.__dict__
+         self.base_client = base_client
+         self.admin = admin
+ 
++    def __getattr__(self, name):
++        # Expose all attributes from the base_client instance
++        return getattr(self.base_client, name)
++
+     def __getattribute__(self, name):
+         obj = object.__getattribute__(self, name)
+         if callable(obj):
