@@ -33,3 +33,4 @@ if ! [ "${NOVA_CONSOLE_PROXY_TYPE}" = "spicehtml5" ] && [ -z "${SERVICE_FILE}" ]
 		exit 0
 	fi
 fi
+export OS_OSLO_MESSAGING_RABBIT__PROCESSNAME=nova-spicehtml5proxy

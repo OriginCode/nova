@@ -31,3 +31,4 @@ if ! [ ""$(echo "${NOVA_SERIAL_PROXY_START}" | tr '[:upper:]' '[:lower:]') = "tr
 		exit 0
 	fi
 fi
+export OS_OSLO_MESSAGING_RABBIT__PROCESSNAME=nova-serialproxy

@@ -1,3 +1,9 @@
+nova (2:31.0.0-5) unstable; urgency=medium
+
+  * export OS_OSLO_MESSAGING_RABBIT__PROCESSNAME for all daemons.
+
+ -- Thomas Goirand <zigo@debian.org>  Fri, 11 Jul 2025 14:24:22 +0200
+
 nova (2:31.0.0-4) unstable; urgency=medium
 
   * Add Fix-neutron-client-dict-grabbing.patch as a workaround for a nasty

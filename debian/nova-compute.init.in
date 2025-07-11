@@ -25,4 +25,4 @@ if [ -f '/etc/nova/nova-compute.conf' ] ; then
 fi
 SYSTEMD_TYPE=notify
 SYSTEMD_NOTIFY_ACCESS=all
-
+export OS_OSLO_MESSAGING_RABBIT__PROCESSNAME=nova-compute
