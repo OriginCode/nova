@@ -7,6 +7,8 @@ nova (2:31.0.0-7) unstable; urgency=high
     accidental information disclosure to the unauthorized instance. Added
     upstream patch: OSSN-0094_restrict_swap_volume_to_cinder.patch.
     (Closes: #1111689).
+  * Blacklist non-deterministic unit test:
+    - ComputeTestCase.test_add_remove_fixed_ip_updates_instance_updated_at
 
  -- Thomas Goirand <zigo@debian.org>  Thu, 21 Aug 2025 09:10:49 +0200
 
