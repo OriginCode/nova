@@ -5,3 +5,4 @@ Add-a-healtcheck-url.patch
 fix-exception.NovaException.patch
 Add-context-switch-chance-to-other-thread-during-get_available_resources.patch
 Fix-neutron-client-dict-grabbing.patch
+OSSN-0094_restrict_swap_volume_to_cinder.patch
