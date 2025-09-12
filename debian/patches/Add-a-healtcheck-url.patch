@@ -15,7 +15,7 @@ Index: nova/etc/nova/api-paste.ini
 ===================================================================
 --- nova.orig/etc/nova/api-paste.ini
 +++ nova/etc/nova/api-paste.ini
-@@ -6,7 +6,7 @@ use = egg:Paste#urlmap
+@@ -6,7 +6,7 @@
  /: meta
  
  [pipeline:meta]
@@ -24,25 +24,17 @@ Index: nova/etc/nova/api-paste.ini
  
  [app:metaapp]
  paste.app_factory = nova.api.metadata.handler:MetadataRequestHandler.factory
-@@ -30,17 +30,22 @@ use = call:nova.api.openstack.urlmap:url
+@@ -30,11 +30,16 @@
  
  [composite:openstack_compute_api_v21]
  use = call:nova.api.auth:pipeline_factory_v21
 -keystone = cors http_proxy_to_wsgi compute_req_id faultwrap request_log sizelimit osprofiler authtoken keystonecontext osapi_compute_app_v21
 +keystone = healthcheck cors http_proxy_to_wsgi compute_req_id faultwrap request_log sizelimit osprofiler authtoken keystonecontext osapi_compute_app_v21
- # DEPRECATED: The [api]auth_strategy conf option is deprecated and will be
- # removed in a subsequent release, whereupon this pipeline will be unreachable.
--noauth2 = cors http_proxy_to_wsgi compute_req_id faultwrap request_log sizelimit osprofiler noauth2 osapi_compute_app_v21
-+noauth2 = healthcheck cors http_proxy_to_wsgi compute_req_id faultwrap request_log sizelimit osprofiler noauth2 osapi_compute_app_v21
  
  [composite:openstack_compute_api_v21_legacy_v2_compatible]
  use = call:nova.api.auth:pipeline_factory_v21
 -keystone = cors http_proxy_to_wsgi compute_req_id faultwrap request_log sizelimit osprofiler authtoken keystonecontext legacy_v2_compatible osapi_compute_app_v21
 +keystone = healthcheck cors http_proxy_to_wsgi compute_req_id faultwrap request_log sizelimit osprofiler authtoken keystonecontext legacy_v2_compatible osapi_compute_app_v21
- # DEPRECATED: The [api]auth_strategy conf option is deprecated and will be
- # removed in a subsequent release, whereupon this pipeline will be unreachable.
--noauth2 = cors http_proxy_to_wsgi compute_req_id faultwrap request_log sizelimit osprofiler noauth2 legacy_v2_compatible osapi_compute_app_v21
-+noauth2 = healthcheck cors http_proxy_to_wsgi compute_req_id faultwrap request_log sizelimit osprofiler noauth2 legacy_v2_compatible osapi_compute_app_v21
 +
 +[filter:healthcheck]
 +use = egg:oslo.middleware#healthcheck

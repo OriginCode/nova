@@ -3,6 +3,7 @@ nova (2:32.0.0~rc1-1) experimental; urgency=medium
   * New upstream release.
   * Fixed (build-)depends for this release.
   * Removed versions of (build-)depends when satisfied in Trixie.
+  * Rebased Add-a-healtcheck-url.patch.
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 12 Sep 2025 18:03:40 +0200
 
