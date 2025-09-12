@@ -23,7 +23,7 @@ Index: nova/nova/virt/libvirt/driver.py
 ===================================================================
 --- nova.orig/nova/virt/libvirt/driver.py
 +++ nova/nova/virt/libvirt/driver.py
-@@ -8740,15 +8740,21 @@ class LibvirtDriver(driver.ComputeDriver
+@@ -8744,15 +8744,21 @@ class LibvirtDriver(driver.ComputeDriver
              except libvirt.libvirtError:
                  return []
  

@@ -4,6 +4,9 @@ nova (2:32.0.0~rc1-1) experimental; urgency=medium
   * Fixed (build-)depends for this release.
   * Removed versions of (build-)depends when satisfied in Trixie.
   * Rebased Add-a-healtcheck-url.patch.
+  * Removed patches appied upstream:
+    - Fix-neutron-client-dict-grabbing.patch
+    - OSSN-0094_restrict_swap_volume_to_cinder.patch
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 12 Sep 2025 18:03:40 +0200
 
