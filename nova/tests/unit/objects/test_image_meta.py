@@ -558,6 +558,32 @@ class TestImageMetaProps(test.NoDBTestCase):
         self.assertNotIn('hw_tpm_model', primitive['nova_object.data'])
         self.assertNotIn('hw_tpm_version', primitive['nova_object.data'])
 
+    def test_obj_make_compatible_sound_model(self):
+        """Test that checks if we pop hw_sound_model."""
+        obj = objects.ImageMetaProps(
+            hw_sound_model='sb16',
+        )
+        primitive = obj.obj_to_primitive()
+        self.assertIn('hw_sound_model', primitive['nova_object.data'])
+
+        primitive = obj.obj_to_primitive('1.27')
+        self.assertNotIn('hw_sound_model', primitive['nova_object.data'])
+
+    def test_obj_make_compatible_usb_model_and_redirected_ports(self):
+        """Check if we pop hw_usb_model and hw_redirected_usb_ports."""
+        obj = objects.ImageMetaProps(
+            hw_usb_model='qemu-xhci',
+            hw_redirected_usb_ports=3
+        )
+        primitive = obj.obj_to_primitive()
+        self.assertIn('hw_usb_model', primitive['nova_object.data'])
+        self.assertIn('hw_redirected_usb_ports', primitive['nova_object.data'])
+
+        primitive = obj.obj_to_primitive('1.27')
+        self.assertNotIn('hw_usb_model', primitive['nova_object.data'])
+        self.assertNotIn(
+            'hw_redirected_usb_ports', primitive['nova_object.data'])
+
     def test_obj_make_compatible_socket_policy(self):
         obj = objects.ImageMetaProps(
             hw_pci_numa_affinity_policy=fields.PCINUMAAffinityPolicy.SOCKET)
@@ -631,3 +657,21 @@ class TestImageMetaProps(test.NoDBTestCase):
             exception.ObjectActionError, obj.obj_to_primitive, '1.38')
         self.assertIn(
             'hw_vif_model=igb not supported in version (1, 38)', str(ex))
+
+    def test_obj_make_compatible_mem_encryption_model(self):
+        """Check 'hw_mem_encryption_model' compatibility."""
+        obj = objects.ImageMetaProps(
+            hw_mem_encryption_model=fields.MemEncryptionModel.AMD_SEV)
+
+        primitive = obj.obj_to_primitive('1.42')
+        self.assertIn(
+            'hw_mem_encryption_model',
+            primitive['nova_object.data'])
+        self.assertEqual(
+            fields.MemEncryptionModel.AMD_SEV,
+            primitive['nova_object.data']['hw_mem_encryption_model'])
+
+        primitive = obj.obj_to_primitive('1.41')
+        self.assertNotIn(
+            'hw_mem_encryption_model',
+            primitive['nova_object.data'])

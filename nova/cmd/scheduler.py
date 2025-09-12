@@ -24,15 +24,14 @@ from oslo_reports import guru_meditation_report as gmr
 from oslo_reports import opts as gmr_opts
 
 import nova.conf
-from nova.conf import remote_debug
 from nova import config
 from nova import objects
 from nova.scheduler import rpcapi
 from nova import service
+from nova import utils
 from nova import version
 
 CONF = nova.conf.CONF
-remote_debug.register_cli_opts(CONF)
 
 
 def main():
@@ -50,5 +49,16 @@ def main():
     # Determine the number of workers; if not specified in config, default
     # to number of CPUs
     workers = CONF.scheduler.workers or processutils.get_worker_count()
+    # NOTE(gibi): The oslo.service backend creates the worker processes
+    # via os.fork. As nova already initialized these executor(s)
+    # in the master process, and os.fork's behavior is to copy the state of
+    # parent to the child process, we destroy the executor in the parent
+    # process before the forking, so that the workers initialize new
+    # executor(s) and therefore avoid working with the wrong internal executor
+    # state (i.e. number of workers idle in the pool). A long therm solution
+    # would be to use os.spawn instead of os.fork for the workers.
+    utils.destroy_scatter_gather_executor()
+    utils.destroy_default_executor()
+
     service.serve(server, workers=workers)
     service.wait()

@@ -40,6 +40,7 @@ def _get_context(req):
     return req.environ['nova.context']
 
 
+@validation.validated
 class AggregateController(wsgi.Controller):
     """The Host Aggregates API controller for the OpenStack API."""
 
@@ -258,7 +259,8 @@ class AggregateController(wsgi.Controller):
                                                            id, metadata)
         except exception.AggregateNotFound as e:
             raise exc.HTTPNotFound(explanation=e.format_message())
-        except exception.InvalidAggregateAction as e:
+        except (exception.InvalidAggregateAction,
+                exception.AggregateMetadataKeyExists) as e:
             raise exc.HTTPBadRequest(explanation=e.format_message())
 
         return self._marshall_aggregate(req, aggregate)
@@ -273,7 +275,7 @@ class AggregateController(wsgi.Controller):
         return {"aggregate": _aggregate}
 
     def _build_aggregate_items(self, req, aggregate):
-        show_uuid = api_version_request.is_supported(req, min_version="2.41")
+        show_uuid = api_version_request.is_supported(req, "2.41")
         keys = aggregate.obj_fields
         # NOTE(rlrossit): Within the compute API, metadata will always be
         # set on the aggregate object (at a minimum to {}). Because of this,
@@ -286,7 +288,7 @@ class AggregateController(wsgi.Controller):
                     (show_uuid or key != 'uuid')):
                 yield key, getattr(aggregate, key)
 
-    @wsgi.Controller.api_version('2.81')
+    @wsgi.api_version('2.81')
     @wsgi.response(202)
     @wsgi.expected_errors((400, 404))
     @validation.schema(aggregate_images.aggregate_images)

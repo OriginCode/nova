@@ -13,7 +13,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova VERSION\n"
 "Report-Msgid-Bugs-To: https://bugs.launchpad.net/openstack-i18n/\n"
-"POT-Creation-Date: 2024-10-09 20:12+0000\n"
+"POT-Creation-Date: 2025-07-04 18:13+0000\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
@@ -65,12 +65,6 @@ msgstr "%(total)i 行がクエリー %(meth)s に合致し、%(done)i が移行�
 #, python-format
 msgid "%(type)s hypervisor does not support PCI devices"
 msgstr "%(type)s ハイパーバイザーは PCI デバイスをサポートしていません"
-
-#, python-format
-msgid "%(worker_name)s value of %(workers)s is invalid, must be greater than 0"
-msgstr ""
-"%(workers)s の %(worker_name)s 値が無効です。0 より大きい値にしなければなりま"
-"せん"
 
 #, python-format
 msgid "%s does not support disk hotplug."
@@ -1705,8 +1699,8 @@ msgstr "イメージの場所にアクセスできません"
 
 #, python-format
 msgid ""
-"No live migration URI configured and no default available for \"%(virt_type)s"
-"\" hypervisor virtualization type."
+"No live migration URI configured and no default available for "
+"\"%(virt_type)s\" hypervisor virtualization type."
 msgstr ""
 "ライブマイグレーションの URI が設定されておらず、ハイパーバイザーの仮想化タイ"
 "プの \"%(virt_type)s\" で使用可能なデフォルトが存在しません。"
@@ -1787,9 +1781,6 @@ msgstr "権限がありません。"
 
 msgid "Not enough parameters to build a valid rule."
 msgstr "有効なルールを作成するだけの十分なパラメータがありません"
-
-msgid "Not implemented on Windows"
-msgstr "Windows では実装されていません"
 
 msgid "Not stored in rbd"
 msgstr "rbd 内に保管されていません"
@@ -2253,9 +2244,6 @@ msgstr "タスク %(task_name)s はホスト %(host)s 上で実行されてい�
 msgid "The PCI address %(address)s has an incorrect format."
 msgstr "PCI アドレス %(address)s の形式が正しくありません。"
 
-msgid "The backlog must be more than 0"
-msgstr "バックログは 0 より大きい値である必要があります"
-
 #, python-format
 msgid "The console port range %(min_port)d-%(max_port)d is exhausted."
 msgstr ""
@@ -2430,23 +2418,11 @@ msgid "Unable to determine disk prefix for %s"
 msgstr "%s のディスクプレフィックスを判別できません"
 
 #, python-format
-msgid "Unable to find ca_file : %s"
-msgstr "ca_file が見つかりません: %s"
-
-#, python-format
-msgid "Unable to find cert_file : %s"
-msgstr "cert_file が見つかりません: %s"
-
-#, python-format
 msgid "Unable to find host for Instance %s"
 msgstr "インスタンス %s のホストが見つかりません"
 
 msgid "Unable to find iSCSI Target"
 msgstr "iSCSI ターゲットが見つかりません"
-
-#, python-format
-msgid "Unable to find key_file : %s"
-msgstr "key_file %s が見つかりません"
 
 msgid "Unable to find volume"
 msgstr "ボリュームが見つかりません"
@@ -2668,13 +2644,6 @@ msgstr ""
 
 msgid "When resizing, instances must change flavor!"
 msgstr "サイズ変更の際は、インスタンスのフレーバーを変更する必要があります。"
-
-msgid ""
-"When running server in SSL mode, you must specify both a cert_file and "
-"key_file option value in your configuration file"
-msgstr ""
-"サーバーを SSL モードで実行する場合は、設定ファイルで cert_file と key_file "
-"の両方のオプションに値を指定する必要があります"
 
 #, python-format
 msgid "Wrong quota method %(method)s used on resource %(res)s"

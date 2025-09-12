@@ -353,12 +353,56 @@ Caveats
    This information is correct as of the 17.0.0 Queens release. Where
    improvements have been made or issues fixed, they are noted per item.
 
+* After installing the NVIDIA driver on compute nodes, if ``mdev`` are not
+  visible but VF devices are present under a path like
+  ``/sys/bus/pci/devices/0000:25:00.4/nvidia``, this indicates that the
+  **kernel variant driver** is in use.
+
+  This most likely occurs on **Ubuntu Noble** or **RHEL 10**.
+
+  .. versionchanged:: 31.0.0
+
+   Please refer to the `PCI passthrough documentation`_ for proper
+   configuration.
+
+* When using recent nVidia GPU architectures like Ampere or newer GPUs which
+  have SR-IOV feature, Nova can't know how many vGPUs can be used by a specific
+  type. You then need to create virtual functions and then provide the list
+  of the virtual functions per GPUs that can be used by setting
+  ``device_addresses``.
+
+  .. versionchanged:: 29.0.0
+
+   By the 2024.1 Caracal release, if you use those hardware, you need to
+   provide a new configuration option named
+   ``max_instances`` in the related mdev type group (eg. ``mdev_nvidia-35``)
+   where the value of that option would be the number of vGPUs that the type
+   can create.
+
+   As an example for the `A40-2Q nVidia GPU type`__ which can create up to 24
+   vGPUs, please provide the below configuration :
+
+   .. __: https://docs.nvidia.com/vgpu/16.0/grid-vgpu-user-guide/index.html#vgpu-types-nvidia-a40
+
+   .. code-block:: ini
+
+      [devices]
+      enabled_mdev_types = nvidia-558
+
+      [mdev_nvidia-558]
+      max_instances = 24
+
+   As a side note, you can see that we don't use ``device_addresses`` in the
+   ``mdev_nvidia-558`` section, as we don't need to tell which exact virtual
+   functions we want to use for that type.
+
+
 * When live-migrating an instance using vGPUs, the libvirt guest domain XML
   isn't updated with the new mediated device UUID to use for the target.
 
   .. versionchanged:: 29.0.0
 
-   In the 2024.2 Caracal release, Nova now `supports vGPU live-migrations`_. In
+   In the 2024.1 Caracal release, Nova now `supports vGPU live-migrations`_. In
    order to do this, both the source and target compute service need to have
    minimum versions of libvirt-8.6.0, QEMU-8.1.0 and Linux kernel 5.18.0. You
    need to ensure that either you use only single common vGPU type between two
@@ -451,3 +495,4 @@ For nested vGPUs:
 .. _Intel GVT-g: https://01.org/igvt-g
 .. _NVIDIA GRID vGPU: http://docs.nvidia.com/grid/5.0/pdf/grid-vgpu-user-guide.pdf
 .. _osc-placement plugin: https://docs.openstack.org/osc-placement/latest/index.html
+.. _PCI passthrough documentation: https://docs.openstack.org/nova/latest/admin/pci-passthrough.html

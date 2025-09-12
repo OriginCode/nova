@@ -48,8 +48,6 @@ import uuid
 
 from castellan import key_manager
 from copy import deepcopy
-import eventlet
-from eventlet import greenthread
 from eventlet import tpool
 from lxml import etree
 from os_brick import encryptors
@@ -227,8 +225,6 @@ NEXT_MIN_QEMU_VERSION = (8, 2, 2)
 # vIOMMU model value `virtio` minimal support version
 MIN_LIBVIRT_VIOMMU_VIRTIO_MODEL = (8, 3, 0)
 
-MIN_LIBVIRT_TB_CACHE_SIZE = (8, 0, 0)
-
 # Virtuozzo driver support
 MIN_VIRTUOZZO_VERSION = (7, 0, 0)
 
@@ -246,19 +242,10 @@ VGPU_RESOURCE_SEMAPHORE = 'vgpu_resources'
 MIN_MDEV_LIVEMIG_LIBVIRT_VERSION = (8, 6, 0)
 MIN_MDEV_LIVEMIG_QEMU_VERSION = (8, 1, 0)
 
-# Minimum version supporting persistent mdevs.
-# https://libvirt.org/drvnodedev.html#mediated-devices-mdevs
-MIN_LIBVIRT_PERSISTENT_MDEV = (7, 3, 0)
-
-# Autostart appears to be available starting in 7.8.0
-# https://github.com/libvirt/libvirt/commit/c6607a25b93bd6b0188405785d6608fdf71c8e0a
-MIN_LIBVIRT_NODEDEV_AUTOSTART = (7, 8, 0)
-
 LIBVIRT_PERF_EVENT_PREFIX = 'VIR_PERF_PARAM_'
 
 # Maxphysaddr minimal support version.
 MIN_LIBVIRT_MAXPHYSADDR = (8, 7, 0)
-MIN_QEMU_MAXPHYSADDR = (2, 7, 0)
 
 # stateless firmware support
 MIN_LIBVIRT_STATELESS_FIRMWARE = (8, 6, 0)
@@ -270,6 +257,10 @@ MIN_IGB_QEMU_VERSION = (8, 0, 0)
 # Minimum versions supporting vfio-pci variant driver.
 MIN_VFIO_PCI_VARIANT_LIBVIRT_VERSION = (10, 0, 0)
 MIN_VFIO_PCI_VARIANT_QEMU_VERSION = (8, 2, 2)
+
+# Minimum versions supporting the virtio sound model
+MIN_VIRTIO_SOUND_LIBVIRT_VERSION = (10, 4, 0)
+MIN_VIRTIO_SOUND_QEMU_VERSION = (8, 2, 0)
 
 REGISTER_IMAGE_PROPERTY_DEFAULTS = [
     'hw_machine_type',
@@ -799,9 +790,6 @@ class LibvirtDriver(driver.ComputeDriver):
 
         self._check_my_ip()
 
-        # TODO(ykarel) This can be dropped when MIN_LIBVIRT_VERSION>=8.0.0
-        self._supports_tb_cache_size()
-
         if (CONF.libvirt.virt_type == 'lxc' and
                 not (CONF.libvirt.uid_maps and CONF.libvirt.gid_maps)):
             LOG.warning("Running libvirt-lxc without user namespaces is "
@@ -889,18 +877,10 @@ class LibvirtDriver(driver.ComputeDriver):
         # wrongly modified.
         self.cpu_api.power_down_all_dedicated_cpus()
 
-        if not self._host.has_min_version(MIN_LIBVIRT_PERSISTENT_MDEV):
-            # TODO(sbauza): Remove this code once mediated devices are
-            # persisted across reboots.
-            # TODO(Uggla): Remove in bump cleanup patch
-            self._recreate_assigned_mediated_devices()
-        else:
-            # NOTE(melwitt): We shouldn't need to do this with libvirt 7.8.0
-            # and newer because we're setting autostart=True on the devices --
-            # but if that fails for whatever reason and any devices become
-            # inactive, we can start them here. With libvirt version < 7.8.0,
-            # this is needed because autostart is not available.
-            self._start_inactive_mediated_devices()
+        # NOTE(melwitt): We shouldn't need to do this because we're setting
+        # autostart=True on the devices -- but if that fails for whatever
+        # reason and any devices become inactive, we can start them here.
+        self._start_inactive_mediated_devices()
 
         self._check_cpu_compatibility()
 
@@ -951,7 +931,6 @@ class LibvirtDriver(driver.ComputeDriver):
 
         supports_maxphysaddr = self._host.has_min_version(
             lv_ver=MIN_LIBVIRT_MAXPHYSADDR,
-            hv_ver=MIN_QEMU_MAXPHYSADDR,
             hv_type=host.HV_DRIVER_QEMU,
         )
 
@@ -1242,35 +1221,6 @@ class LibvirtDriver(driver.ComputeDriver):
         # See https://bugzilla.redhat.com/show_bug.cgi?id=1376907 for ref.
         return os.path.exists('/sys/bus/mdev/devices/{0}'.format(uuid))
 
-    def _recreate_assigned_mediated_devices(self):
-        """Recreate assigned mdevs that could have disappeared if we reboot
-        the host.
-        """
-        # NOTE(sbauza): This method just calls sysfs to recreate mediated
-        # devices by looking up existing guest XMLs and doesn't use
-        # the Placement API so it works with or without a vGPU reshape.
-        mdevs = self._get_all_assigned_mediated_devices()
-        for (mdev_uuid, instance_uuid) in mdevs.items():
-            if not self._is_existing_mdev(mdev_uuid):
-                dev_name = libvirt_utils.mdev_uuid2name(mdev_uuid)
-                dev_info = self._get_mediated_device_information(dev_name)
-                parent = dev_info['parent']
-                parent_type = self._get_vgpu_type_per_pgpu(parent)
-                if dev_info['type'] != parent_type:
-                    # NOTE(sbauza): The mdev was created by using a different
-                    # vGPU type. We can't recreate the mdev until the operator
-                    # modifies the configuration.
-                    parent = "{}:{}:{}.{}".format(*parent[4:].split('_'))
-                    msg = ("The instance UUID %(inst)s uses a mediated device "
-                           "type %(type)s that is no longer supported by the "
-                           "parent PCI device, %(parent)s. Please correct "
-                           "the configuration accordingly." %
-                           {'inst': instance_uuid,
-                            'parent': parent,
-                            'type': dev_info['type']})
-                    raise exception.InvalidLibvirtMdevConfig(reason=msg)
-                self._create_new_mediated_device(parent, uuid=mdev_uuid)
-
     def _check_my_ip(self):
         ips = compute_utils.get_machine_ips()
         if CONF.my_ip not in ips:
@@ -1341,19 +1291,6 @@ class LibvirtDriver(driver.ComputeDriver):
                 "'vcpu_pin_set' config option value to '[compute] "
                 "cpu_shared_set' and '[compute] cpu_dedicated_set', "
                 "respectively, and undefine 'vcpu_pin_set'.")
-
-    def _supports_tb_cache_size(self):
-        if (
-            CONF.libvirt.virt_type == 'qemu' and
-            CONF.libvirt.tb_cache_size and
-            CONF.libvirt.tb_cache_size > 0
-        ):
-            if not self._host.has_min_version(MIN_LIBVIRT_TB_CACHE_SIZE):
-                raise exception.InvalidConfiguration(
-                    _("Nova requires libvirt version %s or greater "
-                      "with '[libvirt] tb_cache_size' "
-                      "configured.") %
-                    libvirt_utils.version_to_string(MIN_LIBVIRT_TB_CACHE_SIZE))
 
     def _prepare_migration_flags(self):
         migration_flags = 0
@@ -2196,7 +2133,8 @@ class LibvirtDriver(driver.ComputeDriver):
         vol_driver = self._get_volume_driver(connection_info)
         conf = vol_driver.get_config(connection_info, disk_info)
 
-        if self._sev_enabled(instance.flavor, instance.image_meta):
+        if self._get_mem_encryption_config(
+                instance.flavor, instance.image_meta):
             designer.set_driver_iommu_for_device(conf)
 
         self._set_cache_mode(conf)
@@ -2339,7 +2277,7 @@ class LibvirtDriver(driver.ComputeDriver):
             'disk_bus': disk_bus,
             'device_type': device_type}
 
-        # Note(cfb): If the volume has a custom block size, check that that we
+        # Note(cfb): If the volume has a custom block size, check that we
         # are using QEMU/KVM. The presence of a block size is considered
         # mandatory by cinder so we fail if we can't honor the request.
         data = {}
@@ -3070,7 +3008,7 @@ class LibvirtDriver(driver.ComputeDriver):
                                          instance.flavor,
                                          CONF.libvirt.virt_type)
 
-        if self._sev_enabled(instance.flavor, image_meta):
+        if self._get_mem_encryption_config(instance.flavor, image_meta):
             designer.set_driver_iommu_for_device(cfg)
 
         try:
@@ -3820,17 +3758,24 @@ class LibvirtDriver(driver.ComputeDriver):
             # If the rebased image is going to have a backing file then
             # explicitly set the backing file format to avoid any security
             # concerns related to file format auto detection.
-            if os.path.isabs(rebase_base):
-                backing_file = rebase_base
+            backing_file = rebase_base
+
+            # We will need the absolute path to the backing file in order to
+            # call images.qemu_img_info() as it checks for path existence.
+            # We still want to do the rebase itself with a relative path if a
+            # relative path was given, so that Cinder will also be able to
+            # successfully reference the backing file in its environment.
+            if os.path.isabs(backing_file):
+                backing_file_abs = backing_file
             else:
                 # this is a probably a volume snapshot case where the
                 # rebase_base is relative. See bug
                 # https://bugs.launchpad.net/nova/+bug/1885528
                 backing_file_name = os.path.basename(rebase_base)
                 volume_path = os.path.dirname(source_path)
-                backing_file = os.path.join(volume_path, backing_file_name)
+                backing_file_abs = os.path.join(volume_path, backing_file_name)
 
-            b_file_fmt = images.qemu_img_info(backing_file).file_format
+            b_file_fmt = images.qemu_img_info(backing_file_abs).file_format
             qemu_img_extra_arg = ['-F', b_file_fmt]
 
         qemu_img_extra_arg.append(source_path)
@@ -4114,7 +4059,7 @@ class LibvirtDriver(driver.ComputeDriver):
                     LOG.info("Instance may have been rebooted during soft "
                              "reboot, so return now.", instance=instance)
                     return True
-            greenthread.sleep(1)
+            time.sleep(1)
         return False
 
     def _hard_reboot(self, context, instance, network_info, share_info,
@@ -5153,6 +5098,13 @@ class LibvirtDriver(driver.ComputeDriver):
                               {'img_id': img_id, 'e': e},
                               instance=instance)
 
+    @staticmethod
+    def _get_fs_label_ephemeral(index: int) -> str:
+        # Use a consistent naming convention for FS labels. We need to be
+        # mindful of various filesystems label name length limitations.
+        # See for example: https://bugs.launchpad.net/nova/+bug/2061701
+        return f'ephemeral{index}'
+
     # NOTE(sileht): many callers of this method assume that this
     # method doesn't fail if an image already exists but instead
     # think that it will be reused (ie: (live)-migration/resize)
@@ -5268,7 +5220,7 @@ class LibvirtDriver(driver.ComputeDriver):
             created_disks = created_disks or not disk_image.exists()
 
             fn = functools.partial(self._create_ephemeral,
-                                   fs_label='ephemeral0',
+                                   fs_label=self._get_fs_label_ephemeral(0),
                                    os_type=instance.os_type,
                                    is_block_dev=disk_image.is_block_dev,
                                    vm_mode=vm_mode)
@@ -5292,7 +5244,7 @@ class LibvirtDriver(driver.ComputeDriver):
                 raise exception.InvalidBDMFormat(details=msg)
 
             fn = functools.partial(self._create_ephemeral,
-                                   fs_label='ephemeral%d' % idx,
+                                   fs_label=self._get_fs_label_ephemeral(idx),
                                    os_type=instance.os_type,
                                    is_block_dev=disk_image.is_block_dev,
                                    vm_mode=vm_mode)
@@ -6232,6 +6184,13 @@ class LibvirtDriver(driver.ComputeDriver):
         meta.roottype = dmeta.root_type
         meta.rootid = dmeta.root_id
 
+        # Always set the image meta, even when booting from volume
+        # as volumes can contain image meta as well.
+        imeta = vconfig.LibvirtConfigGuestMetaImage()
+        imeta.uuid = meta.rootid
+        imeta.image_meta = dmeta.image
+        meta.image = imeta
+
         ometa = vconfig.LibvirtConfigGuestMetaNovaOwner()
         ometa.userid = dmeta.owner.userid
         ometa.username = dmeta.owner.username
@@ -6241,11 +6200,13 @@ class LibvirtDriver(driver.ComputeDriver):
 
         fmeta = vconfig.LibvirtConfigGuestMetaNovaFlavor()
         fmeta.name = dmeta.flavor.name
+        fmeta.id = dmeta.flavor.flavorid
         fmeta.memory = dmeta.flavor.memory_mb
         fmeta.vcpus = dmeta.flavor.vcpus
         fmeta.ephemeral = dmeta.flavor.ephemeral_gb
         fmeta.disk = dmeta.flavor.root_gb
         fmeta.swap = dmeta.flavor.swap
+        fmeta.extra_specs = dmeta.flavor.extra_specs
 
         meta.flavor = fmeta
 
@@ -6728,8 +6689,11 @@ class LibvirtDriver(driver.ComputeDriver):
                 fields.Architecture.I686, fields.Architecture.X86_64,
                 fields.Architecture.AARCH64,
             ):
-                guest.add_feature(
-                    vconfig.LibvirtConfigGuestFeatureVMCoreInfo())
+                # VMCoreInfo device requires DMA between guest OS and host
+                # OS, which is prohibited when guest memory is encrypted.
+                if not self._get_mem_encryption_config(flavor, image_meta):
+                    guest.add_feature(
+                        vconfig.LibvirtConfigGuestFeatureVMCoreInfo())
 
             if hide_hypervisor_id:
                 guest.add_feature(
@@ -6876,6 +6840,34 @@ class LibvirtDriver(driver.ComputeDriver):
         vtpm = vconfig.LibvirtConfigGuestVTPM(vtpm_config, vtpm_secret_uuid)
         guest.add_device(vtpm)
 
+    def _add_sound_device(
+        self,
+        guest: vconfig.LibvirtConfigGuest,
+        flavor: 'objects.Flavor',
+        instance: 'objects.Instance',
+        image_meta: 'objects.ImageMeta',
+    ) -> None:
+        """Add a sound device to the guest, if requested."""
+        # Enable sound support if required in the flavor or image.
+        sound_model = hardware.get_sound_model(flavor, image_meta)
+        if not sound_model:
+            return None
+
+        sound_device = vconfig.LibvirtConfigGuestSound(sound_model)
+        guest.add_device(sound_device)
+
+    def _add_redirected_usb_ports(
+        self,
+        guest: vconfig.LibvirtConfigGuest,
+        flavor: 'objects.Flavor',
+        instance: 'objects.Instance',
+        image_meta: 'objects.ImageMeta',
+    ) -> None:
+        """Add redirected USB ports, if requested."""
+        count = hardware.get_redirected_usb_ports(flavor, image_meta)
+        for i in range(count):
+            guest.add_device(vconfig.LibvirtConfigGuestUSBRedirect())
+
     def _set_qemu_guest_agent(self, guest, flavor, instance, image_meta):
         # Enable qga only if the 'hw_qemu_guest_agent' is equal to yes
         if image_meta.properties.get('hw_qemu_guest_agent', False):
@@ -6884,7 +6876,7 @@ class LibvirtDriver(driver.ComputeDriver):
             # of AMD SEV, any virtio device should use iommu driver, and
             # libvirt does not know about it. That is why the controller
             # should be created manually.
-            if self._sev_enabled(flavor, image_meta):
+            if self._get_mem_encryption_config(flavor, image_meta):
                 self._add_virtio_serial_controller(guest, instance)
 
             LOG.debug("Qemu guest agent is enabled through image "
@@ -6947,7 +6939,7 @@ class LibvirtDriver(driver.ComputeDriver):
             membacking.sharedaccess = True
             membacking.allocateimmediate = True
             membacking.discard = True
-        if self._sev_enabled(flavor, image_meta):
+        if self._get_mem_encryption_config(flavor, image_meta):
             if not membacking:
                 membacking = vconfig.LibvirtConfigGuestMemoryBacking()
             membacking.locked = True
@@ -7389,7 +7381,7 @@ class LibvirtDriver(driver.ComputeDriver):
 
         return False
 
-    def _guest_add_usb_root_controller(self, guest, image_meta):
+    def _guest_add_usb_root_controller(self, guest, flavor, image_meta):
         """Add USB root controller, if necessary.
 
         Note that these are added by default on x86-64. We add the controller
@@ -7398,9 +7390,11 @@ class LibvirtDriver(driver.ComputeDriver):
         """
         usbhost = vconfig.LibvirtConfigGuestUSBHostController()
         usbhost.index = 0
+
         # an unset model means autodetect, while 'none' means don't add a
         # controller (x86 gets one by default)
         usbhost.model = None
+        specified_model = hardware.get_usb_model(flavor, image_meta)
         if not self._guest_needs_usb(guest, image_meta):
             archs = (
                 fields.Architecture.PPC,
@@ -7413,6 +7407,8 @@ class LibvirtDriver(driver.ComputeDriver):
                 # xml, where 'none' adds it but then disables it causing
                 # libvirt errors and the instances not being able to build
                 usbhost.model = None
+            elif specified_model:
+                usbhost.model = specified_model
             else:
                 usbhost.model = 'none'
         guest.add_device(usbhost)
@@ -7534,7 +7530,7 @@ class LibvirtDriver(driver.ComputeDriver):
             self._get_guest_os_type()
         )
 
-        sev_enabled = self._sev_enabled(flavor, image_meta)
+        me_config = self._get_mem_encryption_config(flavor, image_meta)
 
         self._configure_guest_by_virt_type(guest, instance, image_meta, flavor)
         if CONF.libvirt.virt_type != 'lxc':
@@ -7560,6 +7556,7 @@ class LibvirtDriver(driver.ComputeDriver):
         self._create_consoles(guest, instance, flavor, image_meta)
 
         self._guest_add_spice_channel(guest)
+        self._add_sound_device(guest, flavor, instance, image_meta)
 
         if self._guest_add_video_device(guest):
             self._add_video_driver(guest, image_meta, flavor)
@@ -7576,7 +7573,8 @@ class LibvirtDriver(driver.ComputeDriver):
         if self._guest_needs_pcie(guest):
             self._guest_add_pcie_root_ports(guest)
 
-        self._guest_add_usb_root_controller(guest, image_meta)
+        self._guest_add_usb_root_controller(guest, flavor, image_meta)
+        self._add_redirected_usb_ports(guest, flavor, instance, image_meta)
 
         self._guest_add_pci_devices(guest, instance)
 
@@ -7610,10 +7608,11 @@ class LibvirtDriver(driver.ComputeDriver):
         if mdevs:
             self._guest_add_mdevs(guest, mdevs)
 
-        if sev_enabled:
+        if me_config:
             caps = self._host.get_capabilities()
-            self._guest_configure_sev(guest, caps.host.cpu.arch,
-                                      guest.os_mach_type)
+            self._guest_configure_mem_encryption(guest, caps.host.cpu.arch,
+                                                 guest.os_mach_type,
+                                                 me_config.model)
 
         if vpmems:
             self._guest_add_vpmems(guest, vpmems)
@@ -7655,7 +7654,7 @@ class LibvirtDriver(driver.ComputeDriver):
             guest.max_memory_slots += 1
             guest.add_device(vpmem_config)
 
-    def _sev_enabled(self, flavor, image_meta):
+    def _get_mem_encryption_config(self, flavor, image_meta):
         """To enable AMD SEV, the following should be true:
 
         a) the supports_amd_sev instance variable in the host is
@@ -7677,13 +7676,13 @@ class LibvirtDriver(driver.ComputeDriver):
         are run while determining whether SEV is selected.
         """
         if not self._host.supports_amd_sev:
-            return False
+            return None
 
         mach_type = libvirt_utils.get_machine_type(image_meta)
         return hardware.get_mem_encryption_constraint(flavor, image_meta,
                                                       mach_type)
 
-    def _guest_configure_sev(self, guest, arch, mach_type):
+    def _guest_configure_mem_encryption(self, guest, arch, mach_type, model):
         sev = self._find_sev_feature(arch, mach_type)
         if sev is None:
             # In theory this should never happen because it should
@@ -7700,12 +7699,15 @@ class LibvirtDriver(driver.ComputeDriver):
                 feature='sev')
 
         designer.set_driver_iommu_for_all_devices(guest)
-        self._guest_add_launch_security(guest, sev)
+        self._guest_add_sev_launch_security(guest, sev, model)
 
-    def _guest_add_launch_security(self, guest, sev):
+    def _guest_add_sev_launch_security(self, guest, sev, model):
         launch_security = vconfig.LibvirtConfigGuestSEVLaunchSecurity()
         launch_security.cbitpos = sev.cbitpos
         launch_security.reduced_phys_bits = sev.reduced_phys_bits
+        # NOTE(tkajinam): Default policy is for SEV
+        if model == fields.MemEncryptionModel.AMD_SEV_ES:
+            launch_security.policy = launch_security.DEFAULT_SEV_ES_POLICY
         guest.launch_security = launch_security
 
     def _find_sev_feature(self, arch, mach_type):
@@ -7755,14 +7757,16 @@ class LibvirtDriver(driver.ComputeDriver):
     @staticmethod
     def _guest_add_memory_balloon(guest):
         # Memory balloon device only support 'qemu/kvm' hypervisor
-        if (
-            CONF.libvirt.virt_type in ('qemu', 'kvm') and
-            CONF.libvirt.mem_stats_period_seconds > 0
-        ):
-            balloon = vconfig.LibvirtConfigMemoryBalloon()
-            balloon.model = 'virtio'
-            balloon.period = CONF.libvirt.mem_stats_period_seconds
-            guest.add_device(balloon)
+        if CONF.libvirt.virt_type in ('qemu', 'kvm'):
+            if CONF.libvirt.mem_stats_period_seconds > 0:
+                balloon = vconfig.LibvirtConfigMemoryBalloon()
+                balloon.model = 'virtio'
+                balloon.period = CONF.libvirt.mem_stats_period_seconds
+                guest.add_device(balloon)
+            else:
+                balloon = vconfig.LibvirtConfigMemoryBalloon()
+                balloon.model = 'none'
+                guest.add_device(balloon)
 
     @staticmethod
     def _guest_add_watchdog_action(guest, flavor, image_meta):
@@ -8244,7 +8248,7 @@ class LibvirtDriver(driver.ComputeDriver):
                         context, xml, instance,
                         pause=pause, power_on=power_on,
                         post_xml_callback=post_xml_callback)
-        except eventlet.timeout.Timeout:
+        except exception.InstanceEventTimeout:
             # We did not receive all expected events from Neutron, a warning
             # has already been logged by wait_for_instance_event, but we need
             # to decide if the issue is fatal.
@@ -8401,7 +8405,7 @@ class LibvirtDriver(driver.ComputeDriver):
             except libvirt.libvirtError:
                 total += 1
             # NOTE(gtt116): give other tasks a chance.
-            greenthread.sleep(0)
+            utils.cooperative_yield()
         return total
 
     def _get_supported_vgpu_types(self):
@@ -8988,23 +8992,17 @@ class LibvirtDriver(driver.ComputeDriver):
         self._host.device_create(conf)
         # Define it to make it persistent.
         mdev_dev = self._host.device_define(conf)
-        # TODO(Uggla): Remove this in the libvirt bump cleanup patch
-        # As we are not setting autostart anymore, because we are not
-        # passing in following code.
-        # It makes test_allocate_mdevs_with_no_mdevs_but_capacity test to fail.
-        # So removing the tests.
-        if self._host.has_min_version(MIN_LIBVIRT_NODEDEV_AUTOSTART):
-            # Set it to automatically start when the compute host boots or the
-            # parent device becomes available.
-            # NOTE(melwitt): Make this not fatal because we can try to manually
-            # start mdevs in init_host() if they didn't start automatically
-            # after a host reboot.
-            try:
-                self._host.device_set_autostart(mdev_dev, autostart=True)
-            except Exception as e:
-                LOG.info(
-                    'Failed to set autostart to True for mdev '
-                    f'{mdev_dev.name()} with UUID {uuid}: {str(e)}.')
+        # Set it to automatically start when the compute host boots or the
+        # parent device becomes available.
+        # NOTE(melwitt): Make this not fatal because we can try to manually
+        # start mdevs in init_host() if they didn't start automatically
+        # after a host reboot.
+        try:
+            self._host.device_set_autostart(mdev_dev, autostart=True)
+        except Exception as e:
+            LOG.info(
+                'Failed to set autostart to True for mdev '
+                f'{mdev_dev.name()} with UUID {uuid}: {str(e)}.')
         return uuid
 
     def _create_new_mediated_device(self, parent, uuid=None):
@@ -9036,12 +9034,8 @@ class LibvirtDriver(driver.ComputeDriver):
                 # We need the PCI address, not the libvirt name
                 # The libvirt name is like 'pci_0000_84_00_0'
                 pci_addr = "{}:{}:{}.{}".format(*dev_name[4:].split('_'))
-                if not self._host.has_min_version(MIN_LIBVIRT_PERSISTENT_MDEV):
-                    chosen_mdev = nova.privsep.libvirt.create_mdev(
-                        pci_addr, dev_supported_type, uuid=uuid)
-                else:
-                    chosen_mdev = self._create_mdev(
-                        dev_name, dev_supported_type, uuid=uuid)
+                chosen_mdev = self._create_mdev(
+                    dev_name, dev_supported_type, uuid=uuid)
                 LOG.info('Created mdev: %s on pGPU: %s.',
                          chosen_mdev, pci_addr)
                 return chosen_mdev
@@ -9451,7 +9445,6 @@ class LibvirtDriver(driver.ComputeDriver):
         memory_mb = int(self._host.get_memory_mb_total())
         vcpus = len(self._get_vcpu_available())
         pcpus = len(self._get_pcpu_available())
-        memory_enc_slots = self._get_memory_encrypted_slots()
 
         # NOTE(yikun): If the inv record does not exists, the allocation_ratio
         # will use the CONF.xxx_allocation_ratio value if xxx_allocation_ratio
@@ -9496,16 +9489,6 @@ class LibvirtDriver(driver.ComputeDriver):
                 'reserved': 0,
             }
 
-        if memory_enc_slots:
-            result[orc.MEM_ENCRYPTION_CONTEXT] = {
-                'total': memory_enc_slots,
-                'min_unit': 1,
-                'max_unit': 1,
-                'step_size': 1,
-                'allocation_ratio': 1.0,
-                'reserved': 0,
-            }
-
         # If a sharing DISK_GB provider exists in the provider tree, then our
         # storage is shared, and we should not report the DISK_GB inventory in
         # the compute node provider.
@@ -9536,6 +9519,9 @@ class LibvirtDriver(driver.ComputeDriver):
 
         self._update_provider_tree_for_vpmems(
             provider_tree, nodename, result, resources)
+
+        self._update_provider_tree_for_memory_encryption(
+            provider_tree, nodename, allocations=allocations)
 
         provider_tree.update_inventory(nodename, result)
         provider_tree.update_resources(nodename, resources)
@@ -9578,7 +9564,189 @@ class LibvirtDriver(driver.ComputeDriver):
                     metadata=vpmem)
                 resources[rc].add(resource_obj)
 
-    def _get_memory_encrypted_slots(self):
+    def _update_provider_tree_for_memory_encryption(
+            self, provider_tree, nodename, allocations):
+        """Updates the provider tree for MEM_ENCRYPTION_CONTEXT inventory.
+
+        Before 2025.2, MEM_ENCRYPTION_CONTEXT inventory and allocations were on
+        the root compute node provider in the tree. Starting in 2025.2,
+        the MEM_ENCRYPTION_CONTEXT inventory is on a child provider in
+        the tree. As a result, this method will "reshape" the tree if necessary
+        on first start of this compute service in 2025.2.
+
+        :param provider_tree: The ProviderTree to update.
+        :param nodename: The ComputeNode.hypervisor_hostname, also known as
+            the name of the root node provider in the tree for this host.
+        :param allocations: If not None, indicates a reshape was requested and
+            should be performed.
+        :raises: nova.exception.ReshapeNeeded if ``allocations`` is None and
+            the method determines a reshape of the tree is needed, i.e.
+            MEM_ENCRYPTION_CONTEXT inventory and allocations must be migrated
+            from the root node provider to a child provider of
+            MEM_ENCRYPTION_CONTEXT resources in the tree.
+        :raises: nova.exception.ReshapeFailed if the requested tree reshape
+            fails for whatever reason.
+        """
+        inventories_dict = self._get_memory_encryption_inventories()
+        if not inventories_dict:
+            return
+
+        me_rps = self._ensure_memory_encryption_providers(
+            inventories_dict, provider_tree, nodename)
+
+        if self._is_reshape_needed_memory_encryption_on_root(provider_tree,
+                                                             nodename):
+            if allocations is None:
+                LOG.info('Requesting provider tree reshape in order to move '
+                         'memory encryption context inventory from the root '
+                         'compute node provider %s to a child provider.',
+                         nodename)
+                raise exception.ReshapeNeeded()
+            root_node = provider_tree.data(nodename)
+            self._reshape_memory_encryption_resources(allocations, root_node,
+                                                      me_rps)
+            if provider_tree.has_traits(nodename, [ot.HW_CPU_X86_AMD_SEV]):
+                provider_tree.remove_traits(nodename, ot.HW_CPU_X86_AMD_SEV)
+            if orc.MEM_ENCRYPTION_CONTEXT in root_node.inventory:
+                del root_node.inventory[orc.MEM_ENCRYPTION_CONTEXT]
+                provider_tree.update_inventory(nodename, root_node.inventory)
+
+    @staticmethod
+    def _is_reshape_needed_memory_encryption_on_root(provider_tree, nodename):
+        """Determine if root RP has MEM_ENCRYPTION_CONTEXT inventories.
+
+        Check to see if the root compute node provider in the tree for
+        this host already has MEM_ENCRYPTION_CONTEXT inventory because if it
+        does, we either need to signal for a reshape (if
+        _update_provider_tree_for_memory_encryption () has no allocations) or
+        move the allocations within the ProviderTree if passed.
+
+        :param provider_tree: The ProviderTree object for this host.
+        :param nodename: The ComputeNode.hypervisor_hostname, also known as
+            the name of the root node provider in the tree for this host.
+        :returns: boolean, whether we have MEM_ENCRYPTION_CONTEXT root
+            inventory.
+        """
+        root_node = provider_tree.data(nodename)
+        return orc.MEM_ENCRYPTION_CONTEXT in root_node.inventory
+
+    def _ensure_memory_encryption_providers(
+            self, inventories_dict, provider_tree, nodename):
+        """Ensures MEM_ENCRYPTION_CONTEXT inventory providers exist in the tree
+        for $nodename.
+
+        MEM_ENCRYPTION_CONTEXT providers are named $nodename_$model, e.g.
+        ``somehost.foo.bar.com_amd_sev``.
+
+        :param inventories_dict: Dictionary of inventories for
+            MEM_ENCRYPTION_CONTEXT class
+            directly provided by _get_memory_encryption_inventories() and which
+            looks like:
+                {'amd_sev':
+                    {'total': $TOTAL,
+                     'min_unit': 1,
+                     'max_unit': 1,
+                     'step_size': 1,
+                     'reserved': 0,
+                     'allocation_ratio': 1.0,
+                     'traits': [ot.HW_CPU_X86_AMD_SEV],
+                    }
+                }
+        :param provider_tree: The ProviderTree to update.
+        :param nodename: The ComputeNode.hypervisor_hostname, also known as
+            the name of the root node provider in the tree for this host.
+        :returns: dict, keyed by memory encryption model, to ProviderData
+            object representing that resource provider in the tree
+        """
+        me_rps = {}
+        for me_id, inventory in inventories_dict.items():
+            me_rp_name = '%s_%s' % (nodename, me_id)
+            if not inventory['total']:
+                if provider_tree.exists(me_rp_name):
+                    provider_tree.remove(me_rp_name)
+                continue
+            if not provider_tree.exists(me_rp_name):
+                provider_tree.new_child(me_rp_name, nodename)
+            me_rp = provider_tree.data(me_rp_name)
+            me_rps[me_id] = me_rp
+            me_traits = inventory.pop('traits', [])
+            me_inventory = {orc.MEM_ENCRYPTION_CONTEXT: inventory}
+            provider_tree.update_inventory(me_rp_name, me_inventory)
+            provider_tree.add_traits(me_rp_name, *me_traits)
+        return me_rps
+
+    def _reshape_memory_encryption_resources(
+            self, allocations, root_node, me_rps):
+        for consumer_uuid, alloc_data in allocations.items():
+            allocs = alloc_data['allocations']
+            for rp_uuid in list(allocs):
+                resources = allocs[rp_uuid]['resources']
+                if orc.MEM_ENCRYPTION_CONTEXT in resources:
+                    self._reshape_memory_encryption_allocations(
+                        rp_uuid, root_node, consumer_uuid, alloc_data,
+                        resources, me_rps)
+
+    def _reshape_memory_encryption_allocations(
+            self, rp_uuid, root_node, consumer_uuid, alloc_data, resources,
+            me_rps):
+        """Update existing MEM_ENCRYPTION_CONTEXT allocations by moving them
+        from the root node provider to the child provider for AMD SEV
+
+        :param rp_uuid: UUID of the MEM_ENCRYPTION_CONTEXT resource provider
+            with allocations from consumer_uuid (should be the root node
+            provider before reshaping occurs)
+        :param root_node: ProviderData object for the root compute node
+            resource provider in the provider tree
+        :param consumer_uuid: UUID of the consumer (instance) with
+            MEM_ENCRYPTION_CONTEXT allocations against the resource provider
+            represented by rp_uuid
+        :param alloc_data: dict of allocation information for consumer_uuid
+        :param resources: dict, keyed by resource class, of resources allocated
+            to consumer_uuid from rp_uuid
+        :param me_rps: dict, keyed by memory encryption model, to ProviderData
+            object representing that resource provider in the tree
+        :raises: ReshapeFailed if the reshape fails for whatever reason
+        """
+        self._assert_is_root_provider(
+            orc.MEM_ENCRYPTION_CONTEXT, rp_uuid, root_node, consumer_uuid,
+            alloc_data)
+
+        sev_rp = None
+        for me_rp_name in me_rps:
+            if ot.HW_CPU_X86_AMD_SEV in me_rps[me_rp_name].traits:
+                sev_rp = me_rps[me_rp_name]
+                break
+
+        if sev_rp is None:
+            msg = (_('MEM_ENCRYPTION_CONTEXT resources in the root provider '
+                     '%(rp_uuid)s are allocated by %(consumer_uuid)s but '
+                     'the child resource provider for AMD SEV is not found.')
+                   % {'rp_uuid': rp_uuid, 'consumer_uuid': consumer_uuid})
+            raise exception.ReshapeFailed(error=msg)
+
+        allocs = alloc_data['allocations']
+        allocs[sev_rp.uuid] = {
+            'resources': {
+                orc.MEM_ENCRYPTION_CONTEXT: 1
+            }
+        }
+        del resources[orc.MEM_ENCRYPTION_CONTEXT]
+
+    def _get_memory_encryption_inventories(self):
+        """Returns the inventories for MEM_ENCRYPTION_CONTEXT.
+
+        :returns: dict, keyed by memory encryption model, of dicts like:
+                {'amd_sev':
+                    {'total': $TOTAL,
+                     'min_unit': 1,
+                     'max_unit': 1,
+                     'step_size': 1,
+                     'reserved': 0,
+                     'allocation_ratio': 1.0,
+                     'traits': [ot.HW_CPU_X86_AMD_SEV]
+                    }
+                }
+        """
         conf_slots = CONF.libvirt.num_memory_encrypted_guests
 
         if not self._host.supports_amd_sev:
@@ -9586,23 +9754,60 @@ class LibvirtDriver(driver.ComputeDriver):
                 LOG.warning("Host is configured with "
                             "libvirt.num_memory_encrypted_guests set to "
                             "%d, but is not SEV-capable.", conf_slots)
-            return 0
+            return {
+                'amd_sev': {
+                    'total': 0
+                },
+                'amd_sev_es': {
+                    'total': 0
+                }
+            }
 
-        slots = db_const.MAX_INT
+        sev_slots = db_const.MAX_INT
 
-        # NOTE(tkajinam): Current nova supports SEV only so we ignore SEV-ES
         if self._host.max_sev_guests is not None:
-            slots = self._host.max_sev_guests
+            sev_slots = self._host.max_sev_guests
 
         if conf_slots is not None:
-            if conf_slots > slots:
+            if conf_slots > sev_slots:
                 LOG.warning("Host is configured with "
                             "libvirt.num_memory_encrypted_guests set to %d, "
-                            "but supports only %d.", conf_slots, slots)
-            slots = min(slots, conf_slots)
+                            "but supports only %d.", conf_slots, sev_slots)
+            sev_slots = min(sev_slots, conf_slots)
 
-        LOG.debug("Available memory encrypted slots: %d", slots)
-        return slots
+        inventories = {
+            'amd_sev': {
+                'total': sev_slots,
+                'step_size': 1,
+                'max_unit': 1,
+                'min_unit': 1,
+                'allocation_ratio': 1.0,
+                'reserved': 0,
+                'traits': [ot.HW_CPU_X86_AMD_SEV]
+            }
+        }
+
+        sev_es_slots = 0
+        if self._host.supports_amd_sev_es:
+            if self._host.max_sev_es_guests is not None:
+                sev_es_slots = self._host.max_sev_es_guests
+            inventories['amd_sev_es'] = {
+                'total': sev_es_slots,
+                'step_size': 1,
+                'max_unit': 1,
+                'min_unit': 1,
+                'allocation_ratio': 1.0,
+                'reserved': 0,
+                'traits': [ot.HW_CPU_X86_AMD_SEV_ES]
+            }
+        else:
+            inventories['amd_sev_es'] = {
+                'total': 0,
+            }
+
+        LOG.debug("Available memory encrypted slots: "
+                  "AMD SEV=%d SEV-ES=%d", sev_slots, sev_es_slots)
+        return inventories
 
     @property
     def static_traits(self) -> ty.Dict[str, bool]:
@@ -9617,6 +9822,7 @@ class LibvirtDriver(driver.ComputeDriver):
         traits.update(self._get_vif_model_traits())
         traits.update(self._get_iommu_model_traits())
         traits.update(self._get_tpm_traits())
+        traits.update(self._get_sound_model_traits())
 
         _, invalid_traits = ot.check_traits(traits)
         for invalid_trait in invalid_traits:
@@ -9645,8 +9851,8 @@ class LibvirtDriver(driver.ComputeDriver):
         root_node = provider_tree.data(nodename)
         return orc.VGPU in root_node.inventory
 
-    def _ensure_pgpu_providers(self, inventories_dict, provider_tree,
-                               nodename):
+    def _ensure_pgpu_providers(
+            self, inventories_dict, provider_tree, nodename):
         """Ensures GPU inventory providers exist in the tree for $nodename.
 
         GPU providers are named $nodename_$gpu-device-id, e.g.
@@ -9701,12 +9907,13 @@ class LibvirtDriver(driver.ComputeDriver):
 
     @staticmethod
     def _assert_is_root_provider(
-            rp_uuid, root_node, consumer_uuid, alloc_data):
+            rc_name, rp_uuid, root_node, consumer_uuid, alloc_data):
         """Asserts during a reshape that rp_uuid is for the root node provider.
 
         When reshaping, inventory and allocations should be on the root node
         provider and then moved to child providers.
 
+        :param rc_name: Resource class name
         :param rp_uuid: UUID of the provider that holds inventory/allocations.
         :param root_node: ProviderData object representing the root node in a
             provider tree.
@@ -9718,15 +9925,16 @@ class LibvirtDriver(driver.ComputeDriver):
             expected.
         """
         if rp_uuid != root_node.uuid:
-            # Something is wrong - VGPU inventory should
+            # Something is wrong - the inventory should
             # only be on the root node provider if we are
             # reshaping the tree.
-            msg = (_('Unexpected VGPU resource allocation '
+            msg = (_('Unexpected %(rc_name)s resource allocation '
                      'on provider %(rp_uuid)s for consumer '
                      '%(consumer_uuid)s: %(alloc_data)s. '
-                     'Expected VGPU allocation to be on root '
+                     'Expected %(rc_name)s allocation to be on root '
                      'compute node provider %(root_uuid)s.')
-                   % {'rp_uuid': rp_uuid,
+                   % {'rc_name': rc_name,
+                      'rp_uuid': rp_uuid,
                       'consumer_uuid': consumer_uuid,
                       'alloc_data': alloc_data,
                       'root_uuid': root_node.uuid})
@@ -9840,7 +10048,7 @@ class LibvirtDriver(driver.ComputeDriver):
         # We've found VGPU allocations on a provider. It should be the root
         # node provider.
         self._assert_is_root_provider(
-            rp_uuid, root_node, consumer_uuid, alloc_data)
+            orc.VGPU, rp_uuid, root_node, consumer_uuid, alloc_data)
 
         # Find which physical GPU corresponds to this allocation.
         mdev_uuids = self._get_assigned_mdevs_for_reshape(
@@ -9912,8 +10120,8 @@ class LibvirtDriver(driver.ComputeDriver):
                         rp_uuid, root_node, consumer_uuid, alloc_data,
                         resources, pgpu_rps)
 
-    def _update_provider_tree_for_vgpu(self, provider_tree, nodename,
-                                       allocations=None):
+    def _update_provider_tree_for_vgpu(
+            self, provider_tree, nodename, allocations=None):
         """Updates the provider tree for VGPU inventory.
 
         Before Stein, VGPU inventory and allocations were on the root compute
@@ -9969,8 +10177,8 @@ class LibvirtDriver(driver.ComputeDriver):
                 del root_node.inventory[orc.VGPU]
                 provider_tree.update_inventory(nodename, root_node.inventory)
 
-    def _update_provider_tree_for_pcpu(self, provider_tree, nodename,
-                                       allocations=None):
+    def _update_provider_tree_for_pcpu(
+            self, provider_tree, nodename, allocations=None):
         """Updates the provider tree for PCPU inventory.
 
         Before Train, pinned instances consumed VCPU inventory just like
@@ -10171,6 +10379,7 @@ class LibvirtDriver(driver.ComputeDriver):
         else:
             data['numa_topology'] = None
 
+        data['stats'] = {'uptime': self.get_host_uptime()}
         return data
 
     def check_instance_shared_storage_local(self, context, instance):
@@ -11130,7 +11339,7 @@ class LibvirtDriver(driver.ComputeDriver):
             if info.type == libvirt.VIR_DOMAIN_JOB_NONE:
                 # Either still running, or failed or completed,
                 # lets untangle the mess
-                if not finish_event.ready():
+                if not finish_event.is_set():
                     LOG.debug("Operation thread is still running",
                               instance=instance)
                 else:
@@ -11311,20 +11520,21 @@ class LibvirtDriver(driver.ComputeDriver):
             disk_paths, device_names = self._live_migration_copy_disk_paths(
                 context, instance, guest)
 
-        opthread = utils.spawn(self._live_migration_operation,
+        future = utils.spawn(self._live_migration_operation,
                                      context, instance, dest,
                                      block_migration,
                                      migrate_data, guest,
                                      device_names)
 
-        finish_event = eventlet.event.Event()
+        finish_event = threading.Event()
         self.active_migrations[instance.uuid] = deque()
 
-        def thread_finished(thread, event):
+        def thread_finished(_):
             LOG.debug("Migration operation thread notification",
                       instance=instance)
-            event.send()
-        opthread.link(thread_finished, finish_event)
+
+            finish_event.set()
+        future.add_done_callback(thread_finished)
 
         # Let eventlet schedule the new thread right away
         time.sleep(0)
@@ -11349,7 +11559,7 @@ class LibvirtDriver(driver.ComputeDriver):
                 # cancel migration job.
                 self.live_migration_abort(instance)
             except libvirt.libvirtError:
-                LOG.warning("Error occurred when trying to abort live ",
+                LOG.warning("Error occurred when trying to abort live "
                             "migration job, ignoring it.", instance=instance)
             raise
         finally:
@@ -11516,7 +11726,7 @@ class LibvirtDriver(driver.ComputeDriver):
                                 '%(max_retry)d.',
                                 {'cnt': cnt, 'max_retry': max_retry},
                                 instance=instance)
-                    greenthread.sleep(1)
+                    time.sleep(1)
 
     def pre_live_migration(self, context, instance, block_device_info,
                            network_info, disk_info, migrate_data):
@@ -11748,7 +11958,7 @@ class LibvirtDriver(driver.ComputeDriver):
                     # cached.
                     disk.cache(
                         fetch_func=self._create_ephemeral,
-                        fs_label=cache_name,
+                        fs_label=self._get_fs_label_ephemeral(0),
                         os_type=instance.os_type,
                         filename=cache_name,
                         size=info['virt_disk_size'],
@@ -11832,7 +12042,7 @@ class LibvirtDriver(driver.ComputeDriver):
             # Only use announce_pause after the first attempt to avoid
             # pausing before calling announce_self for the first attempt
             if current_attempt != 1:
-                greenthread.sleep(announce_pause)
+                time.sleep(announce_pause)
 
             LOG.info('Sending announce-self command to QEMU monitor. '
                      'Attempt %(current_attempt)s of %(max_attempts)s',
@@ -12097,7 +12307,7 @@ class LibvirtDriver(driver.ComputeDriver):
                             {'i_name': guest.name, 'thing': thing, 'error': e})
 
             # NOTE(gtt116): give other tasks a chance.
-            greenthread.sleep(0)
+            utils.cooperative_yield()
         return disk_over_committed_size
 
     def get_available_nodes(self, refresh=False):
@@ -13232,7 +13442,6 @@ class LibvirtDriver(driver.ComputeDriver):
         :return: A dict of trait names mapped to boolean values.
         """
         traits = self._get_cpu_feature_traits()
-        traits[ot.HW_CPU_X86_AMD_SEV] = self._host.supports_amd_sev
         traits[ot.HW_CPU_HYPERTHREADING] = self._host.has_hyperthreading
         traits.update(self._get_cpu_arch_traits())
         traits.update(self._get_cpu_emulation_arch_traits())
@@ -13366,3 +13575,33 @@ class LibvirtDriver(driver.ComputeDriver):
                 fs.source_dir = self._get_share_mount_path(instance, share)
                 fs.target_dir = share.tag
                 guest.add_device(fs)
+
+    def _get_sound_model_traits(self) -> ty.Dict[str, bool]:
+        """Determine what sound models are supported.
+
+        Not all traits generated by this function may be valid and the result
+        should be validated.
+
+        :return: A dict of trait names mapped to boolean values.
+        """
+        # NOTE(mikal): sadly libvirt's `getDomainCapabilities()` call does not
+        # include details of the supported sound models, so we need to instead
+        # infer it from libvirt versions.
+
+        has_virtio = True
+        if not self._host.has_min_version(MIN_VIRTIO_SOUND_LIBVIRT_VERSION):
+            has_virtio = False
+        if not self._host.has_min_version(
+                hv_ver=MIN_VIRTIO_SOUND_QEMU_VERSION):
+            has_virtio = False
+
+        return {
+            'COMPUTE_SOUND_MODEL_SB16': True,
+            'COMPUTE_SOUND_MODEL_ES1370': True,
+            'COMPUTE_SOUND_MODEL_PCSPK': True,
+            'COMPUTE_SOUND_MODEL_AC97': True,
+            'COMPUTE_SOUND_MODEL_ICH6': True,
+            'COMPUTE_SOUND_MODEL_ICH9': True,
+            'COMPUTE_SOUND_MODEL_USB': True,
+            'COMPUTE_SOUND_MODEL_VIRTIO': has_virtio
+        }

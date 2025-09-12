@@ -48,14 +48,17 @@ class ServerPasswordPolicyTest(base.BasePolicyTest):
         # the server Password.
         self.project_member_authorized_contexts = [
             self.legacy_admin_context, self.system_admin_context,
-            self.project_admin_context, self.project_member_context,
-            self.project_reader_context, self.project_foo_context]
+            self.project_admin_context, self.project_manager_context,
+            self.project_member_context, self.project_reader_context,
+            self.project_foo_context]
         # and they can get their own server password.
         self.project_reader_authorized_contexts = (
             self.project_member_authorized_contexts)
 
     @mock.patch('nova.api.metadata.password.extract_password')
     def test_index_server_password_policy(self, mock_pass):
+        mock_pass.return_value = 'passw0rd'
+
         rule_name = policies.BASE_POLICY_NAME % 'show'
         self.common_policy_auth(self.project_reader_authorized_contexts,
                                 rule_name,

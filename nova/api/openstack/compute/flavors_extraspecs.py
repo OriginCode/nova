@@ -27,6 +27,7 @@ from nova.policies import flavor_extra_specs as fes_policies
 from nova import utils
 
 
+@validation.validated
 class FlavorExtraSpecsController(wsgi.Controller):
     """The flavor extra specs API controller for the OpenStack API."""
 
@@ -35,9 +36,7 @@ class FlavorExtraSpecsController(wsgi.Controller):
         return dict(extra_specs=flavor.extra_specs)
 
     def _check_extra_specs_value(self, req, specs):
-        validation_supported = api_version_request.is_supported(
-            req, min_version='2.86',
-        )
+        validation_supported = api_version_request.is_supported(req, '2.86')
 
         for name, value in specs.items():
             # NOTE(gmann): Max length for numeric value is being checked

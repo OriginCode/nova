@@ -2,12 +2,12 @@
 # for job naming conventions.
 
 - job:
-    name: nova-tox-functional-py39
-    parent: openstack-tox-functional-py39
+    name: nova-tox-functional-py310
+    parent: openstack-tox-functional-py310
     description: |
       Run tox-based functional tests for the OpenStack Nova project
-      under cPython version 3.9 with Nova specific irrelevant-files list.
-      Uses tox with the ``functional-py39`` environment.
+      under cPython version 3.10 with Nova specific irrelevant-files list.
+      Uses tox with the ``functional-py310`` environment.
 
       This job also provides a parent for other projects to run the nova
       functional tests on their own changes.
@@ -22,28 +22,6 @@
       - ^nova/locale/.*$
       - ^\.pre-commit-config\.yaml$
       - ^releasenotes/.*$
-    vars:
-      # explicitly stating the work dir makes this job reusable by other
-      # projects
-      zuul_work_dir: src/opendev.org/openstack/nova
-      bindep_profile: test py39
-    timeout: 3600
-
-- job:
-    name: nova-tox-functional-py310
-    parent: openstack-tox-functional-py310
-    description: |
-      Run tox-based functional tests for the OpenStack Nova project
-      under cPython version 3.10 with Nova specific irrelevant-files list.
-      Uses tox with the ``functional-py310`` environment.
-
-      This job also provides a parent for other projects to run the nova
-      functional tests on their own changes.
-    required-projects:
-      # including nova here makes this job reusable by other projects
-      - openstack/nova
-      - openstack/placement
-    irrelevant-files: *functional-irrelevant-files
     vars:
       # explicitly stating the work dir makes this job reusable by other
       # projects
@@ -72,6 +50,26 @@
       zuul_work_dir: src/opendev.org/openstack/nova
       bindep_profile: test py312
     timeout: 3600
+
+- job:
+    name: nova-tox-py312-threading
+    parent: openstack-tox-py312
+    description: |
+      Run tox-based unit tests for the OpenStack Nova project
+      under cPython version 3.12 with eventlet disabled.
+      Uses tox with the ``py312-threading`` environment.
+
+    required-projects:
+      # including nova here makes this job reusable by other projects and
+      # allow depends-on placement to work with our placement fixture
+      - openstack/nova
+      - openstack/placement
+    vars:
+      # explicitly stating the work dir makes this job reusable by other
+      # projects
+      zuul_work_dir: src/opendev.org/openstack/nova
+      bindep_profile: test py312
+      tox_envlist: py312-threading
 
 - job:
     name: nova-tox-validate-backport
@@ -449,6 +447,11 @@
             scheduler:
               # Added in Train.
               query_placement_for_image_type_support: True
+            DEFAULT:
+              # Added in Flamingo. Ensures that thread statistics is logged
+              # each time a task is submitted to the executor so that web
+              # can troubleshoot hanging threads easier.
+              thread_pool_statistic_period: 0
           "/$NEUTRON_CORE_PLUGIN_CONF":
             # Needed for QoS port heal allocation testing.
             ovs:
@@ -488,7 +491,12 @@
         NOVNC_FROM_PACKAGE: False
         NOVA_USE_UNIFIED_LIMITS: True
         # Added in Caracal.
-        NOVA_COMPILE_MDEV_SAMPLES: True
+        # Temporarly disabled due to
+        # https://bugs.launchpad.net/nova/+bug/2110545
+        NOVA_COMPILE_MDEV_SAMPLES: False
+        'SYSTEMD_ENV_VARS["n-sch"]': OS_NOVA_DISABLE_EVENTLET_PATCHING=true
+        'SYSTEMD_ENV_VARS["n-api"]': OS_NOVA_DISABLE_EVENTLET_PATCHING=true
+        'SYSTEMD_ENV_VARS["n-api-meta"]': OS_NOVA_DISABLE_EVENTLET_PATCHING=true
       devstack_services:
         # Disable OVN services
         br-ex-tcpdump: false
@@ -747,10 +755,6 @@
 - job:
     name: tempest-integrated-compute-rbac-old-defaults
     parent: tempest-integrated-compute
-    # TODO(gmann): As per the 2025.1 testing runtime, we need to run at least
-    # one job on jammy. This job can be moved to Noble in the next cycle
-    # (2025.2).
-    nodeset: openstack-single-node-jammy
     description: |
       This job runs the Tempest tests with Nova RBAC old defaults
     irrelevant-files: &policies-irrelevant-files
@@ -809,7 +813,6 @@
         - nova-ovs-hybrid-plug
         - nova-tox-validate-backport:
             voting: false
-        - nova-tox-functional-py39
         - nova-tox-functional-py310
         - nova-tox-functional-py312
         - openstack-tox-py312:
@@ -834,10 +837,10 @@
         - barbican-tempest-plugin-simple-crypto:
             irrelevant-files: *nova-base-irrelevant-files
             voting: false
+        - nova-tox-py312-threading
     gate:
       jobs:
         - nova-live-migration
-        - nova-tox-functional-py39
         - nova-tox-functional-py310
         - nova-tox-functional-py312
         - nova-multi-cell
@@ -862,6 +865,7 @@
             irrelevant-files: *nova-base-irrelevant-files
         - openstacksdk-functional-devstack:
             irrelevant-files: *nova-base-irrelevant-files
+        - nova-tox-py312-threading
     periodic-weekly:
       jobs:
         # Runs emulation feature functionality test less frequently due

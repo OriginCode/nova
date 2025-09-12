@@ -450,9 +450,6 @@ class HackingTestCase(test.NoDBTestCase):
         code = "nova.utils.spawn(func, arg1, kwarg1=kwarg1)"
         self._assert_has_no_errors(code, checks.check_greenthread_spawns)
 
-        code = "nova.utils.spawn_n(func, arg1, kwarg1=kwarg1)"
-        self._assert_has_no_errors(code, checks.check_greenthread_spawns)
-
     def test_config_option_regex_match(self):
         def should_match(code):
             self.assertTrue(checks.cfg_opt_re.match(code))
@@ -1064,3 +1061,20 @@ class HackingTestCase(test.NoDBTestCase):
                    self.thread.setdaemon(True)
                """
         self._assert_has_no_errors(code, checks.check_set_daemon)
+
+    def test_check_eventlet_primitives(self):
+        code = """
+                    eventlet.sleep(0)
+                    eventlet.sleep(1)
+                    greenthread.sleep(0)
+                    greenthread.sleep(1)
+               """
+        errors = [(x + 1, 0, 'N373') for x in range(4)]
+        self._assert_has_errors(
+            code, checks.check_eventlet_primitives, expected_errors=errors)
+
+        code = """
+                    time.sleep(0)
+                    time.sleep(1)
+               """
+        self._assert_has_no_errors(code, checks.check_eventlet_primitives)

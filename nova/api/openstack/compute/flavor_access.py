@@ -37,6 +37,7 @@ def _marshall_flavor_access(flavor):
     return {'flavor_access': rval}
 
 
+@validation.validated
 class FlavorAccessController(wsgi.Controller):
     """The flavor access API controller for the OpenStack API."""
 
@@ -58,6 +59,7 @@ class FlavorAccessController(wsgi.Controller):
         return _marshall_flavor_access(flavor)
 
 
+@validation.validated
 class FlavorActionController(wsgi.Controller):
     """The flavor access API controller for the OpenStack API."""
 
@@ -76,7 +78,7 @@ class FlavorActionController(wsgi.Controller):
         flavor = common.get_flavor(context, id)
 
         try:
-            if api_version_request.is_supported(req, min_version='2.7'):
+            if api_version_request.is_supported(req, '2.7'):
                 if flavor.is_public:
                     exp = _("Can not add access to a public flavor.")
                     raise webob.exc.HTTPConflict(explanation=exp)

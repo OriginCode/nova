@@ -10,14 +10,32 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import datetime
 from unittest import mock
 
-from nova.policies import keypairs as policies
+from oslo_utils.fixture import uuidsentinel as uuids
 
 from nova.api.openstack.compute import keypairs
+from nova import objects
+from nova.policies import keypairs as policies
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit.objects import test_keypair
 from nova.tests.unit.policies import base
+
+
+FAKE_KEYPAIR = objects.KeyPair(
+    created_at=datetime.datetime(2024, 10, 29, 13, 42, 2),
+    deleted=False,
+    deleted_at=None,
+    fingerprint='foo',
+    id=123,
+    name='foo',
+    private_key='ssh-rsa foo',
+    public_key='ssh-rsa foo',
+    type='ssh',
+    updated_at=None,
+    user_id=uuids.user_alt_id,
+)
 
 
 class KeypairsPolicyTest(base.BasePolicyTest):
@@ -35,15 +53,7 @@ class KeypairsPolicyTest(base.BasePolicyTest):
 
         # Check that everyone is able to create, delete and get
         # their keypairs.
-        self.everyone_authorized_contexts = set([
-            self.legacy_admin_context, self.system_admin_context,
-            self.project_admin_context,
-            self.system_member_context, self.system_reader_context,
-            self.system_foo_context, self.project_member_context,
-            self.project_reader_context, self.project_foo_context,
-            self.other_project_member_context,
-            self.other_project_reader_context,
-        ])
+        self.everyone_authorized_contexts = self.all_contexts
 
         # Check that admin is able to create, delete and get
         # other users keypairs.
@@ -53,6 +63,7 @@ class KeypairsPolicyTest(base.BasePolicyTest):
 
     @mock.patch('nova.compute.api.KeypairAPI.get_key_pairs')
     def test_index_keypairs_policy(self, mock_get):
+        mock_get.return_value = objects.KeyPairList(objects=[])
         rule_name = policies.POLICY_ROOT % 'index'
         self.common_policy_auth(self.everyone_authorized_contexts,
                                 rule_name,
@@ -61,6 +72,7 @@ class KeypairsPolicyTest(base.BasePolicyTest):
 
     @mock.patch('nova.compute.api.KeypairAPI.get_key_pairs')
     def test_index_others_keypairs_policy(self, mock_get):
+        mock_get.return_value = objects.KeyPairList(objects=[])
         req = fakes.HTTPRequest.blank('?user_id=user2', version='2.10')
         rule_name = policies.POLICY_ROOT % 'index'
         self.common_policy_auth(self.admin_authorized_contexts,
@@ -70,6 +82,7 @@ class KeypairsPolicyTest(base.BasePolicyTest):
 
     @mock.patch('nova.compute.api.KeypairAPI.get_key_pair')
     def test_show_keypairs_policy(self, mock_get):
+        mock_get.return_value = FAKE_KEYPAIR
         rule_name = policies.POLICY_ROOT % 'show'
         self.common_policy_auth(self.everyone_authorized_contexts,
                                 rule_name,
@@ -78,6 +91,7 @@ class KeypairsPolicyTest(base.BasePolicyTest):
 
     @mock.patch('nova.compute.api.KeypairAPI.get_key_pair')
     def test_show_others_keypairs_policy(self, mock_get):
+        mock_get.return_value = FAKE_KEYPAIR
         # Change the user_id in request context.
         req = fakes.HTTPRequest.blank('?user_id=user2', version='2.10')
         rule_name = policies.POLICY_ROOT % 'show'
@@ -88,8 +102,8 @@ class KeypairsPolicyTest(base.BasePolicyTest):
 
     @mock.patch('nova.compute.api.KeypairAPI.create_key_pair')
     def test_create_keypairs_policy(self, mock_create):
-        rule_name = policies.POLICY_ROOT % 'create'
         mock_create.return_value = (test_keypair.fake_keypair, 'FAKE_KEY')
+        rule_name = policies.POLICY_ROOT % 'create'
         self.common_policy_auth(self.everyone_authorized_contexts,
                                 rule_name,
                                 self.controller.create,
@@ -153,7 +167,8 @@ class KeypairsScopeTypePolicyTest(KeypairsPolicyTest):
         self.flags(enforce_scope=True, group="oslo_policy")
 
         # With scope checking, only project-scoped users are allowed
-        self.reduce_set('everyone_authorized', self.all_project_contexts)
+        self.reduce_set('everyone_authorized', self.all_project_contexts |
+                set([self.service_context]))
         self.admin_authorized_contexts = [
             self.legacy_admin_context,
             self.project_admin_context]

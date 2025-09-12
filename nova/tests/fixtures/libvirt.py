@@ -1588,7 +1588,7 @@ class Domain(object):
         </interface>''' % nic
 
         hostdevs = ''
-        for hostdev in self._def['devices']['hostdevs']:
+        for index, hostdev in enumerate(self._def['devices']['hostdevs']):
             if hostdev['type'] == 'mdev':
                 hostdevs += '''<hostdev mode='subsystem' type='%(type)s' model='%(model)s'>
     <source>
@@ -1597,12 +1597,14 @@ class Domain(object):
     </hostdev>
             ''' % hostdev  # noqa
             if hostdev['type'] == 'pci':
-                hostdevs += '''<hostdev mode='subsystem' type='%(type)s' managed='%(managed)s'>
+                hostdevs += '''<hostdev mode='subsystem' type='{type}' managed='{managed}'>
     <source>
-      <address domain='%(domain)s' bus='%(bus)s' slot='%(slot)s' function='%(function)s'/>
+      <address domain='{domain}' bus='{bus}' slot='{slot}' function='{function}'/>
     </source>
+    <alias name='hostdev{index}'/>
+    <address type='pci' domain='0x0000' bus='0x00' slot='0x{vslot:02x}' function='0x0'/>
     </hostdev>
-            ''' % hostdev  # noqa
+            '''.format(index=index, vslot=index + 5, **hostdev)  # noqa
 
         vpmems = ''
         for vpmem in self._def['devices']['vpmems']:
@@ -2582,7 +2584,9 @@ class LibvirtFixture(fixtures.Fixture):
         real_exists = os.path.exists
 
         def fake_exists(path):
-            if path == host.SEV_KERNEL_PARAM_FILE:
+            if path == (host.SEV_KERNEL_PARAM_FILE % 'sev'):
+                return False
+            if path == (host.SEV_KERNEL_PARAM_FILE % 'sev-es'):
                 return False
             return real_exists(path)
 

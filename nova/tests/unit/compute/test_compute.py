@@ -27,6 +27,7 @@ from unittest import mock
 from castellan import key_manager
 from cinderclient import exceptions as cinder_exception
 import ddt
+import futurist
 from keystoneclient import exceptions as keystone_exception
 from neutronclient.common import exceptions as neutron_exceptions
 from oslo_log import log as logging
@@ -71,7 +72,6 @@ from nova.scheduler import utils as scheduler_utils
 from nova import test
 from nova.tests import fixtures
 from nova.tests.fixtures import cyborg as cyborg_fixture
-from nova.tests.unit.compute import eventlet_utils
 from nova.tests.unit.compute import fake_resource_tracker
 from nova.tests.unit import fake_block_device
 from nova.tests.unit import fake_diagnostics
@@ -159,7 +159,7 @@ class BaseTestCase(test.TestCase):
         self.compute.driver._set_nodes([NODENAME, NODENAME2])
 
         # execute power syncing synchronously for testing:
-        self.compute._sync_power_pool = eventlet_utils.SyncPool()
+        self.compute._sync_power_pool = futurist.SynchronousExecutor()
 
         # override tracker with a version that doesn't need the database:
         fake_rt = fake_resource_tracker.FakeResourceTracker(self.compute.host,
@@ -1343,7 +1343,7 @@ class ComputeVolumeTestCase(BaseTestCase):
                 self.compute.volume_snapshot_create, self.context,
                 self.instance_object, 'fake_id', {})
 
-        self.compute = utils.ExceptionHelper(self.compute)
+        self.compute = test_utils.ExceptionHelper(self.compute)
 
         self.assertRaises(NotImplementedError,
                 self.compute.volume_snapshot_create, self.context,
@@ -1365,7 +1365,7 @@ class ComputeVolumeTestCase(BaseTestCase):
                 self.compute.volume_snapshot_delete, self.context,
                 self.instance_object, uuids.volume, uuids.snapshot, {})
 
-        self.compute = utils.ExceptionHelper(self.compute)
+        self.compute = test_utils.ExceptionHelper(self.compute)
 
         self.assertRaises(NotImplementedError,
                 self.compute.volume_snapshot_delete, self.context,
@@ -1659,11 +1659,8 @@ class ComputeTestCase(BaseTestCase,
                       test_diagnostics.DiagnosticsComparisonMixin,
                       fake_resource_tracker.RTMockMixin):
     def setUp(self):
-        # This needs to go before we call setUp because the thread pool
-        # executor is created in ComputeManager.__init__, which is called
-        # during setUp.
-        self.useFixture(fixtures.SynchronousThreadPoolExecutorFixture())
         super(ComputeTestCase, self).setUp()
+        self.compute._live_migration_executor = futurist.SynchronousExecutor()
         self.useFixture(fixtures.SpawnIsSynchronousFixture())
 
         self.image_api = image_api.API()
@@ -4398,7 +4395,7 @@ class ComputeTestCase(BaseTestCase,
                           self.compute.get_console_output, self.context,
                           instance, 0)
 
-        self.compute = utils.ExceptionHelper(self.compute)
+        self.compute = test_utils.ExceptionHelper(self.compute)
 
         self.assertRaises(NotImplementedError,
                           self.compute.get_console_output, self.context,
@@ -4421,7 +4418,7 @@ class ComputeTestCase(BaseTestCase,
                           self.compute.get_console_output, self.context,
                           instance, 0)
 
-        self.compute = utils.ExceptionHelper(self.compute)
+        self.compute = test_utils.ExceptionHelper(self.compute)
 
         self.assertRaises(exception.InstanceNotFound,
                           self.compute.get_console_output, self.context,
@@ -4534,7 +4531,7 @@ class ComputeTestCase(BaseTestCase,
                           self.compute.get_vnc_console,
                           self.context, 'invalid', instance=instance)
 
-        self.compute = utils.ExceptionHelper(self.compute)
+        self.compute = test_utils.ExceptionHelper(self.compute)
 
         self.assertRaises(exception.ConsoleTypeInvalid,
                           self.compute.get_vnc_console,
@@ -4555,7 +4552,7 @@ class ComputeTestCase(BaseTestCase,
                           self.compute.get_vnc_console,
                           self.context, None, instance=instance)
 
-        self.compute = utils.ExceptionHelper(self.compute)
+        self.compute = test_utils.ExceptionHelper(self.compute)
 
         self.assertRaises(exception.ConsoleTypeInvalid,
                           self.compute.get_vnc_console,
@@ -4575,7 +4572,7 @@ class ComputeTestCase(BaseTestCase,
                           self.compute.get_vnc_console,
                           self.context, 'novnc', instance=instance)
 
-        self.compute = utils.ExceptionHelper(self.compute)
+        self.compute = test_utils.ExceptionHelper(self.compute)
 
         self.assertRaises(NotImplementedError,
                           self.compute.get_vnc_console,
@@ -4618,7 +4615,7 @@ class ComputeTestCase(BaseTestCase,
                           self.compute.get_spice_console,
                           self.context, 'invalid', instance=instance)
 
-        self.compute = utils.ExceptionHelper(self.compute)
+        self.compute = test_utils.ExceptionHelper(self.compute)
 
         self.assertRaises(exception.ConsoleTypeInvalid,
                           self.compute.get_spice_console,
@@ -4640,7 +4637,7 @@ class ComputeTestCase(BaseTestCase,
                           self.compute.get_spice_console,
                           self.context, 'spice-html5', instance=instance)
 
-        self.compute = utils.ExceptionHelper(self.compute)
+        self.compute = test_utils.ExceptionHelper(self.compute)
 
         self.assertRaises(NotImplementedError,
                           self.compute.get_spice_console,
@@ -4660,7 +4657,7 @@ class ComputeTestCase(BaseTestCase,
                           self.compute.get_spice_console,
                           self.context, None, instance=instance)
 
-        self.compute = utils.ExceptionHelper(self.compute)
+        self.compute = test_utils.ExceptionHelper(self.compute)
 
         self.assertRaises(exception.ConsoleTypeInvalid,
                           self.compute.get_spice_console,
@@ -4680,7 +4677,7 @@ class ComputeTestCase(BaseTestCase,
         self.stub_out("nova.virt.fake.FakeDriver.get_vnc_console",
                        fake_driver_get_console)
 
-        self.compute = utils.ExceptionHelper(self.compute)
+        self.compute = test_utils.ExceptionHelper(self.compute)
 
         self.assertRaises(exception.InstanceNotReady,
                 self.compute.get_vnc_console, self.context, 'novnc',
@@ -4698,7 +4695,7 @@ class ComputeTestCase(BaseTestCase,
         self.stub_out("nova.virt.fake.FakeDriver.get_spice_console",
                        fake_driver_get_console)
 
-        self.compute = utils.ExceptionHelper(self.compute)
+        self.compute = test_utils.ExceptionHelper(self.compute)
 
         self.assertRaises(exception.InstanceNotReady,
                 self.compute.get_spice_console, self.context, 'spice-html5',
@@ -4709,7 +4706,7 @@ class ComputeTestCase(BaseTestCase,
         instance = self._create_fake_instance_obj(
                 params={'vm_state': vm_states.BUILDING})
 
-        self.compute = utils.ExceptionHelper(self.compute)
+        self.compute = test_utils.ExceptionHelper(self.compute)
 
         self.assertRaises(exception.ConsoleTypeUnavailable,
                 self.compute.get_vnc_console, self.context, 'novnc',
@@ -4720,7 +4717,7 @@ class ComputeTestCase(BaseTestCase,
         instance = self._create_fake_instance_obj(
                 params={'vm_state': vm_states.BUILDING})
 
-        self.compute = utils.ExceptionHelper(self.compute)
+        self.compute = test_utils.ExceptionHelper(self.compute)
 
         self.assertRaises(exception.ConsoleTypeUnavailable,
                 self.compute.get_spice_console, self.context, 'spice-html5',
@@ -6826,9 +6823,6 @@ class ComputeTestCase(BaseTestCase,
             final_bdm.save.assert_called()
 
         mock_get_bdms.assert_called_with(c, instance.uuid)
-        mock_remove.assert_has_calls([
-            mock.call(c, instance, uuids.volume_id_1, dest_host),
-            mock.call(c, instance, uuids.volume_id_2, dest_host)])
         mock_rollback.assert_called_once_with(c, instance, dest_host,
             destroy_disks=True,
             migrate_data=test.MatchType(
@@ -8573,6 +8567,8 @@ class ComputeTestCase(BaseTestCase,
             exception.InstanceNotFound(instance_id=uuids.instance)
 
         self.compute._sync_power_states(ctxt)
+        # wait for sync to finish
+        self.compute._sync_power_executor.shutdown(wait=True)
 
         mock_get.assert_has_calls([mock.call(mock.ANY), mock.call(mock.ANY),
                                    mock.call(mock.ANY)])
@@ -14509,10 +14505,12 @@ class ComputeInjectedFilesTestCase(BaseTestCase):
         ]
 
         self.assertRaises(exception.Base64Exception,
-                self.compute.build_and_run_instance,
-                self.context, self.instance, {}, {}, {}, [],
-                          block_device_mapping=[],
-                          injected_files=injected_files)
+            self.compute._do_build_and_run_instance,
+            self.context, self.instance, {}, {}, {},
+            block_device_mapping=[], injected_files=injected_files,
+            admin_password=None, requested_networks=None,
+            security_groups=None, node=None, limits=None, host_list=None,
+            accel_uuids=[])
 
 
 class CheckConfigDriveTestCase(test.NoDBTestCase):

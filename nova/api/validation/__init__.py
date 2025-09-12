@@ -24,7 +24,7 @@ from oslo_log import log as logging
 from oslo_serialization import jsonutils
 import webob
 
-from nova.api.openstack import api_version_request as api_version
+from nova.api.openstack import api_version_request
 from nova.api.openstack import wsgi
 from nova.api.validation import validators
 import nova.conf
@@ -35,8 +35,84 @@ CONF = nova.conf.CONF
 LOG = logging.getLogger(__name__)
 
 
-def _schema_validation_helper(schema, target, min_version, max_version,
-                              args, kwargs, is_body=True):
+def validated(cls):
+    cls._validated = True
+    return cls
+
+
+class Schemas:
+    """A microversion-aware schema container.
+
+    Allow definition and retrieval of schemas on a microversion-aware basis.
+    """
+
+    def __init__(self) -> None:
+        self._schemas: list[
+            tuple[
+                dict[str, object],
+                api_version_request.APIVersionRequest,
+                api_version_request.APIVersionRequest,
+            ]
+        ] = []
+
+    def add_schema(
+        self,
+        schema: tuple[dict[str, object]],
+        min_version: ty.Optional[str],
+        max_version: ty.Optional[str],
+    ) -> None:
+        # we'd like to use bisect.insort but that doesn't accept a 'key' arg
+        # until Python 3.10, so we need to sort after insertion instead :(
+        self._schemas.append(
+            (
+                schema,
+                api_version_request.APIVersionRequest(min_version),
+                api_version_request.APIVersionRequest(max_version),
+            )
+        )
+        self._schemas.sort(key=lambda x: (x[1], x[2]))
+
+        self.validate_schemas()
+
+    def validate_schemas(self) -> None:
+        """Ensure there are no overlapping schemas."""
+        prev_max_version: ty.Optional[
+            api_version_request.APIVersionRequest
+        ] = None
+
+        for schema, min_version, max_version in self._schemas:
+            if prev_max_version:
+                # it doesn't make sense to have multiple schemas if one of them
+                # is unversioned (i.e. applies to everything)
+                assert not prev_max_version.is_null()
+                assert not min_version.is_null()
+                # there should not be any gaps in schema coverage
+                assert prev_max_version.ver_minor + 1 == min_version.ver_minor
+
+            prev_max_version = max_version
+
+    def __call__(self, req: wsgi.Request) -> ty.Optional[dict[str, object]]:
+        ver = req.api_version_request
+
+        for schema, min_version, max_version in self._schemas:
+            if ver.matches(min_version, max_version):
+                return schema
+
+        # TODO(stephenfin): This should be an error in a future release
+        return None
+
+
+def _schema_validation_helper(
+    schema,
+    target,
+    min_version,
+    max_version,
+    args,
+    kwargs,
+    *,
+    relax_additional_properties=False,
+    is_body=True,
+):
     """A helper method to execute JSON-Schema Validation.
 
     This method checks the request version whether matches the specified max
@@ -48,21 +124,24 @@ def _schema_validation_helper(schema, target, min_version, max_version,
     :param schema: A dict, the JSON-Schema is used to validate the target.
     :param target: A dict, the target is validated by the JSON-Schema.
     :param min_version: A string of two numerals. X.Y indicating the minimum
-                        version of the JSON-Schema to validate against.
+        version of the JSON-Schema to validate against.
     :param max_version: A string of two numerals. X.Y indicating the maximum
-                        version of the JSON-Schema to validate against.
+        version of the JSON-Schema to validate against.
     :param args: Positional arguments which passed into original method.
     :param kwargs: Keyword arguments which passed into original method.
+    :param relax_additional_properties: Whether to enable soft
+        additionalProperties validation. This is only enabled for request
+        validation.
     :param is_body: A boolean. Indicating whether the target is HTTP request
-                    body or not.
+        body or not.
     :returns: A boolean. `True` if and only if the version range matches the
-              request AND the schema is successfully validated. `False` if the
-              version range does not match the request and no validation is
-              performed.
+        request AND the schema is successfully validated. `False` if the
+        version range does not match the request and no validation is
+        performed.
     :raises: ValidationError, when the validation fails.
     """
-    min_ver = api_version.APIVersionRequest(min_version)
-    max_ver = api_version.APIVersionRequest(max_version)
+    min_ver = api_version_request.APIVersionRequest(min_version)
+    max_ver = api_version_request.APIVersionRequest(max_version)
 
     # The request object is always the second argument.
     # However numerous unittests pass in the request object
@@ -77,6 +156,8 @@ def _schema_validation_helper(schema, target, min_version, max_version,
         legacy_v2 = args[1].is_legacy_v2()
 
     if legacy_v2:
+        relax_additional_properties = relax_additional_properties and legacy_v2
+
         # NOTE: For v2.0 compatible API, here should work like
         #    client  | schema min_version | schema
         # -----------+--------------------+--------
@@ -85,7 +166,8 @@ def _schema_validation_helper(schema, target, min_version, max_version,
         #  legacy_v2 | 2.1+               | don't
         if min_version is None or min_version == '2.0':
             schema_validator = validators._SchemaValidator(
-                schema, legacy_v2, is_body)
+                schema, relax_additional_properties, is_body
+            )
             schema_validator.validate(target)
             return True
     elif ver.matches(min_ver, max_ver):
@@ -93,8 +175,7 @@ def _schema_validation_helper(schema, target, min_version, max_version,
         # the version range specified. Note that if both min
         # and max are not specified the validator will always
         # be run.
-        schema_validator = validators._SchemaValidator(
-            schema, legacy_v2, is_body)
+        schema_validator = validators._SchemaValidator(schema, False, is_body)
         schema_validator.validate(target)
         return True
 
@@ -109,7 +190,7 @@ def schema(
     request_body_schema: ty.Dict[str, ty.Any],
     min_version: ty.Optional[str] = None,
     max_version: ty.Optional[str] = None,
-) -> ty.Dict[str, ty.Any]:
+):
     """Register a schema to validate request body.
 
     Registered schema will be used for validating request body just before
@@ -130,11 +211,17 @@ def schema(
                 min_version,
                 max_version,
                 args,
-                kwargs
+                kwargs,
+                relax_additional_properties=True,
             )
             return func(*args, **kwargs)
 
-        wrapper._request_schema = request_body_schema
+        if not hasattr(wrapper, 'request_body_schemas'):
+            wrapper.request_body_schemas = Schemas()
+
+        wrapper.request_body_schemas.add_schema(
+            request_body_schema, min_version, max_version
+        )
 
         return wrapper
 
@@ -200,7 +287,12 @@ def response_body_schema(
                     raise
             return response
 
-        wrapper._response_schema = response_body_schema
+        if not hasattr(wrapper, 'response_body_schemas'):
+            wrapper.response_body_schemas = Schemas()
+
+        wrapper.response_body_schemas.add_schema(
+            response_body_schema, min_version, max_version
+        )
 
         return wrapper
 
@@ -235,14 +327,14 @@ def _strip_additional_query_parameters(schema, req):
                     del req.GET[param]
 
 
-def query_schema(query_params_schema, min_version=None,
+def query_schema(request_query_schema, min_version=None,
                  max_version=None):
     """Register a schema to validate request query parameters.
 
     Registered schema will be used for validating request query params just
     before API method executing.
 
-    :param query_params_schema: A dict, the JSON-Schema for validating the
+    :param request_query_schema: A dict, the JSON-Schema for validating the
                                 query parameters.
     :param min_version: A string of two numerals. X.Y indicating the minimum
                         version of the JSON-Schema to validate against.
@@ -272,20 +364,31 @@ def query_schema(query_params_schema, min_version=None,
                 msg = _('Query string is not UTF-8 encoded')
                 raise exception.ValidationError(msg)
 
-            if _schema_validation_helper(query_params_schema,
-                                         query_dict,
-                                         min_version, max_version,
-                                         args, kwargs, is_body=False):
+            if _schema_validation_helper(
+                request_query_schema,
+                query_dict,
+                min_version,
+                max_version,
+                args,
+                kwargs,
+                relax_additional_properties=True,
+                is_body=False,
+            ):
                 # NOTE(alex_xu): The additional query parameters were stripped
                 # out when `additionalProperties=True`. This is for backward
                 # compatible with v2.1 API and legacy v2 API. But it makes the
                 # system more safe for no more unexpected parameters pass down
                 # to the system. In microversion 2.75, we have blocked all of
                 # those additional parameters.
-                _strip_additional_query_parameters(query_params_schema, req)
+                _strip_additional_query_parameters(request_query_schema, req)
             return func(*args, **kwargs)
 
-        wrapper._query_schema = query_params_schema
+        if not hasattr(wrapper, 'request_query_schemas'):
+            wrapper.request_query_schemas = Schemas()
+
+        wrapper.request_query_schemas.add_schema(
+            request_query_schema, min_version, max_version
+        )
 
         return wrapper
 

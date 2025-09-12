@@ -31,7 +31,7 @@ LOG = logging.getLogger(__name__)
 
 
 # NOTE(danms): This is the global service version counter
-SERVICE_VERSION = 68
+SERVICE_VERSION = 70
 
 
 # NOTE(danms): This is our SERVICE_VERSION history. The idea is that any
@@ -237,6 +237,12 @@ SERVICE_VERSION_HISTORY = (
     # Version 68: Compute RPC v6.4:
     # Add support for shares
     {'compute_rpc': '6.4'},
+    # Version 69: Compute RPC v6.4:
+    # Compute manager supports sound model traits
+    {'compute_rpc': '6.4'},
+    # Version 70: Compute RPC v6.4:
+    # Compute manager supports USB controller model traits
+    {'compute_rpc': '6.4'},
 )
 
 # This is the version after which we can rely on having a persistent
@@ -259,7 +265,11 @@ NODE_IDENTITY_VERSION = 65
 #    and value be the latest service version that the release supports (for
 #    example, before Bobcat RC1, please add 'Bobcat': XX where X is the latest
 #    servion version that was added)
-OLDEST_SUPPORTED_SERVICE_VERSION = 'Caracal'
+# NOTE(sbauza): The check for the minimum supported compute service version at
+# service startup can be skipped by setting the
+# [workarounds]/[workarounds]/disable_compute_service_check_for_ffu
+# configuration option to True, like grenade-skip-level jobs do.
+OLDEST_SUPPORTED_SERVICE_VERSION = 'Epoxy'
 SERVICE_VERSION_ALIASES = {
     'Victoria': 52,
     'Wallaby': 54,
@@ -271,6 +281,7 @@ SERVICE_VERSION_ALIASES = {
     'Caracal': 66,
     'Dalmatian': 67,
     'Epoxy': 68,
+    'Flamingo': 70,
 }
 
 

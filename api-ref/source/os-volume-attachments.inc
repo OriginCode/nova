@@ -45,12 +45,12 @@ Response
 
 **Example List volume attachments for an instance: JSON response**
 
-.. literalinclude:: ../../doc/api_samples/os-volumes/list-volume-attachments-resp.json
+.. literalinclude:: ../../doc/api_samples/os-volume_attachments/list-volume-attachments-resp.json
    :language: javascript
 
 **Example List tagged volume attachments for an instance (v2.89): JSON response**
 
-.. literalinclude:: ../../doc/api_samples/os-volumes/v2.89/list-volume-attachments-resp.json
+.. literalinclude:: ../../doc/api_samples/os-volume_attachments/v2.89/list-volume-attachments-resp.json
    :language: javascript
 
 Attach a volume to an instance
@@ -90,17 +90,17 @@ Request
 
 **Example Attach a volume to an instance: JSON request**
 
-.. literalinclude:: ../../doc/api_samples/os-volumes/attach-volume-to-server-req.json
+.. literalinclude:: ../../doc/api_samples/os-volume_attachments/attach-volume-to-server-req.json
    :language: javascript
 
 **Example Attach a volume to an instance and tag it (v2.49): JSON request**
 
-.. literalinclude:: ../../doc/api_samples/os-volumes/v2.49/attach-volume-to-server-req.json
+.. literalinclude:: ../../doc/api_samples/os-volume_attachments/v2.49/attach-volume-to-server-req.json
    :language: javascript
 
 **Example Attach a volume to an instance with "delete_on_termination" (v2.79): JSON request**
 
-.. literalinclude:: ../../doc/api_samples/os-volumes/v2.79/attach-volume-to-server-req.json
+.. literalinclude:: ../../doc/api_samples/os-volume_attachments/v2.79/attach-volume-to-server-req.json
    :language: javascript
 
 Response
@@ -118,17 +118,17 @@ Response
 
 **Example Attach a volume to an instance: JSON response**
 
-.. literalinclude:: ../../doc/api_samples/os-volumes/attach-volume-to-server-resp.json
+.. literalinclude:: ../../doc/api_samples/os-volume_attachments/attach-volume-to-server-resp.json
    :language: javascript
 
 **Example Attach a tagged volume to an instance (v2.70): JSON response**
 
-.. literalinclude:: ../../doc/api_samples/os-volumes/v2.70/attach-volume-to-server-resp.json
+.. literalinclude:: ../../doc/api_samples/os-volume_attachments/v2.70/attach-volume-to-server-resp.json
    :language: javascript
 
 **Example Attach a volume with "delete_on_termination" (v2.79): JSON response**
 
-.. literalinclude:: ../../doc/api_samples/os-volumes/v2.79/attach-volume-to-server-resp.json
+.. literalinclude:: ../../doc/api_samples/os-volume_attachments/v2.79/attach-volume-to-server-resp.json
    :language: javascript
 
 Show a detail of a volume attachment
@@ -167,12 +167,12 @@ Response
 
 **Example Show a detail of a volume attachment: JSON response**
 
-.. literalinclude:: ../../doc/api_samples/os-volumes/volume-attachment-detail-resp.json
+.. literalinclude:: ../../doc/api_samples/os-volume_attachments/volume-attachment-detail-resp.json
    :language: javascript
 
 **Example Show a detail of a tagged volume attachment (v2.89): JSON response**
 
-.. literalinclude:: ../../doc/api_samples/os-volumes/v2.89/volume-attachment-detail-resp.json
+.. literalinclude:: ../../doc/api_samples/os-volume_attachments/v2.89/volume-attachment-detail-resp.json
    :language: javascript
 
 Update a volume attachment
@@ -182,31 +182,10 @@ Update a volume attachment
 
 Update a volume attachment.
 
-.. note:: This action only valid when the server is in ACTIVE, PAUSED and RESIZED state,
-          or a conflict(409) error will be returned.
-
-.. warning:: When updating volumeId, this API is typically meant to
-             only be used as part of a larger orchestrated volume
-             migration operation initiated in the block storage
-             service via the ``os-retype`` or ``os-migrate_volume``
-             volume actions. Direct usage of this API to update
-             volumeId is not recommended and may result in needing to
-             hard reboot the server to update details within the guest
-             such as block storage serial IDs. Furthermore, updating
-             volumeId via this API is only implemented by `certain
-             compute drivers`_.
-
-.. _certain compute drivers: https://docs.openstack.org/nova/latest/user/support-matrix.html#operation_swap_volume
-
-Policy default role is 'rule:system_admin_or_owner', its scope is
-[system, project], which allow project members or system admins to
-change the fields of an attached volume of a server. Policy defaults
-enable only users with the administrative role to change ``volumeId``
-via this operation. Cloud providers can change these permissions
-through the ``policy.json`` file.
-
-Updating, or what is commonly referred to as "swapping", volume attachments
-with volumes that have more than one read/write attachment, is not supported.
+Policy default role is 'rule:admin_or_owner', its scope is [project], which
+allow project members or admins to change the fields of an attached volume of
+a server. Cloud providers can change these permissions through the
+``policy.yaml`` file.
 
 Normal response codes: 202
 
@@ -218,9 +197,9 @@ Request
 .. rest_parameters:: parameters.yaml
 
   - server_id: server_id_path
-  - volume_id: volume_id_swap_src
+  - volume_id: volume_id_path
   - volumeAttachment: volumeAttachment_put
-  - volumeId: volumeId_swap
+  - volumeId: volumeId_update
   - delete_on_termination: delete_on_termination_put_req
   - device: attachment_device_put_req
   - serverId: attachment_server_id_put_req
@@ -233,7 +212,7 @@ Request
 
 **Example Update a volume attachment (v2.85): JSON request**
 
-.. literalinclude:: ../../doc/api_samples/os-volumes/v2.85/update-volume-attachment-delete-flag-req.json
+.. literalinclude:: ../../doc/api_samples/os-volume_attachments/v2.85/update-volume-attachment-delete-flag-req.json
    :language: javascript
 
 Response

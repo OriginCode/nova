@@ -17,7 +17,6 @@ Internal implementation of request Body validating middleware.
 """
 
 import re
-import string
 
 import jsonschema
 from jsonschema import exceptions as jsonschema_exc
@@ -37,8 +36,16 @@ _FORMAT_CHECKER = jsonschema.FormatChecker()
 
 @_FORMAT_CHECKER.checks('regex')
 def _validate_regex_format(instance):
-    if not instance or not isinstance(instance, str):
+    # format checks constrain to the relevant primitive type
+    # https://github.com/OAI/OpenAPI-Specification/issues/3148
+    if not isinstance(instance, str):
+        return True
+
+    # the empty string is a valid regex but doesn't give us anything to match
+    # on
+    if not instance:
         return False
+
     try:
         re.compile(instance)
     except re.error:
@@ -48,6 +55,11 @@ def _validate_regex_format(instance):
 
 @_FORMAT_CHECKER.checks('date-time')
 def _validate_datetime_format(instance):
+    # format checks constrain to the relevant primitive type
+    # https://github.com/OAI/OpenAPI-Specification/issues/3148
+    if not isinstance(instance, str):
+        return True
+
     try:
         timeutils.parse_isotime(instance)
     except ValueError:
@@ -58,6 +70,11 @@ def _validate_datetime_format(instance):
 
 @_FORMAT_CHECKER.checks('base64')
 def _validate_base64_format(instance):
+    # format checks constrain to the relevant primitive type
+    # https://github.com/OAI/OpenAPI-Specification/issues/3148
+    if not isinstance(instance, str):
+        return True
+
     try:
         if isinstance(instance, str):
             instance = instance.encode('utf-8')
@@ -71,25 +88,43 @@ def _validate_base64_format(instance):
 
 
 @_FORMAT_CHECKER.checks('cidr')
-def _validate_cidr_format(cidr):
+def _validate_cidr_format(instance):
+    # format checks constrain to the relevant primitive type
+    # https://github.com/OAI/OpenAPI-Specification/issues/3148
+    if not isinstance(instance, str):
+        return True
+
     try:
-        netaddr.IPNetwork(cidr)
+        netaddr.IPNetwork(instance)
     except netaddr.AddrFormatError:
         return False
-    if '/' not in cidr:
+
+    if '/' not in instance:
         return False
-    if re.search(r'\s', cidr):
+
+    if re.search(r'\s', instance):
         return False
+
     return True
 
 
 @_FORMAT_CHECKER.checks('uuid')
 def _validate_uuid_format(instance):
+    # format checks constrain to the relevant primitive type
+    # https://github.com/OAI/OpenAPI-Specification/issues/3148
+    if not isinstance(instance, str):
+        return True
+
     return uuidutils.is_uuid_like(instance)
 
 
 @_FORMAT_CHECKER.checks('uri')
 def _validate_uri(instance):
+    # format checks constrain to the relevant primitive type
+    # https://github.com/OAI/OpenAPI-Specification/issues/3148
+    if not isinstance(instance, str):
+        return True
+
     uri = rfc3986.uri_reference(instance)
     validator = rfc3986.validators.Validator().require_presence_of(
         'scheme', 'host',
@@ -100,6 +135,7 @@ def _validate_uri(instance):
         validator.validate(uri)
     except rfc3986.exceptions.RFC3986Exception:
         return False
+
     return True
 
 
@@ -157,28 +193,10 @@ def _validate_az_name(instance):
     raise exception.InvalidName(reason=regex.reason)
 
 
-@_FORMAT_CHECKER.checks('keypair_name_20',
-                        exception.InvalidName)
-def _validate_keypair_name_20(keypair_name):
-    safe_chars = "_- " + string.digits + string.ascii_letters
-    return _validate_keypair_name(keypair_name, safe_chars)
-
-
-@_FORMAT_CHECKER.checks('keypair_name_292',
-                        exception.InvalidName)
-def _validate_keypair_name_292(keypair_name):
-    safe_chars = "@._- " + string.digits + string.ascii_letters
-    return _validate_keypair_name(keypair_name, safe_chars)
-
-
-def _validate_keypair_name(keypair_name, safe_chars):
-    clean_value = "".join(x for x in keypair_name if x in safe_chars)
-    if clean_value != keypair_name:
-        reason = _("Only expected characters: [%s]") % safe_chars
-        raise exception.InvalidName(reason=reason)
-    return True
-
-
+# NOTE(stephenfin): Be careful with this method: it doesn't work with oneOf. If
+# you have multiple schemas, this method will delete properties that are not
+# allowed against earlier subschemas even if they're allowed (or even required)
+# by later subschemas.
 def _soft_validate_additional_properties(validator,
                                          additional_properties_value,
                                          instance,

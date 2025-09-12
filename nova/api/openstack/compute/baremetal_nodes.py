@@ -40,6 +40,7 @@ def _no_ironic_proxy(cmd):
     raise webob.exc.HTTPBadRequest(explanation=msg % {'cmd': cmd})
 
 
+@validation.validated
 class BareMetalNodeController(wsgi.Controller):
     """The Bare-Metal Node API controller for the OpenStack API."""
 
@@ -61,7 +62,7 @@ class BareMetalNodeController(wsgi.Controller):
             )
         return self._ironic_connection
 
-    @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
+    @wsgi.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
     @wsgi.expected_errors((404, 501))
     @validation.query_schema(schema.index_query)
     @validation.response_body_schema(schema.index_response)
@@ -86,7 +87,7 @@ class BareMetalNodeController(wsgi.Controller):
 
         return {'nodes': nodes}
 
-    @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
+    @wsgi.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
     @wsgi.expected_errors((404, 501))
     @validation.query_schema(schema.show_query)
     @validation.response_body_schema(schema.show_response)
@@ -117,20 +118,20 @@ class BareMetalNodeController(wsgi.Controller):
 
         return {'node': node}
 
-    @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
+    @wsgi.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
     @wsgi.expected_errors(400)
     @validation.schema(schema.create)
     @validation.response_body_schema(schema.create_response)
     def create(self, req, body):
         _no_ironic_proxy("node-create")
 
-    @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
+    @wsgi.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
     @wsgi.expected_errors(400)
     @validation.response_body_schema(schema.delete_response)
     def delete(self, req, id):
         _no_ironic_proxy("node-delete")
 
-    @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
+    @wsgi.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
     @wsgi.action('add_interface')
     @wsgi.expected_errors(400)
     @validation.schema(schema.add_interface)
@@ -138,7 +139,7 @@ class BareMetalNodeController(wsgi.Controller):
     def _add_interface(self, req, id, body):
         _no_ironic_proxy("port-create")
 
-    @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
+    @wsgi.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
     @wsgi.action('remove_interface')
     @wsgi.expected_errors(400)
     @validation.schema(schema.remove_interface)

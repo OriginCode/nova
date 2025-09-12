@@ -47,7 +47,7 @@ TEST_HYPERS = [
          vcpus_used=2,
          memory_mb_used=5 * 1024,
          local_gb_used=125,
-         hypervisor_type="xen",
+         hypervisor_type="qemu",
          hypervisor_version=3,
          hypervisor_hostname="hyper1",
          free_ram_mb=5 * 1024,
@@ -67,7 +67,7 @@ TEST_HYPERS = [
          vcpus_used=2,
          memory_mb_used=5 * 1024,
          local_gb_used=125,
-         hypervisor_type="xen",
+         hypervisor_type="qemu",
          hypervisor_version=3,
          hypervisor_hostname="hyper2",
          free_ram_mb=5 * 1024,
@@ -76,7 +76,8 @@ TEST_HYPERS = [
          running_vms=2,
          cpu_info=CPU_INFO,
          disk_available_least=100,
-         host_ip=netaddr.IPAddress('2.2.2.2'))]
+         host_ip=netaddr.IPAddress('2.2.2.2'),
+         stats={'uptime': 'fake uptime'})]
 
 
 TEST_SERVICES = [
@@ -203,6 +204,11 @@ class HypervisorsTestV21(test.NoDBTestCase):
     del DETAIL_HYPERS_DICTS[1]['host']
     del DETAIL_HYPERS_DICTS[0]['uuid']
     del DETAIL_HYPERS_DICTS[1]['uuid']
+    # Remove stats since it's not exposed in the API response, but preserve
+    # uptime for v2.88+ tests which expect it
+    for hyper_dict in DETAIL_HYPERS_DICTS:
+        if 'stats' in hyper_dict:
+            del hyper_dict['stats']
     DETAIL_HYPERS_DICTS[0].update({'state': 'up',
                            'status': 'enabled',
                            'service': dict(id=1, host='compute1',
@@ -751,8 +757,8 @@ class HypervisorsTestV233(HypervisorsTestV228):
     api_version = '2.33'
 
     def test_index_pagination(self):
-        req = self._get_request(True,
-                                '/v2/1234/os-hypervisors?limit=1&marker=1')
+        req = self._get_request(
+            True, '/v2.1/os-hypervisors?limit=1&marker=1')
         result = self.controller.index(req)
         expected = {
             'hypervisors': [
@@ -762,7 +768,8 @@ class HypervisorsTestV233(HypervisorsTestV228):
                  'status': 'enabled'}
             ],
             'hypervisors_links': [
-                {'href': 'http://localhost/v2/os-hypervisors?limit=1&marker=2',
+                {'href': 'http://localhost/v2.1/os-hypervisors'
+                         '?limit=1&marker=2',
                  'rel': 'next'}
             ]
         }
@@ -770,27 +777,23 @@ class HypervisorsTestV233(HypervisorsTestV228):
         self.assertEqual(expected, result)
 
     def test_index_pagination_with_invalid_marker(self):
-        req = self._get_request(True,
-                                '/v2/1234/os-hypervisors?marker=99999')
+        req = self._get_request(True, '/v2.1/os-hypervisors?marker=99999')
         self.assertRaises(exc.HTTPBadRequest,
                           self.controller.index, req)
 
     def test_index_pagination_with_invalid_non_int_limit(self):
-        req = self._get_request(True,
-                                '/v2/1234/os-hypervisors?limit=-9')
+        req = self._get_request(True, '/v2.1/os-hypervisors?limit=-9')
         self.assertRaises(exception.ValidationError,
                           self.controller.index, req)
 
     def test_index_pagination_with_invalid_string_limit(self):
-        req = self._get_request(True,
-                                '/v2/1234/os-hypervisors?limit=abc')
+        req = self._get_request(True, '/v2.1/os-hypervisors?limit=abc')
         self.assertRaises(exception.ValidationError,
                           self.controller.index, req)
 
     def test_index_duplicate_query_parameters_with_invalid_string_limit(self):
         req = self._get_request(
-            True,
-            '/v2/1234/os-hypervisors/?limit=1&limit=abc')
+            True, '/v2.1/os-hypervisors/?limit=1&limit=abc')
         self.assertRaises(exception.ValidationError,
                           self.controller.index, req)
 
@@ -823,20 +826,21 @@ class HypervisorsTestV233(HypervisorsTestV228):
                  'status': 'enabled'}
             ],
             'hypervisors_links': [
-                {'href': 'http://localhost/v2/os-hypervisors?limit=1&marker=2',
+                {'href': 'http://localhost/v2.1/os-hypervisors'
+                         '?limit=1&marker=2',
                  'rel': 'next'}
             ]
         }
         req = self._get_request(
-            True, '/v2/1234/os-hypervisors?limit=1&marker=1&additional=3')
+            True, '/v2.1/os-hypervisors?limit=1&marker=1&additional=3')
         result = self.controller.index(req)
         self.assertEqual(expected, result)
 
     def test_detail_pagination(self):
         req = self._get_request(
-            True, '/v2/1234/os-hypervisors/detail?limit=1&marker=1')
+            True, '/v2.1/os-hypervisors/detail?limit=1&marker=1')
         result = self.controller.detail(req)
-        link = 'http://localhost/v2/os-hypervisors/detail?limit=1&marker=2'
+        link = 'http://localhost/v2.1/os-hypervisors/detail?limit=1&marker=2'
         expected = {
             'hypervisors': [
                 {'cpu_info': {'arch': 'x86_64',
@@ -852,7 +856,7 @@ class HypervisorsTestV233(HypervisorsTestV228):
                 'free_ram_mb': 5120,
                 'host_ip': netaddr.IPAddress('2.2.2.2'),
                 'hypervisor_hostname': 'hyper2',
-                'hypervisor_type': 'xen',
+                'hypervisor_type': 'qemu',
                 'hypervisor_version': 3,
                 'id': 2,
                 'local_gb': 250,
@@ -874,21 +878,20 @@ class HypervisorsTestV233(HypervisorsTestV228):
         self.assertEqual(expected, result)
 
     def test_detail_pagination_with_invalid_marker(self):
-        req = self._get_request(True,
-                                '/v2/1234/os-hypervisors/detail?marker=99999')
+        req = self._get_request(
+            True, '/v2.1/os-hypervisors/detail?marker=99999')
         self.assertRaises(exc.HTTPBadRequest,
                           self.controller.detail, req)
 
     def test_detail_pagination_with_invalid_string_limit(self):
-        req = self._get_request(True,
-                                '/v2/1234/os-hypervisors/detail?limit=abc')
+        req = self._get_request(
+            True, '/v2.1/os-hypervisors/detail?limit=abc')
         self.assertRaises(exception.ValidationError,
                           self.controller.detail, req)
 
     def test_detail_duplicate_query_parameters_with_invalid_string_limit(self):
         req = self._get_request(
-            True,
-            '/v2/1234/os-hypervisors/detail?limit=1&limit=abc')
+            True, '/v2.1/os-hypervisors/detail?limit=1&limit=abc')
         self.assertRaises(exception.ValidationError,
                           self.controller.detail, req)
 
@@ -907,7 +910,7 @@ class HypervisorsTestV233(HypervisorsTestV228):
                 'free_ram_mb': 5120,
                 'host_ip': netaddr.IPAddress('2.2.2.2'),
                 'hypervisor_hostname': 'hyper2',
-                'hypervisor_type': 'xen',
+                'hypervisor_type': 'qemu',
                 'hypervisor_version': 3,
                 'id': 2,
                 'local_gb': 250,
@@ -938,7 +941,7 @@ class HypervisorsTestV233(HypervisorsTestV228):
             self.assertEqual(expected, result['hypervisors'])
 
     def test_detail_pagination_with_additional_filter(self):
-        link = 'http://localhost/v2/os-hypervisors/detail?limit=1&marker=2'
+        link = 'http://localhost/v2.1/os-hypervisors/detail?limit=1&marker=2'
         expected = {
             'hypervisors': [
                 {'cpu_info': {'arch': 'x86_64',
@@ -954,7 +957,7 @@ class HypervisorsTestV233(HypervisorsTestV228):
                 'free_ram_mb': 5120,
                 'host_ip': netaddr.IPAddress('2.2.2.2'),
                 'hypervisor_hostname': 'hyper2',
-                'hypervisor_type': 'xen',
+                'hypervisor_type': 'qemu',
                 'hypervisor_version': 3,
                 'id': 2,
                 'local_gb': 250,
@@ -975,7 +978,7 @@ class HypervisorsTestV233(HypervisorsTestV228):
                 'rel': 'next'}]
         }
         req = self._get_request(
-            True, '/v2/1234/os-hypervisors/detail?limit=1&marker=1&unknown=2')
+            True, '/v2.1/os-hypervisors/detail?limit=1&marker=1&unknown=2')
         result = self.controller.detail(req)
         self.assertEqual(expected, result)
 
@@ -1277,7 +1280,8 @@ class HypervisorsTestV253(HypervisorsTestV252):
             url='/os-hypervisors/detail?limit=1&marker=%s' %
                 TEST_HYPERS_OBJ[0].uuid)
         result = self.controller.detail(req)
-        link = ('http://localhost/v2/os-hypervisors/detail?limit=1&marker=%s' %
+        link = ('http://localhost/v2.1/os-hypervisors/detail'
+                '?limit=1&marker=%s' %
                 TEST_HYPERS_OBJ[1].uuid)
         expected = {
             'hypervisors': [self.DETAIL_HYPERS_DICTS[1]],
@@ -1295,7 +1299,7 @@ class HypervisorsTestV253(HypervisorsTestV252):
 
     def test_detail_pagination_with_additional_filter(self):
         req = self._get_request(
-            True, '/v2/1234/os-hypervisors/detail?limit=1&marker=9&unknown=2')
+            True, '/v2.1/os-hypervisors/detail?limit=1&marker=9&unknown=2')
         self.assertRaises(exception.ValidationError,
                           self.controller.detail, req)
 
@@ -1324,7 +1328,7 @@ class HypervisorsTestV253(HypervisorsTestV252):
             url='/os-hypervisors?limit=1&marker=%s' %
                 TEST_HYPERS_OBJ[0].uuid)
         result = self.controller.index(req)
-        link = ('http://localhost/v2/os-hypervisors?limit=1&marker=%s' %
+        link = ('http://localhost/v2.1/os-hypervisors?limit=1&marker=%s' %
                 TEST_HYPERS_OBJ[1].uuid)
         expected = {
             'hypervisors': [{
@@ -1347,7 +1351,7 @@ class HypervisorsTestV253(HypervisorsTestV252):
 
     def test_index_pagination_with_additional_filter(self):
         req = self._get_request(
-            True, '/v2/1234/os-hypervisors/?limit=1&marker=9&unknown=2')
+            True, '/v2.1/os-hypervisors/?limit=1&marker=9&unknown=2')
         self.assertRaises(exception.ValidationError,
                           self.controller.index, req)
 
@@ -1449,6 +1453,21 @@ class HypervisorsTestV288(HypervisorsTestV275):
     def test_view_hypervisor_detail_cpuinfo_none(self):
         # cpu_info is no longer included in the response, so skip this test
         pass
+
+    def test_show_with_uptime_provided_by_compute_node(self):
+        req = self._get_request(use_admin_context=True)
+        result = self.controller.show(req, self.TEST_HYPERS_OBJ[1].uuid)
+        expected_dict = copy.deepcopy(self.DETAIL_HYPERS_DICTS[1])
+        self.assertEqual({'hypervisor': expected_dict}, result)
+        self.controller.host_api.get_host_uptime.assert_not_called()
+
+    def test_detail_list_uptime(self):
+        _ = self._test_servers_with_no_servers(self.controller.detail)
+        # we have simulated that compute 2 is upgraded to store the uptime
+        # in the stats  so we expect 1 call to get the result via RPC
+        # for compute1
+        self.controller.host_api.get_host_uptime.assert_called_with(
+            mock.ANY, "compute1")
 
     def test_uptime(self):
         req = self._get_request(True)

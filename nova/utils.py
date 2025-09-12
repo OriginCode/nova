@@ -16,20 +16,21 @@
 #    under the License.
 
 """Utilities and helper functions."""
-
 import contextlib
 import datetime
 import functools
 import hashlib
 import inspect
+import multiprocessing
 import os
 import random
 import re
 import shutil
 import tempfile
+import time
 
-import eventlet
 from eventlet import tpool
+import futurist
 from keystoneauth1 import loading as ks_loading
 import netaddr
 from openstack import connection
@@ -40,9 +41,7 @@ from oslo_concurrency import lockutils
 from oslo_concurrency import processutils
 from oslo_context import context as common_context
 from oslo_log import log as logging
-import oslo_messaging as messaging
 from oslo_utils import encodeutils
-from oslo_utils import excutils
 from oslo_utils import importutils
 from oslo_utils import strutils
 from oslo_utils import timeutils
@@ -79,16 +78,52 @@ _FILE_CACHE = {}
 
 _SERVICE_TYPES = service_types.ServiceTypes()
 
-DEFAULT_GREEN_POOL = None
+DEFAULT_EXECUTOR = None
 
 
-def _get_default_green_pool():
-    global DEFAULT_GREEN_POOL
-    if DEFAULT_GREEN_POOL is None:
-        DEFAULT_GREEN_POOL = eventlet.greenpool.GreenPool(
-            CONF.default_green_pool_size
-        )
-    return DEFAULT_GREEN_POOL
+def cooperative_yield():
+    # TODO(ksambor) Remove all cooperative_yield calls after dropping Eventlet
+    #  support.
+    if not concurrency_mode_threading():
+        time.sleep(0)
+
+
+def destroy_default_executor():
+    """Closes the executor and resets the global to None to allow forked worker
+    processes to properly init it.
+    """
+    global DEFAULT_EXECUTOR
+    if DEFAULT_EXECUTOR:
+        LOG.info(
+            "The default thread pool %s is shutting down",
+            DEFAULT_EXECUTOR.name)
+        DEFAULT_EXECUTOR.shutdown()
+        LOG.info(
+            "The default thread pool %s is closed", DEFAULT_EXECUTOR.name)
+
+    DEFAULT_EXECUTOR = None
+
+
+def _get_default_executor():
+    global DEFAULT_EXECUTOR
+
+    if not DEFAULT_EXECUTOR:
+        if concurrency_mode_threading():
+            DEFAULT_EXECUTOR = futurist.ThreadPoolExecutor(
+                CONF.default_thread_pool_size
+            )
+        else:
+            DEFAULT_EXECUTOR = futurist.GreenThreadPoolExecutor(
+                CONF.default_green_pool_size
+            )
+
+        pname = multiprocessing.current_process().name
+        executor_name = f"{pname}.default"
+        DEFAULT_EXECUTOR.name = executor_name
+
+        LOG.info("The default thread pool %s is initialized", executor_name)
+
+    return DEFAULT_EXECUTOR
 
 
 # NOTE(mikal): this seems to have to stay for now to handle os-brick
@@ -252,23 +287,6 @@ def generate_password(length=None, symbolgroups=DEFAULT_PASSWORD_SYMBOLS):
     return ''.join(password)
 
 
-# TODO(sfinucan): Replace this with the equivalent from oslo.utils
-def utf8(value):
-    """Try to turn a string into utf-8 if possible.
-
-    The original code was copied from the utf8 function in
-    http://github.com/facebook/tornado/blob/master/tornado/escape.py
-
-    """
-    if value is None or isinstance(value, bytes):
-        return value
-
-    if not isinstance(value, str):
-        value = str(value)
-
-    return value.encode('utf-8')
-
-
 def parse_server_string(server_str):
     """Parses the given server_string and returns a tuple of host and port.
     If it's not a combination of host part and port, the port element
@@ -335,21 +353,6 @@ def format_remote_path(host, path):
         return path
 
     return "%s:%s" % (safe_ip_format(host), path)
-
-
-def make_dev_path(dev, partition=None, base='/dev'):
-    """Return a path to a particular device.
-
-    >>> make_dev_path('xvdc')
-    /dev/xvdc
-
-    >>> make_dev_path('xvdc', 1)
-    /dev/xvdc1
-    """
-    path = os.path.join(base, dev)
-    if partition:
-        path += str(partition)
-    return path
 
 
 def sanitize_hostname(hostname, default_name=None):
@@ -437,45 +440,6 @@ def temporary_mutation(obj, **kwargs):
                 set_value(obj, attr, old_value)
 
 
-def generate_mac_address():
-    """Generate an Ethernet MAC address."""
-    # NOTE(vish): We would prefer to use 0xfe here to ensure that linux
-    #             bridge mac addresses don't change, but it appears to
-    #             conflict with libvirt, so we use the next highest octet
-    #             that has the unicast and locally administered bits set
-    #             properly: 0xfa.
-    #             Discussion: https://bugs.launchpad.net/nova/+bug/921838
-    mac = [0xfa, 0x16, 0x3e,
-           random.randint(0x00, 0xff),
-           random.randint(0x00, 0xff),
-           random.randint(0x00, 0xff)]
-    return ':'.join(map(lambda x: "%02x" % x, mac))
-
-
-# NOTE(mikal): I really wanted this code to go away, but I can't find a way
-# to implement what the callers of this method want with privsep. Basically,
-# if we could hand off either a file descriptor or a file like object then
-# we could make this go away.
-@contextlib.contextmanager
-def temporary_chown(path, owner_uid=None):
-    """Temporarily chown a path.
-
-    :param owner_uid: UID of temporary owner (defaults to current user)
-    """
-    if owner_uid is None:
-        owner_uid = os.getuid()
-
-    orig_uid = os.stat(path).st_uid
-
-    if orig_uid != owner_uid:
-        nova.privsep.path.chown(path, uid=owner_uid)
-    try:
-        yield
-    finally:
-        if orig_uid != owner_uid:
-            nova.privsep.path.chown(path, uid=orig_uid)
-
-
 @contextlib.contextmanager
 def tempdir(**kwargs):
     argdict = kwargs.copy()
@@ -489,34 +453,6 @@ def tempdir(**kwargs):
             shutil.rmtree(tmpdir)
         except OSError as e:
             LOG.error('Could not remove tmpdir: %s', e)
-
-
-class UndoManager(object):
-    """Provides a mechanism to facilitate rolling back a series of actions
-    when an exception is raised.
-    """
-
-    def __init__(self):
-        self.undo_stack = []
-
-    def undo_with(self, undo_func):
-        self.undo_stack.append(undo_func)
-
-    def _rollback(self):
-        for undo_func in reversed(self.undo_stack):
-            undo_func()
-
-    def rollback_and_reraise(self, msg=None, **kwargs):
-        """Rollback a series of actions then re-raise the exception.
-
-        .. note:: (sirp) This should only be called within an
-                  exception handler.
-        """
-        with excutils.save_and_reraise_exception():
-            if msg:
-                LOG.exception(msg, **kwargs)
-
-            self._rollback()
 
 
 def metadata_to_dict(metadata, include_deleted=False):
@@ -575,26 +511,6 @@ def expects_func_args(*args):
     return _decorator_checker
 
 
-class ExceptionHelper(object):
-    """Class to wrap another and translate the ClientExceptions raised by its
-    function calls to the actual ones.
-    """
-
-    def __init__(self, target):
-        self._target = target
-
-    def __getattr__(self, name):
-        func = getattr(self._target, name)
-
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            try:
-                return func(*args, **kwargs)
-            except messaging.ExpectedException as e:
-                raise e.exc_info[1]
-        return wrapper
-
-
 def check_string_length(value, name=None, min_length=0, max_length=None):
     """Check the length of specified string
     :param value: the value of the string
@@ -642,20 +558,21 @@ def _serialize_profile_info():
     return trace_info
 
 
-def pass_context(runner, func, *args, **kwargs):
+def _pass_context(runner, func, *args, **kwargs):
     """Generalised passthrough method
     It will grab the context from the threadlocal store and add it to
     the store on the runner.  This allows for continuity in logging the
     context when using this method to spawn a new thread through the
     runner function
     """
+
     _context = common_context.get_current()
     profiler_info = _serialize_profile_info()
 
     @functools.wraps(func)
     def context_wrapper(*args, **kwargs):
-        # NOTE: If update_store is not called after spawn it won't be
-        # available for the logger to pull from threadlocal storage.
+        # NOTE: If update_store is not called after spawning a thread, it won't
+        # be available for the logger to pull from threadlocal storage.
         if _context is not None:
             _context.update_store()
         if profiler_info and profiler:
@@ -665,7 +582,7 @@ def pass_context(runner, func, *args, **kwargs):
     return runner(context_wrapper, *args, **kwargs)
 
 
-def spawn(func, *args, **kwargs):
+def spawn(func, *args, **kwargs) -> futurist.Future:
     """Passthrough method for eventlet.spawn.
 
     This utility exists so that it can be stubbed for testing without
@@ -676,26 +593,41 @@ def spawn(func, *args, **kwargs):
     context when using this method to spawn a new thread.
     """
 
-    return pass_context(_get_default_green_pool().spawn, func, *args, **kwargs)
+    return spawn_on(_get_default_executor(), func, *args, **kwargs)
 
 
-def spawn_n(func, *args, **kwargs):
-    """Passthrough method for eventlet.greenpool.spawn_n.
+def _executor_is_full(executor):
+    if concurrency_mode_threading():
+        # TODO(gibi): Move this whole logic to futurist ThreadPoolExecutor
+        # so that we can avoid accessing the internals of the executor
+        with executor._shutdown_lock:
+            idle_workers = len([w for w in executor._workers if w.idle]) > 0
+            queued_tasks = executor._work_queue.qsize() > 0
+            return queued_tasks and not idle_workers
 
-    This utility exists so that it can be stubbed for testing without
-    interfering with the service spawns.
+    return False
+
+
+def spawn_on(executor, func, *args, **kwargs) -> futurist.Future:
+    """Passthrough method to run func on a thread in a given executor.
 
     It will also grab the context from the threadlocal store and add it to
     the store on the new thread.  This allows for continuity in logging the
     context when using this method to spawn a new thread.
     """
-
-    pass_context(_get_default_green_pool().spawn_n, func, *args, **kwargs)
+    _log_executor_stats(executor)
+    if _executor_is_full(executor):
+        LOG.warning(
+            "The %s pool does not have free threads so the task %s will be "
+            "queued. If this happens repeatedly then the size of the pool is "
+            "too small for the load or there are stuck threads filling the "
+            "pool.", executor.name, func)
+    return _pass_context(executor.submit, func, *args, **kwargs)
 
 
 def tpool_execute(func, *args, **kwargs):
     """Run func in a native thread"""
-    return pass_context(tpool.execute, func, *args, **kwargs)
+    return _pass_context(tpool.execute, func, *args, **kwargs)
 
 
 def is_none_string(val):
@@ -1194,3 +1126,124 @@ def run_once(message, logger, cleanup=None):
         wrapper.reset = functools.partial(reset, wrapper)
         return wrapper
     return outer_wrapper
+
+
+class _SentinelException(Exception):
+    """This type exists to act as a placeholder and will never be raised"""
+
+
+def latch_error_on_raise(retryable=(_SentinelException,)):
+    """This is a utility decorator to ensure if a function ever raises
+    it will always raise the same exception going forward.
+
+    The only exception we know is safe to ignore is an oslo db connection
+    error as the db may be temporarily unavailable and we should allow
+    mod_wsgi to retry
+    """
+
+    def outer_wrapper(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            if wrapper.error:
+                raise wrapper.error
+            try:
+                return func(*args, **kwargs)
+            except retryable:
+                # reraise any retryable exception to allow them to be handled
+                # by the caller.
+                raise
+            except Exception as e:
+                wrapper.error = e
+                LOG.exception(e)
+                raise
+
+        wrapper.error = None
+
+        def reset(wrapper):
+            wrapper.error = None
+
+        wrapper.reset = functools.partial(reset, wrapper)
+        return wrapper
+    return outer_wrapper
+
+
+def concurrency_mode_threading():
+    """Returns true if the service is running in threading mode, false if
+    running in Eventlet mode
+    """
+    from nova import monkey_patch
+    return not monkey_patch.is_patched()
+
+
+SCATTER_GATHER_EXECUTOR = None
+
+
+def get_scatter_gather_executor():
+    """Returns the executor used for scatter/gather operations."""
+    global SCATTER_GATHER_EXECUTOR
+
+    if not SCATTER_GATHER_EXECUTOR:
+        if concurrency_mode_threading():
+            SCATTER_GATHER_EXECUTOR = futurist.ThreadPoolExecutor(
+                CONF.cell_worker_thread_pool_size)
+        else:
+            SCATTER_GATHER_EXECUTOR = futurist.GreenThreadPoolExecutor()
+
+        pname = multiprocessing.current_process().name
+        executor_name = f"{pname}.cell_worker"
+        SCATTER_GATHER_EXECUTOR.name = executor_name
+
+        LOG.info("The cell worker thread pool %s is initialized",
+                 executor_name)
+
+    return SCATTER_GATHER_EXECUTOR
+
+
+def destroy_scatter_gather_executor():
+    """Closes the executor and resets the global to None to allow forked worker
+    processes to properly init it.
+    """
+    global SCATTER_GATHER_EXECUTOR
+    if SCATTER_GATHER_EXECUTOR:
+        LOG.info(
+            "The cell worker thread pool %s is shutting down",
+            SCATTER_GATHER_EXECUTOR.name)
+        SCATTER_GATHER_EXECUTOR.shutdown()
+        LOG.info(
+            "The cell worker thread pool %s is closed",
+            SCATTER_GATHER_EXECUTOR.name)
+
+    SCATTER_GATHER_EXECUTOR = None
+
+
+def _log_executor_stats(executor):
+    if CONF.thread_pool_statistic_period < 0:
+        return
+
+    last_stats = getattr(executor, "last_stats", None)
+    name = getattr(executor, "name", "unknown")
+
+    allowed_stat_age = time.monotonic() - CONF.thread_pool_statistic_period
+    if last_stats and last_stats > allowed_stat_age:
+        return
+
+    executor.last_stats = time.monotonic()
+
+    stats: futurist.ExecutorStatistics = executor.statistics
+
+    if isinstance(executor, futurist.ThreadPoolExecutor):
+        LOG.debug(
+            "State of %s ThreadPoolExecutor when submitting a new task: "
+            "max_workers: %d, workers: %d, idle workers: %d, queued work: %d, "
+            "stats: %s",
+            name,
+            executor._max_workers, len(executor._workers),
+            len([w for w in executor._workers if w.idle]),
+            executor._work_queue.qsize(), stats)
+    elif isinstance(executor, futurist.GreenThreadPoolExecutor):
+        LOG.debug(
+            "State of %s GreenThreadPoolExecutor when submitting a new task: "
+            "workers: %d, max_workers: %d, work queued length: %d, stats: %s",
+            name,
+            len(executor._pool.coroutines_running), executor._pool.size,
+            executor._delayed_work.unfinished_tasks, stats)

@@ -26,6 +26,7 @@ from nova import exception
 from nova.policies import server_diagnostics as sd_policies
 
 
+@validation.validated
 class ServerDiagnosticsController(wsgi.Controller):
     _view_builder_class = server_diagnostics.ViewBuilder
 
@@ -35,6 +36,8 @@ class ServerDiagnosticsController(wsgi.Controller):
 
     @wsgi.expected_errors((400, 404, 409, 501))
     @validation.query_schema(schema.index_query)
+    @validation.response_body_schema(schema.index_response, '2.1', '2.47')
+    @validation.response_body_schema(schema.index_response_v248, '2.48')
     def index(self, req, server_id):
         context = req.environ["nova.context"]
         instance = common.get_instance(self.compute_api, context, server_id)
@@ -42,7 +45,7 @@ class ServerDiagnosticsController(wsgi.Controller):
                     target={'project_id': instance.project_id})
 
         try:
-            if api_version_request.is_supported(req, min_version='2.48'):
+            if api_version_request.is_supported(req, '2.48'):
                 diagnostics = self.compute_api.get_instance_diagnostics(
                     context, instance)
                 return self._view_builder.instance_diagnostics(diagnostics)

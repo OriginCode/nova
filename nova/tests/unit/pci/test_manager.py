@@ -516,9 +516,9 @@ class PciDevTrackerTestCase(test.NoDBTestCase):
             0,
             len([dev for dev in self.tracker.pci_devs
                  if dev.status == fields.PciDeviceStatus.REMOVED]))
-        # free the device that was allocated and update tracker again
+
+        # free the device that was allocated
         self.tracker._free_device(claimed_dev)
-        self.tracker._set_hvdevs(copy.deepcopy(fake_pci_devs))
         # and assert that one device is removed from the tracker
         self.assertEqual(
             1,
@@ -878,12 +878,15 @@ class PciDevTrackerTestCase(test.NoDBTestCase):
                 self._fake_pci_device_destroy)
         self.destroy_called = 0
         self.assertEqual(len(self.tracker.pci_devs), 3)
-        dev = self.tracker.pci_devs[0]
+        dev1 = self.tracker.pci_devs[0]
+        dev2 = self.tracker.pci_devs[1]
         self.update_called = 0
-        dev.remove()
+        dev1.remove()
+        dev2.remove()
         self.tracker.save(self.fake_context)
-        self.assertEqual(len(self.tracker.pci_devs), 2)
-        self.assertEqual(self.destroy_called, 1)
+
+        self.assertEqual(len(self.tracker.pci_devs), 1)
+        self.assertEqual(self.destroy_called, 2)
 
     def test_clean_usage(self):
         inst_2 = copy.copy(self.inst)

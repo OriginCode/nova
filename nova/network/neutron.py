@@ -171,7 +171,7 @@ def refresh_cache(f):
 
 
 @profiler.trace_cls("neutron_api")
-class ClientWrapper(clientv20.Client):
+class ClientWrapper:
     """A Neutron client wrapper class.
 
     Wraps the callable methods, catches Unauthorized,Forbidden from Neutron and
@@ -179,16 +179,18 @@ class ClientWrapper(clientv20.Client):
     """
 
     def __init__(self, base_client, admin):
-        # Expose all attributes from the base_client instance
-        self.__dict__ = base_client.__dict__
         self.base_client = base_client
         self.admin = admin
 
-    def __getattribute__(self, name):
-        obj = object.__getattribute__(self, name)
-        if callable(obj):
-            obj = object.__getattribute__(self, 'proxy')(obj)
-        return obj
+    def __getattr__(self, name):
+        base_attr = getattr(self.base_client, name)
+        # Each callable base client attr is wrapped so that we can translate
+        # the Unauthorized exception based on if we have an admin client or
+        # not.
+        if callable(base_attr):
+            return self.proxy(base_attr)
+
+        return base_attr
 
     def proxy(self, obj):
         def wrapper(*args, **kwargs):
@@ -708,7 +710,7 @@ class API:
             # dns_domain), or if we cannot retrieve network info, we use the
             # admin client to reset dns_name.
             if (
-                self.has_dns_extension(client=port_client) and
+                detach and self.has_dns_extension(client=port_client) and
                 not network.get('dns_domain')
             ):
                 port_req_body['port']['dns_name'] = ''
@@ -724,7 +726,8 @@ class API:
             # NOTE: For external DNS integration, we use the neutron client
             # with user's context to reset the dns_name since the recordset is
             # under user's zone.
-            self._reset_port_dns_name(network, port_id, neutron)
+            if detach:
+                self._reset_port_dns_name(network, port_id, neutron)
 
     def _validate_requested_port_ids(self, context, instance, neutron,
                                      requested_networks):

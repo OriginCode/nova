@@ -14,16 +14,16 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import collections
+import itertools
 
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
 
 from nova.api.openstack import api_version_request
 from nova.api.openstack import common
-from nova.api.openstack.compute.views import addresses as views_addresses
 from nova.api.openstack.compute.views import flavors as views_flavors
 from nova.api.openstack.compute.views import images as views_images
+from nova.api.openstack.compute.views import ips as views_ips
 from nova import availability_zones as avail_zone
 from nova.compute import api as compute
 from nova.compute import vm_states
@@ -41,6 +41,7 @@ from nova import utils
 LOG = logging.getLogger(__name__)
 
 
+AZ_NOT_IN_REQUEST_SPEC = object()
 SCHED_HINTS_NOT_IN_REQUEST_SPEC = object()
 
 
@@ -70,8 +71,8 @@ class ViewBuilder(common.ViewBuilder):
     def __init__(self):
         """Initialize view builder."""
         super(ViewBuilder, self).__init__()
-        self._address_builder = views_addresses.ViewBuilder()
         self._image_builder = views_images.ViewBuilder()
+        self._ips_builder = views_ips.ViewBuilder()
         self._flavor_builder = views_flavors.ViewBuilder()
         self.compute_api = compute.API()
 
@@ -225,16 +226,20 @@ class ViewBuilder(common.ViewBuilder):
         return unknown_only
 
     def _get_pinned_az(self, context, instance, provided_az):
-        pinned_az = ''
-        if provided_az is not None:
+        if provided_az is AZ_NOT_IN_REQUEST_SPEC:
+            # Case the provided_az is pre fetched, but not specified
+            pinned_az = None
+        elif provided_az is not None:
+            # Case the provided_az is pre fetched, and specified
             pinned_az = provided_az
         else:
+            # Case the provided_az is not pre fethed.
             try:
                 req_spec = objects.RequestSpec.get_by_instance_uuid(
                         context, instance.uuid)
                 pinned_az = req_spec.availability_zone
             except exception.RequestSpecNotFound:
-                pinned_az = ''
+                pinned_az = None
         return pinned_az
 
     def _get_scheduler_hints(self, context, instance, provided_sched_hints):
@@ -265,7 +270,7 @@ class ViewBuilder(common.ViewBuilder):
             # detail will pre-calculate this for us. If we're doing show,
             # then figure it out here.
             show_extra_specs = False
-            if api_version_request.is_supported(request, min_version='2.47'):
+            if api_version_request.is_supported(request, '2.47'):
                 context = request.environ['nova.context']
                 show_extra_specs = context.can(
                     servers_policies.SERVERS % 'show:flavor-extra-specs',
@@ -327,11 +332,11 @@ class ViewBuilder(common.ViewBuilder):
             # attributes after v2.1. They are only in v2.1 for backward compat
             # with v2.0.
             server["server"]["OS-EXT-AZ:availability_zone"] = az or ''
-            if api_version_request.is_supported(request, min_version='2.96'):
+            if api_version_request.is_supported(request, '2.96'):
                 pinned_az = self._get_pinned_az(context, instance, provided_az)
                 server['server']['pinned_availability_zone'] = pinned_az
 
-        if api_version_request.is_supported(request, min_version='2.100'):
+        if api_version_request.is_supported(request, '2.100'):
             server['server']['scheduler_hints'] = (
                     self._get_scheduler_hints(
                         context, instance, provided_sched_hints))
@@ -361,7 +366,7 @@ class ViewBuilder(common.ViewBuilder):
 
         if show_extended_attr:
             properties = ['host', 'name', 'node']
-            if api_version_request.is_supported(request, min_version='2.3'):
+            if api_version_request.is_supported(request, '2.3'):
                 # NOTE(mriedem): These will use the OS-EXT-SRV-ATTR prefix
                 # below and that's OK for microversion 2.3 which is being
                 # compatible with v2.0 for the ec2 API split out from Nova.
@@ -405,7 +410,7 @@ class ViewBuilder(common.ViewBuilder):
             # for new attributes after v2.1. They are only in v2.1 for backward
             # compat with v2.0.
             add_delete_on_termination = api_version_request.is_supported(
-                request, min_version='2.3')
+                request, '2.3')
             if bdms is None:
                 bdms = objects.BlockDeviceMappingList.bdms_by_instance_uuid(
                     context, [instance["uuid"]])
@@ -413,7 +418,7 @@ class ViewBuilder(common.ViewBuilder):
                                           bdms,
                                           add_delete_on_termination)
 
-        if api_version_request.is_supported(request, min_version='2.16'):
+        if api_version_request.is_supported(request, '2.16'):
             if show_host_status is None:
                 unknown_only = self._get_host_status_unknown_only(
                     context, instance)
@@ -432,22 +437,22 @@ class ViewBuilder(common.ViewBuilder):
                             host_status == fields.HostStatus.UNKNOWN):
                         server["server"]['host_status'] = host_status
 
-        if api_version_request.is_supported(request, min_version="2.9"):
+        if api_version_request.is_supported(request, "2.9"):
             server["server"]["locked"] = (True if instance["locked_by"]
                                           else False)
 
-        if api_version_request.is_supported(request, min_version="2.73"):
+        if api_version_request.is_supported(request, "2.73"):
             server["server"]["locked_reason"] = (instance.system_metadata.get(
                                                  "locked_reason"))
 
-        if api_version_request.is_supported(request, min_version="2.19"):
+        if api_version_request.is_supported(request, "2.19"):
             server["server"]["description"] = instance.get(
                                                 "display_description")
 
-        if api_version_request.is_supported(request, min_version="2.26"):
+        if api_version_request.is_supported(request, "2.26"):
             server["server"]["tags"] = [t.tag for t in instance.tags]
 
-        if api_version_request.is_supported(request, min_version="2.63"):
+        if api_version_request.is_supported(request, "2.63"):
             trusted_certs = None
             if instance.trusted_certs:
                 trusted_certs = instance.trusted_certs.ids
@@ -455,7 +460,7 @@ class ViewBuilder(common.ViewBuilder):
 
         # TODO(stephenfin): Remove this check once we remove the
         # OS-EXT-SRV-ATTR:hostname policy checks from the policy is Y or later
-        if api_version_request.is_supported(request, min_version='2.90'):
+        if api_version_request.is_supported(request, '2.90'):
             # API 2.90 made this field visible to non-admins, but we only show
             # it if it's not already added
             if not show_extended_attr:
@@ -479,7 +484,7 @@ class ViewBuilder(common.ViewBuilder):
         coll_name = self._collection_name + '/detail'
         context = request.environ['nova.context']
 
-        if api_version_request.is_supported(request, min_version='2.47'):
+        if api_version_request.is_supported(request, '2.47'):
             # Determine if we should show extra_specs in the inlined flavor
             # once before we iterate the list of instances
             show_extra_specs = context.can(
@@ -507,7 +512,7 @@ class ViewBuilder(common.ViewBuilder):
                                        bdms=bdms,
                                        cell_down_support=cell_down_support)
 
-        if api_version_request.is_supported(request, min_version='2.16'):
+        if api_version_request.is_supported(request, '2.16'):
             unknown_only = self._get_host_status_unknown_only(context)
             # If we're not allowed by policy to show host status at all, don't
             # bother requesting instance host status from the compute API.
@@ -543,16 +548,17 @@ class ViewBuilder(common.ViewBuilder):
         :returns: Server data in dictionary format
         """
         req_specs = None
-        req_specs_dict = collections.defaultdict(str)
+        req_specs_dict = {}
         sched_hints_dict = {}
-        if api_version_request.is_supported(request, min_version='2.96'):
+        if api_version_request.is_supported(request, '2.96'):
             context = request.environ['nova.context']
             instance_uuids = [s.uuid for s in servers]
             req_specs = objects.RequestSpec.get_by_instance_uuids(
                     context, instance_uuids)
-            req_specs_dict = {req.instance_uuid: req.availability_zone
-                              for req in req_specs}
-            if api_version_request.is_supported(request, min_version='2.100'):
+            req_specs_dict.update({req.instance_uuid: req.availability_zone
+                                   for req in req_specs
+                                   if req.availability_zone is not None})
+            if api_version_request.is_supported(request, '2.100'):
                 sched_hints_dict.update({
                     req.instance_uuid: req.scheduler_hints
                     for req in req_specs
@@ -565,7 +571,8 @@ class ViewBuilder(common.ViewBuilder):
                  show_host_status=show_host_status,
                  show_sec_grp=show_sec_grp, bdms=bdms,
                  cell_down_support=cell_down_support,
-                 provided_az=req_specs_dict[server.uuid],
+                 provided_az=req_specs_dict.get(
+                     server.uuid, AZ_NOT_IN_REQUEST_SPEC),
                  provided_sched_hints=sched_hints_dict.get(
                      server.uuid, SCHED_HINTS_NOT_IN_REQUEST_SPEC)
                  )["server"]
@@ -609,7 +616,7 @@ class ViewBuilder(common.ViewBuilder):
         context = request.environ["nova.context"]
         networks = common.get_networks_for_instance(context, instance)
 
-        return self._address_builder.index(
+        return self._ips_builder.index(
             request, networks, extend_address,
         )["addresses"]
 
@@ -628,17 +635,18 @@ class ViewBuilder(common.ViewBuilder):
                 }],
             }
 
-            if api_version_request.is_supported(request, min_version='2.98'):
-                image_props = {}
-                for key, value in instance.system_metadata.items():
-                    if key.startswith(utils.SM_IMAGE_PROP_PREFIX):
-                        # remove prefix 'image_' at start of key, so that
-                        # key 'image_<key-name>' becomes '<key-name>'
-                        k = key.partition('_')[2]
-                        image_props[k] = value
-
-                image['properties'] = image_props
-
+            if api_version_request.is_supported(request, '2.98'):
+                prefix_len = len(utils.SM_IMAGE_PROP_PREFIX)
+                # allow legacy names if that is what were stored in metadata
+                std_fields = set(itertools.chain(
+                    objects.ImageMetaProps.fields.keys(),
+                    objects.ImageMetaProps._legacy_property_map.keys()
+                ))
+                image['properties'] = {
+                    key[prefix_len:]: value for key, value in
+                    instance.system_metadata.items()
+                    if (key.startswith(utils.SM_IMAGE_PROP_PREFIX) and
+                        key[prefix_len:] in std_fields and value is not None)}
             return image
         else:
             return ""
@@ -663,7 +671,7 @@ class ViewBuilder(common.ViewBuilder):
                         "from the DB", instance=instance)
             return {}
 
-        if api_version_request.is_supported(request, min_version="2.47"):
+        if api_version_request.is_supported(request, "2.47"):
             return self._get_flavor_dict(request, flavor, show_extra_specs)
 
         flavor_id = flavor["flavorid"]

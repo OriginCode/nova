@@ -29,6 +29,31 @@ CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
 
 
+WARN_PCI_TRACKER_HELD_DEVICE = (
+    "WARNING [nova.pci.manager] Unable to remove device with status "
+    "'allocated' and ownership %s because of PCI device "
+    "%s is allocated instead of ['available', "
+    "'unavailable', 'unclaimable']. Check your [pci]device_spec "
+    "configuration to make sure this allocated device is whitelisted. "
+    "If you have removed the device from the whitelist intentionally "
+    "or the device is no longer available on the host you will need "
+    "to delete the server or migrate it to another host to silence "
+    "this warning.")
+
+WARN_PCI_PLACEMENT_HELD_DEVICE = (
+    "WARNING [nova.compute.pci_placement_translator] "
+    "Device spec is not found for device %s in "
+    "[pci]device_spec. The device is allocated by "
+    "%s. We are keeping this device in the Placement "
+    "view. You should not remove an allocated device from "
+    "the configuration. Please restore the configuration. "
+    "If you cannot restore the configuration as the "
+    "device is dead then delete or cold migrate the "
+    "instance and then restart the nova-compute service "
+    "to resolve the inconsistency."
+)
+
+
 class PlacementPCIReportingTests(test_pci_sriov_servers._PCIServersTestBase):
     PCI_RC = f"CUSTOM_PCI_{fakelibvirt.PCI_VEND_ID}_{fakelibvirt.PCI_PROD_ID}"
     PF_RC = f"CUSTOM_PCI_{fakelibvirt.PCI_VEND_ID}_{fakelibvirt.PF_PROD_ID}"
@@ -99,7 +124,7 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
                     )
                 },
                 # PF_PROD_ID + slot 2 will match one PF but not their children
-                # VFs
+                # VFs and will be considered OTU
                 {
                     "vendor_id": fakelibvirt.PCI_VEND_ID,
                     "product_id": fakelibvirt.PF_PROD_ID,
@@ -107,6 +132,7 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
                     "traits": ",".join(
                         [os_traits.HW_NIC_SRIOV, "CUSTOM_PF", "pf-white"]
                     ),
+                    "one_time_use": "true",
                 },
                 # VF_PROD_ID + slot 3 will match two VFs but not their parent
                 # PF
@@ -147,6 +173,7 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
                 ],
                 "0000:81:02.0": [
                     "HW_NIC_SRIOV",
+                    "HW_PCI_ONE_TIME_USE",
                     "CUSTOM_PF",
                     "CUSTOM_PF_WHITE",
                 ],
@@ -766,29 +793,42 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
             "compute1", **compute1_expected_placement_view)
         # the warning from the PciTracker
         self.assertIn(
-            "WARNING [nova.pci.manager] Unable to remove device with status "
-            "'allocated' and ownership %s because of PCI device "
-            "1:0000:81:00.0 is allocated instead of ['available', "
-            "'unavailable', 'unclaimable']. Check your [pci]device_spec "
-            "configuration to make sure this allocated device is whitelisted. "
-            "If you have removed the device from the whitelist intentionally "
-            "or the device is no longer available on the host you will need "
-            "to delete the server or migrate it to another host to silence "
-            "this warning."
-            % server['id'],
+            WARN_PCI_TRACKER_HELD_DEVICE % (server['id'], "1:0000:81:00.0"),
             self.stdlog.logger.output,
         )
         # the warning from the placement PCI tracking logic
         self.assertIn(
-            "WARNING [nova.compute.pci_placement_translator] Device spec is "
-            "not found for device 0000:81:00.0 in [pci]device_spec. We are "
-            "skipping this devices during Placement update. The device is "
-            "allocated by %s. You should not remove an allocated device from "
-            "the configuration. Please restore the configuration or cold "
-            "migrate the instance to resolve the inconsistency."
-            % server['id'],
+            WARN_PCI_PLACEMENT_HELD_DEVICE % ("0000:81:00.0", server['id']),
             self.stdlog.logger.output,
         )
+
+        # Now delete the service as the warning suggested. It should work.
+        self._delete_server(server)
+
+        # The allocation successfully removed
+        compute1_expected_placement_view["usages"] = {
+            "0000:81:00.0": {
+                "CUSTOM_PCI_8086_1528": 0,
+            }
+        }
+        compute1_expected_placement_view["allocations"].pop(server["id"])
+        self.assert_placement_pci_view(
+            "compute1", **compute1_expected_placement_view)
+
+        self.stdlog.delete_stored_logs()
+        self.restart_compute_service(hostname="compute1")
+
+        # The next compute restart won't trigger any warning
+        self.assertNotIn(
+            "WARNING [nova.compute.pci_placement_translator] ",
+            self.stdlog.logger.output,
+        )
+        # And the device is now removed from Placement
+        compute1_expected_placement_view["inventories"].pop("0000:81:00.0")
+        compute1_expected_placement_view["traits"].pop("0000:81:00.0")
+        compute1_expected_placement_view["usages"].pop("0000:81:00.0")
+        self.assert_placement_pci_view(
+            "compute1", **compute1_expected_placement_view)
 
     def test_device_reconfiguration_with_allocations_config_change_stop(self):
         self._create_one_compute_with_a_pf_consumed_by_an_instance()
@@ -853,18 +893,279 @@ class PlacementPCIInventoryReportingTests(PlacementPCIReportingTests):
             "compute1", **compute1_expected_placement_view)
         # the warning from the PciTracker
         self.assertIn(
-            "WARNING [nova.pci.manager] Unable to remove device with status "
-            "'allocated' and ownership %s because of PCI device "
-            "1:0000:81:00.0 is allocated instead of ['available', "
-            "'unavailable', 'unclaimable']. Check your [pci]device_spec "
-            "configuration to make sure this allocated device is whitelisted. "
-            "If you have removed the device from the whitelist intentionally "
-            "or the device is no longer available on the host you will need "
-            "to delete the server or migrate it to another host to silence "
-            "this warning."
-            % server['id'],
+            WARN_PCI_TRACKER_HELD_DEVICE % (server['id'], "1:0000:81:00.0"),
             self.stdlog.logger.output,
         )
+
+    def test_pf_devspec_removed_while_allocated(self):
+        server, compute1_expected_placement_view = (
+            self._create_one_compute_with_a_pf_consumed_by_an_instance())
+
+        # remove 0000:81:00.0 PF from the device spec and restart the compute
+        device_spec = self._to_list_of_json_str([])
+        self.flags(group='pci', device_spec=device_spec)
+        # The PF is used but removed from the config. The PciTracker warns
+        # but keeps the device so the placement logic mimic this and only warns
+        # but keeps the RP and the allocation in placement intact.
+        self.restart_compute_service(hostname="compute1")
+        self.assert_placement_pci_view(
+            "compute1", **compute1_expected_placement_view)
+        self._run_periodics()
+        self.assert_placement_pci_view(
+            "compute1", **compute1_expected_placement_view)
+        # the warning from the PciTracker
+        self.assertIn(
+            WARN_PCI_TRACKER_HELD_DEVICE % (server['id'], "1:0000:81:00.0"),
+            self.stdlog.logger.output,
+        )
+        # the warning from the placement PCI tracking logic
+        self.assertIn(
+            WARN_PCI_PLACEMENT_HELD_DEVICE % ("0000:81:00.0", server['id']),
+            self.stdlog.logger.output,
+        )
+        # no placement error is reported
+        self.assertNotRegex(
+            self.stdlog.logger.output,
+            "ERROR .nova.scheduler.client.report..*Failed to delete "
+            "resource provider with UUID.*from the placement API. "
+            "Got 409.*Unable to delete resource provider.*Resource "
+            "provider has allocations.")
+
+        self.stdlog.delete_stored_logs()
+        # the deletion succeeds
+        self._delete_server(server)
+        # no placement error is reported
+        self.assertNotRegex(
+            self.stdlog.logger.output,
+            "ERROR .nova.scheduler.client.report..*Failed to delete "
+            "resource provider with UUID.*from the placement API. "
+            "Got 409.*Unable to delete resource provider.*Resource "
+            "provider has allocations.")
+
+        # The allocation is removed from placement
+        compute1_expected_placement_view["usages"] = {
+            "0000:81:00.0": {
+                self.PF_RC: 0,
+            }
+        }
+        compute1_expected_placement_view["allocations"].pop(server["id"])
+        self.assert_placement_pci_view(
+            "compute1", **compute1_expected_placement_view)
+
+        # The PCI device is removed from the PCI tracker when the device is
+        # freed, but not from Placement yet because during VM deletion the
+        # resource tracker updated before the Placement allocation is dropped
+        # so we cannot drop the Placement inventory during delete.
+        self.assertPCIDeviceCounts("compute1", total=0, free=0)
+
+        # We need a periodics run to trigger the deletion of the device in
+        # Placement
+        self._run_periodics()
+
+        compute1_expected_placement_view["inventories"].pop("0000:81:00.0")
+        compute1_expected_placement_view["traits"].pop("0000:81:00.0")
+        compute1_expected_placement_view["usages"].pop("0000:81:00.0")
+        self.assert_placement_pci_view(
+            "compute1", **compute1_expected_placement_view)
+
+    def _create_one_compute_with_vfs_one_consumed_by_an_instance(
+        self, num_vfs
+    ):
+        # The fake libvirt will emulate on the host:
+        # * one type-PF in slot 0, with N type-VF(s)
+        pci_info = fakelibvirt.HostPCIDevicesInfo(
+            num_pci=0, num_pfs=1, num_vfs=num_vfs)
+        # we match the VFs and ignore the PF
+        device_spec = self._to_list_of_json_str(
+            [
+                {
+                    "vendor_id": fakelibvirt.PCI_VEND_ID,
+                    "product_id": fakelibvirt.VF_PROD_ID,
+                    "address": "0000:81:00.",
+                },
+            ]
+        )
+        self.flags(group='pci', device_spec=device_spec)
+        self.flags(group="pci", report_in_placement=True)
+        self.start_compute(hostname="compute1", pci_info=pci_info)
+
+        self.assertPCIDeviceCounts("compute1", total=num_vfs, free=num_vfs)
+        compute1_expected_placement_view = {
+            "inventories": {
+                "0000:81:00.0": {self.VF_RC: num_vfs},
+            },
+            "traits": {
+                "0000:81:00.0": [],
+            },
+            "usages": {
+                "0000:81:00.0": {self.VF_RC: 0},
+            },
+            "allocations": {},
+        }
+        self.assert_placement_pci_view(
+            "compute1", **compute1_expected_placement_view)
+
+        # Create an instance consuming one VF
+        extra_spec = {"pci_passthrough:alias": "a-vf:1"}
+        flavor_id = self._create_flavor(extra_spec=extra_spec)
+        server = self._create_server(flavor_id=flavor_id, networks=[])
+
+        self.assertPCIDeviceCounts("compute1", total=num_vfs, free=num_vfs - 1)
+        compute1_expected_placement_view["usages"] = {
+            "0000:81:00.0": {self.VF_RC: 1},
+        }
+        compute1_expected_placement_view["allocations"][server["id"]] = {
+            "0000:81:00.0": {self.VF_RC: 1},
+        }
+        self.assert_placement_pci_view(
+            "compute1", **compute1_expected_placement_view)
+        self._run_periodics()
+        self.assert_placement_pci_view(
+            "compute1", **compute1_expected_placement_view)
+
+        return server, compute1_expected_placement_view
+
+    def test_last_vf_devspec_removed_while_allocated(self):
+        server, compute1_expected_placement_view = (
+            self._create_one_compute_with_vfs_one_consumed_by_an_instance(
+                num_vfs=1))
+
+        # remove 0000:81:00.1 VF from the device spec and restart the compute
+        device_spec = self._to_list_of_json_str([])
+        self.flags(group='pci', device_spec=device_spec)
+        # The VF is used but removed from the config. The PciTracker warns
+        # but keeps the device so the placement logic mimic this and only warns
+        # but keeps the RP and the allocation in placement intact.
+        self.restart_compute_service(hostname="compute1")
+        self.assert_placement_pci_view(
+            "compute1", **compute1_expected_placement_view)
+        self._run_periodics()
+        self.assert_placement_pci_view(
+            "compute1", **compute1_expected_placement_view)
+        # the warning from the PciTracker
+        self.assertIn(
+            WARN_PCI_TRACKER_HELD_DEVICE % (server["id"], "1:0000:81:00.1"),
+            self.stdlog.logger.output,
+        )
+        # the warning from the placement PCI tracking logic
+        self.assertIn(
+            WARN_PCI_PLACEMENT_HELD_DEVICE % ("0000:81:00.1", server['id']),
+            self.stdlog.logger.output,
+        )
+
+        self.stdlog.delete_stored_logs()
+        # the deletion succeeds
+        self._delete_server(server)
+        # no placement error is reported
+        self.assertNotRegex(
+            self.stdlog.logger.output,
+            "ERROR .nova.scheduler.client.report..*Failed to delete "
+            "resource provider with UUID.*from the placement API. "
+            "Got 409.*Unable to delete resource provider.*Resource "
+            "provider has allocations.")
+
+        # The allocation is removed from placement
+        compute1_expected_placement_view["usages"] = {
+            "0000:81:00.0": {
+                self.VF_RC: 0,
+            }
+        }
+        compute1_expected_placement_view["allocations"].pop(server["id"])
+        self.assert_placement_pci_view(
+            "compute1", **compute1_expected_placement_view)
+
+        # The PCI device is removed from the PCI tracker when the device is
+        # freed, but not from Placement yet because during VM deletion the
+        # resource tracker updated before the Placement allocation is dropped
+        # so we cannot drop the Placement inventory during delete.
+        self.assertPCIDeviceCounts("compute1", total=0, free=0)
+
+        # We need a periodics run to trigger the deletion of the device in
+        # Placement
+        self._run_periodics()
+
+        compute1_expected_placement_view["inventories"].pop("0000:81:00.0")
+        compute1_expected_placement_view["traits"].pop("0000:81:00.0")
+        compute1_expected_placement_view["usages"].pop("0000:81:00.0")
+        self.assert_placement_pci_view(
+            "compute1", **compute1_expected_placement_view)
+
+    def test_non_last_vf_devspec_removed_while_allocated(self):
+        server, compute1_expected_placement_view = (
+            self._create_one_compute_with_vfs_one_consumed_by_an_instance(
+                num_vfs=2))
+
+        # remove 0000:81:00.* VFs from the device spec and restart the compute
+        device_spec = self._to_list_of_json_str([])
+        self.flags(group='pci', device_spec=device_spec)
+        self.restart_compute_service(hostname="compute1")
+        # One of the VFs is used but all of them is removed from the config.
+        # The PciTracker warns but keeps the allocated device so the placement
+        # logic mimic this and only warns but keeps the RP and the allocation
+        # in placement intact.
+        # The non allocated VF is removed while the allocated one is kept
+        compute1_expected_placement_view["inventories"] = {
+            "0000:81:00.0": {
+                self.VF_RC: 1
+            },
+        }
+        self.assert_placement_pci_view(
+            "compute1", **compute1_expected_placement_view)
+        # the warning from the PciTracker
+        self.assertIn(
+            WARN_PCI_TRACKER_HELD_DEVICE % (server['id'], "1:0000:81:00.2"),
+            self.stdlog.logger.output,
+        )
+        # two warnings from the placement PCI tracking logic
+        self.assertIn(
+            WARN_PCI_PLACEMENT_HELD_DEVICE % ("0000:81:00.2", server['id']),
+            self.stdlog.logger.output,
+        )
+        self.assertIn(
+            "WARNING [nova.compute.pci_placement_translator] "
+            "Needed to adjust inventories of CUSTOM_PCI_8086_1515 on "
+            "resource provider compute1_0000:81:00.0 from 0 to 1 due to "
+            "existing placement allocations. This should only happen while "
+            "VMs using already removed devices.",
+            self.stdlog.logger.output,
+        )
+
+        self.stdlog.delete_stored_logs()
+        # the deletion succeeds
+        self._delete_server(server)
+        # no placement error is reported
+        self.assertNotRegex(
+            self.stdlog.logger.output,
+            "ERROR .nova.scheduler.client.report..*Failed to delete "
+            "resource provider with UUID.*from the placement API. "
+            "Got 409.*Unable to delete resource provider.*Resource "
+            "provider has allocations.")
+
+        # The allocation is removed from placement
+        compute1_expected_placement_view["usages"] = {
+            "0000:81:00.0": {
+                self.VF_RC: 0,
+            }
+        }
+        compute1_expected_placement_view["allocations"].pop(server["id"])
+        self.assert_placement_pci_view(
+            "compute1", **compute1_expected_placement_view)
+
+        # The PCI device is removed from the PCI tracker when the device is
+        # freed, but not from Placement yet because during VM deletion the
+        # resource tracker updated before the Placement allocation is dropped
+        # so we cannot drop the Placement inventory during delete.
+        self.assertPCIDeviceCounts("compute1", total=0, free=0)
+
+        # We need a periodics run to trigger the deletion of the device in
+        # Placement
+        self._run_periodics()
+
+        compute1_expected_placement_view["inventories"].pop("0000:81:00.0")
+        compute1_expected_placement_view["traits"].pop("0000:81:00.0")
+        compute1_expected_placement_view["usages"].pop("0000:81:00.0")
+        self.assert_placement_pci_view(
+            "compute1", **compute1_expected_placement_view)
 
     def test_reporting_disabled_nothing_is_reported(self):
         # The fake libvirt will emulate on the host:
@@ -1995,3 +2296,170 @@ class RCAndTraitBasedPCIAliasTests(PlacementPCIReportingTests):
         self.assert_placement_pci_view(
             "compute1", **compute1_expected_placement_view)
         self.assert_no_pci_healing("compute1")
+
+    def test_one_time_use_workflow(self):
+        # The fake libvirt will emulate on the host:
+        # * two type-PCIs
+        pci_info = fakelibvirt.HostPCIDevicesInfo(
+            num_pci=1, num_pfs=0, num_vfs=0)
+        device_spec = self._to_list_of_json_str(
+            [
+                {
+                    "vendor_id": fakelibvirt.PCI_VEND_ID,
+                    "product_id": fakelibvirt.PCI_PROD_ID,
+                    "one_time_use": "true",
+                },
+            ]
+        )
+        self.flags(group='pci', device_spec=device_spec)
+        pci_alias = {
+            "vendor_id": fakelibvirt.PCI_VEND_ID,
+            "product_id": fakelibvirt.PCI_PROD_ID,
+            "name": "a-otu",
+        }
+        self.flags(
+            group="pci",
+            alias=self._to_list_of_json_str([pci_alias]),
+        )
+        extra_spec = {"pci_passthrough:alias": "a-otu:1"}
+        flavor_id = self._create_flavor(extra_spec=extra_spec)
+        self.start_compute(hostname="compute1", pci_info=pci_info)
+
+        rc = "CUSTOM_PCI_%s_%s" % (fakelibvirt.PCI_VEND_ID,
+                                   fakelibvirt.PCI_PROD_ID)
+        addr = "0000:81:00.0"
+        expected_placement_view = {
+            "inventories": {
+                addr: {
+                    rc: {
+                        "total": 1,
+                        "reserved": 0,
+                    },
+                },
+            },
+            "traits": {
+                addr: [
+                    "HW_PCI_ONE_TIME_USE",
+                ],
+            },
+            "usages": {
+                addr: {rc: 0},
+            },
+            "allocations": {},
+        }
+
+        # Initially we expect no usage, no reservation
+        self.assert_placement_pci_view(
+            "compute1", **expected_placement_view)
+        self.assertPCIDeviceCounts('compute1', total=1, free=1)
+
+        # Create a server that uses our device
+        server = self._create_server(flavor_id=flavor_id, networks=[])
+
+        # Now we expect the usage to have gone up, and for the reserved
+        # count on our OTU device to have increased
+        expected_placement_view["usages"][addr][rc] = 1
+        expected_placement_view["inventories"][addr][rc]["reserved"] = 1
+        self.assert_placement_pci_view(
+            "compute1", **expected_placement_view)
+
+        # Delete the server to release the allocation (but not reservation)
+        self._delete_server(server)
+
+        # We expect the usage to have gone back to zero, but the reserved
+        # count is unchanged
+        expected_placement_view["usages"][addr][rc] = 0
+        self.assert_placement_pci_view(
+            "compute1", **expected_placement_view)
+
+        # Create another server that wants our device, but there are no
+        # cleaned devices available. It should fail to schedule because
+        # no host can satisfy the request.
+        server = self._create_server(flavor_id=flavor_id, networks=[],
+                                     expected_state="ERROR")
+        self.assertIn('No valid host', server['fault']['message'])
+        self._delete_server(server)
+
+        # Externally "clean" the device and mark it as unreserved
+        self._reserve_placement_resource('compute1_%s' % addr, rc, 0)
+        expected_placement_view["inventories"][addr][rc]['reserved'] = 0
+        self.assert_placement_pci_view(
+            "compute1", **expected_placement_view)
+
+        # Create a server that uses our device, confirming that after an
+        # external clean it is allocatable again.
+        server = self._create_server(flavor_id=flavor_id, networks=[])
+
+    def test_otu_configured_late(self):
+        # The fake libvirt will emulate on the host:
+        # * two type-PCIs
+        pci_info = fakelibvirt.HostPCIDevicesInfo(
+            num_pci=1, num_pfs=0, num_vfs=0)
+        device_spec = [
+            {
+                "vendor_id": fakelibvirt.PCI_VEND_ID,
+                "product_id": fakelibvirt.PCI_PROD_ID,
+            },
+        ]
+        self.flags(
+            group='pci', device_spec=self._to_list_of_json_str(device_spec))
+        pci_alias = {
+            "vendor_id": fakelibvirt.PCI_VEND_ID,
+            "product_id": fakelibvirt.PCI_PROD_ID,
+            "name": "a-otu",
+        }
+        self.flags(
+            group="pci",
+            alias=self._to_list_of_json_str([pci_alias]),
+        )
+        extra_spec = {"pci_passthrough:alias": "a-otu:1"}
+        flavor_id = self._create_flavor(extra_spec=extra_spec)
+        self.start_compute(hostname="compute1", pci_info=pci_info)
+
+        rc = "CUSTOM_PCI_%s_%s" % (fakelibvirt.PCI_VEND_ID,
+                                   fakelibvirt.PCI_PROD_ID)
+        addr = "0000:81:00.0"
+        expected_placement_view = {
+            "inventories": {
+                addr: {
+                    rc: {
+                        "total": 1,
+                        "reserved": 0,
+                    },
+                },
+            },
+            "traits": {
+                addr: [],
+            },
+            "usages": {
+                addr: {rc: 0},
+            },
+            "allocations": {},
+        }
+
+        # Initially we expect no usage, no reservation
+        self.assert_placement_pci_view(
+            "compute1", **expected_placement_view)
+        self.assertPCIDeviceCounts("compute1", total=1, free=1)
+
+        # Create a server that uses our device
+        self._create_server(flavor_id=flavor_id, networks=[])
+
+        # Expect to see the usage go up, but reserved stays at zero
+        expected_placement_view["usages"][addr][rc] = 1
+        self.assert_placement_pci_view(
+            "compute1", **expected_placement_view)
+
+        # Now configure the compute node to treat our device as OTU and restart
+        # the compute service (which will run the placement update)
+        device_spec[0]['one_time_use'] = 'true'
+        self.flags(
+            group="pci", device_spec=self._to_list_of_json_str(device_spec))
+        self.restart_compute_service(hostname="compute1")
+
+        # Now we expect to see the device go reserved and the OTU trait get
+        # added to it.
+        expected_placement_view["inventories"][addr][rc]["reserved"] = 1
+        expected_placement_view["traits"][addr].append("HW_PCI_ONE_TIME_USE")
+        self.assert_placement_pci_view(
+            "compute1", **expected_placement_view)

@@ -27,11 +27,7 @@ LOG = logging.getLogger(__name__)
 CONF = conf.CONF
 
 
-class RescueServerTestWithDeletedBaseImage(
-    base.ServersTestBase
-):
-
-    api_major_version = 'v2.1'
+class RescueServerTestWithDeletedBaseImage(base.ServersTestBase):
     microversion = '2.87'
 
     # BUG #2002606
@@ -57,7 +53,9 @@ class RescueServerTestWithDeletedBaseImage(
             'nova.virt.libvirt.utils.get_instance_path', fake_path))
 
     def _create_test_images(self):
-        timestamp = datetime.datetime(2021, 1, 2, 3, 4, 5)
+        timestamp = datetime.datetime(
+            2021, 1, 2, 3, 4, 5, tzinfo=datetime.timezone.utc
+        )
         base_image = {
             'id': uuids.base_image,
             'name': 'base_image',
@@ -69,7 +67,7 @@ class RescueServerTestWithDeletedBaseImage(
             'is_public': False,
             'container_format': 'ova',
             'disk_format': 'vhd',
-            'size': '74185822',
+            'size': 74185822,
             'min_ram': 0,
             'min_disk': 0,
             'protected': False,
@@ -88,7 +86,7 @@ class RescueServerTestWithDeletedBaseImage(
             'is_public': False,
             'container_format': 'ova',
             'disk_format': 'vhd',
-            'size': '74185822',
+            'size': 74185822,
             'min_ram': 0,
             'min_disk': 0,
             'protected': False,

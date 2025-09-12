@@ -17,7 +17,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: nova VERSION\n"
 "Report-Msgid-Bugs-To: https://bugs.launchpad.net/openstack-i18n/\n"
-"POT-Creation-Date: 2024-10-09 20:12+0000\n"
+"POT-Creation-Date: 2025-07-04 18:13+0000\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
@@ -66,12 +66,6 @@ msgstr "%(total)i 행이 %(meth)s 조회와 일치함, %(done)i이(가) 마이�
 #, python-format
 msgid "%(type)s hypervisor does not support PCI devices"
 msgstr "%(type)s 하이퍼바이저가 PCI 디바이스를 지원하지 않음"
-
-#, python-format
-msgid "%(worker_name)s value of %(workers)s is invalid, must be greater than 0"
-msgstr ""
-"%(workers)s의 %(worker_name)s 값이 올바르지 않습니다. 해당 값은 0보다 커야 합"
-"니다."
 
 #, python-format
 msgid "%s does not support disk hotplug."
@@ -1764,8 +1758,8 @@ msgstr "액세스 가능한 이미지 위치가 없음"
 
 #, python-format
 msgid ""
-"No live migration URI configured and no default available for \"%(virt_type)s"
-"\" hypervisor virtualization type."
+"No live migration URI configured and no default available for "
+"\"%(virt_type)s\" hypervisor virtualization type."
 msgstr ""
 "라이브 마이그레이션 URI가 구성되지 않았으며 \"%(virt_type)s\" 하이퍼바이저 가"
 "상화 유형에 사용 가능한 기본값이 없습니다."
@@ -1850,9 +1844,6 @@ msgstr "권한이 없습니다. "
 
 msgid "Not enough parameters to build a valid rule."
 msgstr "유효한 규칙을 빌드하기엔 매개변수가 부족합니다. "
-
-msgid "Not implemented on Windows"
-msgstr "Windows에서 구현되지 않음"
 
 msgid "Not stored in rbd"
 msgstr "rbd에 저장되지 않음"
@@ -2337,9 +2328,6 @@ msgstr "PCI 주소 %(address)s에 올바르지 않은 형식이 있습니다."
 msgid "The `os_distro` image metadata property is required"
 msgstr "다음의 이미지 메타데이터 속성이 필요합니다. : `os_distro`"
 
-msgid "The backlog must be more than 0"
-msgstr "백로그는 0보다 커야 함"
-
 #, python-format
 msgid "The console port range %(min_port)d-%(max_port)d is exhausted."
 msgstr "콘솔 포트 범위 %(min_port)d-%(max_port)d이(가) 소진되었습니다."
@@ -2534,23 +2522,11 @@ msgid "Unable to determine disk prefix for %s"
 msgstr "%s의 디스크 접두부를 판별할 수 없음"
 
 #, python-format
-msgid "Unable to find ca_file : %s"
-msgstr "ca_file을 찾을 수 없음: %s"
-
-#, python-format
-msgid "Unable to find cert_file : %s"
-msgstr "cert_file을 찾을 수 없음: %s"
-
-#, python-format
 msgid "Unable to find host for Instance %s"
 msgstr "%s 인스턴스에 대한 호스트를 찾을 수 없음"
 
 msgid "Unable to find iSCSI Target"
 msgstr "iSCSI 대상을 찾을 수 없음"
-
-#, python-format
-msgid "Unable to find key_file : %s"
-msgstr "key_file을 찾을 수 없음: %s"
 
 msgid "Unable to find volume"
 msgstr "볼륨을 찾을 수 없음"
@@ -2784,13 +2760,6 @@ msgstr "하이퍼바이저에서 볼륨크기 확장을 지원하지 않습니�
 
 msgid "When resizing, instances must change flavor!"
 msgstr "크기를 조정할 때 인스턴스는 플레이버를 변경해야 합니다!"
-
-msgid ""
-"When running server in SSL mode, you must specify both a cert_file and "
-"key_file option value in your configuration file"
-msgstr ""
-"서버를 SSL 모드에서 실행할 때 구성 파일에 cert_file 및 key_file 옵션 값을 모"
-"두 지정해야 함"
 
 #, python-format
 msgid "Wrong quota method %(method)s used on resource %(res)s"

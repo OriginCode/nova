@@ -38,6 +38,7 @@ LOG = logging.getLogger(__name__)
 MIN_VER_NOVA_COMPUTE_EVACUATE_STOPPED = 62
 
 
+@validation.validated
 class EvacuateController(wsgi.Controller):
     def __init__(self):
         super(EvacuateController, self).__init__()
@@ -45,7 +46,7 @@ class EvacuateController(wsgi.Controller):
         self.host_api = compute.HostAPI()
 
     def _get_on_shared_storage(self, req, evacuate_body):
-        if api_version_request.is_supported(req, min_version='2.14'):
+        if api_version_request.is_supported(req, '2.14'):
             return None
         else:
             return strutils.bool_from_string(evacuate_body["onSharedStorage"])
@@ -108,7 +109,7 @@ class EvacuateController(wsgi.Controller):
         force = None
 
         target_state = None
-        if api_version_request.is_supported(req, min_version='2.95'):
+        if api_version_request.is_supported(req, '2.95'):
             min_ver = objects.service.get_minimum_version_all_cells(
                 context, ['nova-compute'])
             if min_ver < MIN_VER_NOVA_COMPUTE_EVACUATE_STOPPED:
@@ -122,13 +123,13 @@ class EvacuateController(wsgi.Controller):
 
         on_shared_storage = self._get_on_shared_storage(req, evacuate_body)
 
-        if api_version_request.is_supported(req, min_version='2.29'):
+        if api_version_request.is_supported(req, '2.29'):
             force = body["evacuate"].get("force", False)
             force = strutils.bool_from_string(force, strict=True)
             if force is True and not host:
                 message = _("Can't force to a non-provided destination")
                 raise exc.HTTPBadRequest(explanation=message)
-        if api_version_request.is_supported(req, min_version='2.14'):
+        if api_version_request.is_supported(req, '2.14'):
             password = self._get_password_v214(req, evacuate_body)
         else:
             password = self._get_password(req, evacuate_body,
@@ -151,8 +152,8 @@ class EvacuateController(wsgi.Controller):
                                       on_shared_storage, password, force,
                                       target_state)
         except exception.InstanceInvalidState as state_error:
-            common.raise_http_conflict_for_instance_invalid_state(state_error,
-                    'evacuate', id)
+            common.raise_http_conflict_for_instance_invalid_state(
+                state_error, 'evacuate', id)
         except (
             exception.ComputeServiceInUse,
             exception.ForbiddenPortsWithAccelerator,
@@ -163,11 +164,14 @@ class EvacuateController(wsgi.Controller):
             raise exc.HTTPConflict(explanation=e.format_message())
         except (
             exception.ForbiddenSharesNotSupported,
-            exception.ForbiddenWithShare) as e:
+            exception.ForbiddenWithShare,
+        ) as e:
             raise exc.HTTPConflict(explanation=e.format_message())
 
-        if (not api_version_request.is_supported(req, min_version='2.14') and
-                CONF.api.enable_instance_password):
+        if (
+            not api_version_request.is_supported(req, '2.14') and
+            CONF.api.enable_instance_password
+        ):
             return {'adminPass': password}
         else:
             return None

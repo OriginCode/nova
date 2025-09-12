@@ -27,6 +27,7 @@ from nova import exception
 from nova.policies import assisted_volume_snapshots as avs_policies
 
 
+@validation.validated
 class AssistedVolumeSnapshotsController(wsgi.Controller):
     """The Assisted volume snapshots API controller for the OpenStack API."""
 
@@ -40,11 +41,6 @@ class AssistedVolumeSnapshotsController(wsgi.Controller):
     def create(self, req, body):
         """Creates a new snapshot."""
         context = req.environ['nova.context']
-        # NOTE(gmann) We pass empty target to policy enforcement. This API
-        # is called by cinder which does not have correct project_id.
-        # By passing the empty target, we make sure that we do not check
-        # the requester project_id and allow users with
-        # allowed role to create snapshot.
         context.can(avs_policies.POLICY_ROOT % 'create', target={})
 
         snapshot = body['snapshot']
@@ -74,11 +70,6 @@ class AssistedVolumeSnapshotsController(wsgi.Controller):
     def delete(self, req, id):
         """Delete a snapshot."""
         context = req.environ['nova.context']
-        # NOTE(gmann) We pass empty target to policy enforcement. This API
-        # is called by cinder which does not have correct project_id.
-        # By passing the empty target, we make sure that we do not check
-        # the requester project_id and allow users with allowed role to
-        # delete snapshot.
         context.can(avs_policies.POLICY_ROOT % 'delete', target={})
 
         delete_metadata = {}

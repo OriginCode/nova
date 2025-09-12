@@ -609,14 +609,14 @@ As an example, let's consider the case where this option is set to:
 
     ``os_distro=1, hw_machine_type=-1``
 
-If an instance would boot with an image having ``os_distro=windows`` and
+If an instance would boot with an image having ``os_distro=windows`` and
 ``hw_machine_type=q35``, the final host weight will be:
 
     ``(nb_inst(``os_distro=windows``)  * 1.0) +
       (nb_inst(``hw_machine_type=q35``) * -1)``
 
 where nb_inst(``prop=value``) would give me the number of instances having
-an image where ``prop`` is set to ``value`` (eg. the number of instances
+an image where ``prop`` is set to ``value`` (eg. the number of instances
 running with ``os_distro=windows``)
 
 Possible values:
@@ -905,7 +905,9 @@ compute hosts.
 When enabled the scheduler queries Placement about the PCI device
 availability to select destination for a server with PCI request. The scheduler
 also allocates the selected PCI devices in Placement. Note that this logic
-does not replace the PCIPassthroughFilter but extends it.
+does not replace the PCIPassthroughFilter but extends it. Note that this
+config option needs to be set in the configuration of nova-api, nova-scheduler,
+and all nova-conductor services.
 
 * ``[pci] report_in_placement``
 * ``[pci] alias``

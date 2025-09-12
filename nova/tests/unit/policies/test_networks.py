@@ -41,16 +41,20 @@ class NetworksPolicyTest(base.BasePolicyTest):
         # of networks then neutron will be returning the appropriate error.
         self.project_reader_authorized_contexts = [
             self.legacy_admin_context, self.system_admin_context,
-            self.project_admin_context, self.project_member_context,
-            self.project_reader_context, self.project_foo_context,
+            self.project_admin_context, self.project_manager_context,
+            self.project_member_context, self.project_reader_context,
+            self.project_foo_context,
             self.other_project_reader_context,
             self.system_member_context, self.system_reader_context,
             self.system_foo_context,
-            self.other_project_member_context
+            self.other_project_manager_context,
+            self.other_project_member_context,
+            self.service_context
         ]
 
     @mock.patch('nova.network.neutron.API.get_all')
     def test_list_networks_policy(self, mock_get):
+        mock_get.return_value = []
         rule_name = "os_compute_api:os-networks:list"
         self.common_policy_auth(self.project_reader_authorized_contexts,
                                 rule_name, self.controller.index,
@@ -58,6 +62,7 @@ class NetworksPolicyTest(base.BasePolicyTest):
 
     @mock.patch('nova.network.neutron.API.get')
     def test_show_network_policy(self, mock_get):
+        mock_get.return_value = {'id': uuids.network_id, 'name': 'foo'}
         rule_name = "os_compute_api:os-networks:show"
         self.common_policy_auth(self.project_reader_authorized_contexts,
                                 rule_name, self.controller.show,
@@ -83,10 +88,11 @@ class NetworksNoLegacyNoScopePolicyTest(NetworksPolicyTest):
         # to get network.
         self.project_reader_authorized_contexts = [
             self.legacy_admin_context, self.system_admin_context,
-            self.project_admin_context, self.project_member_context,
-            self.project_reader_context,
+            self.project_admin_context, self.project_manager_context,
+            self.project_member_context, self.project_reader_context,
             self.other_project_reader_context,
             self.system_member_context, self.system_reader_context,
+            self.other_project_manager_context,
             self.other_project_member_context
         ]
 
@@ -107,9 +113,12 @@ class NetworksScopeTypePolicyTest(NetworksPolicyTest):
         self.flags(enforce_scope=True, group="oslo_policy")
         self.project_reader_authorized_contexts = [
             self.legacy_admin_context, self.project_admin_context,
-            self.project_member_context, self.project_reader_context,
-            self.project_foo_context, self.other_project_reader_context,
-            self.other_project_member_context
+            self.project_manager_context, self.project_member_context,
+            self.project_reader_context, self.project_foo_context,
+            self.other_project_manager_context,
+            self.other_project_reader_context,
+            self.other_project_member_context,
+            self.service_context
         ]
 
 
@@ -128,7 +137,9 @@ class NetworksScopeTypeNoLegacyPolicyTest(NetworksScopeTypePolicyTest):
         super(NetworksScopeTypeNoLegacyPolicyTest, self).setUp()
         self.project_reader_authorized_contexts = [
             self.legacy_admin_context, self.project_admin_context,
-            self.project_member_context, self.project_reader_context,
+            self.project_manager_context, self.project_member_context,
+            self.project_reader_context,
+            self.other_project_manager_context,
             self.other_project_member_context,
             self.other_project_reader_context,
         ]

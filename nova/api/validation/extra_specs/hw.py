@@ -278,7 +278,7 @@ cpu_topology_validators = [
     base.ExtraSpecValidator(
         name='hw:cpu_sockets',
         description=(
-            'The number of virtual CPU threads to emulate in the guest '
+            'The number of virtual CPU sockets to emulate in the guest '
             'CPU topology. '
             'Defaults to the number of vCPUs requested. '
             'Only supported by the libvirt virt driver.'
@@ -318,9 +318,9 @@ cpu_topology_validators = [
         },
     ),
     base.ExtraSpecValidator(
-        name='hw:max_cpu_sockets',
+        name='hw:cpu_max_sockets',
         description=(
-            'The max number of virtual CPU threads to emulate in the '
+            'The max number of virtual CPU sockets to emulate in the '
             'guest CPU topology. '
             'This is used to limit the topologies that can be requested by '
             'an image and will be used to validate the ``hw_cpu_sockets`` '
@@ -334,7 +334,7 @@ cpu_topology_validators = [
         },
     ),
     base.ExtraSpecValidator(
-        name='hw:max_cpu_cores',
+        name='hw:cpu_max_cores',
         description=(
             'The max number of virtual CPU cores to emulate per socket in the '
             'guest CPU topology. '
@@ -350,7 +350,7 @@ cpu_topology_validators = [
         },
     ),
     base.ExtraSpecValidator(
-        name='hw:max_cpu_threads',
+        name='hw:cpu_max_threads',
         description=(
             'The max number of virtual CPU threads to emulate per core in the '
             'guest CPU topology. '
@@ -405,6 +405,22 @@ feature_flag_validators = [
         value={
             'type': bool,
             'description': 'Whether to enable memory encryption',
+        },
+    ),
+    base.ExtraSpecValidator(
+        name='hw:mem_encryption_model',
+        description=(
+            'CPU feature used for memory encryption of the guest. '
+            'This has no effect unless hw:mem_encryption (or equivalent '
+            'image property) is set to True.'
+        ),
+        value={
+            'type': str,
+            'description': 'A CPU feature used for memory encryption',
+            'enum': [
+                'amd-sev',
+                'amd-sev-es',
+            ],
         },
     ),
     base.ExtraSpecValidator(
@@ -537,6 +553,46 @@ feature_flag_validators = [
         value={
             'type': bool,
             'description': 'Whether to enable packed virtqueue',
+        },
+    ),
+    base.ExtraSpecValidator(
+        name='hw:sound_model',
+        description=(
+            'The model of the attached sound device. '
+            'Only supported by the libvirt virt driver. '
+            'If unset, no sound device is attached.'
+        ),
+        value={
+            'type': str,
+            'description': 'A sound model',
+            'enum': fields.SoundModelType.ALL,
+        },
+    ),
+    base.ExtraSpecValidator(
+        name='hw:usb_model',
+        description=(
+            'The model of the attached USB controller device. '
+            'Only supported by the libvirt virt driver. '
+            'If unset, no USB controller device is attached.'
+        ),
+        value={
+            'type': str,
+            'description': 'A USB controller model',
+            'enum': fields.USBControllerModelType.ALL,
+        },
+    ),
+    base.ExtraSpecValidator(
+        name='hw:redirected_usb_ports',
+        description=(
+            'The number of redirected USB ports to add to the virtual '
+            'machine. Only supported by the libvirt virt driver. If unset, '
+            'no redirected USB ports are added. The maximum value is 15.'
+        ),
+        value={
+            'type': int,
+            'description': 'The number of USB redirection devices to add',
+            'min': 0,
+            'max': 15
         },
     ),
 ]

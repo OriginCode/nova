@@ -48,6 +48,10 @@ class VTPMConfig(ty.NamedTuple):
     model: str
 
 
+class MemEncryptionConfig(ty.NamedTuple):
+    model: str
+
+
 def get_vcpu_pin_set():
     """Parse ``vcpu_pin_set`` config.
 
@@ -918,7 +922,7 @@ def _pack_instance_onto_cores(host_cell, instance_cell,
 def _numa_fit_instance_cell(
     host_cell: 'objects.NUMACell',
     instance_cell: 'objects.InstanceNUMACell',
-    limits: ty.Optional['objects.NUMATopologyLimit'] = None,
+    limits: ty.Optional['objects.NUMATopologyLimits'] = None,
     cpuset_reserved: int = 0,
 ) -> ty.Optional['objects.InstanceNUMACell']:
     """Ensure an instance cell can fit onto a host cell
@@ -929,7 +933,7 @@ def _numa_fit_instance_cell(
 
     :param host_cell: host cell to fit the instance cell onto
     :param instance_cell: instance cell we want to fit
-    :param limits: an objects.NUMATopologyLimit or None
+    :param limits: an objects.NUMATopologyLimits or None
     :param cpuset_reserved: An int to indicate the number of CPUs overhead
 
     :returns: objects.InstanceNUMACell with the id set to that of the
@@ -1157,10 +1161,9 @@ def get_mem_encryption_constraint(
     flavor: 'objects.Flavor',
     image_meta: 'objects.ImageMeta',
     machine_type: ty.Optional[str] = None,
-) -> bool:
-    """Return a boolean indicating whether encryption of guest memory was
-    requested, either via the hw:mem_encryption extra spec or the
-    hw_mem_encryption image property (or both).
+) -> ty.Optional[MemEncryptionConfig]:
+    """Return memory encryption context requested either via flavor extra specs
+    or image properties (or both).
 
     Also watch out for contradictory requests between the flavor and
     image regarding memory encryption, and raise an exception where
@@ -1188,8 +1191,7 @@ def get_mem_encryption_constraint(
     :param machine_type: a string representing the machine type (optional)
     :raises: nova.exception.FlavorImageConflict
     :raises: nova.exception.InvalidMachineType
-    :returns: boolean indicating whether encryption of guest memory
-    was requested
+    :returns: A named tuple containing the memory encryption model, else None.
     """
 
     flavor_mem_enc_str, image_mem_enc = _get_flavor_image_meta(
@@ -1203,7 +1205,7 @@ def get_mem_encryption_constraint(
     # boolean is handled automatically
 
     if not flavor_mem_enc and not image_mem_enc:
-        return False
+        return None
 
     _check_for_mem_encryption_requirement_conflicts(
         flavor_mem_enc_str, flavor_mem_enc, image_mem_enc, flavor, image_meta)
@@ -1215,20 +1217,53 @@ def get_mem_encryption_constraint(
     # encryption enabled, image_meta has no id key. See bug #2041511.
     # So we check whether id exists. If there is no value, we set it
     # to a sentinel value we can detect later. i.e. '<no-id>'.
-    requesters = []
+    enc_requesters = []
     if flavor_mem_enc:
-        requesters.append("hw:mem_encryption extra spec in %s flavor" %
-                          flavor.name)
+        enc_requesters.append("hw:mem_encryption extra spec in %s flavor" %
+                              flavor.name)
     if image_mem_enc:
         image_id = (image_meta.id if 'id' in image_meta else '<no-id>')
-        requesters.append("hw_mem_encryption property of image %s" %
-                          image_id)
+        enc_requesters.append("hw_mem_encryption property of image %s" %
+                              image_id)
 
-    _check_mem_encryption_uses_uefi_image(requesters, image_meta)
+    _check_mem_encryption_uses_uefi_image(enc_requesters, image_meta)
     _check_mem_encryption_machine_type(image_meta, machine_type)
 
-    LOG.debug("Memory encryption requested by %s", " and ".join(requesters))
-    return True
+    LOG.debug("Memory encryption requested by %s",
+              " and ".join(enc_requesters))
+
+    flavor_mem_enc_model, image_mem_enc_model = _get_flavor_image_meta(
+        'mem_encryption_model', flavor, image_meta)
+    _check_for_mem_encryption_model_conflicts(
+        flavor_mem_enc_model, image_mem_enc_model, flavor, image_meta)
+
+    mem_enc_model = None
+    model_requesters = []
+    if flavor_mem_enc_model:
+        mem_enc_model = flavor_mem_enc_model
+        model_requesters.append(
+            "hw:mem_encryption_model extra spec in %s flavor" % flavor.name)
+    if image_mem_enc_model:
+        mem_enc_model = image_mem_enc_model
+        image_id = (image_meta.id if 'id' in image_meta else '<no-id>')
+        model_requesters.append(
+            "hw_mem_encryption_model property of image %s" % image_id)
+
+    if not mem_enc_model:
+        return MemEncryptionConfig(model=fields.MemEncryptionModel.AMD_SEV)
+
+    LOG.debug("Memory encryption model requested by %s",
+              " and ".join(model_requesters))
+
+    if mem_enc_model not in fields.MemEncryptionModel.ALL:
+        raise exception.Invalid(
+            ("Invalid memory encryption model %(model)r. "
+             "Allowed values: %(valid)s.") %
+            {'model': mem_enc_model,
+             'valid': ', '.join(fields.MemEncryptionModel.ALL)}
+        )
+
+    return MemEncryptionConfig(model=mem_enc_model)
 
 
 def _check_for_mem_encryption_requirement_conflicts(
@@ -1251,6 +1286,31 @@ def _check_for_mem_encryption_requirement_conflicts(
             'flavor_val': flavor_mem_enc_str,
             'image_name': image_name,
             'image_val': image_mem_enc,
+        }
+        raise exception.FlavorImageConflict(emsg % data)
+
+
+def _check_for_mem_encryption_model_conflicts(
+        flavor_mem_enc_model, image_mem_enc_model, flavor, image_meta):
+    # Check for conflicts between explicit requirements regarding
+    # memory encryption model.
+    if (flavor_mem_enc_model is not None and
+            image_mem_enc_model is not None and
+            flavor_mem_enc_model != image_mem_enc_model):
+        emsg = _(
+            "Flavor %(flavor_name)s has hw:mem_encryption_model extra "
+            "spec explicitly set to %(flavor_val)s, conflicting with "
+            "image %(image_name)s which has hw_mem_encryption_model property "
+            "explicitly set to %(image_val)s"
+        )
+        # image_meta.name is not set if image object represents root
+        # Cinder volume.
+        image_name = (image_meta.name if 'name' in image_meta else None)
+        data = {
+            'flavor_name': flavor.name,
+            'flavor_val': flavor_mem_enc_model,
+            'image_name': image_name,
+            'image_val': image_mem_enc_model,
         }
         raise exception.FlavorImageConflict(emsg % data)
 
@@ -1986,14 +2046,18 @@ def get_packed_virtqueue_constraint(
         flavor_key = ':'.join(['hw', key_value])
         image_key = '_'.join(['hw', key_value])
         flavor_value_str = flavor.get('extra_specs', {}).get(flavor_key, None)
-        image_value = image_meta.get('properties', {}).get(image_key, None)
+        image_value_str = image_meta.get('properties', {}).get(image_key, None)
     else:
-        flavor_value_str, image_value = _get_flavor_image_meta(
+        flavor_value_str, image_value_str = _get_flavor_image_meta(
             key_value, flavor, image_meta)
 
     flavor_value = None
     if flavor_value_str is not None:
         flavor_value = strutils.bool_from_string(flavor_value_str)
+
+    image_value = None
+    if image_value_str is not None:
+        image_value = strutils.bool_from_string(image_value_str)
 
     if (
         image_value is not None and
@@ -2432,7 +2496,7 @@ def numa_fit_instance_to_host(
     host_topology: 'objects.NUMATopology',
     instance_topology: 'objects.InstanceNUMATopology',
     provider_mapping: ty.Optional[ty.Dict[str, ty.List[str]]],
-    limits: ty.Optional['objects.NUMATopologyLimit'] = None,
+    limits: ty.Optional['objects.NUMATopologyLimits'] = None,
     pci_requests: ty.Optional['objects.InstancePCIRequests'] = None,
     pci_stats: ty.Optional[stats.PciDeviceStats] = None,
 ):
@@ -2912,3 +2976,90 @@ def check_shares_supported(context, instance):
         )
     ):
         raise exception.ForbiddenSharesNotConfiguredCorrectly()
+
+
+def get_sound_model(
+    flavor: 'objects.Flavor',
+    image_meta: 'objects.ImageMeta',
+) -> ty.Optional[str]:
+    """Get the sound device model, if any.
+
+    :param flavor: ``nova.objects.Flavor`` instance
+    :param image_meta: ``nova.objects.ImageMeta`` instance
+    :raises: nova.exception.FlavorImageConflict if a value is specified in both
+        the flavor and the image, but the values do not match
+    :raises: nova.exception.Invalid if a value or combination of values is
+        invalid
+    :returns: A string containing the device model, else None.
+    """
+    model = _get_unique_flavor_image_meta('sound_model', flavor, image_meta)
+    if model and model not in fields.SoundModelType.ALL:
+        raise exception.Invalid(
+            "Invalid sound device model %(model)r. Allowed values: %(valid)s."
+            % {'model': model, 'valid': ', '.join(fields.SoundModelType.ALL)}
+        )
+
+    return model
+
+
+def get_usb_model(
+    flavor: 'objects.Flavor',
+    image_meta: 'objects.ImageMeta',
+) -> ty.Optional[str]:
+    """Get the USB controller model, if any.
+
+    :param flavor: ``nova.objects.Flavor`` instance
+    :param image_meta: ``nova.objects.ImageMeta`` instance
+    :raises: nova.exception.FlavorImageConflict if a value is specified in both
+        the flavor and the image, but the values do not match
+    :raises: nova.exception.Invalid if a value or combination of values is
+        invalid
+    :returns: A string containing the USB controller model, else None.
+    """
+    model = _get_unique_flavor_image_meta('usb_model', flavor, image_meta)
+    if model and model not in fields.USBControllerModelType.ALL:
+        raise exception.Invalid(
+            'Invalid USB controller model %(model)r. '
+            'Allowed values: %(valid)s.'
+            % {
+                'model': model,
+                'valid': ', '.join(fields.USBControllerModelType.ALL)
+            })
+
+    return model
+
+
+def get_redirected_usb_ports(
+    flavor: 'objects.Flavor',
+    image_meta: 'objects.ImageMeta',
+) -> int:
+    """Get the number of redirected USB ports, if any.
+
+    :param flavor: ``nova.objects.Flavor`` instance
+    :param image_meta: ``nova.objects.ImageMeta`` instance
+    :raises: nova.exception.FlavorImageConflict if a value is specified in both
+        the flavor and the image, but the values do not match
+    :raises: nova.exception.Invalid if a value or combination of values is
+        invalid
+    :returns: An integer number of ports, else 0.
+    """
+    count = _get_unique_flavor_image_meta(
+        'redirected_usb_ports', flavor, image_meta)
+    if not count:
+        count = 0
+    else:
+        try:
+            count = int(count)
+        except ValueError:
+            raise exception.Invalid('"%s" is not a valid integer.' % count)
+
+    if count < 0:
+        raise exception.Invalid(
+            'You cannot have a negative number of USB ports.')
+    elif count > 15:
+        # NOTE(mikal): XHCI controllers only support up to 15 ports. This isn't
+        # documented in the libvirt domain XML documentation at the moment, but
+        # is at https://www.kraxel.org/blog/2018/08/qemu-usb-tips/.
+        raise exception.Invalid('Nova only supports up to 15 USB ports.')
+
+    return count

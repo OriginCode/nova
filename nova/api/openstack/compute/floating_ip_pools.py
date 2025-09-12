@@ -34,6 +34,7 @@ def _translate_floating_ip_pools_view(pools):
     }
 
 
+@validation.validated
 class FloatingIPPoolsController(wsgi.Controller):
     """The Floating IP Pool API controller for the OpenStack API."""
 
@@ -41,7 +42,7 @@ class FloatingIPPoolsController(wsgi.Controller):
         super(FloatingIPPoolsController, self).__init__()
         self.network_api = neutron.API()
 
-    @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
+    @wsgi.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
     @wsgi.expected_errors(())
     @validation.query_schema(schema.index_query)
     @validation.response_body_schema(schema.index_response)

@@ -14,10 +14,9 @@ metadata service supports two sets of APIs - an OpenStack metadata API and an
 EC2-compatible API - and also exposes vendordata and user data. Both the
 OpenStack metadata and EC2-compatible APIs are versioned by date.
 
-The metadata service can be run globally, as part of the :program:`nova-api`
-application, or on a per-cell basis, as part of the standalone
-:program:`nova-api-metadata` application. A detailed comparison is provided in
-the :ref:`cells V2 guide <cells-v2-layout-metadata-api>`.
+The metadata service can be run globally, or on a per-cell basis. A detailed
+comparison is provided in the
+:ref:`cells V2 guide <cells-v2-layout-metadata-api>`.
 
 .. versionchanged:: 19.0.0
 
@@ -71,8 +70,6 @@ Configuration
 The :program:`nova-api` application accepts the following metadata
 service-related options:
 
-- :oslo.config:option:`enabled_apis`
-- :oslo.config:option:`enabled_ssl_apis`
 - :oslo.config:option:`neutron.service_metadata_proxy`
 - :oslo.config:option:`neutron.metadata_proxy_shared_secret`
 - :oslo.config:option:`api.metadata_cache_expiration`
@@ -91,13 +88,6 @@ following to a :file:`nova-api.conf` file:
 
 .. code-block:: ini
 
-    [DEFAULT]
-    enabled_apis = osapi_compute,metadata
-    enabled_ssl_apis =
-    metadata_listen = 0.0.0.0
-    metadata_listen_port = 0
-    metadata_workers = 4
-
     [neutron]
     service_metadata_proxy = True
 
@@ -111,8 +101,7 @@ following to a :file:`nova-api.conf` file:
 .. note::
 
     This does not include configuration options that are not metadata-specific
-    but are nonetheless required, such as
-    :oslo.config:option:`api.auth_strategy`.
+    but are nonetheless required.
 
 Configuring the application to use the ``DynamicJSON`` vendordata provider is
 more involved and is not covered here.
@@ -137,11 +126,6 @@ file:
 
 .. code-block:: ini
 
-    [DEFAULT]
-    metadata_listen = 0.0.0.0
-    metadata_listen_port = 0
-    metadata_workers = 4
-
     [neutron]
     service_metadata_proxy = True
 
@@ -153,8 +137,7 @@ file:
 .. note::
 
     This does not include configuration options that are not metadata-specific
-    but are nonetheless required, such as
-    :oslo.config:option:`api.auth_strategy`.
+    but are nonetheless required.
 
 For information about configuring the neutron side of the metadata service,
 refer to the :neutron-doc:`neutron configuration guide

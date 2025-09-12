@@ -28,6 +28,7 @@ removed from Nova in the 29.0.0 (Caracal) release.
 """
 
 
+@validation.validated
 class RemoteConsolesController(wsgi.Controller):
     def __init__(self):
         super(RemoteConsolesController, self).__init__()
@@ -37,7 +38,7 @@ class RemoteConsolesController(wsgi.Controller):
                          'serial': self.compute_api.get_serial_console,
                          'mks': self.compute_api.get_mks_console}
 
-    @wsgi.Controller.api_version("2.1", "2.5")
+    @wsgi.api_version("2.1", "2.5")
     @wsgi.expected_errors((400, 404, 409, 501))
     @wsgi.action('os-getVNCConsole')
     @validation.schema(schema.get_vnc_console)
@@ -69,7 +70,7 @@ class RemoteConsolesController(wsgi.Controller):
 
         return {'console': {'type': console_type, 'url': output['url']}}
 
-    @wsgi.Controller.api_version("2.1", "2.5")
+    @wsgi.api_version("2.1", "2.5")
     @wsgi.expected_errors((400, 404, 409, 501))
     @wsgi.action('os-getSPICEConsole')
     @validation.schema(schema.get_spice_console)
@@ -98,18 +99,19 @@ class RemoteConsolesController(wsgi.Controller):
 
         return {'console': {'type': console_type, 'url': output['url']}}
 
-    @wsgi.Controller.api_version("2.1", "2.5")
+    @wsgi.api_version("2.1", "2.5")
     @wsgi.expected_errors((400, 404, 409, 501))
     @wsgi.action('os-getRDPConsole')
     @wsgi.removed('29.0.0', _rdp_console_removal_reason)
     @validation.schema(schema.get_rdp_console)
+    @validation.response_body_schema(schema.get_rdp_console_response)
     def get_rdp_console(self, req, id, body):
         """RDP console was available only for HyperV driver which has been
         removed from Nova in 29.0.0 (Caracal) release.
         """
         raise webob.exc.HTTPBadRequest()
 
-    @wsgi.Controller.api_version("2.1", "2.5")
+    @wsgi.api_version("2.1", "2.5")
     @wsgi.expected_errors((400, 404, 409, 501))
     @wsgi.action('os-getSerialConsole')
     @validation.schema(schema.get_serial_console)
@@ -140,11 +142,14 @@ class RemoteConsolesController(wsgi.Controller):
 
         return {'console': {'type': console_type, 'url': output['url']}}
 
-    @wsgi.Controller.api_version("2.6")
+    @wsgi.api_version("2.6")
     @wsgi.expected_errors((400, 404, 409, 501))
     @validation.schema(schema.create_v26, "2.6", "2.7")
     @validation.schema(schema.create_v28, "2.8", "2.98")
     @validation.schema(schema.create_v299, "2.99")
+    @validation.response_body_schema(schema.create_response, "2.6", "2.7")
+    @validation.response_body_schema(schema.create_response_v28, "2.8", "2.98")
+    @validation.response_body_schema(schema.create_response_v299, "2.99")
     def create(self, req, server_id, body):
         context = req.environ['nova.context']
         instance = common.get_instance(self.compute_api, context, server_id)
@@ -152,13 +157,21 @@ class RemoteConsolesController(wsgi.Controller):
                     target={'project_id': instance.project_id})
         protocol = body['remote_console']['protocol']
         console_type = body['remote_console']['type']
+
+        # handle removed console types
+        if protocol in ('rdp',):
+            raise webob.exc.HTTPBadRequest(
+                'Unavailable console type %s.' % protocol
+            )
+
         try:
-            handler = self.handlers.get(protocol)
+            # this should never fail in the real world since our schema
+            # prevents unsupported types getting through
+            handler = self.handlers[protocol]
             output = handler(context, instance, console_type)
             return {'remote_console': {'protocol': protocol,
                                        'type': console_type,
                                        'url': output['url']}}
-
         except exception.InstanceNotFound as e:
             raise webob.exc.HTTPNotFound(explanation=e.format_message())
         except exception.InstanceNotReady as e:
@@ -169,5 +182,5 @@ class RemoteConsolesController(wsgi.Controller):
                 exception.ImageSerialPortNumberExceedFlavorValue,
                 exception.SocketPortRangeExhaustedException) as e:
             raise webob.exc.HTTPBadRequest(explanation=e.format_message())
-        except NotImplementedError:
+        except (NotImplementedError, KeyError):
             common.raise_feature_not_supported()

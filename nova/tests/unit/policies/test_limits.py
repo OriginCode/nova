@@ -127,9 +127,12 @@ class LimitsScopeTypePolicyTest(LimitsPolicyTest):
             self.legacy_admin_context, self.project_admin_context]
         self.everyone_authorized_contexts = [
             self.legacy_admin_context, self.project_admin_context,
-            self.project_member_context, self.project_reader_context,
+            self.project_manager_context, self.project_member_context,
+            self.project_reader_context,
+            self.other_project_manager_context,
             self.other_project_member_context,
-            self.project_foo_context, self.other_project_reader_context
+            self.project_foo_context, self.other_project_reader_context,
+            self.service_context,
         ]
 
 
@@ -151,7 +154,10 @@ class LimitsScopeTypeNoLegacyPolicyTest(LimitsScopeTypePolicyTest):
             self.legacy_admin_context, self.project_admin_context]
         self.everyone_authorized_contexts = [
             self.legacy_admin_context, self.project_admin_context,
-            self.project_member_context, self.project_reader_context,
+            self.project_manager_context, self.project_member_context,
+            self.project_reader_context,
+            self.other_project_manager_context,
             self.other_project_member_context,
-            self.project_foo_context, self.other_project_reader_context
+            self.project_foo_context, self.other_project_reader_context,
+            self.service_context,
         ]

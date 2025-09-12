@@ -20,8 +20,9 @@ Allows overriding of flags for use of fakes, and some black magic for
 inline callbacks.
 
 """
-
-import nova.monkey_patch  # noqa
+# autopep8: off
+from nova import monkey_patch ; monkey_patch.patch()  # noqa
+# autopep8: on
 
 import abc
 import builtins
@@ -61,6 +62,7 @@ from nova.db.main import api as db_api
 from nova import exception
 from nova import objects
 from nova.objects import base as objects_base
+from nova.pci import request
 from nova import quota
 from nova.scheduler.client import report
 from nova.scheduler import utils as scheduler_utils
@@ -189,11 +191,15 @@ class TestCase(base.BaseTestCase):
         self.useFixture(
             nova_fixtures.PropagateTestCaseIdToChildEventlets(self.id()))
 
+        # Ensure that the pci alias is reset between test cases running in
+        # the same process
+        request.get_alias_from_config.cache_clear()
+
         # How many of which service we've started. {$service-name: $count}
         self._service_fixture_count = collections.defaultdict(int)
 
         self.useFixture(nova_fixtures.OpenStackSDKFixture())
-        self.useFixture(nova_fixtures.IsolatedGreenPoolFixture(self.id()))
+        self.useFixture(nova_fixtures.IsolatedExecutorFixture(self.id()))
 
         self.useFixture(log_fixture.get_logging_handle_error_fixture())
 
@@ -304,6 +310,7 @@ class TestCase(base.BaseTestCase):
         # make sure that the wsgi app is fully initialized for all testcase
         # instead of only once initialized for test worker
         wsgi_app.init_global_data.reset()
+        wsgi_app.init_application.reset()
 
         # Reset the placement client singleton
         report.PLACEMENTCLIENT = None
@@ -319,7 +326,7 @@ class TestCase(base.BaseTestCase):
         # all other tests.
         scheduler_utils.reset_globals()
 
-        # Wait for bare greenlets spawn_n()'ed from a GreenThreadPoolExecutor
+        # Wait for bare greenlets spawn()'ed from a GreenThreadPoolExecutor
         # to finish before moving on from the test. When greenlets from a
         # previous test remain running, they may attempt to access structures
         # (like the database) that have already been torn down and can cause
@@ -329,8 +336,8 @@ class TestCase(base.BaseTestCase):
         # Reset the global key manager
         nova.crypto._KEYMGR = None
 
-        # Reset the global endpoint
-        nova.limit.utils.ENDPOINT = None
+        # Reset the global identity client
+        nova.limit.utils.IDENTITY_CLIENT = None
 
     def _setup_cells(self):
         """Setup a normal cellsv2 environment.
@@ -424,6 +431,10 @@ class TestCase(base.BaseTestCase):
         group = kw.pop('group', None)
         for k, v in kw.items():
             CONF.set_override(k, v, group)
+            # loading and validating alias is cached so if it is reconfigured
+            # we need to reset the cache
+            if k == 'alias' and group == 'pci':
+                request.get_alias_from_config.cache_clear()
 
     def reset_flags(self, *k, **kw):
         """Reset flag variables for a test."""

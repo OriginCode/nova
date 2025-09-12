@@ -15,8 +15,7 @@
 import datetime
 import hashlib
 import os
-import os.path
-import tempfile
+import threading
 from unittest import mock
 
 import fixtures
@@ -28,11 +27,13 @@ from openstack import exceptions as sdk_exc
 from oslo_config import cfg
 from oslo_context import context as common_context
 from oslo_context import fixture as context_fixture
+import oslo_service.backend as oslo_backend
 from oslo_utils import encodeutils
 from oslo_utils import fixture as utils_fixture
 
 from nova import context
 from nova import exception
+from nova import monkey_patch
 from nova.objects import base as obj_base
 from nova.objects import instance as instance_obj
 from nova.objects import service as service_obj
@@ -145,14 +146,6 @@ class GenericUtilsTestCase(test.NoDBTestCase):
                          if c in 'abcdefghijklmnopqrstuvwxyz'])
         self.assertTrue([c for c in password
                          if c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'])
-
-    @mock.patch('nova.privsep.path.chown')
-    def test_temporary_chown(self, mock_chown):
-        with tempfile.NamedTemporaryFile() as f:
-            with utils.temporary_chown(f.name, owner_uid=2):
-                mock_chown.assert_called_once_with(f.name, uid=2)
-                mock_chown.reset_mock()
-            mock_chown.assert_called_once_with(f.name, uid=os.getuid())
 
     def test_get_shortened_ipv6(self):
         self.assertEqual("abcd:ef01:2345:6789:abcd:ef01:c0a8:fefe",
@@ -755,13 +748,12 @@ class SafeTruncateTestCase(test.NoDBTestCase):
         self.assertEqual(254, len(byte_message))
 
 
-class SpawnNTestCase(test.NoDBTestCase):
+class SpawnTestCase(test.NoDBTestCase):
     def setUp(self):
-        super(SpawnNTestCase, self).setUp()
+        super(SpawnTestCase, self).setUp()
         self.useFixture(context_fixture.ClearRequestContext())
-        self.spawn_name = 'spawn_n'
 
-    def test_spawn_n_no_context(self):
+    def test_spawn_no_context(self):
         self.assertIsNone(common_context.get_current())
 
         def _fake_spawn(func, *args, **kwargs):
@@ -771,12 +763,12 @@ class SpawnNTestCase(test.NoDBTestCase):
 
         def fake(arg):
             pass
-        pool = utils._get_default_green_pool()
-        with mock.patch.object(pool, self.spawn_name, _fake_spawn):
-            getattr(utils, self.spawn_name)(fake, 'test')
+        executor = utils._get_default_executor()
+        with mock.patch.object(executor, "submit", _fake_spawn):
+            getattr(utils, "spawn")(fake, 'test')
         self.assertIsNone(common_context.get_current())
 
-    def test_spawn_n_context(self):
+    def test_spawn_context(self):
         self.assertIsNone(common_context.get_current())
         ctxt = context.RequestContext('user', 'project')
 
@@ -789,12 +781,12 @@ class SpawnNTestCase(test.NoDBTestCase):
         def fake(context, kwarg1=None):
             pass
 
-        pool = utils._get_default_green_pool()
-        with mock.patch.object(pool, self.spawn_name, _fake_spawn):
-            getattr(utils, self.spawn_name)(fake, ctxt, kwarg1='test')
+        executor = utils._get_default_executor()
+        with mock.patch.object(executor, "submit", _fake_spawn):
+            getattr(utils, "spawn")(fake, ctxt, kwarg1='test')
         self.assertEqual(ctxt, common_context.get_current())
 
-    def test_spawn_n_context_different_from_passed(self):
+    def test_spawn_context_different_from_passed(self):
         self.assertIsNone(common_context.get_current())
         ctxt = context.RequestContext('user', 'project')
         ctxt_passed = context.RequestContext('user', 'project',
@@ -810,37 +802,10 @@ class SpawnNTestCase(test.NoDBTestCase):
         def fake(context, kwarg1=None):
             pass
 
-        pool = utils._get_default_green_pool()
-        with mock.patch.object(pool, self.spawn_name, _fake_spawn):
-            getattr(utils, self.spawn_name)(fake, ctxt_passed, kwarg1='test')
+        executor = utils._get_default_executor()
+        with mock.patch.object(executor, "submit", _fake_spawn):
+            getattr(utils, "spawn")(fake, ctxt_passed, kwarg1='test')
         self.assertEqual(ctxt, common_context.get_current())
-
-
-class SpawnTestCase(SpawnNTestCase):
-    def setUp(self):
-        super(SpawnTestCase, self).setUp()
-        self.spawn_name = 'spawn'
-
-
-class UT8TestCase(test.NoDBTestCase):
-    def test_none_value(self):
-        self.assertIsInstance(utils.utf8(None), type(None))
-
-    def test_bytes_value(self):
-        some_value = b"fake data"
-        return_value = utils.utf8(some_value)
-        # check that type of returned value doesn't changed
-        self.assertIsInstance(return_value, type(some_value))
-        self.assertEqual(some_value, return_value)
-
-    def test_not_text_type(self):
-        return_value = utils.utf8(1)
-        self.assertEqual(b"1", return_value)
-        self.assertIsInstance(return_value, bytes)
-
-    def test_text_type_with_encoding(self):
-        some_value = 'test\u2026config'
-        self.assertEqual(some_value, utils.utf8(some_value).decode("utf-8"))
 
 
 class TestObjectCallHelpers(test.NoDBTestCase):
@@ -1398,3 +1363,331 @@ class RunOnceTests(test.NoDBTestCase):
         self.assertRaises(ValueError, f.reset)
         self.assertFalse(f.called)
         mock_clean.assert_called_once_with()
+
+
+class LatchErrorOnRaiseTests(test.NoDBTestCase):
+
+    error = test.TestingException()
+    unrecoverable = ValueError('some error')
+
+    @utils.latch_error_on_raise(retryable=(test.TestingException,))
+    def dummy_test_func(self, error=None):
+        if error:
+            raise error
+        return True
+
+    def setUp(self):
+        super().setUp()
+        self.dummy_test_func.reset()
+
+    @mock.patch.object(utils.LOG, 'exception')
+    def test_wrapped_success(self, fake_logger):
+        self.assertTrue(self.dummy_test_func())
+        fake_logger.assert_not_called()
+        self.assertIsNone(self.dummy_test_func.error)
+
+    @mock.patch.object(utils.LOG, 'exception')
+    def test_wrapped_raises_recoverable(self, fake_logger):
+        expected = LatchErrorOnRaiseTests.error
+        e = self.assertRaises(
+            type(expected), self.dummy_test_func, error=expected)
+        self.assertIs(expected, e)
+        # we just leave recoverable exception flow though the decorator
+        # without catching them so the logger should not be called by the
+        # decorator
+        fake_logger.assert_not_called()
+        self.assertIsNone(self.dummy_test_func.error)
+        self.assertTrue(self.dummy_test_func())
+
+    @mock.patch.object(utils.LOG, 'exception')
+    def test_wrapped_raises_unrecoverable(self, fake_logger):
+        expected = LatchErrorOnRaiseTests.unrecoverable
+        e = self.assertRaises(
+            type(expected), self.dummy_test_func, error=expected)
+        self.assertIs(expected, e)
+        fake_logger.assert_called_once_with(expected)
+        self.assertIsNotNone(self.dummy_test_func.error)
+        self.assertIs(self.dummy_test_func.error, expected)
+
+    @mock.patch.object(utils.LOG, 'exception', new=mock.MagicMock())
+    def test_wrapped_raises_forever(self):
+        expected = LatchErrorOnRaiseTests.unrecoverable
+        first = self.assertRaises(
+            type(expected), self.dummy_test_func, error=expected)
+        self.assertIs(expected, first)
+        second = self.assertRaises(
+            type(expected), self.dummy_test_func, error=expected)
+        self.assertIs(first, second)
+
+
+class ScatterGatherExecutorTestCase(test.NoDBTestCase):
+    def test_executor_is_named(self):
+        executor = utils.get_scatter_gather_executor()
+        # NOTE(gibi): The executor is name both in normal run and in the test
+        # env. During testing we use a test-case-specific name, outside
+        # of test we use process name specific name instead. The test case
+        # specific name is added to help troubleshooting leaked executors
+        # between test case.
+        self.assertRegex(executor.name,
+            "nova.tests.unit.test_utils.ScatterGatherExecutor.*"
+            "test_executor_is_named.cell_worker")
+
+    @mock.patch.object(
+        utils, 'concurrency_mode_threading', new=mock.Mock(return_value=False))
+    def test_executor_type_eventlet(self):
+        executor = utils.get_scatter_gather_executor()
+
+        self.assertEqual('GreenThreadPoolExecutor', type(executor).__name__)
+
+    @mock.patch.object(
+        utils, 'concurrency_mode_threading', new=mock.Mock(return_value=True))
+    def test_executor_type_and_size_threading(self):
+        self.flags(cell_worker_thread_pool_size=13)
+        executor = utils.get_scatter_gather_executor()
+
+        self.assertEqual('ThreadPoolExecutor', type(executor).__name__)
+        self.assertEqual(13, executor._max_workers)
+
+    def test_executor_destroy(self):
+        executor = utils.get_scatter_gather_executor()
+        self.assertIsNotNone(utils.SCATTER_GATHER_EXECUTOR)
+
+        utils.destroy_scatter_gather_executor()
+        self.assertIsNone(utils.SCATTER_GATHER_EXECUTOR)
+        self.assertFalse(executor.alive)
+
+
+class DefaultExecutorTestCase(test.NoDBTestCase):
+    def test_executor_is_named(self):
+        executor = utils._get_default_executor()
+        # NOTE(gibi): The executor is name both in normal run and in the test
+        # env. During testing we use a test-case-specific name, outside
+        # of test we use process name specific name instead. The test case
+        # specific name is added to help troubleshooting leaked executors
+        # between test case.
+        self.assertRegex(executor.name,
+            "nova.tests.unit.test_utils.DefaultExecutor.*"
+            "test_executor_is_named.default")
+
+    @mock.patch.object(
+        utils, 'concurrency_mode_threading', new=mock.Mock(return_value=False))
+    def test_executor_type_and_size_eventlet(self):
+        self.flags(default_green_pool_size=113)
+        executor = utils._get_default_executor()
+
+        self.assertEqual('GreenThreadPoolExecutor', type(executor).__name__)
+        self.assertEqual(113, executor._max_workers)
+
+    @mock.patch.object(
+        utils, 'concurrency_mode_threading', new=mock.Mock(return_value=True))
+    def test_executor_type_and_size_threading(self):
+        self.flags(default_thread_pool_size=13)
+        executor = utils._get_default_executor()
+
+        self.assertEqual('ThreadPoolExecutor', type(executor).__name__)
+        self.assertEqual(13, executor._max_workers)
+
+    def test_executor_destroy(self):
+        executor = utils._get_default_executor()
+        self.assertIsNotNone(utils.DEFAULT_EXECUTOR)
+
+        utils.destroy_default_executor()
+        self.assertIsNone(utils.DEFAULT_EXECUTOR)
+        self.assertFalse(executor.alive)
+
+
+class SpawnOnTestCase(test.NoDBTestCase):
+    def test_spawn_on_submits_work(self):
+        executor = utils.get_scatter_gather_executor()
+        task = mock.MagicMock()
+
+        future = utils.spawn_on(executor, task, 13, foo='bar')
+        future.result()
+
+        task.assert_called_once_with(13, foo='bar')
+
+    @mock.patch.object(
+        utils, 'concurrency_mode_threading', new=mock.Mock(return_value=True))
+    @mock.patch.object(utils.LOG, 'warning')
+    def test_spawn_on_warns_on_full_executor(self, mock_warning):
+        # Ensure we have executor for a single task only at a time
+        self.flags(cell_worker_thread_pool_size=1)
+        executor = utils.get_scatter_gather_executor()
+
+        work = threading.Event()
+        started = threading.Event()
+
+        # let the blocked tasks finish after the test case so that the leaked
+        # thread check is not triggered during cleanup
+        self.addCleanup(work.set)
+
+        def task():
+            started.set()
+            work.wait()
+
+        # Start two tasks that will wait, the first will execute the second
+        # will wait in the queue
+        utils.spawn_on(executor, task)
+        utils.spawn_on(executor, task)
+        # wait for the first task to consume the single executor thread
+        started.wait()
+        # start one more task to trigger the fullness check.
+        utils.spawn_on(executor, task)
+
+        # We expect that spawn_on will warn due to the second task being is
+        # waiting in the queue, and no idle worker thread exists.
+        mock_warning.assert_called_once_with(
+            'The %s pool does not have free threads so the task %s will be '
+            'queued. If this happens repeatedly then the size of the pool is '
+            'too small for the load or there are stuck threads filling the '
+            'pool.',
+            'nova.tests.unit.test_utils.SpawnOnTestCase.'
+            'test_spawn_on_warns_on_full_executor.cell_worker', task)
+
+
+class ExecutorStatsTestCase(test.NoDBTestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.work = threading.Event()
+
+    def _task_finishes(self):
+        return
+
+    def _task_fails(self):
+        raise ValueError()
+
+    def _task_running(self):
+        self.work.wait()
+
+    @mock.patch.object(
+        utils, 'concurrency_mode_threading', new=mock.Mock(return_value=False))
+    @mock.patch.object(utils.LOG, 'debug')
+    def test_stats_logged_eventlet(self, mock_debug):
+        # ensure that each task submission triggers stats printing
+        self.flags(thread_pool_statistic_period=0)
+
+        utils.spawn(self._task_finishes).result()
+        utils.spawn(self._task_fails).exception()
+        running = utils.spawn(self._task_running)
+
+        # avoid having a hanging thread leaking from the test case
+        def cleanup():
+            self.work.set()
+            running.result()
+
+        self.addCleanup(cleanup)
+
+        # The stats are printed *before* the work is submitted so we need an
+        # extra task submitted to get the stats from the above task.
+        utils.spawn(self._task_finishes).result()
+        print(mock_debug.mock_calls)
+
+        args = mock_debug.mock_calls[3][1]
+        self.assertEqual(
+            ('State of %s GreenThreadPoolExecutor when submitting a new task: '
+             'workers: %d, max_workers: %d, work queued length: %d, stats: %s',
+             'nova.tests.unit.test_utils.ExecutorStatsTestCase.'
+             'test_stats_logged_eventlet.default', 1, 1000, 0),
+            args[0:5])
+        stats = args[5]
+        self.assertEqual(1, stats.failures)
+        self.assertEqual(2, stats.executed)
+        self.assertEqual(0, stats.cancelled)
+
+    @mock.patch.object(
+        utils, 'concurrency_mode_threading', new=mock.Mock(return_value=True))
+    @mock.patch.object(utils.LOG, 'debug')
+    def test_stats_logged_threading(self, mock_debug):
+        # ensure that each task submission triggers stats printing
+        self.flags(thread_pool_statistic_period=0)
+        # make the tasks sequential to help simulating queued task
+        self.flags(default_thread_pool_size=1)
+
+        utils.spawn(self._task_finishes).result()
+        utils.spawn(self._task_fails).exception()
+        running = utils.spawn(self._task_running)
+
+        # avoid having a hanging thread leaking from the test case
+        def cleanup():
+            self.work.set()
+            running.result()
+
+        self.addCleanup(cleanup)
+
+        # this will be queued as the only worker thread is held up by the
+        # running task
+        utils.spawn(self._task_finishes)
+        # this is also queued so we can cancel it to dequeue it
+        utils.spawn(self._task_finishes).cancel()
+        # The stats are printed *before* the work is submitted so we need an
+        # extra task submitted to get the stats from the above task.
+        utils.spawn(self._task_finishes)
+
+        args = mock_debug.mock_calls[5][1]
+        self.assertEqual(
+            ('State of %s ThreadPoolExecutor when submitting a new task: '
+             'max_workers: %d, workers: %d, idle workers: %d, queued work: %d,'
+             ' stats: %s',
+             'nova.tests.unit.test_utils.ExecutorStatsTestCase.'
+             'test_stats_logged_threading.default',
+             1, 1, 1, 3),
+            args[0:6])
+        stats = args[6]
+        self.assertEqual(1, stats.failures)
+        self.assertEqual(2, stats.executed)
+        self.assertEqual(1, stats.cancelled)
+
+    @mock.patch.object(utils.LOG, 'debug')
+    def test_stats_skipped_if_too_frequent(self, mock_debug):
+        self.flags(thread_pool_statistic_period=10)
+        utils.spawn(self._task_finishes).result()
+        mock_debug.assert_called()
+        mock_debug.reset_mock()
+
+        utils.spawn(self._task_finishes).result()
+        mock_debug.assert_not_called()
+
+    @mock.patch.object(utils.LOG, 'debug')
+    def test_stats_skipped_disabled(self, mock_info):
+        self.flags(thread_pool_statistic_period=-1)
+
+        utils.spawn(self._task_finishes).result()
+        mock_info.assert_not_called()
+
+
+class OsloServiceBackendSelectionTestCase(test.NoDBTestCase):
+    def setUp(self):
+        # NOTE(gibi): We need this as the base test class would trigger
+        # monkey patching and would prevent us to test the threading code path
+        self.useFixture(
+            fixtures.MonkeyPatch(
+                "nova.monkey_patch._monkey_patch", lambda: True))
+        super().setUp()
+        origi = monkey_patch.MONKEY_PATCHED
+        monkey_patch.MONKEY_PATCHED = False
+
+        def reset():
+            monkey_patch.MONKEY_PATCHED = origi
+        self.addCleanup(reset)
+
+    @mock.patch('oslo_service.backend.init_backend')
+    def test_eventlet_selected(self, init_backend):
+        monkey_patch.patch()
+
+        init_backend.assert_called_once_with(oslo_backend.BackendType.EVENTLET)
+
+    @mock.patch('oslo_service.backend.init_backend')
+    @mock.patch.dict(os.environ, {"OS_NOVA_DISABLE_EVENTLET_PATCHING": "true"})
+    def test_threading_selected_monkey_patching_poisoned(self, init_backend):
+        monkey_patch.patch()
+
+        init_backend.assert_called_once_with(
+            oslo_backend.BackendType.THREADING)
+        import eventlet
+        ex = self.assertRaises(RuntimeError, eventlet.monkey_patch)
+        self.assertEqual(
+            "The service is started with native threading via "
+            "OS_NOVA_DISABLE_EVENTLET_PATCHING set to 'true', but then the "
+            "service tried to call eventlet.monkey_patch(). This is a bug.",
+            str(ex))

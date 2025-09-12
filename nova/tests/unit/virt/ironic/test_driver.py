@@ -1582,15 +1582,18 @@ class IronicDriverTestCase(test.NoDBTestCase):
 
         self.mock_conn.validate_node.return_value = \
             ironic_utils.get_test_validation(
-                power=_node.ValidationResult(result=False, reason=None),
+                power=_node.ValidationResult(result=False, reason='OVERVOLT'),
                 deploy=_node.ValidationResult(result=False, reason=None),
-                storage=_node.ValidationResult(result=False, reason=None),
+                storage=_node.ValidationResult(result=True, reason=None),
             )
         self.mock_conn.get_node.return_value = node
         image_meta = ironic_utils.get_test_image_meta()
 
-        self.assertRaises(exception.ValidationError, self.driver.spawn,
-                          self.ctx, instance, image_meta, [], None, {})
+        msgre = '.*deploy: None, power: OVERVOLT, storage: No Error.*'
+
+        self.assertRaisesRegex(exception.ValidationError, msgre,
+            self.driver.spawn, self.ctx, instance, image_meta,
+            [], None, {})
         self.mock_conn.get_node.assert_called_once_with(
             node_id, fields=ironic_driver._NODE_FIELDS)
         mock_avti.assert_called_once_with(self.ctx, instance, None)
@@ -2603,7 +2606,7 @@ class IronicDriverSyncTestCase(IronicDriverTestCase):
     def setUp(self):
         super(IronicDriverSyncTestCase, self).setUp()
         self.driver.node_cache = {}
-        # Since the code we're testing runs in a spawn_n green thread, ensure
+        # Since the code we're testing runs in a spawn green thread, ensure
         # that the thread completes.
         self.useFixture(nova_fixtures.SpawnIsSynchronousFixture())
 
@@ -3352,6 +3355,8 @@ class IronicDriverConsoleTestCase(test.NoDBTestCase):
         # mock retries configs to avoid sleeps and make tests run quicker
         CONF.set_default('api_max_retries', default=1, group='ironic')
         CONF.set_default('api_retry_interval', default=0, group='ironic')
+        CONF.set_default(
+            'serial_console_state_timeout', default=1, group='ironic')
 
         self.stub_out('nova.virt.ironic.driver.IronicDriver.'
                       '_validate_instance_and_node',

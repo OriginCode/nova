@@ -31,6 +31,7 @@ from nova.policies import migrate_server as ms_policies
 LOG = logging.getLogger(__name__)
 
 
+@validation.validated
 class MigrateServerController(wsgi.Controller):
     def __init__(self):
         super(MigrateServerController, self).__init__()
@@ -48,8 +49,10 @@ class MigrateServerController(wsgi.Controller):
         instance = common.get_instance(self.compute_api, context, id,
                                        expected_attrs=['flavor', 'services'])
         host_name = None
-        if (api_version_request.is_supported(req, min_version='2.56') and
-            body['migrate'] is not None):
+        if (
+            api_version_request.is_supported(req, '2.56') and
+            body['migrate'] is not None
+        ):
             host_name = body['migrate'].get('host')
 
         if host_name:
@@ -105,16 +108,20 @@ class MigrateServerController(wsgi.Controller):
         instance = common.get_instance(self.compute_api, context, id,
                                        expected_attrs=['numa_topology'])
 
-        context.can(ms_policies.POLICY_ROOT % 'migrate_live',
-                    target={'project_id': instance.project_id})
-
         host = body["os-migrateLive"]["host"]
+        if host:
+            context.can(ms_policies.POLICY_ROOT % 'migrate_live:host',
+                        target={'project_id': instance.project_id})
+        else:
+            context.can(ms_policies.POLICY_ROOT % 'migrate_live',
+                        target={'project_id': instance.project_id})
+
         block_migration = body["os-migrateLive"]["block_migration"]
         force = None
-        async_ = api_version_request.is_supported(req, min_version='2.34')
-        if api_version_request.is_supported(req, min_version='2.30'):
+        async_ = api_version_request.is_supported(req, '2.34')
+        if api_version_request.is_supported(req, '2.30'):
             force = self._get_force_param_for_live_migration(body, host)
-        if api_version_request.is_supported(req, min_version='2.25'):
+        if api_version_request.is_supported(req, '2.25'):
             if block_migration == 'auto':
                 block_migration = None
             else:

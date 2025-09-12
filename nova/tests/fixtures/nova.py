@@ -58,6 +58,7 @@ from nova.db.api import api as api_db_api
 from nova.db.main import api as main_db_api
 from nova.db import migration
 from nova import exception
+from nova import monkey_patch
 from nova import objects
 from nova.objects import base as obj_base
 from nova.objects import service as service_obj
@@ -559,10 +560,11 @@ class CellDatabases(fixtures.Fixture):
     def _wrap_get_server(self, target, endpoints, serializer=None):
         """Mirror rpc.get_server() but with our special sauce."""
         serializer = CheatingSerializer(serializer)
+        exc = "threading" if utils.concurrency_mode_threading() else "eventlet"
         return messaging.get_rpc_server(rpc.TRANSPORT,
                                         target,
                                         endpoints,
-                                        executor='eventlet',
+                                        executor=exc,
                                         serializer=serializer)
 
     def _wrap_get_client(self, target, version_cap=None, serializer=None,
@@ -992,14 +994,13 @@ class OSAPIFixture(fixtures.Fixture):
     """
 
     def __init__(
-        self, api_version='v2', project_id=PROJECT_ID,
+        self, api_version='v2.1', project_id=PROJECT_ID,
         use_project_id_in_urls=False, stub_keystone=True,
     ):
         """Constructor
 
         :param api_version: the API version that we're interested in
-        using. Currently this expects 'v2' or 'v2.1' as possible
-        options.
+            using. Currently this expects 'v2' or 'v2.1' as possible options.
         :param project_id: the project id to use on the API.
         :param use_project_id_in_urls: If True, act like the "endpoint" in the
             "service catalog" has the legacy format including the project_id.
@@ -1020,8 +1021,6 @@ class OSAPIFixture(fixtures.Fixture):
         service_name = 'osapi_compute'
         endpoint = 'http://%s:%s/' % (hostname, port)
         conf_overrides = {
-            'osapi_compute_listen': hostname,
-            'osapi_compute_listen_port': port,
             'debug': True,
         }
         self.useFixture(ConfPatcher(**conf_overrides))
@@ -1106,23 +1105,29 @@ class OSMetadataServer(fixtures.Fixture):
 
     """
 
+    def __init__(self):
+        self.md_url = None
+
     def setUp(self):
         super(OSMetadataServer, self).setUp()
-        # in order to run these in tests we need to bind only to local
-        # host, and dynamically allocate ports
+
+        # A unique hostname for the wsgi-intercept.
+        hostname = uuidsentinel.metadata_host
+        service_name = 'metadata'
+        endpoint = f'http://{hostname}/'
         conf_overrides = {
-            'metadata_listen': '127.0.0.1',
-            'metadata_listen_port': 0,
-            'debug': True
+            'debug': True,
         }
         self.useFixture(ConfPatcher(**conf_overrides))
 
-        self.metadata = service.WSGIService("metadata")
-        self.metadata.start()
-        self.addCleanup(self.metadata.stop)
-        self.md_url = "http://%s:%s/" % (
-            conf_overrides['metadata_listen'],
-            self.metadata.port)
+        loader = wsgi.Loader().load_app(service_name)
+        app = lambda: loader
+
+        intercept = interceptor.RequestsInterceptor(app, url=endpoint)
+        intercept.install_intercept()
+        self.addCleanup(intercept.uninstall_intercept)
+
+        self.md_url = endpoint
 
 
 class PoisonFunctions(fixtures.Fixture):
@@ -1180,118 +1185,133 @@ class IndirectionAPIFixture(fixtures.Fixture):
         self.addCleanup(self.cleanup)
 
 
-class IsolatedGreenPoolFixture(fixtures.Fixture):
-    """isolate each test to a dedicated greenpool.
+class IsolatedExecutorFixture(fixtures.Fixture):
+    """isolate each test to a dedicated executor.
 
-    Replace the default shared greenpool with a pre test greenpool
-    and wait for all greenthreads to finish in test cleanup.
+    Replace the default shared executor with a per test executor
+    and wait for all threads to finish in test cleanup.
     """
 
     def __init__(self, test):
         self.test_case_id = test
 
     def _setUp(self):
-        self.greenpool = eventlet.greenpool.GreenPool()
+        # Just safety that the previous testcase cleaned up after itself
+        assert utils.SCATTER_GATHER_EXECUTOR is None
+        assert utils.DEFAULT_EXECUTOR is None
 
-        def _get_default_green_pool():
-            return self.greenpool
-        # NOTE(sean-k-mooney): greenpools use eventlet.spawn and
-        # eventlet.spawn_n so we can't stub out all calls to those functions.
+        origi_get_scatter_gather = utils.get_scatter_gather_executor
+        origi_default_executor = utils._get_default_executor
+
+        self.executor = None
+        self.scatter_gather_executor = None
+
+        def _get_default_executor():
+            self.executor = origi_default_executor()
+            self.executor.name = f"{self.test_case_id}.default"
+            return self.executor
+        # NOTE(sean-k-mooney): greenpools use eventlet.spawn so we can't stub
+        # out all calls to those functions.
         # Instead since nova only creates greenthreads directly via nova.utils
         # we stub out the default green pool. This will not capture
         # Greenthreads created via the standard lib threading module.
         self.useFixture(fixtures.MonkeyPatch(
-            'nova.utils._get_default_green_pool', _get_default_green_pool))
-        self.addCleanup(self.do_cleanup)
+            'nova.utils._get_default_executor', _get_default_executor))
+        self.addCleanup(lambda: self.do_cleanup_executor(self.executor))
 
-    def do_cleanup(self):
-        running = self.greenpool.running()
-        if running:
-            # kill all greenthreads in the pool before raising to prevent
-            # them from interfering with other tests.
-            for gt in list(self.greenpool.coroutines_running):
-                if isinstance(gt, eventlet.greenthread.GreenThread):
-                    gt.kill()
-            # reset the global greenpool just in case.
-            utils.DEFAULT_GREEN_POOL = eventlet.greenpool.GreenPool()
-            if any(
-                isinstance(gt, eventlet.greenthread.GreenThread)
-                for gt in self.greenpool.coroutines_running
-            ):
-                raise RuntimeError(
-                    f'detected leaked greenthreads in {self.test_case_id}')
-            elif (len(self.greenpool.coroutines_running) > 0 and
-                  strutils.bool_from_string(os.getenv(
-                    "NOVA_RAISE_ON_GREENLET_LEAK", "0")
-            )):
-                raise RuntimeError(
-                    f'detected leaked greenlets in {self.test_case_id}')
+        def _get_scatter_gather_executor():
+            self.scatter_gather_executor = origi_get_scatter_gather()
+            self.scatter_gather_executor.name = (
+                f"{self.test_case_id}.cell_worker")
+            return self.scatter_gather_executor
+
+        self.useFixture(fixtures.MonkeyPatch(
+            'nova.utils.get_scatter_gather_executor',
+            _get_scatter_gather_executor))
+
+        self.addCleanup(
+            lambda: self.do_cleanup_executor(self.scatter_gather_executor))
+
+        self.addCleanup(self.reset_globals)
+
+    def reset_globals(self):
+        utils.SCATTER_GATHER_EXECUTOR = None
+        utils.DEFAULT_EXECUTOR = None
+
+    def do_cleanup_executor(self, executor):
+        # NOTE(gibi): we cannot rely on utils.concurrency_mode_threading
+        # as that might have been mocked during the test when the executor
+        # was created, but during cleanup the mock is already removed.
+        threading = isinstance(executor, futurist.ThreadPoolExecutor)
+        if executor and executor.alive:
+            executor.shutdown(wait=False)
+
+            if threading:
+                # NOTE(gibi): This is optimistic, but we need specific examples
+                # where self.executor.shutdown(wait=True) hangs to figure out
+                # what we can do here.
+                pass
             else:
-                self.addDetail(
-                    'IsolatedGreenPoolFixture',
-                    f'no leaked greenthreads detected in {self.test_case_id} '
-                    'but some greenlets were running when the test finished.'
-                    'They cannot be killed so they may interact with '
-                    'other tests if they raise exceptions. '
-                    'These greenlets were likely created by spawn_n and'
-                    'and therefore are not expected to return or raise.'
-                )
+                # kill all greenthreads in the pool before raising to prevent
+                # them from interfering with other tests.
+                for gt in list(executor._pool.coroutines_running):
+                    if isinstance(gt, eventlet.greenthread.GreenThread):
+                        gt.kill()
 
+            executor.shutdown(wait=True)
 
-class _FakeGreenThread(object):
-    def __init__(self, func, *args, **kwargs):
-        self._result = func(*args, **kwargs)
+            if threading:
+                # NOTE(gibi):If shutdown(wait=True) returns then nothing is
+                # leaked, so nothing to do here.
+                pass
+            else:
+                self._raise_on_green_pool(executor._pool)
 
-    def cancel(self, *args, **kwargs):
-        # This method doesn't make sense for a synchronous call, it's just
-        # defined to satisfy the interface.
-        pass
-
-    def kill(self, *args, **kwargs):
-        # This method doesn't make sense for a synchronous call, it's just
-        # defined to satisfy the interface.
-        pass
-
-    def link(self, func, *args, **kwargs):
-        func(self, *args, **kwargs)
-
-    def unlink(self, func, *args, **kwargs):
-        # This method doesn't make sense for a synchronous call, it's just
-        # defined to satisfy the interface.
-        pass
-
-    def wait(self):
-        return self._result
+    def _raise_on_green_pool(self, pool):
+        if any(
+                isinstance(gt, eventlet.greenthread.GreenThread)
+                for gt in pool.coroutines_running
+        ):
+            raise RuntimeError(
+                f'detected leaked greenthreads in {self.test_case_id}')
+        elif (len(pool.coroutines_running) > 0 and
+              strutils.bool_from_string(os.getenv(
+                  "NOVA_RAISE_ON_GREENLET_LEAK", "0")
+              )):
+            raise RuntimeError(
+                f'detected leaked greenlets in {self.test_case_id}')
+        else:
+            self.addDetail(
+                'IsolatedGreenPoolFixture',
+                'no leaked greenthreads detected in '
+                f'{self.test_case_id} '
+                'but some greenlets were running when the test'
+                'finished.'
+                'They cannot be killed so they may interact with '
+                'other tests if they raise exceptions. '
+                'These greenlets were likely created by spawn and'
+                'and therefore are not expected to return or raise.'
+            )
 
 
 class SpawnIsSynchronousFixture(fixtures.Fixture):
-    """Patch and restore the spawn_n utility method to be synchronous"""
+    """Patch and restore the spawn_* utility methods to be synchronous"""
 
     def setUp(self):
         super(SpawnIsSynchronousFixture, self).setUp()
-        self.useFixture(fixtures.MonkeyPatch(
-            'nova.utils.spawn_n', _FakeGreenThread))
-        self.useFixture(fixtures.MonkeyPatch(
-            'nova.utils.spawn', _FakeGreenThread))
+        executor = futurist.SynchronousExecutor()
+        self.addCleanup(executor.shutdown)
 
+        def spawn(*args, **kwargs):
+            return executor.submit(*args, **kwargs)
 
-class _FakeExecutor(futurist.SynchronousExecutor):
-    def __init__(self, *args, **kwargs):
-        # Ignore kwargs (example: max_workers) that SynchronousExecutor
-        # does not support.
-        super(_FakeExecutor, self).__init__()
+        # Just ignore the first arg that is the original executor instance
+        # and use our test internal synchronous executor.
+        def spawn_on(_, *args, **kwargs):
+            return executor.submit(*args, **kwargs)
 
-
-class SynchronousThreadPoolExecutorFixture(fixtures.Fixture):
-    """Make GreenThreadPoolExecutor synchronous.
-
-    Replace the GreenThreadPoolExecutor with the SynchronousExecutor.
-    """
-
-    def setUp(self):
-        super(SynchronousThreadPoolExecutorFixture, self).setUp()
-        self.useFixture(fixtures.MonkeyPatch(
-            'futurist.GreenThreadPoolExecutor', _FakeExecutor))
+        self.useFixture(fixtures.MonkeyPatch('nova.utils.spawn', spawn))
+        self.useFixture(fixtures.MonkeyPatch('nova.utils.spawn_on', spawn_on))
 
 
 class BannedDBSchemaOperations(fixtures.Fixture):
@@ -1830,7 +1850,7 @@ class PropagateTestCaseIdToChildEventlets(fixtures.Fixture):
             # propagation
             caller = eventlet.getcurrent()
             # If there is no id set on us that means we were spawned with other
-            # than nova.utils.spawn or spawn_n so the id propagation chain got
+            # than nova.utils.spawn so the id propagation chain got
             # broken. We fall back to self.test_case_id from the fixture which
             # is good enough
             caller_test_case_id = getattr(
@@ -1852,37 +1872,6 @@ class PropagateTestCaseIdToChildEventlets(fixtures.Fixture):
         # our initialization to the child eventlet
         self.useFixture(
             fixtures.MonkeyPatch('nova.utils.spawn', wrapped_spawn))
-
-        # now do the same with spawn_n
-        orig_spawn_n = utils.spawn_n
-
-        def wrapped_spawn_n(func, *args, **kwargs):
-            # This is still runs before the eventlet.spawn so read the id for
-            # propagation
-            caller = eventlet.getcurrent()
-            # If there is no id set on us that means we were spawned with other
-            # than nova.utils.spawn or spawn_n so the id propagation chain got
-            # broken. We fall back to self.test_case_id from the fixture which
-            # is good enough
-            caller_test_case_id = getattr(
-                caller, 'test_case_id', None) or self.test_case_id
-
-            @functools.wraps(func)
-            def test_case_id_wrapper(*args, **kwargs):
-                # This runs after the eventlet.spawn in the new child.
-                # Propagate the id from our caller eventlet
-                current = eventlet.getcurrent()
-                current.test_case_id = caller_test_case_id
-                return func(*args, **kwargs)
-
-            # call the original spawn_n to create the child but with our
-            # new wrapper around its target
-            return orig_spawn_n(test_case_id_wrapper, *args, **kwargs)
-
-        # let's replace nova.utils.spawn_n with the wrapped one that injects
-        # our initialization to the child eventlet
-        self.useFixture(
-            fixtures.MonkeyPatch('nova.utils.spawn_n', wrapped_spawn_n))
 
 
 class ReaderWriterLock(lockutils.ReaderWriterLock):
@@ -1912,7 +1901,7 @@ class ReaderWriterLock(lockutils.ReaderWriterLock):
     """
 
     def __init__(self, *a, **kw):
-        eventlet_patched = eventlet.patcher.is_monkey_patched('thread')
+        eventlet_patched = monkey_patch.is_patched()
         mpatch = fixtures.MonkeyPatch(
             'threading.current_thread', eventlet.getcurrent)
         with mpatch if eventlet_patched else contextlib.ExitStack():
@@ -2077,7 +2066,7 @@ class GreenThreadPoolShutdownWait(fixtures.Fixture):
         real_shutdown = futurist.GreenThreadPoolExecutor.shutdown
         self.useFixture(fixtures.MockPatch(
             'futurist.GreenThreadPoolExecutor.shutdown',
-            lambda self, wait: real_shutdown(self, wait=True)))
+            lambda self, wait=True: real_shutdown(self, wait=True)))
 
 
 class UnifiedLimitsFixture(fixtures.Fixture):
@@ -2110,6 +2099,8 @@ class UnifiedLimitsFixture(fixtures.Fixture):
             'model': {'name': 'flat'}}
         self.mock_sdk_adapter.get_endpoint.return_value.service_id = None
         self.mock_sdk_adapter.get_endpoint.return_value.region_id = None
+        self.mock_sdk_adapter.endpoints.return_value = [
+            mock.Mock(service_id=None, region_id=None)]
 
         # These are Keystone API calls that oslo.limit will also use.
         self.mock_sdk_adapter.registered_limits.side_effect = (
@@ -2118,6 +2109,10 @@ class UnifiedLimitsFixture(fixtures.Fixture):
         self.mock_sdk_adapter.create_registered_limit.side_effect = (
             self.create_registered_limit)
         self.mock_sdk_adapter.create_limit.side_effect = self.create_limit
+
+        # These are calls made for service endpoint discovery in limit/utils.py
+        self.mock_sdk_adapter.services.return_value = [mock.Mock(id=None)]
+        self.mock_sdk_adapter.regions.return_value = [mock.Mock(id=None)]
 
         self.registered_limits_list = []
         self.limits_list = []

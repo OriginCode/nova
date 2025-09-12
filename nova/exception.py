@@ -482,6 +482,12 @@ class InvalidAggregateActionUpdateMeta(InvalidAggregateAction):
                 "%(aggregate_id)s. Reason: %(reason)s.")
 
 
+class AggregateMetadataKeyExists(NovaException):
+    msg_fmt = _("Aggregate %(aggregate_id)s already contain metadata "
+                "key %(key)s.")
+    code = 400
+
+
 class InvalidSortKey(Invalid):
     msg_fmt = _("Sort key supplied was not valid.")
 
@@ -2654,4 +2660,9 @@ class EphemeralEncryptionCleanupFailed(NovaException):
 
 
 class HostConflict(Exception):
+    pass
+
+
+class InstanceEventTimeout(Exception):
+    """A custom timeout exception to replace eventlet.timeout.Timeout."""
     pass

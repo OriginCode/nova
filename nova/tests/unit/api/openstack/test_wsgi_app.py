@@ -15,6 +15,7 @@ from unittest import mock
 
 import fixtures
 from oslo_config import fixture as config_fixture
+from oslo_serialization import jsonutils
 from oslotest import base
 
 from nova.api.openstack import wsgi_app
@@ -82,12 +83,34 @@ document_root = /tmp
         # raised during it.
         self.assertRaises(test.TestingException, wsgi_app.init_application,
                           'nova-api')
+        # reset the latch_error_on_raise decorator
+        wsgi_app.init_application.reset()
         # Now run init_application a second time, it should succeed since no
         # exception is being raised (the init of global data should not be
         # re-attempted).
         wsgi_app.init_application('nova-api')
         self.assertIn('Global data already initialized, not re-initializing.',
                       self.stdlog.logger.output)
+
+    @mock.patch(
+        'sys.argv', new=mock.MagicMock(return_value=mock.sentinel.argv))
+    @mock.patch('nova.api.openstack.wsgi_app._get_config_files')
+    def test_init_application_called_unrecoverable(self, mock_get_files):
+        """Test that init_application can tolerate being called more than once
+        in a single python interpreter instance and raises the same exception
+        forever if its unrecoverable.
+        """
+        error = ValueError("unrecoverable config error")
+        excepted_type = type(error)
+        mock_get_files.side_effect = [
+            error, test.TestingException, test.TestingException]
+        for i in range(3):
+            e = self.assertRaises(
+                excepted_type, wsgi_app.init_application, 'nova-api')
+            self.assertIs(e, error)
+        # since the expction is latched on the first raise mock_get_files
+        # should not be called again on each iteration
+        mock_get_files.assert_called_once()
 
     @mock.patch('nova.objects.Service.get_by_host_and_binary')
     @mock.patch('nova.utils.raise_if_old_compute')
@@ -104,6 +127,14 @@ document_root = /tmp
             'disable_compute_service_check_for_ffu', True,
             group='workarounds')
         wsgi_app._setup_service('myhost', 'api')
+
+    def test_setup_service_pci_alias_validation(self):
+        wsgi_app.CONF.set_override(
+            'alias', jsonutils.dumps({'name': 'foo'}),
+            group='pci')
+        self.assertRaises(
+            exception.PciInvalidAlias,
+            wsgi_app._setup_service, 'myhost', 'api')
 
     def test__get_config_files_empty_env(self):
         env = {}

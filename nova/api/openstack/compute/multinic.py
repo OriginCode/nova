@@ -26,6 +26,7 @@ from nova import exception
 from nova.policies import multinic as multinic_policies
 
 
+@validation.validated
 class MultinicController(wsgi.Controller):
     """This API is deprecated from Microversion '2.44'."""
 
@@ -33,7 +34,7 @@ class MultinicController(wsgi.Controller):
         super(MultinicController, self).__init__()
         self.compute_api = compute.API()
 
-    @wsgi.Controller.api_version("2.1", "2.43")
+    @wsgi.api_version("2.1", "2.43")
     @wsgi.response(202)
     @wsgi.action('addFixedIp')
     @wsgi.expected_errors((400, 404))
@@ -52,7 +53,7 @@ class MultinicController(wsgi.Controller):
         except exception.NoMoreFixedIps as e:
             raise exc.HTTPBadRequest(explanation=e.format_message())
 
-    @wsgi.Controller.api_version("2.1", "2.43")
+    @wsgi.api_version("2.1", "2.43")
     @wsgi.response(202)
     @wsgi.action('removeFixedIp')
     @wsgi.expected_errors((400, 404))

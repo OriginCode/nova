@@ -69,12 +69,11 @@ class TenantNetworkController(wsgi.Controller):
                 LOG.exception("Failed to get default networks")
 
     def _get_default_networks(self):
-        project_id = CONF.api.neutron_default_tenant_id
-        ctx = nova_context.RequestContext(user_id=None,
-                                          project_id=project_id)
+        project_id = CONF.api.neutron_default_project_id
+        ctx = nova_context.RequestContext(user_id=None, project_id=project_id)
         return self.network_api.get_all(ctx)
 
-    @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
+    @wsgi.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
     @wsgi.expected_errors(())
     @validation.query_schema(schema.index_query)
     def index(self, req):
@@ -87,7 +86,7 @@ class TenantNetworkController(wsgi.Controller):
         networks.extend(self._default_networks)
         return {'networks': [network_dict(n) for n in networks]}
 
-    @wsgi.Controller.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
+    @wsgi.api_version("2.1", MAX_PROXY_API_SUPPORT_VERSION)
     @wsgi.expected_errors(404)
     @validation.query_schema(schema.show_query)
     def show(self, req, id):
@@ -103,11 +102,13 @@ class TenantNetworkController(wsgi.Controller):
 
     @wsgi.expected_errors(410)
     @wsgi.removed('21.0.0', _removal_reason)
+    @validation.response_body_schema(schema.delete_response)
     def delete(self, req, id):
         raise exc.HTTPGone()
 
     @wsgi.expected_errors(410)
     @wsgi.removed('21.0.0', _removal_reason)
     @validation.schema(schema.create)
+    @validation.response_body_schema(schema.create_response)
     def create(self, req, body):
         raise exc.HTTPGone()

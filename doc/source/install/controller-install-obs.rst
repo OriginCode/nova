@@ -191,16 +191,6 @@ Install and configure components
 
 #. Edit the ``/etc/nova/nova.conf`` file and complete the following actions:
 
-   * In the ``[DEFAULT]`` section, enable only the compute and metadata
-     APIs:
-
-     .. path /etc/nova/nova.conf
-     .. code-block:: ini
-
-        [DEFAULT]
-        # ...
-        enabled_apis = osapi_compute,metadata
-
    * In the ``[api_database]`` and ``[database]`` sections, configure database
      access:
 
@@ -230,15 +220,11 @@ Install and configure components
      Replace ``RABBIT_PASS`` with the password you chose for the ``openstack``
      account in ``RabbitMQ``.
 
-   * In the ``[api]`` and ``[keystone_authtoken]`` sections, configure Identity
-     service access:
+   * In the ``[keystone_authtoken]`` section, configure Identity service
+     access:
 
      .. path /etc/nova/nova.conf
      .. code-block:: ini
-
-        [api]
-        # ...
-        auth_strategy = keystone
 
         [keystone_authtoken]
         # ...
@@ -269,7 +255,6 @@ Install and configure components
         [service_user]
         send_service_user_token = true
         auth_url = https://controller/identity
-        auth_strategy = keystone
         auth_type = password
         project_domain_name = Default
         project_name = service

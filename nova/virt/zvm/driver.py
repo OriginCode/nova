@@ -12,7 +12,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import eventlet
 import os
 import time
 
@@ -133,6 +132,7 @@ class ZVMDriver(driver.ComputeDriver):
                                      obj_fields.HVType.ZVM,
                                      obj_fields.VMMode.HVM)],
             'numa_topology': None,
+            'stats': {'uptime': self.get_host_uptime()}
         }
 
         LOG.debug("Getting available resource for %(host)s:%(nodename)s",
@@ -289,7 +289,7 @@ class ZVMDriver(driver.ComputeDriver):
                     instance, event, deadline=timeout,
                     error_callback=self._neutron_failed_callback):
                 self._setup_network(vm_name, os_distro, network_info, instance)
-        except eventlet.timeout.Timeout:
+        except exception.InstanceEventTimeout:
             LOG.warning("Timeout waiting for vif plugging callback.",
                         instance=instance)
             if CONF.vif_plugging_is_fatal:

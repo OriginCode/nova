@@ -141,8 +141,9 @@ class ServersPolicyTest(base.BasePolicyTest):
         # Users that can take action on *our* project resources
         self.project_action_authorized_contexts = set([
             self.legacy_admin_context, self.system_admin_context,
-            self.project_admin_context, self.project_member_context,
-            self.project_reader_context, self.project_foo_context,
+            self.project_admin_context, self.project_manager_context,
+            self.project_member_context, self.project_reader_context,
+            self.project_foo_context,
         ])
 
         # Users that can read *our* project resources
@@ -1366,7 +1367,8 @@ class ServersNoLegacyNoScopeTest(ServersPolicyTest):
         # see everything in their project.
         self.reduce_set('everyone_authorized',
                         self.all_contexts - set([self.project_foo_context,
-                                                 self.system_foo_context]))
+                                                 self.system_foo_context,
+                                                 self.service_context]))
 
         # Disabling legacy support means readers and random roles lose
         # power to create things on their own projects. Note that
@@ -1380,7 +1382,8 @@ class ServersNoLegacyNoScopeTest(ServersPolicyTest):
                             self.system_foo_context,
                             self.project_reader_context,
                             self.project_foo_context,
-                            self.other_project_reader_context]))
+                            self.other_project_reader_context,
+                            self.service_context]))
 
 
 class ServersScopeTypePolicyTest(ServersPolicyTest):
@@ -1414,6 +1417,7 @@ class ServersScopeTypePolicyTest(ServersPolicyTest):
         self.reduce_set('project_action_authorized',
                         set([self.legacy_admin_context,
                              self.project_admin_context,
+                             self.project_manager_context,
                              self.project_member_context,
                              self.project_reader_context,
                              self.project_foo_context]))
@@ -1426,7 +1430,8 @@ class ServersScopeTypePolicyTest(ServersPolicyTest):
 
         # With scope checking enabled, system users no longer have
         # project access, even to create their own resources.
-        self.reduce_set('project_member_authorized', self.all_project_contexts)
+        self.reduce_set('project_member_authorized',
+                self.all_project_contexts | set([self.service_context]))
 
         # With scope checking enabled, system admin is no longer an
         # admin of project resources.

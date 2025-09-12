@@ -21,7 +21,6 @@ from unittest import mock
 from oslo_utils.fixture import uuidsentinel
 from webob import exc
 
-from nova.api.openstack import api_version_request
 from nova.api.openstack.compute import aggregates as aggregates_v21
 from nova.compute import api as compute_api
 from nova import context
@@ -109,9 +108,9 @@ class AggregateTestCaseV21(test.NoDBTestCase):
 
     def _set_up(self):
         self.controller = aggregates_v21.AggregateController()
-        self.req = fakes.HTTPRequest.blank('/v2/os-aggregates',
+        self.req = fakes.HTTPRequest.blank('/v2.1/os-aggregates',
                                            use_admin_context=True)
-        self.user_req = fakes.HTTPRequest.blank('/v2/os-aggregates')
+        self.user_req = fakes.HTTPRequest.blank('/v2.1/os-aggregates')
         self.context = self.req.environ['nova.context']
 
     def setUp(self):
@@ -675,6 +674,19 @@ class AggregateTestCaseV21(test.NoDBTestCase):
         self.assertRaises(self.bad_request, eval(self.set_metadata),
                           self.req, "1", body=body)
 
+    def test_set_metadata_case_sensitive(self):
+        body = {"set_metadata": {"metadata": {"foo": "bar"}}}
+        side_effect = exception.AggregateMetadataKeyExists(
+            aggregate_id="2", key="foo")
+
+        with mock.patch.object(self.controller.api,
+                               'update_aggregate_metadata',
+                               side_effect=side_effect) as mock_update:
+            self.assertRaises(exc.HTTPBadRequest, eval(self.set_metadata),
+                              self.req, "2", body=body)
+            mock_update.assert_called_once_with(
+                self.context, "2", body["set_metadata"]["metadata"])
+
     def test_delete_aggregate(self):
         with mock.patch.object(self.controller.api,
                                'delete_aggregate') as mock_del:
@@ -718,15 +730,16 @@ class AggregateTestCaseV21(test.NoDBTestCase):
         # top-level dict, so we need to put availability_zone at the top also
         agg['availability_zone'] = 'nova'
 
-        avr_v240 = api_version_request.APIVersionRequest("2.40")
-        avr_v241 = api_version_request.APIVersionRequest("2.41")
-
-        req = mock.MagicMock(api_version_request=avr_v241)
+        req = fakes.HTTPRequest.blank('/v2/os-aggregates',
+                                      use_admin_context=True,
+                                      version='2.41')
         marshalled_agg = self.controller._marshall_aggregate(req, agg_obj)
 
         self.assertEqual(agg, marshalled_agg['aggregate'])
 
-        req = mock.MagicMock(api_version_request=avr_v240)
+        req = fakes.HTTPRequest.blank('/v2/os-aggregates',
+                                      use_admin_context=True,
+                                      version='2.40')
         marshalled_agg = self.controller._marshall_aggregate(req, agg_obj)
 
         # UUID isn't in microversion 2.40 and before
@@ -739,7 +752,7 @@ class AggregateTestCaseV21(test.NoDBTestCase):
 
     def test_images_with_invalid_id(self):
         body = {'cache': [{'id': uuidsentinel.cache}]}
-        req = fakes.HTTPRequest.blank('/v2/os-aggregates',
+        req = fakes.HTTPRequest.blank('/v2.1/os-aggregates',
                                       use_admin_context=True,
                                       version='2.81')
         self.assertRaises(exc.HTTPBadRequest, self.controller.images,
@@ -748,7 +761,7 @@ class AggregateTestCaseV21(test.NoDBTestCase):
     def test_images_with_duplicate_id(self):
         body = {"cache": [{"id": "faae1bd3-c848-41d6-b4dd-97d5b8be8b7e"},
                           {"id": "faae1bd3-c848-41d6-b4dd-97d5b8be8b7e"}]}
-        req = fakes.HTTPRequest.blank('/v2/os-aggregates',
+        req = fakes.HTTPRequest.blank('/v2.1/os-aggregates',
                                       use_admin_context=True,
                                       version='2.81')
         self.assertRaises(exc.HTTPBadRequest, self.controller.images,
@@ -759,7 +772,7 @@ class AggregateTestCaseV21(test.NoDBTestCase):
                           {"id": "290de658-cf55-4cce-b025-9a1a9f93676a"},
                           {"id": "896f7f54-4e4e-4c21-a2b7-47cff4e99ab0"},
                           {"id": "d982bb82-04a0-4e9b-b40e-470f20a7b5d1"}]}
-        req = fakes.HTTPRequest.blank('/v2/os-aggregates',
+        req = fakes.HTTPRequest.blank('/v2.1/os-aggregates',
                                       use_admin_context=True,
                                       version='2.81')
         context = req.environ['nova.context']

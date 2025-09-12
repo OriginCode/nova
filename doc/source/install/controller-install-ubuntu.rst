@@ -195,7 +195,8 @@ Install and configure components
      Replace ``NOVA_DBPASS`` with the password you chose for the Compute
      databases.
 
-   * In the ``[DEFAULT]`` section, configure ``RabbitMQ`` message queue access:
+   * In the ``[DEFAULT]`` section, configure ``RabbitMQ`` message queue access
+     (RabbitMQ should be already `installed and configured <https://docs.openstack.org/install-guide/environment-messaging-ubuntu.html>`_):
 
      .. path /etc/nova/nova.conf
      .. code-block:: ini
@@ -207,15 +208,11 @@ Install and configure components
      Replace ``RABBIT_PASS`` with the password you chose for the ``openstack``
      account in ``RabbitMQ``.
 
-   * In the ``[api]`` and ``[keystone_authtoken]`` sections, configure Identity
-     service access:
+   * In the ``[keystone_authtoken]`` section, configure Identity service
+     access:
 
      .. path /etc/nova/nova.conf
      .. code-block:: ini
-
-        [api]
-        # ...
-        auth_strategy = keystone
 
         [keystone_authtoken]
         # ...
@@ -246,7 +243,6 @@ Install and configure components
         [service_user]
         send_service_user_token = true
         auth_url = https://controller/identity
-        auth_strategy = keystone
         auth_type = password
         project_domain_name = Default
         project_name = service

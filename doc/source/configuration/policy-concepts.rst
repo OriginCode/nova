@@ -33,8 +33,8 @@ issues that had been identified:
    component than API in Nova that did not honor changes to policy. As a
    result, policy could not override hard-coded in-project checks.
 
-Keystone comes with ``admin``, ``member`` and ``reader`` roles by default.
-Please refer to :keystone-doc:`this document </admin/service-api-protection.html>`
+Keystone comes with ``admin``, ``manager``, ``member`` and ``reader`` roles
+by default. Please refer to :keystone-doc:`this document </admin/service-api-protection.html>`
 for more information about these new defaults. In addition, keystone supports
 a new "system scope" concept that makes it easier to protect deployment level
 resources from project or system level resources. Please refer to
@@ -215,6 +215,44 @@ OR
 'project_id:%(project_id)s' in the check_str is important to restrict the
 access within the requested project.
 
+.. rubric:: ``manager``
+
+``project_manager`` is denoted by someone with the manager role on a project.
+It is intended to be used in project-level management APIs and perform more
+privileged operations on its project resources than ``project_member``. It
+inherits all the permissions of a ``project_member`` and ``project_reader``.
+For example, a ``project_manager`` can migrate (cold or live) their servers
+without specifying the host. Further, a ``project_manager`` will be able
+to list migrations related to their own project.
+
+``project_manager`` persona in Nova policy rule (it is defined as
+``project_manager_api`` in policy yaml) looks like:
+
+'project_id:%(project_id)s' in the check_str is important to restrict the
+access within the requested project.
+
+.. code-block:: yaml
+
+    # Default rule for Project level management APIs.
+    "project_manager_api": "role:manager and project_id:%(project_id)s"
+
+To keep the legacy ``admin`` behavior unchanged, Nova allow ``admin``
+also to access the project level management APIs:
+
+.. code-block:: yaml
+
+    # Default rule for Project level management APIs.
+    "project_manager_or_admin": "rule:project_manager_api or rule:context_is_admin"
+
+The above base rule are used for specific API access:
+
+.. code-block:: yaml
+
+    # Cold migrate a server without specifying a host
+    # POST  /servers/{server_id}/action (migrate)
+    # Intended scope(s): project
+    "os_compute_api:os-migrate-server:migrate": "rule:project_manager_or_admin"
+
 .. rubric:: ``admin``
 
 This role is to perform the admin level write operations. Nova policies are
@@ -238,6 +276,25 @@ With these new defaults, you can solve the problem of:
    to provide access to project level user to perform operations within
    their project only.
 
+.. rubric:: ``service``
+
+The ``service`` role is a special role in Keystone, which is used for the
+internal service-to-service communication. It is assigned to service users
+i.e. nova or neutron which model the OpenStack services. Nova defaults its
+service-to-service APIs to require the ``service`` role so that they cannot
+be used by any non-service users. Allowing access to service-to-service APIs
+to non-service users can be destructive to resources and leave the deployment
+in an invalid state. It's advisable to audit the ``policy.yaml`` files and
+keystone users to make sure those APIs are not allowed to any non-service
+users and the service role is not granted to human admin accounts.
+
+.. note::
+
+    Make sure the configured nova service user in other services has the
+    ``service`` role otherwise communication from the other services to
+    Nova will fail. For example, user configured as ``username`` option in
+    ``neutron.conf`` file under ``[nova]`` section has the ``service`` role.
+
 Nova supported scope & Roles
 -----------------------------
 
@@ -248,17 +305,31 @@ overridden in the policy.yaml file but scope is not override-able.
    perform the admin level operations. Example: enable/disable compute
    service, Live migrate server etc.
 
+#. PROJECT_MANAGER: ``manager`` role on ``project`` scope. This is used to
+   perform project management operations within project. For example: migrate
+   a server.
+
 #. PROJECT_MEMBER: ``member`` role on ``project`` scope. This is used to perform
    resource owner level operation within project. For example: Pause a server.
 
 #. PROJECT_READER: ``reader`` role on ``project`` scope. This is used to perform
    read-only operation within project. For example: Get server.
 
-#. PROJECT_MEMBER_OR_ADMIN: ``admin`` or ``member`` role on ``project`` scope.    Such policy rules are default to most of the owner level APIs and align
+#. PROJECT_MANAGER_OR_ADMIN: ``admin`` or ``manager`` role on ``project`` scope.
+   Such policy rules are default to project management level APIs and along
+   with ``manager`` role, legacy admin can continue to access those APIs.
+
+#. PROJECT_MEMBER_OR_ADMIN: ``admin`` or ``member`` role on ``project`` scope.
+   Such policy rules are default to most of the owner level APIs and align
    with ``member`` role legacy admin can continue to access those APIs.
 
-#. PROJECT_READER_OR_ADMIN: ``admin`` or ``reader`` role on ``project`` scope.    Such policy rules are default to most of the read only APIs so that legacy
+#. PROJECT_READER_OR_ADMIN: ``admin`` or ``reader`` role on ``project`` scope.
+   Such policy rules are default to most of the read only APIs so that legacy
    admin can continue to access those APIs.
+
+#. SERVICE_ROLE (Internal): ``service`` role on service users with ``project``
+   scope. Such policy rules are default to the service-to-service APIs (The
+   APIs only meant to be called by the OpenStack services).
 
 Backward Compatibility
 ----------------------
@@ -336,21 +407,31 @@ NOTE::
 
 Below table show how legacy rules are mapped to new rules:
 
-+--------------------+---------------------------+----------------+-----------+
-| Legacy Rule        |    New Rules              |Operation       |scope_type |
-+====================+===========================+================+===========+
-| RULE_ADMIN_API     |-> ADMIN                   |Global resource | [project] |
-|                    |                           |Write & Read    |           |
-+--------------------+---------------------------+----------------+-----------+
-|                    |-> ADMIN                   |Project admin   | [project] |
-|                    |                           |level operation |           |
-|                    +---------------------------+----------------+-----------+
-| RULE_ADMIN_OR_OWNER|-> PROJECT_MEMBER_OR_ADMIN |Project resource| [project] |
-|                    |                           |Write           |           |
-|                    +---------------------------+----------------+-----------+
-|                    |-> PROJECT_READER_OR_ADMIN |Project resource| [project] |
-|                    |                           |Read            |           |
-+--------------------+---------------------------+----------------+-----------+
+.. list-table::
+   :widths: 25 45 15 15
+   :header-rows: 1
+
+   * - Legacy Rule
+     - New Rule
+     - Operation
+     - Scope
+   * - RULE_ADMIN_API
+     - ADMIN
+     - Global resource Write & Read
+     - project
+   * - RULE_ADMIN_API
+     - PROJECT_MANAGER_OR_ADMIN
+     - Project management level
+     - project
+   * - RULE_ADMIN_OR_OWNER
+     - PROJECT_MEMBER_OR_ADMIN
+     - Project resource write
+     - project
+   * - RULE_ADMIN_OR_OWNER
+     - PROJECT_READER_OR_ADMIN
+     - Project resource read
+     - project
 
 We expect all deployments to migrate to the new policy by OpenStack 2023.1
-(Nova 27.0.0) release so that we can remove the support of old policies.
+(Nova 27.0.0) release (``project_manager`` role is available from Nova 32.0.0)
+so that we can remove the support of old policies.

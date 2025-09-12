@@ -2089,11 +2089,11 @@ code:
   description: |
     The HTTP response code for the event. The following codes are currently used:
 
-      * 200 - successfully submitted event
-      * 400 - the request is missing required parameter
-      * 404 - the instance specified by ``server_uuid`` was not found
-      * 422 - no host was found for the server specified by ``server_uuid``,
-         so there is no route to this server.
+    * 200 - successfully submitted event
+    * 400 - the request is missing required parameter
+    * 404 - the instance specified by ``server_uuid`` was not found
+    * 422 - no host was found for the server specified by ``server_uuid``,
+       so there is no route to this server.
   in: body
   required: true
   type: string
@@ -2737,6 +2737,7 @@ event_name:
     - ``volume-extended`` (since microversion ``2.51``)
     - ``power-update`` (since microversion ``2.76``)
     - ``accelerator-request-bound`` (since microversion ``2.82``)
+    - ``volume-reimaged`` (since microversion ``2.93``)
 
   in: body
   required: true
@@ -3843,25 +3844,24 @@ hypervisor_os_diagnostics:
   min_version: 2.48
 hypervisor_servers:
   description: |
-    A list of ``server`` objects.
-    This field has become mandatory in microversion 2.75. If no servers is on hypervisor
-    then empty list is returned.
+    A list of ``server`` objects. Before microversion 2.75, this field is only
+    returned if non-empty. From microversion 2.75, this field will always be
+    returned unless the ``with_servers`` query parameter is provided and is
+    set to ``false``.
   in: body
-  required: true
+  required: false
   type: array
   min_version: 2.53
 hypervisor_servers_name:
   description: |
     The server name.
   in: body
-  required: false
   type: string
   min_version: 2.53
 hypervisor_servers_uuid:
   description: |
     The server ID.
   in: body
-  required: false
   type: string
   min_version: 2.53
 hypervisor_service:
@@ -3902,8 +3902,11 @@ hypervisor_type_body:
   type: string
 hypervisor_uptime:
   description: |
-    The total uptime of the hypervisor and information about average load. Only
-    reported for active hosts where the virt driver supports this feature.
+    The response format of this api depends on the virt driver in use on a
+    given host. The libvirt driver returns the output of the `uptime` command
+    directly, the z/VM driver returns the `ILP` time. All other drivers
+    always return `null`. Note this value is cached and updated periodically.
+
   in: body
   required: true
   type: string
@@ -5721,6 +5724,7 @@ pinned_availability_zone:
     Also when default_schedule_zone config option set to specific AZ, in that
     case, instance would be pinned to that specific AZ, and instance will be
     scheduled on host belonging to pinned AZ.
+    In case of no pinned availability zone, this value is set to `null`.
   in: body
   type: string
   min_version: 2.96
@@ -5892,6 +5896,7 @@ project_id_server:
 project_id_server_action:
   description: |
     The ID of the project which initiated the server action.
+    This can be ``null`` for ``nova-manage``-initiated actions.
   in: body
   required: true
   type: string
@@ -5985,17 +5990,20 @@ remote_console:
 remote_console_protocol:
   description: |
     The protocol of remote console. The valid values are ``vnc``, ``spice``,
-    ``serial`` and ``mks``. The protocol ``mks`` is added since Microversion
-    ``2.8``.
+    ``rdp``, ``serial`` and ``mks``. The protocol ``mks`` is added since
+    Microversion ``2.8``. The protocol ``rdp`` requires the Hyper-V driver
+    which was removed in the 29.0.0 (Caracal) release.
   in: body
   required: true
   type: string
 remote_console_type:
   description: |
     The type of remote console. The valid values are ``novnc``,
-    ``spice-html5``, ``spice-direct``, ``serial``, and ``webmks``. The type
-    ``webmks`` was added in Microversion ``2.8``, and the type
-    ``spice-direct`` was added in Microversion ``2.99``.
+    ``rdp-html5``, ``spice-html5``, ``spice-direct``, ``serial``, and
+    ``webmks``. The type ``webmks`` was added in Microversion ``2.8`` and the
+    type ``spice-direct`` was added in Microversion ``2.99``. The type
+    ``rdp-html5`` requires the Hyper-V driver which was removed in the 29.0.0
+    (Caracal) release.
   in: body
   required: true
   type: string
@@ -7394,6 +7402,7 @@ user_id_migration_2_80:
 user_id_server_action:
   description: |
     The ID of the user which initiated the server action.
+    This can be ``null`` for ``nova-manage``-initiated actions.
   in: body
   required: true
   type: string
@@ -7619,6 +7628,12 @@ volumeId_resp:
 volumeId_swap:
   description: |
     The UUID of the volume to attach instead of the attached volume.
+  in: body
+  required: true
+  type: string
+volumeId_update:
+  description: |
+    The UUID of the attached volume.
   in: body
   required: true
   type: string

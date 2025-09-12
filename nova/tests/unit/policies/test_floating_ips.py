@@ -57,21 +57,27 @@ class FloatingIPPolicyTest(base.BasePolicyTest):
         # of FIP then neutron will be returning the appropriate error.
         self.member_authorized_contexts = [
             self.legacy_admin_context, self.system_admin_context,
-            self.project_admin_context, self.project_member_context,
-            self.project_reader_context, self.project_foo_context,
+            self.project_admin_context, self.project_manager_context,
+            self.project_member_context, self.project_reader_context,
+            self.project_foo_context,
             self.other_project_reader_context,
             self.system_member_context, self.system_reader_context,
             self.system_foo_context,
-            self.other_project_member_context
+            self.other_project_manager_context,
+            self.other_project_member_context,
+            self.service_context
         ]
         self.project_reader_authorized_contexts = [
             self.legacy_admin_context, self.system_admin_context,
-            self.project_admin_context, self.project_member_context,
-            self.project_reader_context, self.project_foo_context,
+            self.project_admin_context, self.project_manager_context,
+            self.project_member_context, self.project_reader_context,
+            self.project_foo_context,
             self.other_project_reader_context,
             self.system_member_context, self.system_reader_context,
             self.system_foo_context,
-            self.other_project_member_context
+            self.other_project_manager_context,
+            self.other_project_member_context,
+            self.service_context
         ]
         # With legacy rule and no scope checks, all admin, project members
         # project reader or other project role(because legacy rule allow server
@@ -79,8 +85,9 @@ class FloatingIPPolicyTest(base.BasePolicyTest):
         # delete FIP to server.
         self.project_member_authorized_contexts = [
             self.legacy_admin_context, self.system_admin_context,
-            self.project_admin_context, self.project_member_context,
-            self.project_reader_context, self.project_foo_context]
+            self.project_admin_context, self.project_manager_context,
+            self.project_member_context, self.project_reader_context,
+            self.project_foo_context]
 
     @mock.patch('nova.network.neutron.API.get_floating_ip')
     def test_show_floating_ip_policy(self, mock_get):
@@ -174,16 +181,18 @@ class FloatingIPNoLegacyNoScopePolicyTest(FloatingIPPolicyTest):
         # to operate on FIP.
         self.member_authorized_contexts = [
             self.legacy_admin_context, self.system_admin_context,
-            self.project_admin_context, self.project_member_context,
-            self.system_member_context,
+            self.project_admin_context, self.project_manager_context,
+            self.project_member_context, self.system_member_context,
+            self.other_project_manager_context,
             self.other_project_member_context
         ]
         self.project_reader_authorized_contexts = [
             self.legacy_admin_context, self.system_admin_context,
-            self.project_admin_context, self.project_member_context,
-            self.project_reader_context,
+            self.project_admin_context, self.project_manager_context,
+            self.project_member_context, self.project_reader_context,
             self.other_project_reader_context,
             self.system_member_context, self.system_reader_context,
+            self.other_project_manager_context,
             self.other_project_member_context
         ]
 
@@ -207,15 +216,21 @@ class FloatingIPScopeTypePolicyTest(FloatingIPPolicyTest):
             self.project_m_r_or_admin_with_scope_and_legacy)
         self.member_authorized_contexts = [
             self.legacy_admin_context, self.project_admin_context,
-            self.project_member_context, self.project_reader_context,
-            self.project_foo_context, self.other_project_reader_context,
-            self.other_project_member_context
+            self.project_member_context, self.project_manager_context,
+            self.project_reader_context, self.project_foo_context,
+            self.other_project_manager_context,
+            self.other_project_reader_context,
+            self.other_project_member_context,
+            self.service_context
         ]
         self.project_reader_authorized_contexts = [
             self.legacy_admin_context, self.project_admin_context,
-            self.project_member_context, self.project_reader_context,
-            self.project_foo_context, self.other_project_reader_context,
-            self.other_project_member_context
+            self.project_manager_context, self.project_member_context,
+            self.project_reader_context, self.project_foo_context,
+            self.other_project_manager_context,
+            self.other_project_reader_context,
+            self.other_project_member_context,
+            self.service_context
         ]
 
 
@@ -248,12 +263,15 @@ class FloatingIPScopeTypeNoLegacyPolicyTest(FloatingIPScopeTypePolicyTest):
         # other roles like foo will not be able to operate FIP.
         self.member_authorized_contexts = [
             self.legacy_admin_context, self.project_admin_context,
-            self.project_member_context,
+            self.project_manager_context, self.project_member_context,
+            self.other_project_manager_context,
             self.other_project_member_context
         ]
         self.project_reader_authorized_contexts = [
             self.legacy_admin_context, self.project_admin_context,
-            self.project_member_context, self.project_reader_context,
+            self.project_manager_context, self.project_member_context,
+            self.project_reader_context,
+            self.other_project_manager_context,
             self.other_project_reader_context,
             self.other_project_member_context
         ]
