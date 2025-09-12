@@ -8,6 +8,8 @@ nova (2:32.0.0~rc1-1) experimental; urgency=medium
     - Fix-neutron-client-dict-grabbing.patch
     - OSSN-0094_restrict_swap_volume_to_cinder.patch
   * Removed Add-context-switch-chance-to-other-thread-during-get_avail...patch
+  * No need to rm debian/tmp/usr/bin/nova-api-{os-compute,metadata}, the files
+    are removed upstream.
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 12 Sep 2025 18:03:40 +0200
 

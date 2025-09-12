@@ -169,9 +169,6 @@ endif
 	pkgos-fix-config-default $(NOVA_CONF) placement auth_url http://localhost:5000/v3
 	pkgos-fix-config-default $(NOVA_CONF) placement username = placement
 
-	rm debian/tmp/usr/bin/nova-api-os-compute
-	rm debian/tmp/usr/bin/nova-api-metadata
-
 	dh_install
 	dh_missing --fail-missing -Xbin/nova-all -Xbin/nova-network
 
