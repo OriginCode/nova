@@ -10,6 +10,7 @@ nova (2:32.0.0~rc1-1) experimental; urgency=medium
   * Removed Add-context-switch-chance-to-other-thread-during-get_avail...patch
   * No need to rm debian/tmp/usr/bin/nova-api-{os-compute,metadata}, the files
     are removed upstream.
+  * Removed nova-api from d/nova-api.install. Now only uwsgi is possible.
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 12 Sep 2025 18:03:40 +0200
 

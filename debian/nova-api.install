@@ -1,3 +1,2 @@
 debian/nova-api-metadata-uwsgi.ini	/etc/nova
 debian/nova-api-uwsgi.ini		/etc/nova
-usr/bin/nova-api
