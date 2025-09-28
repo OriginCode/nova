@@ -84,7 +84,6 @@ endif
 		--output-file=$(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf \
 		--wrap-width 140 \
 		--namespace nova.conf \
-		--namespace oslo.db \
 		--namespace oslo.limit \
 		--namespace oslo.log \
 		--namespace oslo.messaging \
