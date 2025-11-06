@@ -1,0 +1,44 @@
+Author: Ghanshyam Maan <gmaan@ghanshyammann.com>
+Date: Wed, 05 Nov 2025 20:23:48 +0000
+Description: Fix test_simple_tenant_usage test
+ API policy test_simple_tenant_usage test does
+ not send the start and end time in request's query
+ string. In that case, API set the current time to
+ both start and end times. So there is a chance that
+ both start and end times can be the same, and Nova
+ raises an error:
+ - https://github.com/openstack/nova/blob/9e5ad07aeeb9f14eba37e2cdea9377e7af48ef88/nova/api/openstack/compute/simple_tenant_usage.py#L258
+Closes-Bug: https://launchpad.net/bugs/2130703
+Change-Id: Ib47890087110d460504df64aeed5206ded2e70b0
+Signed-off-by: Ghanshyam Maan <gmaan@ghanshyammann.com>
+Origin: upstream, https://review.opendev.org/c/openstack/nova/+/966223
+Last-Update: 2025-11-06
+
+diff --git a/nova/tests/unit/policies/test_simple_tenant_usage.py b/nova/tests/unit/policies/test_simple_tenant_usage.py
+index f40dda1..a037d11 100644
+--- a/nova/tests/unit/policies/test_simple_tenant_usage.py
++++ b/nova/tests/unit/policies/test_simple_tenant_usage.py
+@@ -10,8 +10,11 @@
+ #    License for the specific language governing permissions and limitations
+ #    under the License.
+ 
++import datetime
+ from unittest import mock
+ 
++from oslo_utils import timeutils
++
+ from nova.api.openstack.compute import simple_tenant_usage
+ from nova.policies import simple_tenant_usage as policies
+ from nova.tests.unit.api.openstack import fakes
+@@ -29,7 +32,10 @@
+     def setUp(self):
+         super(SimpleTenantUsagePolicyTest, self).setUp()
+         self.controller = simple_tenant_usage.SimpleTenantUsageController()
+-        self.req = fakes.HTTPRequest.blank('')
++        start = timeutils.utcnow()
++        end = start + datetime.timedelta(hours=5)
++        url = '?start=%s&end=%s' % (start.isoformat(), end.isoformat())
++        self.req = fakes.HTTPRequest.blank(url)
+         self.controller._get_instances_all_cells = mock.MagicMock()
+ 
+         # Currently any admin can list other project usage.
