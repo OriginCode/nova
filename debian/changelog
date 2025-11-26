@@ -1,3 +1,9 @@
+nova (2:32.1.0-3) unstable; urgency=medium
+
+  * Removed Gustavo Panizzo from uploaders (Closes: #1114573).
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 26 Nov 2025 15:32:53 +0100
+
 nova (2:32.1.0-2) unstable; urgency=medium
 
   * Add Fix-test_simple_tenant_usage-test.patch and re-activate blacklisted
