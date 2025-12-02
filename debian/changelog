@@ -1,3 +1,9 @@
+nova (2:32.1.0-5) UNRELEASED; urgency=medium
+
+  * Rebuilt.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 02 Dec 2025 15:42:49 +0100
+
 nova (2:32.1.0-4) unstable; urgency=medium
 
   * Updated homepage URL (Closes: #1118106).
