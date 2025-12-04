@@ -1,0 +1,76 @@
+Description: Fixed failing timebased tests
+ If the updates are made on the same second, these unit tests are failing.
+ Adding a time.sleep(2) fixes it.
+Author: Thomas Goirand <zigo@debian.org>
+Forwarded: no
+Last-Update: 2025-12-04
+
+Index: nova/nova/tests/unit/compute/test_compute.py
+===================================================================
+--- nova.orig/nova/tests/unit/compute/test_compute.py
++++ nova/nova/tests/unit/compute/test_compute.py
+@@ -22,6 +22,7 @@ import fixtures as std_fixtures
+ from itertools import chain
+ import operator
+ import sys
++import time
+ from unittest import mock
+ 
+ from castellan import key_manager
+@@ -8446,6 +8447,7 @@ class ComputeTestCase(BaseTestCase,
+                 self.compute.network_api, 'add_fixed_ip_to_instance', _noop):
+             self.compute.add_fixed_ip_to_instance(
+                 self.context, 'fake', instance)
++        time.sleep(2)
+         updated_at_2 = db.instance_get_by_uuid(self.context,
+                                                instance['uuid'])['updated_at']
+ 
+@@ -8453,6 +8455,7 @@ class ComputeTestCase(BaseTestCase,
+             self.compute.network_api, 'remove_fixed_ip_from_instance', _noop):
+             self.compute.remove_fixed_ip_from_instance(
+                 self.context, 'fake', instance)
++        time.sleep(2)
+         updated_at_3 = db.instance_get_by_uuid(self.context,
+                                                instance['uuid'])['updated_at']
+ 
+Index: nova/nova/tests/unit/conductor/tasks/test_cross_cell_migrate.py
+===================================================================
+--- nova.orig/nova/tests/unit/conductor/tasks/test_cross_cell_migrate.py
++++ nova/nova/tests/unit/conductor/tasks/test_cross_cell_migrate.py
+@@ -11,6 +11,7 @@
+ #    under the License.
+ 
+ import copy
++import time
+ from unittest import mock
+ 
+ from oslo_messaging import exceptions as messaging_exceptions
+@@ -1573,6 +1574,7 @@ class RevertResizeTaskTestCase(test.NoDB
+         source_obj = objects.Migration(id=1, created_at=t1, updated_at=t1,
+                                        uuid=uuids.migration,
+                                        status='post-migrating')
++        time.sleep(2)
+         t2 = timeutils.utcnow()
+         target_obj = objects.Migration(id=2, created_at=t2, updated_at=t2,
+                                        uuid=uuids.migration,
+Index: nova/nova/tests/unit/db/main/test_api.py
+===================================================================
+--- nova.orig/nova/tests/unit/db/main/test_api.py
++++ nova/nova/tests/unit/db/main/test_api.py
+@@ -18,6 +18,7 @@
+ 
+ import copy
+ import datetime
++import time
+ from unittest import mock
+ 
+ from dateutil import parser as dateutil_parser
+@@ -3414,6 +3415,8 @@ class InstanceActionTestCase(test.TestCa
+             'created_at': timeutils.utcnow()
+         }
+ 
++        time.sleep(2)
++
+         action_values = self._create_action_values(uuid1, extra=extra)
+         db.action_start(self.ctxt, action_values)
+ 
