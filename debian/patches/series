@@ -5,3 +5,4 @@ Add-a-healtcheck-url.patch
 fix-exception.NovaException.patch
 Fix-test_simple_tenant_usage-test.patch
 fix-failing-timebased-tests.patch
+testtools-2.8.2-TestMatchersInterface-is-removed.patch
