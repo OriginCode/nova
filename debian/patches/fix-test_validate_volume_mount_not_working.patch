@@ -1,0 +1,21 @@
+Description: Fix test_validate_volume_mount_not_working()
+Author: Thomas Goirand <zigo@debian.org>
+Bug-Debian: https://bugs.debian.org/1124185
+Forwarded: https://review.opendev.org/c/openstack/nova/+/971885
+Last-Update: 2025-12-29
+
+--- nova-32.1.0.orig/nova/tests/unit/virt/libvirt/volume/test_quobyte.py
++++ nova-32.1.0/nova/tests/unit/virt/libvirt/volume/test_quobyte.py
+@@ -264,9 +264,9 @@ class QuobyteTestCase(test.NoDBTestCase)
+         stat_mock.side_effect = [os.stat, statMockCall]
+ 
+         self.assertRaises(
+-            excClass=nova_exception.InvalidVolume,
+-            callableObj=drv.validate_volume,
+-            mount_path=self.TEST_MNT_POINT)
++            nova_exception.InvalidVolume,
++            drv.validate_volume,
++            self.TEST_MNT_POINT)
+         stat_mock.assert_called_with(self.TEST_MNT_POINT)
+         part_mock.assert_called_once_with(all=True)
+ 
