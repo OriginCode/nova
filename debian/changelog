@@ -6,6 +6,7 @@ nova (2:32.1.0-7) unstable; urgency=high
     in an unsafe image resize operation that could destroy data on the host
     system. Appiled upstream patch (Closes: #1128294):
     - cve-2026-24708-make-disk.extend-pass-format-to-qemu-img-2025.2.patch
+  * Cleans better.
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 06 Feb 2026 00:32:36 +0100
 
