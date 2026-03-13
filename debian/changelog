@@ -16,6 +16,8 @@ nova (2:33.0.0~rc1-1) experimental; urgency=medium
   * d/rules export OS_NOVA_DISABLE_EVENTLET_PATCHING=false to avoid failure
     during unit testing.
   * Do not generate /usr/share/nova-common/policy.yaml.example.
+  * Switch nova-api and nova-api-metadata to module=, as the wsgi scripts in
+    /usr/bin are gone from upstream.
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 13 Mar 2026 11:38:59 +0100
 
