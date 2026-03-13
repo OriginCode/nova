@@ -10,6 +10,7 @@ Build-Depends:
  dh-python,
  openstack-pkg-tools,
  po-debconf,
+ pybuild-plugin-pyproject,
  python3-all,
  python3-pbr,
  python3-setuptools,

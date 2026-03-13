@@ -1,6 +1,7 @@
 nova (2:33.0.0~rc1-1) experimental; urgency=medium
 
   * New upstream release.
+  * Add pybuild-plugin-pyproject as build-depends.
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 13 Mar 2026 11:38:59 +0100
 
