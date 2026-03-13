@@ -9,7 +9,7 @@ Index: nova/nova/tests/unit/compute/test_compute.py
 ===================================================================
 --- nova.orig/nova/tests/unit/compute/test_compute.py
 +++ nova/nova/tests/unit/compute/test_compute.py
-@@ -22,6 +22,7 @@ import fixtures as std_fixtures
+@@ -24,6 +24,7 @@ import fixtures as std_fixtures
  from itertools import chain
  import operator
  import sys
@@ -17,7 +17,7 @@ Index: nova/nova/tests/unit/compute/test_compute.py
  from unittest import mock
  
  from castellan import key_manager
-@@ -8446,6 +8447,7 @@ class ComputeTestCase(BaseTestCase,
+@@ -8451,6 +8452,7 @@ class ComputeTestCase(BaseTestCase,
                  self.compute.network_api, 'add_fixed_ip_to_instance', _noop):
              self.compute.add_fixed_ip_to_instance(
                  self.context, 'fake', instance)
@@ -25,7 +25,7 @@ Index: nova/nova/tests/unit/compute/test_compute.py
          updated_at_2 = db.instance_get_by_uuid(self.context,
                                                 instance['uuid'])['updated_at']
  
-@@ -8453,6 +8455,7 @@ class ComputeTestCase(BaseTestCase,
+@@ -8458,6 +8460,7 @@ class ComputeTestCase(BaseTestCase,
              self.compute.network_api, 'remove_fixed_ip_from_instance', _noop):
              self.compute.remove_fixed_ip_from_instance(
                  self.context, 'fake', instance)
@@ -65,7 +65,7 @@ Index: nova/nova/tests/unit/db/main/test_api.py
  from unittest import mock
  
  from dateutil import parser as dateutil_parser
-@@ -3414,6 +3415,8 @@ class InstanceActionTestCase(test.TestCa
+@@ -3375,6 +3376,8 @@ class InstanceActionTestCase(test.TestCa
              'created_at': timeutils.utcnow()
          }
  
