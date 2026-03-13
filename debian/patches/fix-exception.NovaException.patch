@@ -7,7 +7,7 @@ Index: nova/nova/virt/disk/api.py
 ===================================================================
 --- nova.orig/nova/virt/disk/api.py
 +++ nova/nova/virt/disk/api.py
-@@ -649,7 +649,7 @@ def _set_passwd(username, admin_passwd,
+@@ -663,7 +663,7 @@ def _set_passwd(username, admin_passwd,
              break
      else:
          msg = _('User %(username)s not found in password file.')
@@ -16,7 +16,7 @@ Index: nova/nova/virt/disk/api.py
  
      # update password in the shadow file. It's an error if the
      # user doesn't exist.
-@@ -665,6 +665,6 @@ def _set_passwd(username, admin_passwd,
+@@ -679,6 +679,6 @@ def _set_passwd(username, admin_passwd,
  
      if not found:
          msg = _('User %(username)s not found in shadow file.')
