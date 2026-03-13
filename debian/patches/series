@@ -5,4 +5,3 @@ Add-a-healtcheck-url.patch
 fix-exception.NovaException.patch
 fix-failing-timebased-tests.patch
 testtools-2.8.2-TestMatchersInterface-is-removed.patch
-cve-2026-24708-make-disk.extend-pass-format-to-qemu-img-2025.2.patch
