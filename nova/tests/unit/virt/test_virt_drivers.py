@@ -13,6 +13,7 @@
 #    under the License.
 
 from collections import deque
+import functools
 import sys
 import traceback
 from unittest import mock
@@ -56,6 +57,7 @@ def catch_notimplementederror(f):
     log it so that we can extract this information afterwards as needed.
     """
 
+    @functools.wraps(f)
     def wrapped_func(self, *args, **kwargs):
         try:
             return f(self, *args, **kwargs)
@@ -66,8 +68,6 @@ def catch_notimplementederror(f):
                       {'driver': type(self.connection),
                        'method': frame[2], 'test': f.__name__})
 
-    wrapped_func.__name__ = f.__name__
-    wrapped_func.__doc__ = f.__doc__
     return wrapped_func
 
 
@@ -90,6 +90,10 @@ class _FakeDriverBackendTestCase(object):
 
         self.useFixture(fixtures.MonkeyPatch(
             'nova.virt.libvirt.host.Host._conn_event_thread',
+            lambda *args: None))
+
+        self.useFixture(fixtures.MonkeyPatch(
+            'nova.virt.libvirt.host.Host._event_emit_delayed',
             lambda *args: None))
 
         self.flags(rescue_image_id="2",
@@ -122,7 +126,7 @@ class _FakeDriverBackendTestCase(object):
         self.stub_out('nova.virt.libvirt.guest.Guest.migrate',
                       lambda self, destination, migrate_uri=None,
                       migrate_disks=None, destination_xml=None, flags=0,
-                      bandwidth=0: None)
+                      bandwidth=0, parallel=0: None)
         # We can't actually make a config drive v2 because ensure_tree has
         # been faked out
         self.stub_out('nova.virt.configdrive.ConfigDriveBuilder.make_drive',
@@ -421,10 +425,10 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
         self.assertEqual(storage_ip, result['ip'])
 
     @catch_notimplementederror
-    @mock.patch('threading.Event.wait', new=mock.Mock())
     @mock.patch.object(libvirt.driver.LibvirtDriver, '_build_device_metadata',
                        return_value=objects.InstanceDeviceMetadata())
     def test_attach_detach_volume(self, _):
+        self.flags(device_detach_timeout="1", group="libvirt")
         instance_ref, network_info = self._get_running_instance()
         connection_info = {
             "driver_volume_type": "fake",
@@ -458,10 +462,10 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
                                         '/dev/sda', 2))
 
     @catch_notimplementederror
-    @mock.patch('threading.Event.wait', new=mock.Mock())
     @mock.patch.object(libvirt.driver.LibvirtDriver, '_build_device_metadata',
                        return_value=objects.InstanceDeviceMetadata())
     def test_attach_detach_different_power_states(self, _):
+        self.flags(device_detach_timeout="1", group="libvirt")
         instance_ref, network_info = self._get_running_instance()
         connection_info = {
             "driver_volume_type": "fake",

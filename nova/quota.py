@@ -1376,7 +1376,6 @@ def _instances_cores_ram_count(context, project_id, user_id=None):
                           'cores': <count across user>,
                           'ram': <count across user>}}
     """
-    global UID_QFD_POPULATED_CACHE_BY_PROJECT
     if CONF.quota.count_usage_from_placement:
         # If a project has all user_id and queued_for_delete data populated,
         # cache the result to avoid needless database checking in the future.
@@ -1419,13 +1418,7 @@ def _server_group_count(context, project_id, user_id=None):
 QUOTAS = QuotaEngine(
     resources=[
         CountableResource(
-            'instances', _instances_cores_ram_count, 'instances'),
-        CountableResource(
             'cores', _instances_cores_ram_count, 'cores'),
-        CountableResource(
-            'ram', _instances_cores_ram_count, 'ram'),
-        AbsoluteResource(
-            'metadata_items', 'metadata_items'),
         AbsoluteResource(
             'injected_files', 'injected_files'),
         AbsoluteResource(
@@ -1433,7 +1426,13 @@ QUOTAS = QuotaEngine(
         AbsoluteResource(
             'injected_file_path_bytes', 'injected_file_path_length'),
         CountableResource(
+            'instances', _instances_cores_ram_count, 'instances'),
+        CountableResource(
             'key_pairs', _keypair_get_count_by_user, 'key_pairs'),
+        AbsoluteResource(
+            'metadata_items', 'metadata_items'),
+        CountableResource(
+            'ram', _instances_cores_ram_count, 'ram'),
         CountableResource(
             'server_groups', _server_group_count, 'server_groups'),
         CountableResource(

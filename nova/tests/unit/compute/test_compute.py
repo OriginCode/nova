@@ -18,6 +18,8 @@
 """Tests for compute service."""
 
 import datetime
+import threading
+
 import fixtures as std_fixtures
 from itertools import chain
 import operator
@@ -28,7 +30,7 @@ from castellan import key_manager
 from cinderclient import exceptions as cinder_exception
 import ddt
 import futurist
-from keystoneclient import exceptions as keystone_exception
+from keystoneauth1 import exceptions as keystone_exception
 from neutronclient.common import exceptions as neutron_exceptions
 from oslo_log import log as logging
 import oslo_messaging as messaging
@@ -1661,7 +1663,14 @@ class ComputeTestCase(BaseTestCase,
     def setUp(self):
         super(ComputeTestCase, self).setUp()
         self.compute._live_migration_executor = futurist.SynchronousExecutor()
+        # NOTE(gibi): the _sync_power_states periodic task in the
+        # ComputeManager spawning concurrent tasks and uses a lock to
+        # synchronize a shared data structure. As the spawn is made
+        # synchronous meaning the tasks runs on the caller thread. This means
+        # the simple lock causes a deadlock in the unit test. Upgrade that lock
+        # to be reentrant so the test can pass with synchronous spawn.
         self.useFixture(fixtures.SpawnIsSynchronousFixture())
+        self.compute._syncs_in_progress_lock = threading.RLock()
 
         self.image_api = image_api.API()
         self.default_flavor = objects.Flavor.get_by_name(self.context,
@@ -2199,8 +2208,8 @@ class ComputeTestCase(BaseTestCase,
 
         bdms = []
 
-        def fake_rpc_reserve_block_device_name(self, context, instance, device,
-                                               volume_id, **kwargs):
+        def fake_rpc_attach_volume(self, context, instance, volume, device,
+                                   disk_bus, device_type, **kwargs):
             bdm = objects.BlockDeviceMapping(
                         **{'context': context,
                            'source_type': 'volume',
@@ -2220,9 +2229,9 @@ class ComputeTestCase(BaseTestCase,
         self.stub_out('nova.volume.cinder.API.terminate_connection',
                        fake_terminate_connection)
         self.stub_out('nova.volume.cinder.API.detach', fake_detach)
-        self.stub_out('nova.compute.rpcapi.ComputeAPI.'
-                       'reserve_block_device_name',
-                       fake_rpc_reserve_block_device_name)
+        self.stub_out('nova.conductor.rpcapi.ComputeTaskAPI.'
+                       'attach_volume',
+                       fake_rpc_attach_volume)
 
         self.compute_api.attach_volume(self.context, instance, 1,
                                        '/dev/vdc')
@@ -4081,10 +4090,9 @@ class ComputeTestCase(BaseTestCase,
         with mock.patch.object(compute_utils,
                                'EventReporter') as mock_event:
             if method == 'snapshot':
-                self.assertRaises(test.TestingException,
-                                  self.compute.snapshot_instance,
-                                  self.context, image_id=uuids.snapshot,
-                                  instance=inst_obj)
+                future = self.compute.snapshot_instance(
+                    self.context, image_id=uuids.snapshot, instance=inst_obj)
+                self.assertRaises(test.TestingException, future.result)
                 mock_event.assert_called_once_with(self.context,
                                                    'compute_snapshot_instance',
                                                    CONF.host,
@@ -7390,9 +7398,6 @@ class ComputeTestCase(BaseTestCase,
         raised_exc = None
 
         def fake_db_fault_create(ctxt, values):
-            global exc_info
-            global raised_exc
-
             self.assertIn('raise messaging.RemoteError', values['details'])
             self.assertIn('Remote error: test My Test Message\nNone.',
                           values['details'])
@@ -11777,13 +11782,6 @@ class ComputeAPITestCase(BaseTestCase):
             {'port_id': port_id, 'pci_req': pci_req})
 
     def test_attach_volume_new_flow(self):
-        fake_bdm = fake_block_device.FakeDbBlockDeviceDict(
-                {'source_type': 'volume', 'destination_type': 'volume',
-                 'volume_id': uuids.volume_id, 'device_name': '/dev/vdb'})
-        bdm = block_device_obj.BlockDeviceMapping()._from_db_object(
-                self.context,
-                block_device_obj.BlockDeviceMapping(),
-                fake_bdm)
         instance = self._create_fake_instance_obj()
         instance.id = 42
         fake_volume = {'id': uuids.volume, 'multiattach': False}
@@ -11792,46 +11790,23 @@ class ComputeAPITestCase(BaseTestCase):
             mock.patch.object(cinder.API, 'get', return_value=fake_volume),
             mock.patch.object(objects.BlockDeviceMapping,
                               'get_by_volume_and_instance'),
-            mock.patch.object(cinder.API, 'check_availability_zone'),
-            mock.patch.object(cinder.API, 'attachment_create',
-                              return_value={'id': uuids.attachment_id}),
-            mock.patch.object(objects.BlockDeviceMapping, 'save'),
-            mock.patch.object(compute_rpcapi.ComputeAPI,
-                'reserve_block_device_name', return_value=bdm),
-            mock.patch.object(compute_rpcapi.ComputeAPI, 'attach_volume')
-        ) as (mock_get, mock_no_bdm,
-              mock_check_availability_zone, mock_attachment_create,
-              mock_bdm_save, mock_reserve_bdm, mock_attach):
+            mock.patch.object(self.compute_api.compute_task_api,
+                              'attach_volume')
+        ) as (mock_get, mock_no_bdm, mock_attach):
             mock_no_bdm.side_effect = exception.VolumeBDMNotFound(
                     volume_id=uuids.volume)
             self.compute_api.attach_volume(
                     self.context, instance, uuids.volume,
                     '/dev/vdb', 'ide', 'cdrom')
 
-            mock_reserve_bdm.assert_called_once_with(
-                    self.context, instance, '/dev/vdb', uuids.volume,
-                    disk_bus='ide', device_type='cdrom', tag=None,
-                    multiattach=False)
             self.assertEqual(mock_get.call_args,
                              mock.call(self.context, uuids.volume))
-            self.assertEqual(mock_check_availability_zone.call_args,
-                             mock.call(
-                                 self.context, fake_volume, instance=instance))
-            mock_attachment_create.assert_called_once_with(self.context,
-                                                           uuids.volume,
-                                                           instance.uuid)
-            a, kw = mock_attach.call_args
-            self.assertEqual(a[2].device_name, '/dev/vdb')
-            self.assertEqual(a[2].volume_id, uuids.volume_id)
+            mock_attach.assert_called_once_with(self.context, instance,
+                fake_volume, '/dev/vdb', 'ide', 'cdrom', tag=None,
+                supports_multiattach=False, delete_on_termination=False,
+                do_cast=True)
 
     def test_attach_volume_no_device_new_flow(self):
-        fake_bdm = fake_block_device.FakeDbBlockDeviceDict(
-                {'source_type': 'volume', 'destination_type': 'volume',
-                 'device_name': '/dev/vdb', 'volume_id': uuids.volume_id})
-        bdm = block_device_obj.BlockDeviceMapping()._from_db_object(
-                self.context,
-                block_device_obj.BlockDeviceMapping(),
-                fake_bdm)
         instance = self._create_fake_instance_obj()
         instance.id = 42
         fake_volume = {'id': uuids.volume, 'multiattach': False}
@@ -11841,16 +11816,9 @@ class ComputeAPITestCase(BaseTestCase):
             mock.patch.object(objects.BlockDeviceMapping,
                               'get_by_volume_and_instance',
                               side_effect=exception.VolumeBDMNotFound),
-            mock.patch.object(cinder.API, 'check_availability_zone'),
-            mock.patch.object(cinder.API, 'attachment_create',
-                              return_value={'id': uuids.attachment_id}),
-            mock.patch.object(objects.BlockDeviceMapping, 'save'),
-            mock.patch.object(compute_rpcapi.ComputeAPI,
-                'reserve_block_device_name', return_value=bdm),
-            mock.patch.object(compute_rpcapi.ComputeAPI, 'attach_volume')
-        ) as (mock_get, mock_no_bdm,
-              mock_check_availability_zone, mock_attachment_create,
-              mock_bdm_save, mock_reserve_bdm, mock_attach):
+            mock.patch.object(self.compute_api.compute_task_api,
+                              'attach_volume')
+        ) as (mock_get, mock_no_bdm, mock_attach):
             mock_no_bdm.side_effect = exception.VolumeBDMNotFound(
                                           volume_id=uuids.volume)
 
@@ -11858,20 +11826,10 @@ class ComputeAPITestCase(BaseTestCase):
                     self.context, instance, uuids.volume,
                     device=None)
 
-            mock_reserve_bdm.assert_called_once_with(
-                    self.context, instance, None, uuids.volume,
-                    disk_bus=None, device_type=None, tag=None,
-                    multiattach=False)
             self.assertEqual(mock_get.call_args,
                              mock.call(self.context, uuids.volume))
-            self.assertEqual(mock_check_availability_zone.call_args,
-                             mock.call(
-                                 self.context, fake_volume, instance=instance))
-            mock_attachment_create.assert_called_once_with(self.context,
-                                                           uuids.volume,
-                                                           instance.uuid)
             a, kw = mock_attach.call_args
-            self.assertEqual(a[2].volume_id, uuids.volume_id)
+            self.assertEqual(a[2], fake_volume)
 
     def test_attach_volume_shelved_offloaded(self):
         instance = self._create_fake_instance_obj()
@@ -11885,10 +11843,10 @@ class ComputeAPITestCase(BaseTestCase):
                  'instance_uuid': instance.uuid}))
         with test.nested(
              mock.patch.object(compute.API,
-                               '_create_volume_bdm',
+                               '_create_volume_bdm_locally',
                                return_value=fake_bdm),
-             mock.patch.object(compute.API,
-                               '_check_attach_and_reserve_volume'),
+             mock.patch.object(compute_utils,
+                               'check_attach_and_reserve_volume'),
              mock.patch.object(cinder.API, 'attach'),
              mock.patch.object(compute_utils, 'EventReporter')
         ) as (mock_bdm_create, mock_attach_and_reserve, mock_attach,
@@ -11898,9 +11856,7 @@ class ComputeAPITestCase(BaseTestCase):
                     self.context, instance, volume,
                     '/dev/vdb', 'ide', 'cdrom', False)
             mock_attach_and_reserve.assert_called_once_with(self.context,
-                                                            volume,
-                                                            instance,
-                                                            fake_bdm)
+                self.compute_api.volume_api, volume, instance, fake_bdm)
             mock_attach.assert_called_once_with(self.context,
                                                 uuids.volume,
                                                 instance.uuid,
@@ -11926,10 +11882,10 @@ class ComputeAPITestCase(BaseTestCase):
 
         with test.nested(
              mock.patch.object(compute.API,
-                               '_create_volume_bdm',
+                               '_create_volume_bdm_locally',
                                return_value=fake_bdm),
-             mock.patch.object(compute.API,
-                               '_check_attach_and_reserve_volume',
+             mock.patch.object(compute_utils,
+                               'check_attach_and_reserve_volume',
                                side_effect=fake_check_attach_and_reserve),
              mock.patch.object(cinder.API, 'attachment_complete')
         ) as (mock_bdm_create, mock_attach_and_reserve, mock_attach_complete):
@@ -11938,9 +11894,7 @@ class ComputeAPITestCase(BaseTestCase):
                     self.context, instance, volume,
                     '/dev/vdb', 'ide', 'cdrom', False)
             mock_attach_and_reserve.assert_called_once_with(self.context,
-                                                            volume,
-                                                            instance,
-                                                            fake_bdm)
+                self.compute_api.volume_api, volume, instance, fake_bdm)
             mock_attach_complete.assert_called_once_with(
                 self.context, uuids.attachment_id)
 

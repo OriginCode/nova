@@ -25,6 +25,16 @@ from nova.objects import fields
 LOG = log.getLogger(__name__)
 OS_VIF_DELEGATION = 'os_vif_delegation'
 
+__all__ = [
+    'HyperVLiveMigrateData',
+    'LibvirtLiveMigrateBDMInfo',
+    'LibvirtLiveMigrateData',
+    'LibvirtLiveMigrateNUMAInfo',
+    'LiveMigrateData',
+    'VIFMigrateData',
+    'VMwareLiveMigrateData',
+]
+
 
 @obj_base.NovaObjectRegistry.register
 class VIFMigrateData(obj_base.NovaObject):
@@ -246,7 +256,8 @@ class LibvirtLiveMigrateData(LiveMigrateData):
     #               source_mdev_types and target_mdevs fields
     # Version 1.12: Added dst_cpu_shared_set_info
     # Version 1.13: Inherited pci_dev_map_src_dst from LiveMigrateData
-    VERSION = '1.13'
+    # Version 1.14: Added vtpm_secret_uuid and vtpm_secret_value
+    VERSION = '1.14'
 
     fields = {
         'filename': fields.StringField(),
@@ -285,12 +296,29 @@ class LibvirtLiveMigrateData(LiveMigrateData):
         # key is source mdev UUID and value is the destination mdev UUID.
         'target_mdevs': fields.DictOfStringsField(),
         'dst_cpu_shared_set_info': fields.SetOfIntegersField(),
+        'vtpm_secret_uuid': fields.UUIDField(nullable=True),
+        'vtpm_secret_value': fields.SensitiveStringField(nullable=True),
     }
 
     def obj_make_compatible(self, primitive, target_version):
         super(LibvirtLiveMigrateData, self).obj_make_compatible(
             primitive, target_version)
         target_version = versionutils.convert_version_to_tuple(target_version)
+        if (target_version < (1, 14)):
+            # In an object primitive, a field will be included if and only if
+            # it is set to something (including None, if the field is
+            # nullable). So instances with no vTPM will not have these fields
+            # set.
+            vtpm_fields = ['vtpm_secret_uuid', 'vtpm_secret_value']
+            if any(field in vtpm_fields for field in primitive):
+                # If either field is set, then we know this object was passed
+                # from newer compute which could support vTPM live migration.
+                # We raise here instead of silently removing the fields because
+                # we cannot backport the object to something compatible.
+                raise exception.ObjectActionError(
+                    action='obj_make_compatible',
+                    reason='Unable to backport newer vTPM support to '
+                           'requested version %d.%d' % target_version)
         if (target_version < (1, 13)):
             primitive.pop('pci_dev_map_src_dst', None)
         if (target_version < (1, 12)):
@@ -334,6 +362,53 @@ class LibvirtLiveMigrateData(LiveMigrateData):
 
     def is_on_shared_storage(self):
         return self.is_shared_block_storage or self.is_shared_instance_path
+
+    @property
+    def has_vtpm(self):
+        """Whether the live migration involves vTPM"""
+        return (self.obj_attr_is_set('vtpm_secret_uuid') and
+                self.obj_attr_is_set('vtpm_secret_value'))
+
+    @property
+    def has_vtpm_secret_data(self):
+        """Whether vTPM secret data has been populated"""
+        return (
+            self.has_vtpm and self.vtpm_secret_uuid and self.vtpm_secret_value)
+
+    @property
+    def vtpm_secret_value_bytes(self):
+        """Get the vTPM secret value as bytes after transport over RPC.
+
+        A vTPM secret is a Barbican secret of type "passphrase", which are
+        used for storing plain text secrets. A Barbican passphrase is an
+        unencrypted bytestring of data type: bytes.
+
+        The secret value is generated in nova/crypto.py as a random bytestring
+        that is subsequently base64 encoded using the standard Base64 alphabet.
+        It is then stored in Barbican as a passphrase.
+
+        The caller expects to receive bytes from here so we can convert the
+        value to the original data type: bytes with 'ascii' encoding.
+        """
+        return self.vtpm_secret_value.encode(encoding='ascii')
+
+    @vtpm_secret_value_bytes.setter
+    def vtpm_secret_value_bytes(self, value):
+        """Store the vTPM secret value as str for transport over RPC.
+
+        A vTPM secret is a Barbican secret of type "passphrase", which are
+        used for storing plain text secrets. A Barbican passphrase is an
+        unencrypted bytestring of data type: bytes.
+
+        The secret value is generated in nova/crypto.py as a random bytestring
+        that is subsequently base64 encoded using the standard Base64 alphabet.
+        It is then stored in Barbican as a passphrase.
+
+        We expect to receive bytes here and we can convert the value to a str
+        with 'ascii' encoding because we know it was base64 encoded using the
+        standard Base64 alphabet.
+        """
+        self.vtpm_secret_value = value.decode(encoding='ascii')
 
 
 # TODO(gmann): HyperV virt driver has been removed in Nova 29.0.0 (OpenStack

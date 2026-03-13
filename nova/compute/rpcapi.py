@@ -32,6 +32,14 @@ from nova import rpc
 
 CONF = nova.conf.CONF
 RPC_TOPIC = "compute"
+# NOTE(gmaan): The compute service creates two rpc servers which means each
+# compute service worker will be listening on two topic queues (1. 'compute'
+# 2. 'compute-alt'). The 'compute-alt' rpc server is used to handle the
+# graceful shutdown of compute service. During graceful shutdown, 'compute'
+# rpc server will be stopped but 'compute-alt' rpc server will be active for
+# finishing the ongoing operations. The 'compute-alt' topic is supposed to be
+# used in the rpc call/cast which are used to finish the ongoing operations.
+RPC_TOPIC_ALT = "compute-alt"
 
 LOG = logging.getLogger(__name__)
 LAST_VERSION = None
@@ -406,6 +414,7 @@ class ComputeAPI(object):
         * 6.2 - Add target_state parameter to rebuild_instance()
         * 6.3 - Add delete_attachment parameter to remove_volume_connection
         * 6.4 - Add allow_share() and deny_share()
+        * 6.5 - Add 2nd RPC server with new topic 'compute-alt'
     '''
 
     VERSION_ALIASES = {
@@ -433,6 +442,7 @@ class ComputeAPI(object):
         'dalmatian': '6.3',
         'epoxy': '6.4',
         'flamingo': '6.4',
+        'gazpacho': '6.5',
     }
 
     @property
@@ -564,6 +574,33 @@ class ComputeAPI(object):
                               serializer=serializer,
                               call_monitor_timeout=cmt)
 
+    def prepare_for_alt_rpcserver(
+            self, client, server, version, **kwargs):
+        # NOTE(gmaan): By override the 'topic' in prepare() method, we make
+        # this rpc client to send the message to the different RPC server,
+        # which listen to RPC_TOPIC_ALT (the RPC server which is active during
+        # compute service graceful shutdown).
+        topic = RPC_TOPIC_ALT
+        msg = _("RPC: Sending the message to topic: %s") % topic
+
+        # NOTE(gmann): The old compute will not have the new 2nd RPC server
+        # so we need to handle it with RPC versioning. For the old compute,
+        # it will fallback to send the message to the original RPC server,
+        # which listen to RPC_TOPIC.
+        if not client.can_send_version('6.5'):
+            topic = RPC_TOPIC
+            msg = _("Fallback to send the message to original topic: %s as "
+                    "RPC version is too old.") % topic
+
+        LOG.debug(msg)
+
+        params = {
+            'server': server,
+            'version': version,
+            'topic': topic}
+        params.update(kwargs)
+        return client.prepare(**params)
+
     def add_fixed_ip_to_instance(self, ctxt, instance, network_id):
         version = self._ver(ctxt, '5.0')
         cctxt = self.router.client(ctxt).prepare(
@@ -604,6 +641,12 @@ class ComputeAPI(object):
             kwargs.pop('migration')
             kwargs.pop('limits')
             version = '5.0'
+        # NOTE(gmaan): Most of the live migration RPC methods use the
+        # 'compute-alt' topic, but this RPC method should use the 'compute'
+        # topic. If a shutdown is initiated on the destination compute, the
+        # RPC server for the 'compute' topic will be stopped. If a live
+        # migration request arrives after that, the destination compute node
+        # should not take it.
         cctxt = client.prepare(server=destination, version=version,
                                call_monitor_timeout=CONF.rpc_response_timeout,
                                timeout=CONF.long_rpc_timeout)
@@ -613,6 +656,10 @@ class ComputeAPI(object):
         version = self._ver(ctxt, '5.0')
         client = self.router.client(ctxt)
         source = _compute_host(None, instance)
+        # NOTE(gmaan): Like check_can_live_migrate_destination, this RPC
+        # method should use topic 'compute'. If a shutdown is initiated
+        # on the source compute and, after that, a live migration request
+        # arrives, the source compute should not take it.
         cctxt = client.prepare(server=source, version=version)
         return cctxt.call(ctxt, 'check_can_live_migrate_source',
                           instance=instance,
@@ -626,7 +673,14 @@ class ComputeAPI(object):
         if not client.can_send_version('6.0'):
             # We always pass the instance until the 5.0 version
             msg_args['instance'] = instance
-        cctxt = client.prepare(
+        # NOTE(gmaan): This is called by the destination compute's
+        # revert_resize() on source compute. Destination compute check
+        # with source compute if instance storage is shared or not so
+        # that it can decide if disks needs to be destroyed. Make this
+        # RPC request to 'compute-alt' topic so that the shutdown request
+        # will wait for the compute to finish the revert resize.
+        cctxt = self.prepare_for_alt_rpcserver(
+                client,
                 server=_compute_host(host, instance), version=version)
         return cctxt.call(ctxt, 'check_instance_shared_storage', **msg_args)
 
@@ -708,7 +762,11 @@ class ComputeAPI(object):
             msg_args.pop('request_spec')
             version = '5.0'
 
-        cctxt = client.prepare(
+        # NOTE(gmaan): This is final step of resize/migration. Make this
+        # RPC request to 'compute-alt' topic so that the shutdown request
+        # will wait for the compute to finish the in-progress migration.
+        cctxt = self.prepare_for_alt_rpcserver(
+                client,
                 server=host, version=version)
         cctxt.cast(ctxt, 'finish_resize', **msg_args)
 
@@ -727,8 +785,14 @@ class ComputeAPI(object):
             msg_args.pop('request_spec')
             version = '5.0'
 
-        cctxt = client.prepare(
-                server=host, version=version)
+        # NOTE(gmaan): This is called by the destination compute's
+        # revert_resize() on source compute. Destination compute has deleted
+        # the new instance on destination and asked source compute to power
+        # on the old instance on source. Make this RPC request to 'compute-alt'
+        # topic so that the shutdown request will wait for
+        # the compute to finish the revert resize.
+        cctxt = self.prepare_for_alt_rpcserver(
+                client, server=host, version=version)
         cctxt.cast(ctxt, 'finish_revert_resize', **msg_args)
 
     def finish_snapshot_based_resize_at_dest(
@@ -767,7 +831,12 @@ class ComputeAPI(object):
             msg_args['request_spec'] = request_spec
         if not client.can_send_version(version):
             raise exception.MigrationError(reason=_('Compute too old'))
-        cctxt = client.prepare(
+        # NOTE(gmaan): This is the cross-cell resize case to finish the
+        # snapshot-based resize on the destination compute. Make this RPC
+        # request to 'compute-alt' topic so that the shutdown request will
+        # wait for the compute to finish the in-progress cross-cell resize.
+        cctxt = self.prepare_for_alt_rpcserver(
+            client,
             server=migration.dest_compute, version=version,
             call_monitor_timeout=CONF.rpc_response_timeout,
             timeout=CONF.long_rpc_timeout)
@@ -801,10 +870,17 @@ class ComputeAPI(object):
         client = self.router.client(ctxt)
         if not client.can_send_version(version):
             raise exception.MigrationError(reason=_('Compute too old'))
-        cctxt = client.prepare(server=migration.source_compute,
-                               version=version,
-                               call_monitor_timeout=CONF.rpc_response_timeout,
-                               timeout=CONF.long_rpc_timeout)
+        # NOTE(gmaan): This is called after the
+        # revert_snapshot_based_resize_at_dest so revert resize is completed on
+        # destination side. We should complete it on source compute also. Make
+        # this RPC request to 'compute-alt' topic so that the shutdown request
+        # will wait for the compute to finish the cross-cell revert resize.
+        cctxt = self.prepare_for_alt_rpcserver(
+                client,
+                server=migration.source_compute,
+                version=version,
+                call_monitor_timeout=CONF.rpc_response_timeout,
+                timeout=CONF.long_rpc_timeout)
         return cctxt.call(
             ctxt, 'finish_revert_snapshot_based_resize_at_source',
             instance=instance, migration=migration)
@@ -859,8 +935,14 @@ class ComputeAPI(object):
 
     def validate_console_port(self, ctxt, instance, port, console_type):
         version = self._ver(ctxt, '5.0')
-        cctxt = self.router.client(ctxt).prepare(
-                server=_compute_host(None, instance), version=version)
+        client = self.router.client(ctxt)
+        # NOTE(gmaan): Send this RPC request to 'compute-alt' topic. This is
+        # called when the console is already requested. If shutdown is
+        # requested after that, compute should finish the port validation
+        # so that users can get their requested console.
+        cctxt = self.prepare_for_alt_rpcserver(
+            client,
+            server=_compute_host(None, instance), version=version)
         return cctxt.call(ctxt, 'validate_console_port',
                           instance=instance, port=port,
                           console_type=console_type)
@@ -896,7 +978,13 @@ class ComputeAPI(object):
                        migration, migrate_data=None):
         version = self._ver(ctxt, '5.0')
         client = self.router.client(ctxt)
-        cctxt = client.prepare(server=host, version=version)
+        # NOTE(gmaan): Send this RPC request to 'compute-alt' topic. At this
+        # stage, both the source and destination compute have already confirmed
+        # that live migration can proceed. If the shutdown is initiated after
+        # that, the compute should finish the live migration using the
+        # 'compute-alt' RPC server.
+        cctxt = self.prepare_for_alt_rpcserver(
+            client, server=host, version=version)
         cctxt.cast(ctxt, 'live_migration', instance=instance,
                    dest=dest, block_migration=block_migration,
                    migrate_data=migrate_data, migration=migration)
@@ -925,7 +1013,12 @@ class ComputeAPI(object):
     def post_live_migration_at_destination(self, ctxt, instance,
             block_migration, host):
         version = self._ver(ctxt, '5.0')
-        cctxt = self.router.client(ctxt).prepare(
+        client = self.router.client(ctxt)
+        # NOTE(gmaan): Send this RPC request to 'compute-alt' topic. If the
+        # shutdown is initiated during live migration, the compute should
+        # finish the live migration using the 'compute-alt' RPC server.
+        cctxt = self.prepare_for_alt_rpcserver(
+                client,
                 server=host, version=version,
                 call_monitor_timeout=CONF.rpc_response_timeout,
                 timeout=CONF.long_rpc_timeout)
@@ -943,9 +1036,14 @@ class ComputeAPI(object):
             version = '5.0'
             # We just need to honor the argument in the v5.0 RPC API method
             msg_args['block_migration'] = None
-        cctxt = client.prepare(server=host, version=version,
-                               timeout=CONF.long_rpc_timeout,
-                               call_monitor_timeout=CONF.rpc_response_timeout)
+        # NOTE(gmaan): Send this RPC request to 'compute-alt' topic. If the
+        # shutdown is initiated during live migration, the compute should
+        # finish the live migration using the 'compute-alt' RPC server.
+        cctxt = self.prepare_for_alt_rpcserver(
+                client,
+                server=host, version=version,
+                timeout=CONF.long_rpc_timeout,
+                call_monitor_timeout=CONF.rpc_response_timeout)
         return cctxt.call(ctxt, 'pre_live_migration',
                           instance=instance,
                           disk=disk, migrate_data=migrate_data,
@@ -978,6 +1076,13 @@ class ComputeAPI(object):
                 version = '5.0'
                 msg_args['request_spec'] = (
                     request_spec.to_legacy_request_spec_dict())
+        # NOTE(gmaan): This is called by the conductor on the destination
+        # compute to check and start the resize/cold migration on source.
+        # This method can be called again by the conductor if the destination
+        # compute asks the conductor to reschedule the migration to another
+        # host. In both case, resize is not yet started, so this RPC request
+        # uses 'compute' topic. If a shutdown is initiated, then not taking
+        # the resize request at this stage is acceptable.
         cctxt = client.prepare(server=host, version=version)
         cctxt.cast(ctxt, 'prep_resize', **msg_args)
 
@@ -1026,6 +1131,10 @@ class ComputeAPI(object):
             msg_args['request_spec'] = request_spec
         if not client.can_send_version(version):
             raise exception.MigrationPreCheckError(reason=_('Compute too old'))
+        # NOTE(gmaan): This is the cross-cell resize case, and resize is not
+        # yet started, so this RPC request uses 'compute' topic. If a shutdown
+        # is initiated, then not taking the resize request at this stage is
+        # acceptable.
         cctxt = client.prepare(server=destination, version=version,
                                call_monitor_timeout=CONF.rpc_response_timeout,
                                timeout=CONF.long_rpc_timeout)
@@ -1062,10 +1171,17 @@ class ComputeAPI(object):
         client = self.router.client(ctxt)
         if not client.can_send_version(version):
             raise exception.MigrationError(reason=_('Compute too old'))
-        cctxt = client.prepare(server=_compute_host(None, instance),
-                               version=version,
-                               call_monitor_timeout=CONF.rpc_response_timeout,
-                               timeout=CONF.long_rpc_timeout)
+        # NOTE(gmaan): This is the cross-cell resize case, and called after
+        # resize is prepared on destination compute. At this point, resize
+        # is started so make this RPC request to 'compute-alt' topic so that
+        # the shutdown request will wait for the compute to finish the
+        # in-progress cross-cell resize.
+        cctxt = self.prepare_for_alt_rpcserver(
+                client,
+                server=_compute_host(None, instance),
+                version=version,
+                call_monitor_timeout=CONF.rpc_response_timeout,
+                timeout=CONF.long_rpc_timeout)
         return cctxt.call(
             ctxt, 'prep_snapshot_based_resize_at_source',
             instance=instance, migration=migration, snapshot_id=snapshot_id)
@@ -1153,8 +1269,12 @@ class ComputeAPI(object):
         if not client.can_send_version(version):
             kwargs.pop('delete_attachment')
             version = self._ver(ctxt, '5.0')
-
-        cctxt = client.prepare(server=host, version=version)
+        # NOTE(gmaan): This is called during live migration rollback. Send
+        # this RPC request to 'compute-alt' topic. If the shutdown is initiated
+        # during live migration rollback, the compute should finish the it
+        # using the 'compute-alt' RPC server.
+        cctxt = self.prepare_for_alt_rpcserver(
+                client, server=host, version=version)
         return cctxt.call(ctxt, 'remove_volume_connection', **kwargs)
 
     def rescue_instance(self, ctxt, instance, rescue_password,
@@ -1189,7 +1309,13 @@ class ComputeAPI(object):
                 msg_args.pop('request_spec')
                 version = '5.0'
 
-        cctxt = client.prepare(server=_compute_host(None, instance),
+        # NOTE(gmaan): This is called by destination compute's prep_resize()
+        # to start the migration on source compute. Make this RPC request to
+        # 'compute-alt' topic so that the shutdown request will wait for
+        # the compute to finish the in-progress migration.
+        cctxt = self.prepare_for_alt_rpcserver(
+                client,
+                server=_compute_host(None, instance),
                 version=version)
         cctxt.cast(ctxt, 'resize_instance', **msg_args)
 
@@ -1214,6 +1340,11 @@ class ComputeAPI(object):
             msg_args.pop('request_spec')
             version = '5.0'
 
+        # NOTE(gmaan): This revert resize is initiated by API on the
+        # destination compute, and the revert resize has not yet started.
+        # So this RPC request uses the 'compute' topic. If a shutdown is
+        # initiated, then not taking the revert resize request at this stage
+        # is acceptable.
         cctxt = client.prepare(
                 server=_compute_host(host, instance), version=version)
         cctxt.cast(ctxt, 'revert_resize', **msg_args)
@@ -1241,6 +1372,11 @@ class ComputeAPI(object):
         client = self.router.client(ctxt)
         if not client.can_send_version(version):
             raise exception.MigrationError(reason=_('Compute too old'))
+        # NOTE(gmaan): This revert resize for cross-cell resize case. It is
+        # initiated by the conductor and the revert resize has not yet started.
+        # So this RPC request uses the 'compute' topic. If a shutdown is
+        # initiated, then not taking the revert resize request at this stage
+        # is acceptable.
         cctxt = client.prepare(server=migration.dest_compute,
                                version=version,
                                call_monitor_timeout=CONF.rpc_response_timeout,
@@ -1254,7 +1390,12 @@ class ComputeAPI(object):
                                                migrate_data):
         version = self._ver(ctxt, '5.0')
         client = self.router.client(ctxt)
-        cctxt = client.prepare(server=host, version=version)
+        # NOTE(gmaan): This is called during live migration rollback. Send
+        # this RPC request to 'compute-alt' topic. If the shutdown is initiated
+        # during live migration rollback, the compute should finish it using
+        # the 'compute-alt' RPC server.
+        cctxt = self.prepare_for_alt_rpcserver(
+                client, server=host, version=version)
         cctxt.cast(ctxt, 'rollback_live_migration_at_destination',
                    instance=instance, destroy_disks=destroy_disks,
                    migrate_data=migrate_data)
@@ -1278,7 +1419,12 @@ class ComputeAPI(object):
         """
         version = self._ver(ctxt, '5.3')
         client = self.router.client(ctxt)
-        cctxt = client.prepare(server=host, version=version)
+        # NOTE(gmaan): This is called during live migration rollback. Send
+        # this RPC request to 'compute-alt' topic. If the shutdown is initiated
+        # during live migration rollback, the compute should finish it using
+        # the 'compute-alt' RPC server.
+        cctxt = self.prepare_for_alt_rpcserver(
+                client, server=host, version=version)
         cctxt.call(ctxt, 'drop_move_claim_at_destination', instance=instance)
 
     def set_admin_password(self, ctxt, instance, new_pass):
@@ -1515,8 +1661,13 @@ class ComputeAPI(object):
     def external_instance_event(self, ctxt, instances, events, host=None):
         instance = instances[0]
         version = self._ver(ctxt, '5.0')
-        cctxt = self.router.client(ctxt).prepare(
-            server=_compute_host(host, instance),
+        client = self.router.client(ctxt)
+        # NOTE(gmaan): This is initiated by the external services (for
+        # example, neutron send event for network change) and let's not block
+        # them during shutdown. Make this RPC request to 'compute-alt' topic.
+        cctxt = self.prepare_for_alt_rpcserver(
+            client,
+            _compute_host(host, instance),
             version=version)
         cctxt.cast(ctxt, 'external_instance_event', instances=instances,
                    events=events)

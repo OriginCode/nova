@@ -22,11 +22,11 @@ handles RPC calls relating to creating instances.  It is responsible for
 building a disk image, launching it via the underlying virtualization driver,
 responding to calls to check its state, attaching persistent storage, and
 terminating it.
-
 """
 
 import base64
 import binascii
+from collections.abc import Callable, Iterator
 import contextlib
 import copy
 import functools
@@ -36,11 +36,9 @@ import sys
 import threading
 import time
 import traceback
-import typing as ty
 
 from cinderclient import exceptions as cinder_exception
 from cursive import exception as cursive_exception
-import futurist
 from keystoneauth1 import exceptions as keystone_exception
 from openstack import exceptions as sdk_exc
 import os_traits
@@ -100,6 +98,7 @@ import nova.virt.node
 from nova.virt import storage_users
 from nova.virt import virtapi
 from nova.volume import cinder
+from nova import vtpm
 
 CONF = nova.conf.CONF
 
@@ -264,12 +263,12 @@ class ThreadingEventWithResult(threading.Event):
 
 # Each collection of events is a dict of eventlet Events keyed by a tuple of
 # event name and associated tag
-_InstanceEvents = ty.Dict[ty.Tuple[str, str], ThreadingEventWithResult]
+_InstanceEvents = dict[tuple[str, str], ThreadingEventWithResult]
 
 
 class InstanceEvents(object):
     def __init__(self):
-        self._events: ty.Optional[ty.Dict[str, _InstanceEvents]] = {}
+        self._events: dict[str, _InstanceEvents] | None = {}
 
     @staticmethod
     def _lock_name(instance) -> str:
@@ -484,7 +483,7 @@ class ComputeVirtAPI(virtapi.VirtAPI):
     def _wait_for_instance_events(
         instance: 'objects.Instance',
         events: dict,
-        error_callback: ty.Callable,
+        error_callback: Callable[[str, 'objects.Instance'], bool],
         timeout: int,
     ) -> None:
         deadline = time.monotonic() + timeout
@@ -505,7 +504,7 @@ class ComputeVirtAPI(virtapi.VirtAPI):
                 break
 
     @contextlib.contextmanager
-    def wait_for_instance_event(self, instance, event_names, deadline=300,
+    def wait_for_instance_event(self, instance, event_names, timeout=300,
                                 error_callback=None):
         """Plan to wait for some events, run some code, then wait.
 
@@ -543,7 +542,7 @@ class ComputeVirtAPI(virtapi.VirtAPI):
         :param event_names: A list of event names. Each element is a
                             tuple of strings to indicate (name, tag),
                             where name is required, but tag may be None.
-        :param deadline: Maximum number of seconds we should wait for all
+        :param timeout: Maximum number of seconds we should wait for all
                          of the specified events to arrive.
         :param error_callback: A function to be called if an event arrives
 
@@ -565,7 +564,7 @@ class ComputeVirtAPI(virtapi.VirtAPI):
                 # NOTE(danms): Don't wait for any of the events. They
                 # should all be canceled and fired immediately below,
                 # but don't stick around if not.
-                deadline = 0
+                timeout = 0
         try:
             yield
         except self._exit_early_exc as e:
@@ -582,7 +581,7 @@ class ComputeVirtAPI(virtapi.VirtAPI):
         sw.start()
         try:
             self._wait_for_instance_events(
-                    instance, events, error_callback, timeout=deadline)
+                    instance, events, error_callback, timeout=timeout)
         except exception.InstanceEventTimeout:
             LOG.warning(
                 'Timeout waiting for %(events)s for instance with '
@@ -643,7 +642,7 @@ class ComputeVirtAPI(virtapi.VirtAPI):
 class ComputeManager(manager.Manager):
     """Manages the running instances from creation to destruction."""
 
-    target = messaging.Target(version='6.4')
+    target = messaging.Target(version='6.5')
 
     def __init__(self, compute_driver=None, *args, **kwargs):
         """Load configuration options and connect to the hypervisor."""
@@ -667,27 +666,58 @@ class ComputeManager(manager.Manager):
         self.compute_task_api = conductor.ComputeTaskAPI()
         self.query_client = query.SchedulerQueryClient()
         self.instance_events = InstanceEvents()
-        self._sync_power_executor = futurist.GreenThreadPoolExecutor(
+        self._sync_power_executor = nova.utils.create_executor(
             max_workers=CONF.sync_power_state_pool_size)
-        self._syncs_in_progress = {}
+        self._syncs_in_progress: set[str] = set()
+        self._syncs_in_progress_lock = threading.Lock()
         self.send_instance_updates = (
             CONF.filter_scheduler.track_instance_changes)
-        if CONF.max_concurrent_builds != 0:
-            self._build_semaphore = threading.Semaphore(
-                CONF.max_concurrent_builds)
-        else:
+
+        max_builds = self._get_max_concurrent_builds()
+        max_snapshots = self._get_max_concurrent_snapshots()
+
+        if utils.concurrency_mode_threading():
+            max_tasks = max(max_builds, max_snapshots)
+
+            if max_builds != max_snapshots:
+                LOG.warning(
+                    "In native threading mode the number of concurrent "
+                    "builds, and snapshots should be limited to the "
+                    "same number. The current configuration has differing "
+                    "limits: max_concurrent_builds: %d, "
+                    "max_concurrent_snapshots: %d. "
+                    "Nova will use a single, overall limit of %d for these "
+                    "tasks.",
+                    max_builds, max_snapshots, max_tasks)
+
+            self._long_task_executor = utils.get_long_task_executor(max_tasks)
+
+            # In threading mode we want to use the size of the executor to
+            # act as the limit of concurrent execution. So neuter the
+            # semaphores here.
+            # TODO(gibi): remove the semaphores once eventlet mode is removed
             self._build_semaphore = compute_utils.UnlimitedSemaphore()
-        if CONF.max_concurrent_snapshots > 0:
-            self._snapshot_semaphore = threading.Semaphore(
-                CONF.max_concurrent_snapshots)
-        else:
             self._snapshot_semaphore = compute_utils.UnlimitedSemaphore()
-        if CONF.max_concurrent_live_migrations > 0:
-            self._live_migration_executor = futurist.GreenThreadPoolExecutor(
-                max_workers=CONF.max_concurrent_live_migrations)
+
         else:
-            # CONF.max_concurrent_live_migrations is 0 (unlimited)
-            self._live_migration_executor = futurist.GreenThreadPoolExecutor()
+            # In eventlet mode we use the individual semaphores to limit
+            # the concurrent tasks, so just create a big Executor to
+            # potentially host all of them
+            self._long_task_executor = utils.get_long_task_executor(
+                max_builds + max_snapshots)
+
+            self._build_semaphore = threading.Semaphore(max_builds)
+            self._snapshot_semaphore = threading.Semaphore(max_snapshots)
+
+        # While live migration is a long-running task we cannot put it into
+        # the same long_task_executor as build and snapshot as we need:
+        # 1. a very small limit of concurrent live migrations compared to
+        #    builds and snapshots
+        # 2. a way to cancel live migrations easily that are waiting due to the
+        #    limit
+        self._live_migration_executor = nova.utils.create_executor(
+            max_workers=self._get_max_concurrent_live_migrations())
+
         # This is a dict, keyed by instance uuid, to a two-item tuple of
         # migration object and Future for the queued live migration.
         self._waiting_live_migrations = {}
@@ -705,6 +735,73 @@ class ComputeManager(manager.Manager):
         self.driver = driver.load_compute_driver(self.virtapi, compute_driver)
         self.rt = resource_tracker.ResourceTracker(
             self.host, self.driver, reportclient=self.reportclient)
+
+    def _get_max_concurrent_builds(self):
+        if CONF.max_concurrent_builds > 0:
+            return CONF.max_concurrent_builds
+
+        # setting CONF.max_concurrent_builds to 0 (unlimited)
+        # is deprecated but still supported, so we need to use a sane
+        # default values for each threading mode
+        LOG.warning("Nova compute deprecated the support of unlimited "
+                    "parallel instance builds so "
+                    "[DEFAULT]max_concurrent_builds configured "
+                    "with value 0 is deprecated and will not be supported "
+                    "in future releases. Please set an explicit positive "
+                    "value to this config option instead.")
+        if utils.concurrency_mode_threading():
+            # Fall back to the default of the config
+            return 10
+        else:
+            # In eventlet mode we need to keep backward compatibility, and
+            # we use 1000 to emulate unlimited
+            return 1000
+
+    def _get_max_concurrent_snapshots(self):
+        if CONF.max_concurrent_snapshots > 0:
+            return CONF.max_concurrent_snapshots
+
+        # setting CONF.max_concurrent_snapshots to 0 (unlimited)
+        # is deprecated but still supported, so we need to use a sane
+        # default values for each threading mode
+        LOG.warning("Nova compute deprecated the support of unlimited "
+                    "parallel instance snapshots so "
+                    "[DEFAULT]max_concurrent_snapshots configured "
+                    "with value 0 is deprecated and will not be supported "
+                    "in future releases. Please set an explicit positive "
+                    "value to this config option instead.")
+        if utils.concurrency_mode_threading():
+            # Fall back to the default of the config
+            return 5
+        else:
+            # In eventlet mode we need to keep backward compatibility, and
+            # we use 1000 to emulate unlimited
+            return 1000
+
+    def _get_max_concurrent_live_migrations(self):
+        if CONF.max_concurrent_live_migrations > 0:
+            return CONF.max_concurrent_live_migrations
+
+        # setting CONF.max_concurrent_live_migrations to 0 (unlimited)
+        # is deprecated but still supported, so we need to use a sane
+        # default values for each threading mode
+        LOG.warning("Nova compute deprecated the support of unlimited "
+                    "parallel live migration so "
+                    "[DEFAULT]max_concurrent_live_migrations configured "
+                    "with value 0 is deprecated and will not be supported "
+                    "in future releases. Please set an explicit positive"
+                    "value to this config option instead.")
+        if utils.concurrency_mode_threading():
+            return 5
+        else:
+            # In eventlet mode we need to keep backward compatibility and
+            # 1000 greenthreads to emulate unlimited
+            return 1000
+
+    @contextlib.contextmanager
+    def syncs_in_progress(self) -> Iterator[set[str]]:
+        with self._syncs_in_progress_lock:
+            yield self._syncs_in_progress
 
     def reset(self):
         LOG.info('Reloading compute RPC API')
@@ -949,6 +1046,9 @@ class ComputeManager(manager.Manager):
                 self.host, action=fields.NotificationAction.DELETE,
                 phase=fields.NotificationPhase.END, bdms=bdms)
 
+    def _complete_deletion_vtpm(self, context, instance):
+        vtpm.delete_secret(context, instance)
+
     def _complete_deletion(self, context, instance):
         self._update_resource_tracker(context, instance)
 
@@ -962,6 +1062,9 @@ class ComputeManager(manager.Manager):
 
         self._clean_instance_console_tokens(context, instance)
         self._delete_scheduler_instance_info(context, instance.uuid)
+
+        # Delete the vTPM secret in the key manager service if needed.
+        self._complete_deletion_vtpm(context, instance)
 
     def _validate_pinning_configuration(self, instances):
         if not self.driver.capabilities.get('supports_pcpus', False):
@@ -1624,16 +1727,6 @@ class ComputeManager(manager.Manager):
     def init_host(self, service_ref):
         """Initialization for a standalone compute service."""
 
-        if service_ref:
-            # If we are an existing service, check to see if we need
-            # to record a locally-persistent node identity because
-            # we have upgraded from a previous version.
-            self._ensure_existing_node_identity(service_ref)
-        else:
-            # If we are a new service (in the database), make sure we have no
-            # instances on our hypervisor as we would expect.
-            self._sanity_check_new_host()
-
         if CONF.pci.device_spec:
             # Simply loading the PCI passthrough spec will do a bunch of
             # validation that would otherwise wait until the PciDevTracker is
@@ -1667,6 +1760,16 @@ class ComputeManager(manager.Manager):
             raise exception.InvalidConfiguration(msg)
 
         self.driver.init_host(host=self.host)
+
+        if service_ref:
+            # If we are an existing service, check to see if we need
+            # to record a locally-persistent node identity because
+            # we have upgraded from a previous version.
+            self._ensure_existing_node_identity(service_ref)
+        else:
+            # If we are a new service (in the database), make sure we have no
+            # instances on our hypervisor as we would expect.
+            self._sanity_check_new_host()
 
         # NOTE(gibi): At this point the compute_nodes of the resource tracker
         # has not been populated yet so we cannot rely on the resource tracker
@@ -1785,11 +1888,40 @@ class ComputeManager(manager.Manager):
                 self._set_instance_obj_error_state(
                     instance, clean_task_state=True)
 
+    def graceful_shutdown(self):
+        """Gracefully shutdown the manager.
+
+        This will be called during graceful shutdown (SIGTERM) and manager
+        should transit the in-progress tasks to safe termination point. The
+        safe termination point can be either complete or abort them.
+        """
+        # TODO(gmaan) Time based wait is temporary solution and it will be
+        # replaced by the better solution to finish in-progress tasks.
+        if CONF.manager_shutdown_timeout > CONF.graceful_shutdown_timeout:
+            LOG.warning('manager_shutdown_timeout (%s) is higher than '
+                        'graceful_shutdown_timeout (%s); the service may be '
+                        'killed before the manager finishes waiting.',
+                        CONF.manager_shutdown_timeout,
+                        CONF.graceful_shutdown_timeout)
+            sleep_time = max(0, CONF.graceful_shutdown_timeout - 10)
+        else:
+            sleep_time = CONF.manager_shutdown_timeout
+        LOG.debug('Compute service manager is waiting for %s seconds to '
+                  'finish in-progress tasks', sleep_time)
+        time.sleep(sleep_time)
+
+        # Cleanup host will be the last step of manager graceful_shutdown
+        self.cleanup_host()
+
     def cleanup_host(self):
         self.driver.register_event_listener(None)
         self.instance_events.cancel_all_events()
         self.driver.cleanup_host(host=self.host)
         self._cleanup_live_migrations_in_pool()
+        # NOTE: graceful shutdown needs to take care of the executors
+        # self._sync_power_executor.shutdown()
+        # utils.destroy_long_task_executor()
+        # utils.destroy_default_executor()
 
     def _cleanup_live_migrations_in_pool(self):
         # Shutdown the pool so we don't get new requests.
@@ -2425,7 +2557,8 @@ class ComputeManager(manager.Manager):
         # NOTE(danms): We spawn here to return the RPC worker thread back to
         # the pool. Since what follows could take a really long time, we don't
         # want to tie up RPC workers.
-        utils.spawn(_locked_do_build_and_run_instance,
+        utils.spawn_on(self._long_task_executor,
+                    _locked_do_build_and_run_instance,
                     context, instance, image, request_spec,
                     filter_properties, admin_password, injected_files,
                     requested_networks, security_groups,
@@ -2732,7 +2865,8 @@ class ComputeManager(manager.Manager):
                 exception.VirtualInterfaceMacAddressException,
                 exception.FixedIpInvalidOnHost,
                 exception.UnableToAutoAllocateNetwork,
-                exception.NetworksWithQoSPolicyNotSupported) as e:
+                exception.NetworksWithQoSPolicyNotSupported,
+                exception.VTPMSecretForbidden) as e:
             LOG.exception('Failed to allocate network(s)',
                           instance=instance)
             self._notify_about_instance_usage(context, instance,
@@ -2917,6 +3051,7 @@ class ComputeManager(manager.Manager):
                 self._build_resources_cleanup(instance, network_info)
         except (exception.UnexpectedTaskStateError,
                 exception.InstanceUnacceptable,
+                exception.ExternalNetworkAttachForbidden,
                 exception.OverQuota, exception.InvalidBDM) as e:
             self._build_resources_cleanup(instance, network_info)
             raise exception.BuildAbortException(instance_uuid=instance.uuid,
@@ -2995,7 +3130,7 @@ class ComputeManager(manager.Manager):
 
         timeout = CONF.arq_binding_timeout
         with self.virtapi.wait_for_instance_event(
-                instance, events, deadline=timeout):
+                instance, events, timeout=timeout):
             resolved_arqs = cyclient.get_arqs_for_instance(
                     instance.uuid, only_resolved=True)
             # Events for these resolved ARQs may have already arrived.
@@ -3323,6 +3458,21 @@ class ComputeManager(manager.Manager):
         if original_exception is not None and raise_exc:
             raise original_exception
 
+    def _get_multiattach_volume_lock_names_bdms(
+        self, bdms: objects.BlockDeviceMappingList) -> list[str]:
+        """Get the lock names for multiattach volumes.
+
+        :param bdms: BlockDeviceMappingList object
+        :return: List of lock names
+        """
+        if not bdms:
+            return []
+        return [
+            f"multi_attach_volume_{bdm.volume_id}"
+            for bdm in bdms
+            if bdm.is_multiattach
+        ]
+
     def _delete_instance(self, context, instance, bdms):
         """Delete an instance on this host.
 
@@ -3340,35 +3490,38 @@ class ComputeManager(manager.Manager):
         compute_utils.notify_about_instance_action(context, instance,
                 self.host, action=fields.NotificationAction.DELETE,
                 phase=fields.NotificationPhase.START, bdms=bdms)
+        with utils.FairLockGuard(
+            self._get_multiattach_volume_lock_names_bdms(bdms)
+        ):
+            self._shutdown_instance(context, instance, bdms)
 
-        self._shutdown_instance(context, instance, bdms)
+            # NOTE(vish): We have already deleted the instance, so we have
+            #             to ignore problems cleaning up the volumes. It
+            #             would be nice to let the user know somehow that
+            #             the volume deletion failed, but it is not
+            #             acceptable to have an instance that can not be
+            #             deleted. Perhaps this could be reworked in the
+            #             future to set an instance fault the first time
+            #             and to only ignore the failure if the instance
+            #             is already in ERROR.
 
-        # NOTE(vish): We have already deleted the instance, so we have
-        #             to ignore problems cleaning up the volumes. It
-        #             would be nice to let the user know somehow that
-        #             the volume deletion failed, but it is not
-        #             acceptable to have an instance that can not be
-        #             deleted. Perhaps this could be reworked in the
-        #             future to set an instance fault the first time
-        #             and to only ignore the failure if the instance
-        #             is already in ERROR.
+            # NOTE(ameeda): The volumes have already been detached during
+            #               the above _shutdown_instance() call and this is
+            #               why detach is not requested from
+            #               _cleanup_volumes() in this case
 
-        # NOTE(ameeda): The volumes have already been detached during
-        #               the above _shutdown_instance() call and this is
-        #               why detach is not requested from
-        #               _cleanup_volumes() in this case
+            self._cleanup_volumes(context, instance, bdms,
+                    raise_exc=False, detach=False)
+            # if a delete task succeeded, always update vm state and task
+            # state without expecting task state to be DELETING
+            instance.vm_state = vm_states.DELETED
+            instance.task_state = None
+            instance.power_state = power_state.NOSTATE
+            instance.terminated_at = timeutils.utcnow()
+            instance.save()
 
-        self._cleanup_volumes(context, instance, bdms,
-                raise_exc=False, detach=False)
         # Delete Cyborg ARQs if the instance has a device profile.
         compute_utils.delete_arqs_if_needed(context, instance)
-        # if a delete task succeeded, always update vm state and task
-        # state without expecting task state to be DELETING
-        instance.vm_state = vm_states.DELETED
-        instance.task_state = None
-        instance.power_state = power_state.NOSTATE
-        instance.terminated_at = timeutils.utcnow()
-        instance.save()
 
         self._complete_deletion(context, instance)
         # only destroy the instance in the db if the _complete_deletion
@@ -3511,6 +3664,7 @@ class ComputeManager(manager.Manager):
     # NOTE(johannes): This is probably better named power_on_instance
     # so it matches the driver method, but because of other issues, we
     # can't use that name in grizzly.
+    @messaging.expected_exceptions(exception.VTPMSecretForbidden)
     @wrap_exception()
     @reverts_task_state
     @wrap_instance_event(prefix='compute')
@@ -3710,14 +3864,14 @@ class ComputeManager(manager.Manager):
             raise exception.BuildAbortException(
                 instance_uuid=instance.uuid, reason=msg)
         image_size = int(math.ceil(float(image.get('size')) / units.Gi))
-        deadline = CONF.reimage_timeout_per_gb * image_size
+        timeout = CONF.reimage_timeout_per_gb * image_size
         error_cb = self._reimage_failed_callback
 
         # Call cinder to perform reimage operation and wait until an
         # external event is triggered.
         try:
             with self.virtapi.wait_for_instance_event(instance, events,
-                                                      deadline=deadline,
+                                                      timeout=timeout,
                                                       error_callback=error_cb):
                 self.volume_api.reimage_volume(
                     context, root_bdm.volume_id, image_id,
@@ -4380,6 +4534,7 @@ class ComputeManager(manager.Manager):
 
         return share_info
 
+    @messaging.expected_exceptions(exception.VTPMSecretForbidden)
     @wrap_exception()
     @reverts_task_state
     @wrap_instance_event(prefix='compute')
@@ -4572,10 +4727,24 @@ class ComputeManager(manager.Manager):
                       instance=instance)
             return
 
-        with self._snapshot_semaphore:
-            self._snapshot_instance(context, image_id, instance,
-                                    task_states.IMAGE_SNAPSHOT)
+        def do_snapshot_instance(
+            context, image_id, instance, expected_task_state
+        ):
+            with self._snapshot_semaphore:
+                self._snapshot_instance(context, image_id, instance,
+                                        expected_task_state)
 
+        # NOTE(gibi): We spawn a separate task as this can be a long-running
+        # operation, and we want to return the RPC worker to its executor to
+        # avoid blocking RPC traffic.
+        return utils.spawn_on(
+            self._long_task_executor, do_snapshot_instance, context,
+            image_id, instance, task_states.IMAGE_SNAPSHOT)
+
+    @wrap_exception()
+    @reverts_task_state
+    @wrap_instance_fault
+    @delete_image_on_error
     def _snapshot_instance(self, context, image_id, instance,
                            expected_task_state):
         context = context.elevated()
@@ -8594,7 +8763,7 @@ class ComputeManager(manager.Manager):
         context: nova.context.RequestContext,
         instance: 'objects.Instance',
         port_id: str,
-        port_allocation: ty.Dict[str, ty.Dict[str, ty.Dict[str, int]]],
+        port_allocation: dict[str, dict[str, dict[str, int]]],
     ) -> None:
 
         if not port_allocation:
@@ -8646,7 +8815,7 @@ class ComputeManager(manager.Manager):
         context: nova.context.RequestContext,
         instance: 'objects.Instance',
         pci_reqs: 'objects.InstancePCIRequests',
-    ) -> ty.Optional['objects.PciDevice']:
+    ) -> 'objects.PciDevice | None':
         """Claim PCI devices if there are PCI requests
 
         :param context: nova.context.RequestContext
@@ -8683,10 +8852,12 @@ class ComputeManager(manager.Manager):
         context: nova.context.RequestContext,
         instance: 'objects.Instance',
         pci_reqs: 'objects.InstancePCIRequests',
-        request_groups: ty.List['objects.RequestGroup'],
+        request_groups: list['objects.RequestGroup'],
         request_level_params: 'objects.RequestLevelParams',
-    ) -> ty.Tuple[ty.Optional[ty.Dict[str, ty.List[str]]],
-                  ty.Optional[ty.Dict[str, ty.Dict[str, ty.Dict[str, int]]]]]:
+    ) -> tuple[
+        dict[str, list[str]] | None,
+        dict[str, dict[str, dict[str, int]]] | None
+    ]:
         """Allocate resources for the request in placement
 
         :param context: nova.context.RequestContext
@@ -9541,7 +9712,7 @@ class ComputeManager(manager.Manager):
             else:
                 disk = None
 
-            deadline = CONF.vif_plugging_timeout
+            timeout = CONF.vif_plugging_timeout
             error_cb = self._neutron_failed_live_migration_callback
             # In order to avoid a race with the vif plugging that the virt
             # driver does on the destination host, we register our events
@@ -9549,7 +9720,7 @@ class ComputeManager(manager.Manager):
             # dest host reports back that we shouldn't wait, we can break
             # out of the context manager using _BreakWaitForInstanceEvent.
             with self.virtapi.wait_for_instance_event(
-                    instance, events, deadline=deadline,
+                    instance, events, timeout=timeout,
                     error_callback=error_cb):
                 with timeutils.StopWatch() as timer:
                     # TODO(mriedem): The "block_migration" parameter passed
@@ -9869,7 +10040,9 @@ class ComputeManager(manager.Manager):
             # storage
             # vpmem must be cleaned
             do_cleanup = (not migrate_data.is_shared_instance_path or
-                          has_vpmem or has_mdevs or power_management_possible)
+                          has_vpmem or has_mdevs or
+                          power_management_possible or
+                          migrate_data.has_vtpm)
             destroy_disks = not (
                     migrate_data.is_shared_block_storage or
                     migrate_data.is_shared_instance_path)
@@ -11007,20 +11180,21 @@ class ComputeManager(manager.Manager):
                 LOG.exception("Periodic sync_power_state task had an "
                               "error while processing an instance.",
                               instance=db_instance)
-
-            self._syncs_in_progress.pop(db_instance.uuid)
+            with self.syncs_in_progress() as syncs:
+                syncs.remove(db_instance.uuid)
 
         for db_instance in db_instances:
             # process syncs asynchronously - don't want instance locking to
             # block entire periodic task thread
             uuid = db_instance.uuid
-            if uuid in self._syncs_in_progress:
-                LOG.debug('Sync already in progress for %s', uuid)
-            else:
-                LOG.debug('Triggering sync for uuid %s', uuid)
-                self._syncs_in_progress[uuid] = True
-                nova.utils.spawn_on(
-                    self._sync_power_executor, _sync, db_instance)
+            with self.syncs_in_progress() as syncs:
+                if uuid in syncs:
+                    LOG.debug('Sync already in progress for %s', uuid)
+                else:
+                    LOG.debug('Triggering sync for uuid %s', uuid)
+                    syncs.add(uuid)
+                    nova.utils.spawn_on(
+                        self._sync_power_executor, _sync, db_instance)
 
     def _query_driver_power_state_and_sync(self, context, db_instance):
         if db_instance.task_state is not None:

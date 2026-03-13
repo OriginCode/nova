@@ -19,14 +19,14 @@ from unittest import mock
 
 import ddt
 import eventlet
-from eventlet import greenthread
 from eventlet import tpool
-from oslo_serialization import jsonutils
+from lxml import etree
 from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import uuidutils
 from oslo_utils import versionutils
 import testtools
 
+from nova.compute import manager
 from nova.compute import vm_states
 from nova import exception
 from nova import objects
@@ -72,7 +72,21 @@ class HostTestCase(test.NoDBTestCase):
         super(HostTestCase, self).setUp()
 
         self.useFixture(nova_fixtures.LibvirtFixture())
-        self.host = host.Host("qemu:///system")
+        self.host = self._create_host("qemu:///system")
+
+    def _create_host(self, *args, **kwargs):
+        h = host.Host(*args, **kwargs)
+        self.addCleanup(h.cleanup)
+        # We need this explicitly as the majority of the test cases using
+        # a Host object does not care about the event handling thread, and
+        # it is disabled and poisoned. But test cases in this class trying
+        # to cover code there. So we partially instantiate the event handling
+        # logic here and pumping the events in the test cases individually.
+        h._delayed_executor = (
+            utils.StaticallyDelayingCancellableTaskExecutorWrapper(
+                delay=15, executor=utils._get_default_executor()))
+
+        return h
 
     def test_repeat_initialization(self):
         for i in range(3):
@@ -117,18 +131,27 @@ class HostTestCase(test.NoDBTestCase):
         self.assertEqual(0, len(log_mock.method_calls),
                          'LOG should not be used in _connect_auth_cb.')
 
-    @mock.patch.object(greenthread, 'spawn_after')
-    def test_event_dispatch(self, mock_spawn_after):
+    @mock.patch.object(
+        utils, 'StaticallyDelayingCancellableTaskExecutorWrapper')
+    def test_event_dispatch(self, mock_wrapper):
         # Validate that the libvirt self-pipe for forwarding
         # events between threads is working sanely
+
+        # Simulate that the dispatch thread runs.
+        # In threading mode we don't have such thread as we don't need it
+        # so for threading this is noop.
+        def run_dispatch(hostimpl):
+            if not utils.concurrency_mode_threading():
+                hostimpl._event_handler._dispatch_events()
+
         def handler(event):
             got_events.append(event)
 
-        hostimpl = host.Host("qemu:///system",
+        hostimpl = self._create_host("qemu:///system",
                              lifecycle_event_handler=handler)
-        got_events = []
+        hostimpl.initialize()
 
-        hostimpl._init_events_pipe()
+        got_events = []
 
         event1 = event.LifecycleEvent(
             "cef19ce0-0ca2-11df-855d-b19fbce37686",
@@ -136,9 +159,9 @@ class HostTestCase(test.NoDBTestCase):
         event2 = event.LifecycleEvent(
             "cef19ce0-0ca2-11df-855d-b19fbce37686",
             event.EVENT_LIFECYCLE_PAUSED)
-        hostimpl._queue_event(event1)
-        hostimpl._queue_event(event2)
-        hostimpl._dispatch_events()
+        hostimpl._event_handler._queue_event(event1)
+        hostimpl._event_handler._queue_event(event2)
+        run_dispatch(hostimpl)
 
         want_events = [event1, event2]
         self.assertEqual(want_events, got_events)
@@ -150,32 +173,26 @@ class HostTestCase(test.NoDBTestCase):
             "cef19ce0-0ca2-11df-855d-b19fbce37686",
             event.EVENT_LIFECYCLE_STOPPED)
 
-        hostimpl._queue_event(event3)
-        hostimpl._queue_event(event4)
-        hostimpl._dispatch_events()
+        hostimpl._event_handler._queue_event(event3)
+        hostimpl._event_handler._queue_event(event4)
+        run_dispatch(hostimpl)
 
         want_events = [event1, event2, event3]
         self.assertEqual(want_events, got_events)
 
+        mock_wrapper.assert_called_once_with(
+            delay=15, executor=utils._get_default_executor())
         # STOPPED is delayed so it's handled separately
-        mock_spawn_after.assert_called_once_with(
-            hostimpl._lifecycle_delay, hostimpl._event_emit, event4)
+        mock_wrapper.return_value.submit_with_delay(
+            hostimpl._event_emit, event4)
 
-    def test_event_lifecycle(self):
-        got_events = []
-
-        # Validate that libvirt events are correctly translated
-        # to Nova events
-        def spawn_after(seconds, func, *args, **kwargs):
-            got_events.append(args[0])
-            return mock.Mock(spec=greenthread.GreenThread)
-
-        greenthread.spawn_after = mock.Mock(side_effect=spawn_after)
-        hostimpl = host.Host("qemu:///system",
+    @mock.patch('nova.virt.libvirt.host.Host._event_emit_delayed')
+    def test_event_lifecycle(self, mock_emit):
+        hostimpl = self._create_host("qemu:///system",
                              lifecycle_event_handler=lambda e: None)
+
         conn = hostimpl.get_connection()
 
-        hostimpl._init_events_pipe()
         fake_dom_xml = """
                 <domain type='kvm'>
                   <uuid>cef19ce0-0ca2-11df-855d-b19fbce37686</uuid>
@@ -192,13 +209,18 @@ class HostTestCase(test.NoDBTestCase):
 
         hostimpl._event_lifecycle_callback(
             conn, dom, fakelibvirt.VIR_DOMAIN_EVENT_STOPPED, 0, hostimpl)
-        hostimpl._dispatch_events()
-        self.assertEqual(len(got_events), 1)
-        self.assertIsInstance(got_events[0], event.LifecycleEvent)
-        self.assertEqual(got_events[0].uuid,
-                         "cef19ce0-0ca2-11df-855d-b19fbce37686")
-        self.assertEqual(got_events[0].transition,
-                         event.EVENT_LIFECYCLE_STOPPED)
+        # Simulate that the dispatch thread runs.
+        # In threading mode we don't have such thread as we don't need it
+        if not utils.concurrency_mode_threading():
+            hostimpl._event_handler._dispatch_events()
+
+        mock_emit.assert_called_once()
+        args, _ = mock_emit.call_args
+        got_event = args[0]
+        self.assertIsInstance(got_event, event.LifecycleEvent)
+        self.assertEqual(
+            got_event.uuid, "cef19ce0-0ca2-11df-855d-b19fbce37686")
+        self.assertEqual(got_event.transition, event.EVENT_LIFECYCLE_STOPPED)
 
     def test_event_lifecycle_callback_suspended_postcopy(self):
         """Tests the suspended lifecycle event with libvirt with post-copy"""
@@ -214,7 +236,7 @@ class HostTestCase(test.NoDBTestCase):
             conn, dom, fakelibvirt.VIR_DOMAIN_EVENT_SUSPENDED,
             detail=fakelibvirt.VIR_DOMAIN_EVENT_SUSPENDED_POSTCOPY,
             opaque=hostimpl)
-        expected_event = hostimpl._queue_event.call_args[0][0]
+        expected_event = hostimpl._event_handler._queue_event.call_args[0][0]
         self.assertEqual(event.EVENT_LIFECYCLE_POSTCOPY_STARTED,
                          expected_event.transition)
 
@@ -236,7 +258,7 @@ class HostTestCase(test.NoDBTestCase):
             conn, dom, fakelibvirt.VIR_DOMAIN_EVENT_SUSPENDED,
             detail=fakelibvirt.VIR_DOMAIN_EVENT_SUSPENDED_MIGRATED,
             opaque=hostimpl)
-        expected_event = hostimpl._queue_event.call_args[0][0]
+        expected_event = hostimpl._event_handler._queue_event.call_args[0][0]
         self.assertEqual(event.EVENT_LIFECYCLE_MIGRATION_COMPLETED,
                          expected_event.transition)
         get_job_info.assert_called_once_with()
@@ -263,7 +285,7 @@ class HostTestCase(test.NoDBTestCase):
             conn, dom, fakelibvirt.VIR_DOMAIN_EVENT_SUSPENDED,
             detail=fakelibvirt.VIR_DOMAIN_EVENT_SUSPENDED_MIGRATED,
             opaque=hostimpl)
-        expected_event = hostimpl._queue_event.call_args[0][0]
+        expected_event = hostimpl._event_handler._queue_event.call_args[0][0]
         self.assertEqual(event.EVENT_LIFECYCLE_PAUSED,
                          expected_event.transition)
         get_job_info.assert_called_once_with()
@@ -271,33 +293,37 @@ class HostTestCase(test.NoDBTestCase):
             test.MatchType(libvirt_guest.Guest), instance=None,
             logging_ok=False)
 
-    def test_event_emit_delayed_call_delayed(self):
+    @mock.patch('nova.utils.StaticallyDelayingCancellableTaskExecutorWrapper')
+    def test_event_emit_delayed_call_delayed(self, mock_wrapper):
         ev = event.LifecycleEvent(
             "cef19ce0-0ca2-11df-855d-b19fbce37686",
             event.EVENT_LIFECYCLE_STOPPED)
-        spawn_after_mock = mock.Mock()
-        greenthread.spawn_after = spawn_after_mock
-        hostimpl = host.Host(
+        hostimpl = self._create_host(
             'qemu:///system', lifecycle_event_handler=lambda e: None)
-        hostimpl._event_emit_delayed(ev)
-        spawn_after_mock.assert_called_once_with(
-            15, hostimpl._event_emit, ev)
+        hostimpl.initialize()
 
-    @mock.patch.object(greenthread, 'spawn_after')
-    def test_event_emit_delayed_call_delayed_pending(self, spawn_after_mock):
-        hostimpl = host.Host(
+        hostimpl._event_emit_delayed(ev)
+        mock_wrapper.assert_called_once_with(
+            delay=15, executor=utils._get_default_executor())
+        mock_wrapper.return_value.submit_with_delay.assert_called_once_with(
+            hostimpl._event_emit, ev)
+
+    @mock.patch('nova.utils.StaticallyDelayingCancellableTaskExecutorWrapper')
+    def test_event_emit_delayed_call_delayed_pending(self, mock_wrapper):
+        hostimpl = self._create_host(
             'qemu:///system', lifecycle_event_handler=lambda e: None)
         uuid = "cef19ce0-0ca2-11df-855d-b19fbce37686"
-        gt_mock = mock.Mock()
-        hostimpl._events_delayed[uuid] = gt_mock
+
         ev = event.LifecycleEvent(
             uuid, event.EVENT_LIFECYCLE_STOPPED)
         hostimpl._event_emit_delayed(ev)
-        gt_mock.cancel.assert_called_once_with()
-        self.assertTrue(spawn_after_mock.called)
+        mock_future = mock_wrapper.return_value.submit_with_delay.return_value
+        mock_future.add_done_callback.assert_called_once()
+        self.assertTrue(mock_wrapper.return_value.submit_with_delay.called)
+        self.assertIs(mock_future, hostimpl._events_delayed[uuid])
 
     def test_event_delayed_cleanup(self):
-        hostimpl = host.Host(
+        hostimpl = self._create_host(
             'qemu:///system', lifecycle_event_handler=lambda e: None)
         uuid = "cef19ce0-0ca2-11df-855d-b19fbce37686"
         ev = event.LifecycleEvent(
@@ -307,6 +333,25 @@ class HostTestCase(test.NoDBTestCase):
         hostimpl._event_emit_delayed(ev)
         gt_mock.cancel.assert_called_once_with()
         self.assertNotIn(uuid, hostimpl._events_delayed.keys())
+
+    def test_host_cleanup_cancels_delayed_events(self):
+        hostimpl = self._create_host(
+            'qemu:///system', lifecycle_event_handler=lambda e: None)
+        uuid = "cef19ce0-0ca2-11df-855d-b19fbce37686"
+        ev = event.LifecycleEvent(
+            uuid, event.EVENT_LIFECYCLE_STOPPED)
+
+        hostimpl._event_emit_delayed(ev)
+
+        self.assertIn(uuid, hostimpl._events_delayed)
+        future = hostimpl._events_delayed[uuid]
+        self.assertFalse(future.cancelled())
+        self.assertTrue(hostimpl._delayed_executor.is_alive)
+
+        hostimpl.cleanup()
+
+        self.assertTrue(future.cancelled())
+        self.assertFalse(hostimpl._delayed_executor.is_alive)
 
     def test_device_removed_event(self):
         hostimpl = mock.MagicMock()
@@ -319,7 +364,7 @@ class HostTestCase(test.NoDBTestCase):
         dom = fakelibvirt.Domain(conn, fake_dom_xml, running=True)
         host.Host._event_device_removed_callback(
             conn, dom, dev='virtio-1', opaque=hostimpl)
-        expected_event = hostimpl._queue_event.call_args[0][0]
+        expected_event = hostimpl._event_handler._queue_event.call_args[0][0]
         self.assertEqual(
             libvirtevent.DeviceRemovedEvent, type(expected_event))
         self.assertEqual(
@@ -337,7 +382,7 @@ class HostTestCase(test.NoDBTestCase):
         dom = fakelibvirt.Domain(conn, fake_dom_xml, running=True)
         host.Host._event_device_removal_failed_callback(
             conn, dom, dev='virtio-1', opaque=hostimpl)
-        expected_event = hostimpl._queue_event.call_args[0][0]
+        expected_event = hostimpl._event_handler._queue_event.call_args[0][0]
         self.assertEqual(
             libvirtevent.DeviceRemovalFailedEvent, type(expected_event))
         self.assertEqual(
@@ -409,7 +454,7 @@ class HostTestCase(test.NoDBTestCase):
     @mock.patch.object(host.Host, "_connect")
     def test_conn_event(self, mock_conn):
         handler = mock.MagicMock()
-        h = host.Host("qemu:///system", conn_event_handler=handler)
+        h = self._create_host("qemu:///system", conn_event_handler=handler)
 
         h.get_connection()
         h._dispatch_conn_event()
@@ -419,7 +464,7 @@ class HostTestCase(test.NoDBTestCase):
     @mock.patch.object(host.Host, "_connect")
     def test_conn_event_fail(self, mock_conn):
         handler = mock.MagicMock()
-        h = host.Host("qemu:///system", conn_event_handler=handler)
+        h = self._create_host("qemu:///system", conn_event_handler=handler)
         mock_conn.side_effect = fakelibvirt.libvirtError('test')
 
         self.assertRaises(exception.HypervisorUnavailable, h.get_connection)
@@ -442,7 +487,7 @@ class HostTestCase(test.NoDBTestCase):
     @mock.patch.object(host.Host, "_connect")
     def test_conn_event_up_down(self, mock_conn, mock_test_conn):
         handler = mock.MagicMock()
-        h = host.Host("qemu:///system", conn_event_handler=handler)
+        h = self._create_host("qemu:///system", conn_event_handler=handler)
         mock_conn.side_effect = (mock.MagicMock(),
                                  fakelibvirt.libvirtError('test'))
         mock_test_conn.return_value = False
@@ -459,8 +504,13 @@ class HostTestCase(test.NoDBTestCase):
 
     @mock.patch.object(host.Host, "_connect")
     def test_conn_event_thread(self, mock_conn):
-        event = eventlet.event.Event()
-        h = host.Host("qemu:///system", conn_event_handler=event.send)
+        event = manager.ThreadingEventWithResult()
+
+        # This emulates LibvirtDriver._handle_conn_event
+        def conn_event_handler(*args, **kwargs):
+            event.set()
+        h = self._create_host(
+            "qemu:///system", conn_event_handler=conn_event_handler)
         h.initialize()
 
         h.get_connection()
@@ -1045,6 +1095,21 @@ class HostTestCase(test.NoDBTestCase):
         mock_sec.return_value = secret
         self.host.create_secret('iscsi', 'iscsivol', password="foo")
         secret.setValue.assert_called_once_with("foo")
+
+    @mock.patch.object(fakelibvirt.virConnect, "secretDefineXML")
+    def test_create_secret_vtpm_ephemeral_private_default(self, mock_sec):
+        self.host.create_secret('vtpm', uuids.instance)
+        xml = etree.fromstring(mock_sec.call_args.args[0])
+        self.assertEqual('yes', xml.get('ephemeral'))
+        self.assertEqual('yes', xml.get('private'))
+
+    @mock.patch.object(fakelibvirt.virConnect, "secretDefineXML")
+    def test_create_secret_vtpm_not_ephemeral_private(self, mock_sec):
+        self.host.create_secret('vtpm', uuids.instance, ephemeral=False,
+                                private=False)
+        xml = etree.fromstring(mock_sec.call_args.args[0])
+        self.assertEqual('no', xml.get('ephemeral'))
+        self.assertEqual('no', xml.get('private'))
 
     @mock.patch('nova.virt.libvirt.host.Host.find_secret')
     def test_delete_secret(self, mock_find_secret):
@@ -2026,94 +2091,6 @@ Active:          8381604 kB
         mock_libversion.return_value = 7008000
         self.assertFalse(self.host.supports_remote_managed_ports)
 
-    @mock.patch.object(host.Host, 'loaders', new_callable=mock.PropertyMock)
-    @mock.patch.object(host.Host, 'get_canonical_machine_type')
-    def test_get_loader(self, mock_get_mtype, mock_loaders):
-        loaders = [
-            {
-                'description': 'Sample descriptor',
-                'interface-types': ['uefi'],
-                'mapping': {
-                    'device': 'flash',
-                    'executable': {
-                        'filename': '/usr/share/edk2/ovmf/OVMF_CODE.fd',
-                        'format': 'raw',
-                    },
-                    'nvram-template': {
-                        'filename': '/usr/share/edk2/ovmf/OVMF_VARS.fd',
-                        'format': 'raw',
-                    },
-                },
-                'targets': [
-                    {
-                        'architecture': 'x86_64',
-                        'machines': ['pc-q35-*'],  # exclude pc-i440fx-*
-                    },
-                ],
-                'features': ['acpi-s3', 'amd-sev', 'verbose-dynamic'],
-                'tags': [],
-            },
-        ]
-
-        def fake_get_mtype(arch, machine):
-            return {
-                'x86_64': {
-                    'pc': 'pc-i440fx-5.1',
-                    'q35': 'pc-q35-5.1',
-                },
-                'aarch64': {
-                    'virt': 'virt-5.1',
-                },
-            }[arch][machine]
-
-        mock_get_mtype.side_effect = fake_get_mtype
-        mock_loaders.return_value = loaders
-
-        # this should pass because we're not reporting the secure-boot feature
-        # which is what we don't want
-        loader = self.host.get_loader('x86_64', 'q35', has_secure_boot=False)
-        self.assertIsNotNone(loader)
-
-        # while it should fail here since we want it now
-        self.assertRaises(
-            exception.UEFINotSupported,
-            self.host.get_loader,
-            'x86_64', 'q35', has_secure_boot=True)
-
-        # it should also fail for an unsupported architecture
-        self.assertRaises(
-            exception.UEFINotSupported,
-            self.host.get_loader,
-            'aarch64', 'virt', has_secure_boot=False)
-
-        # or an unsupported machine type
-        self.assertRaises(
-            exception.UEFINotSupported,
-            self.host.get_loader,
-            'x86_64', 'pc', has_secure_boot=False)
-
-        # add the secure-boot feature flag
-        loaders[0]['features'].append('secure-boot')
-
-        # this should pass because we're reporting the secure-boot feature
-        # which is what we want
-        loader = self.host.get_loader('x86_64', 'q35', has_secure_boot=True)
-        self.assertIsNotNone(loader)
-
-        # check that SMM bool is false as we don't need it
-        self.assertFalse(loader[2])
-
-        # check that we get SMM bool correctly (True) when required
-        loaders[0]['features'].append('requires-smm')
-        loader = self.host.get_loader('x86_64', 'q35', has_secure_boot=True)
-        self.assertTrue(loader[2])
-
-        # while it should fail here since we don't want it now
-        self.assertRaises(
-            exception.UEFINotSupported,
-            self.host.get_loader,
-            'x86_64', 'q35', has_secure_boot=False)
-
 
 vc = fakelibvirt.virConnect
 
@@ -2126,6 +2103,10 @@ class TestLibvirtSEV(test.NoDBTestCase):
 
         self.useFixture(nova_fixtures.LibvirtFixture())
         self.host = host.Host("qemu:///system")
+        self.addCleanup(self.host.cleanup)
+        self.host._delayed_executor = (
+            utils.StaticallyDelayingCancellableTaskExecutorWrapper(
+                delay=0.1, executor=utils._get_default_executor()))
 
 
 @ddt.ddt
@@ -2161,6 +2142,7 @@ class TestLibvirtSEVUnsupported(TestLibvirtSEV):
     @mock.patch('builtins.open', mock.mock_open(read_data="1\n"))
     def test_unsupported_without_feature(self, fake_exists):
         self.assertFalse(self.host.supports_amd_sev)
+        self.assertFalse(self.host.supports_mem_encryption)
 
     @mock.patch.object(os.path, 'exists', return_value=True)
     @mock.patch('builtins.open', mock.mock_open(read_data="1\n"))
@@ -2168,6 +2150,7 @@ class TestLibvirtSEVUnsupported(TestLibvirtSEV):
         new=vc._domain_capability_features_with_SEV_unsupported)
     def test_unsupported_with_feature(self, fake_exists):
         self.assertFalse(self.host.supports_amd_sev)
+        self.assertFalse(self.host.supports_mem_encryption)
 
     def test_non_x86_architecture(self):
         fake_caps_xml = '''
@@ -2182,6 +2165,7 @@ class TestLibvirtSEVUnsupported(TestLibvirtSEV):
         with mock.patch.object(fakelibvirt.virConnect, 'getCapabilities',
                                return_value=fake_caps_xml):
             self.assertFalse(self.host.supports_amd_sev)
+            self.assertFalse(self.host.supports_mem_encryption)
 
 
 class TestLibvirtSEVSupported(TestLibvirtSEV):
@@ -2193,6 +2177,7 @@ class TestLibvirtSEVSupported(TestLibvirtSEV):
                        new=vc._domain_capability_features_with_SEV)
     def test_supported_with_feature(self, fake_exists):
         self.assertTrue(self.host.supports_amd_sev)
+        self.assertTrue(self.host.supports_mem_encryption)
 
 
 @ddt.ddt
@@ -2273,14 +2258,26 @@ class TestLibvirtSEVESSupported(TestLibvirtSEV):
                        new=vc._domain_capability_features_with_SEV)
     def test_supported_with_feature(self, fake_exists, get_version):
         self.assertTrue(self.host.supports_amd_sev_es)
+        self.assertTrue(self.host.supports_mem_encryption)
 
 
 class LibvirtTpoolProxyTestCase(test.NoDBTestCase):
     def setUp(self):
+        if utils.concurrency_mode_threading():
+            self.skipTest(
+                "In threading mode nova does not use eventlet.tpool.Proxy to "
+                "wrap the libvirt calls. This test asserts that such calls "
+                "are returning Proxy objects. So these test cases are not "
+                "valid.")
+
         super(LibvirtTpoolProxyTestCase, self).setUp()
 
         self.useFixture(nova_fixtures.LibvirtFixture())
         self.host = host.Host("qemu:///system")
+        self.host._delayed_executor = (
+            utils.StaticallyDelayingCancellableTaskExecutorWrapper(
+                delay=0.1, executor=utils._get_default_executor()))
+        self.addCleanup(self.host.cleanup)
 
         def _stub_xml(uuid):
             return ("<domain>"
@@ -2368,51 +2365,3 @@ class LibvirtTpoolProxyTestCase(test.NoDBTestCase):
         self.assertEqual(1, len(dev_names))
         for name in dev_names:
             self.assertIsInstance(name, str)
-
-
-class LoadersTestCase(test.NoDBTestCase):
-
-    def test_loaders(self):
-        loader = {
-            'description': 'Sample descriptor',
-            'interface-types': ['uefi'],
-            'mapping': {
-                'device': 'flash',
-                'executable': {
-                    'filename': '/usr/share/edk2/ovmf/OVMF_CODE.fd',
-                    'format': 'raw',
-                },
-                'nvram-template': {
-                    'filename': '/usr/share/edk2/ovmf/OVMF_VARS.fd',
-                    'format': 'raw',
-                },
-            },
-            'targets': [
-                {
-                    'architecture': 'x86_64',
-                    'machines': ['pc-i440fx-*', 'pc-q35-*'],
-                },
-            ],
-            'features': ['acpi-s3', 'amd-sev', 'verbose-dynamic'],
-            'tags': [],
-        }
-
-        m = mock.mock_open(read_data=jsonutils.dumps(loader).encode('utf-8'))
-        with test.nested(
-            mock.patch.object(
-                os.path, 'exists',
-                side_effect=lambda path: path == '/usr/share/qemu/firmware'),
-            mock.patch('glob.glob', return_value=['10_fake.json']),
-            mock.patch('builtins.open', m, create=True),
-        ) as (mock_exists, mock_glob, mock_open):
-            loaders = host._get_loaders()
-
-            self.assertEqual(loaders, [loader])
-
-            mock_exists.assert_has_calls([
-                mock.call('/usr/share/qemu/firmware'),
-                mock.call('/etc/qemu/firmware'),
-            ])
-            mock_glob.assert_called_once_with(
-                '/usr/share/qemu/firmware/*.json')
-            mock_open.assert_called_once_with('10_fake.json', 'rb')

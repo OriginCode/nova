@@ -15,9 +15,9 @@
 import datetime
 from unittest import mock
 
-import iso8601
 from oslo_serialization import jsonutils
 from oslo_utils.fixture import uuidsentinel
+from oslo_utils import timeutils
 
 from nova.api.openstack.compute import availability_zone as az_v21
 from nova.api.openstack.compute import servers as servers_v21
@@ -128,6 +128,14 @@ class AvailabilityZoneApiTestV21(test.NoDBTestCase):
         self.assertFalse(zones[1]['zoneState']['available'])
         self.assertIsNone(zones[1]['hosts'])
 
+    def test_availability_zone_index_invalid_query_params(self):
+        req = fakes.HTTPRequest.blank('?invalid=1', version='2.102')
+        self.assertRaises(
+            exception.ValidationError,
+            self.controller.index,
+            req,
+        )
+
     def test_availability_zone_detail(self):
         req = fakes.HTTPRequest.blank('')
         resp_dict = self.controller.detail(req)
@@ -135,7 +143,7 @@ class AvailabilityZoneApiTestV21(test.NoDBTestCase):
         self.assertIn('availabilityZoneInfo', resp_dict)
         zones = resp_dict['availabilityZoneInfo']
         self.assertEqual(len(zones), 3)
-        timestamp = iso8601.parse_date("2012-12-26T14:45:25Z")
+        timestamp = timeutils.parse_isotime("2012-12-26T14:45:25Z")
         expected = [
             {
                 'zoneName': 'internal',
@@ -190,6 +198,14 @@ class AvailabilityZoneApiTestV21(test.NoDBTestCase):
 
         self.assertThat(resp_dict,
                         matchers.DictMatches(expected_response))
+
+    def test_availability_zone_detail_invalid_query_params(self):
+        req = fakes.HTTPRequest.blank('?invalid=1', version='2.102')
+        self.assertRaises(
+            exception.ValidationError,
+            self.controller.index,
+            req,
+        )
 
 
 class ServersControllerCreateTestV21(test.TestCase):

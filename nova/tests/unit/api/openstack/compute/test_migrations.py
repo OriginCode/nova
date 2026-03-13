@@ -15,7 +15,6 @@
 import datetime
 from unittest import mock
 
-import iso8601
 from oslo_utils.fixture import uuidsentinel as uuids
 from webob import exc
 
@@ -56,8 +55,8 @@ fake_migrations = [
         'deleted': False,
         'uuid': uuids.migration1,
         'cross_cell_move': False,
-        'user_id': None,
-        'project_id': None
+        'user_id': uuids.user_id,
+        'project_id': uuids.project_id,
     },
     # non in-progress live migration
     {
@@ -86,8 +85,8 @@ fake_migrations = [
         'deleted': False,
         'uuid': uuids.migration2,
         'cross_cell_move': False,
-        'user_id': None,
-        'project_id': None
+        'user_id': uuids.user_id,
+        'project_id': uuids.project_id,
     },
     # in-progress resize
     {
@@ -116,8 +115,8 @@ fake_migrations = [
         'deleted': False,
         'uuid': uuids.migration3,
         'cross_cell_move': False,
-        'user_id': None,
-        'project_id': None
+        'user_id': uuids.user_id,
+        'project_id': uuids.project_id,
     },
     # non in-progress resize
     {
@@ -146,8 +145,8 @@ fake_migrations = [
         'deleted': False,
         'uuid': uuids.migration4,
         'cross_cell_move': False,
-        'user_id': None,
-        'project_id': None
+        'user_id': uuids.user_id,
+        'project_id': uuids.project_id,
     }
 ]
 
@@ -396,10 +395,10 @@ class MigrationTestCaseV266(MigrationsTestCaseV259):
         search_opts = {'instance_uuid': uuids.instance_uuid,
                        'changes-before':
                            datetime.datetime(2013, 10, 22, 13, 42, 3,
-                                             tzinfo=iso8601.iso8601.UTC),
+                                             tzinfo=datetime.timezone.utc),
                        'changes-since':
                            datetime.datetime(2013, 10, 22, 13, 42, 2,
-                                             tzinfo=iso8601.iso8601.UTC)}
+                                             tzinfo=datetime.timezone.utc)}
         get_migrations_sorted.assert_called_once_with(
             req.environ['nova.context'], search_opts, sort_dirs=mock.ANY,
             sort_keys=mock.ANY, limit=1000, marker=None)

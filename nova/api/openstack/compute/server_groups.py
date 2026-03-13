@@ -16,6 +16,7 @@
 """The Server Group API Extension."""
 
 import collections
+import itertools
 
 from oslo_log import log as logging
 import webob
@@ -87,7 +88,16 @@ def _should_enable_custom_max_server_rules(context, rules):
 class ServerGroupController(wsgi.Controller):
     """The Server group API controller for the OpenStack API."""
 
-    def _format_server_group(self, context, group, req):
+    def _format_server_group(self, context, group, req,
+                             not_deleted_inst_uuids=None):
+        """Format ServerGroup according to API version.
+
+        Displays only not-deleted members.
+
+        :param:not_deleted_inst_uuids: Pre-built set of instance-uuids for
+                                       multiple server-groups that are found to
+                                       be not deleted.
+        """
         # the id field has its value as the uuid of the server group
         # There is no 'uuid' key in server_group seen by clients.
         # In addition, clients see policies as a ["policy-name"] list;
@@ -106,7 +116,12 @@ class ServerGroupController(wsgi.Controller):
         members = []
         if group.members:
             # Display the instances that are not deleted.
-            members = _get_not_deleted(context, group.members)
+            if not_deleted_inst_uuids is not None:
+                # short-cut if we already pre-built a list of not deleted
+                # instances to be more efficient
+                members = list(set(group.members) & not_deleted_inst_uuids)
+            else:
+                members = _get_not_deleted(context, group.members)
         server_group['members'] = members
         # Add project id information to the response data for
         # API version v2.13
@@ -116,7 +131,8 @@ class ServerGroupController(wsgi.Controller):
         return server_group
 
     @wsgi.expected_errors(404)
-    @validation.query_schema(schema.show_query)
+    @validation.query_schema(schema.show_query, '2.1', '2.101')
+    @validation.query_schema(schema.show_query_v2102, '2.102')
     @validation.response_body_schema(schema.show_response, '2.1', '2.12')
     @validation.response_body_schema(schema.show_response_v213, '2.13', '2.14')
     @validation.response_body_schema(schema.show_response_v215, '2.15', '2.63')
@@ -181,7 +197,11 @@ class ServerGroupController(wsgi.Controller):
             sgs = objects.InstanceGroupList.get_by_project_id(
                     context, project_id)
         limited_list = common.limited(sgs.objects, req)
-        result = [self._format_server_group(context, group, req)
+
+        all_members = list(itertools.chain.from_iterable(
+            sg.members for sg in limited_list if sg.members))
+        not_deleted = set(_get_not_deleted(context, all_members))
+        result = [self._format_server_group(context, group, req, not_deleted)
                   for group in limited_list]
         return {'server_groups': result}
 

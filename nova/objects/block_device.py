@@ -15,10 +15,11 @@
 from oslo_db import api as oslo_db_api
 from oslo_db.sqlalchemy import update_match
 from oslo_log import log as logging
+from oslo_serialization import jsonutils
 from oslo_utils import uuidutils
 from oslo_utils import versionutils
 
-from nova import block_device
+from nova import block_device as blockdev
 from nova.db.main import api as db
 from nova.db.main import models as db_models
 from nova import exception
@@ -33,6 +34,14 @@ LOG = logging.getLogger(__name__)
 
 _BLOCK_DEVICE_OPTIONAL_JOINED_FIELD = ['instance']
 BLOCK_DEVICE_OPTIONAL_ATTRS = _BLOCK_DEVICE_OPTIONAL_JOINED_FIELD
+
+__all__ = [
+    'BLOCK_DEVICE_OPTIONAL_ATTRS',
+    'BlockDeviceMapping',
+    'BlockDeviceMappingList',
+    'block_device_make_list',
+    'block_device_make_list_from_dicts',
+]
 
 
 def _expected_cols(expected_attrs):
@@ -317,6 +326,26 @@ class BlockDeviceMapping(base.NovaPersistentObject, base.NovaObject,
                     fields.BlockDeviceDestinationType.VOLUME)
 
     @property
+    def is_multiattach(self):
+        """Return whether the volume is multiattach.
+
+        Note that this property is only valid for volumes that are attached to
+        an instance. If the volume is not attached to an instance, this
+        property will return False.
+
+        :returns: True if the volume is multiattach, False otherwise
+        """
+
+        if not self.is_volume:
+            return False
+        if 'connection_info' not in self:
+            return False
+        if not self.connection_info:
+            return False
+        info = jsonutils.loads(self.connection_info)
+        return info.get("multiattach", False)
+
+    @property
     def is_image(self):
         return self.source_type == fields.BlockDeviceSourceType.IMAGE
 
@@ -326,7 +355,7 @@ class BlockDeviceMapping(base.NovaPersistentObject, base.NovaObject,
                     fields.BlockDeviceDestinationType.LOCAL)
 
     def get_image_mapping(self):
-        return block_device.BlockDeviceDict(self).get_image_mapping()
+        return blockdev.BlockDeviceDict(self).get_image_mapping()
 
     @base.lazy_load_counter
     def obj_load_attr(self, attrname):

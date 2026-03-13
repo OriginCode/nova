@@ -17,8 +17,6 @@ import os
 import sys
 import textwrap
 import time
-import typing as ty
-from unittest import mock
 
 import fixtures
 from lxml import etree
@@ -100,6 +98,8 @@ VIR_DOMAIN_EVENT_SUSPENDED_POSTCOPY = 7
 
 VIR_DOMAIN_UNDEFINE_MANAGED_SAVE = 1
 VIR_DOMAIN_UNDEFINE_NVRAM = 4
+VIR_DOMAIN_UNDEFINE_KEEP_TPM = 64
+VIR_DOMAIN_UNDEFINE_KEEP_NVRAM = 8
 
 VIR_DOMAIN_AFFECT_CURRENT = 0
 VIR_DOMAIN_AFFECT_LIVE = 1
@@ -127,6 +127,8 @@ VIR_MIGRATE_PERSIST_DEST = 8
 VIR_MIGRATE_UNDEFINE_SOURCE = 16
 VIR_MIGRATE_NON_SHARED_INC = 128
 VIR_MIGRATE_AUTO_CONVERGE = 8192
+VIR_MIGRATE_PARALLEL = 131072
+VIR_MIGRATE_PARAM_PARALLEL_CONNECTIONS = 'parallel.connections'
 VIR_MIGRATE_POSTCOPY = 32768
 VIR_MIGRATE_TLS = 65536
 
@@ -196,6 +198,7 @@ VIR_SECRET_USAGE_TYPE_NONE = 0
 VIR_SECRET_USAGE_TYPE_VOLUME = 1
 VIR_SECRET_USAGE_TYPE_CEPH = 2
 VIR_SECRET_USAGE_TYPE_ISCSI = 3
+VIR_SECRET_USAGE_TYPE_VTPM = 5
 
 # metadata types
 VIR_DOMAIN_METADATA_DESCRIPTION = 0
@@ -914,6 +917,17 @@ def _parse_disk_info(element):
         disk_info['target_dev'] = target.get('dev')
         disk_info['target_bus'] = target.get('bus')
 
+    alias = element.find('./alias')
+    if alias is not None:
+        disk_info['alias'] = alias.get('name')
+
+    blockio = element.find('./blockio')
+    if blockio is not None:
+        disk_info['blockio_logical_block_size'] = blockio.get(
+            'logical_block_size')
+        disk_info['blockio_physical_block_size'] = blockio.get(
+            'physical_block_size')
+
     return disk_info
 
 
@@ -959,6 +973,10 @@ def _parse_nic_info(element):
     if target is not None:
         nic_info['target_dev'] = target.get('dev')
 
+    alias = element.find('./alias')
+    if alias is not None:
+        nic_info['alias'] = alias.get('name')
+
     return nic_info
 
 
@@ -975,6 +993,10 @@ def _parse_hostdev_info(element):
             hostdev_info['bus'] = address.get('bus')
             hostdev_info['slot'] = address.get('slot')
             hostdev_info['function'] = address.get('function')
+
+    alias = element.find('./alias')
+    if alias is not None:
+        hostdev_info['alias'] = alias.get('name')
 
     return hostdev_info
 
@@ -1111,7 +1133,7 @@ class NodeDevice(object):
     def name(self) -> str:
         return self._name
 
-    def listCaps(self) -> ty.List[str]:
+    def listCaps(self) -> list[str]:
         return [self.name().split('_')[0]]
 
 
@@ -1166,7 +1188,16 @@ class Domain(object):
 
         os_loader = tree.find('./os/loader')
         if os_loader is not None:
+            os['loader'] = os_loader.text
+            os['loader_type'] = os_loader.get('type')
+            os['loader_readonly'] = os_loader.get('readonly')
             os['loader_stateless'] = os_loader.get('stateless')
+            os['loader_secure'] = os_loader.get('secure')
+
+        os_nvram = tree.find('./os/nvram')
+        if os_nvram is not None:
+            os['nvram'] = os_nvram.text
+            os['nvram_template'] = os_nvram.get('template')
 
         os_kernel = tree.find('./os/kernel')
         if os_kernel is not None:
@@ -1206,6 +1237,22 @@ class Domain(object):
         if emulator_pin is not None:
             definition['emulator_pin'] = emulator_pin.get('cpuset')
 
+        iothreads = tree.find('./iothreads')
+        if iothreads is not None:
+            definition['iothreads'] = iothreads.text
+
+        iothread_pin = tree.find('./cputune/iothreadpin')
+        if iothread_pin is not None and iothread_pin.get('iothread') is None:
+            raise make_libvirtError(
+                libvirtError,
+                "XML error: Missing required attribute 'iothread' "
+                "in element 'iothreadpin'",
+                error_code=VIR_ERR_XML_ERROR,
+                error_domain=VIR_FROM_DOMAIN
+            )
+        if iothread_pin is not None:
+            definition['iothread_pin'] = iothread_pin.get('cpuset')
+
         memnodes = {}
 
         for node in tree.findall('./numatune/memnode'):
@@ -1219,8 +1266,16 @@ class Domain(object):
         if device_nodes is not None:
             disks_info = []
             disks = device_nodes.findall('./disk')
-            for disk in disks:
-                disks_info += [_parse_disk_info(disk)]
+            for idx, disk in enumerate(disks):
+                disk_info = _parse_disk_info(disk)
+
+                alias = disk.find('./alias')
+                if alias is not None:
+                    disk_info['alias'] = alias.get('name')
+                else:
+                    disk_info['alias'] = f'disk{idx}'
+
+                disks_info.append(disk_info)
             devices['disks'] = disks_info
 
             # Manage shares
@@ -1232,13 +1287,19 @@ class Domain(object):
 
             nics_info = []
             nics = device_nodes.findall('./interface')
-            for nic in nics:
+            for idx, nic in enumerate(nics):
                 nic_info = {}
                 nic_info['type'] = nic.get('type')
 
                 mac = nic.find('./mac')
                 if mac is not None:
                     nic_info['mac'] = mac.get('address')
+
+                alias = nic.find('./alias')
+                if alias is not None:
+                    nic_info['alias'] = alias.get('name')
+                else:
+                    nic_info['alias'] = f'net{idx}'
 
                 source = nic.find('./source')
                 if source is not None:
@@ -1406,16 +1467,25 @@ class Domain(object):
         if xml.startswith("<disk"):
             disk_info = _parse_disk_info(etree.fromstring(xml))
             disk_info['_attached'] = True
+            if 'alias' not in disk_info:
+                idx = len(self._def['devices']['disks'])
+                disk_info['alias'] = f'disk{idx}'
             self._def['devices']['disks'] += [disk_info]
             result = True
         elif xml.startswith("<interface"):
             nic_info = _parse_nic_info(etree.fromstring(xml))
             nic_info['_attached'] = True
+            if 'alias' not in nic_info:
+                idx = len(self._def['devices']['nics'])
+                nic_info['alias'] = f'net{idx}'
             self._def['devices']['nics'] += [nic_info]
             result = True
         elif xml.startswith("<hostdev"):
             hostdev_info = _parse_hostdev_info(etree.fromstring(xml))
             hostdev_info['_attached'] = True
+            if 'alias' not in hostdev_info:
+                idx = len(self._def['devices']['hostdevs'])
+                hostdev_info['alias'] = f'hostdev{idx}'
             self._def['devices']['hostdevs'] += [hostdev_info]
             result = True
         else:
@@ -1500,10 +1570,35 @@ class Domain(object):
         pass
 
     def XMLDesc(self, flags):
-        loader = '<loader/>'
+        loader_elems = ['']
+        if self._def['os'].get('loader_type'):
+            loader_elems.append(
+                "type='%s'" % self._def['os'].get('loader_type'))
+        if self._def['os'].get('loader_readonly'):
+            loader_elems.append(
+                "readonly='%s'" % self._def['os'].get('loader_readonly'))
+        if self._def['os'].get('loader_secure'):
+            loader_elems.append(
+                "secure='%s'" % self._def['os'].get('loader_secure'))
         if self._def['os'].get('loader_stateless'):
-            loader = ('<loader stateless="%s"/>' %
-                self._def['os'].get('loader_stateless'))
+            loader_elems.append(
+                "stateless='%s'" % self._def['os'].get('loader_stateless'))
+
+        loader = ''
+        if self._def['os'].get('loader'):
+            loader = '<loader%s>%s</loader>' % (
+                ' '.join(loader_elems), self._def['os'].get('loader'))
+        elif loader_elems:
+            loader = '<loader%s/>' % ' '.join(loader_elems)
+
+        nvram = ''
+        nvram_template = self._def['os'].get('nvram_template')
+        if nvram_template:
+            if not self._def['os'].get('nvram'):
+                nvram = "<nvram template='%s'/>" % nvram_template
+            else:
+                nvram = "<nvram template='%s'>%s</nvram>" % (
+                    nvram_template, self._def['os'].get('nvram'))
 
         disks = ''
         for disk in self._def['devices']['disks']:
@@ -1515,7 +1610,9 @@ class Domain(object):
             strformat = """
     <disk type='%(type)s' device='%(device)s'>
       <driver name='%(driver_name)s' type='%(driver_type)s'/>
+      <alias name='%(alias)s'/>
       <source %(source_attr)s='%(source)s'"""
+
             if 'encryption_format' not in disk:
                 strformat += '/>'
             else:
@@ -1526,7 +1623,24 @@ class Domain(object):
       </source>"""
             strformat += """
       <target dev='%(target_dev)s' bus='%(target_bus)s'/>
-      <address type='drive' controller='0' bus='0' unit='0'/>
+      <address type='drive' controller='0' bus='0' unit='0'/>"""
+
+            # Add blockio if present
+            if 'blockio_logical_block_size' in disk or \
+                    'blockio_physical_block_size' in disk:
+                blockio_attrs = []
+                if disk.get('blockio_logical_block_size'):
+                    blockio_attrs.append(
+                        "logical_block_size='%s'" %
+                        disk['blockio_logical_block_size'])
+                if disk.get('blockio_physical_block_size'):
+                    blockio_attrs.append(
+                        "physical_block_size='%s'" %
+                        disk['blockio_physical_block_size'])
+                strformat += """
+      <blockio %s/>""" % ' '.join(blockio_attrs)
+
+            strformat += """
     </disk>"""
             disks += strformat % dict(source_attr=source_attr, **disk)
         filesystems = ''
@@ -1552,6 +1666,7 @@ class Domain(object):
                 # this branch covers kernel ovs interfaces
                 nics += '''<interface type='%(type)s'>
           <mac address='%(mac)s'/>
+          <alias name='%(alias)s'/>
           <target dev='tap274487d1-6%(func)s'/>
           <address type='pci' domain='0x0000' bus='0x00' slot='0x03'
                    function='0x%(func)s'/>
@@ -1560,6 +1675,7 @@ class Domain(object):
                 # this branch covers hardware offloaded ovs with vdpa
                 nics += '''<interface type='%(type)s'>
           <mac address='%(mac)s'/>
+          <alias name='%(alias)s'/>
           <source dev='%(source)s'/>
           <address type='pci' domain='0x0000' bus='0x00' slot='0x03'
                    function='0x%(func)s'/>
@@ -1569,6 +1685,7 @@ class Domain(object):
             elif 'source' in nic:
                 nics += '''<interface type='%(type)s'>
           <mac address='%(mac)s'/>
+          <alias name='%(alias)s'/>
           <source %(type)s='%(source)s'/>
           <target dev='tap274487d1-6%(func)s'/>
           <address type='pci' domain='0x0000' bus='0x00' slot='0x03'
@@ -1581,6 +1698,7 @@ class Domain(object):
                 # the fixture we hard code it.
                 nics += '''<interface type='%(type)s'>
           <mac address='%(mac)s'/>
+          <alias name='%(alias)s'/>
           <source dev='fake_pf_interface_name' mode='passthrough'>
               <address type='pci' domain='0x0000' bus='0x81' slot='0x00'
                    function='0x%(func)s'/>
@@ -1627,12 +1745,21 @@ class Domain(object):
         cputune = ''
         for vcpu, cpuset in self._def['cpu_pins'].items():
             cputune += '<vcpupin vcpu="%d" cpuset="%s"/>' % (int(vcpu), cpuset)
-        emulatorpin = None
+        emulatorpin = ''
         if 'emulator_pin' in self._def:
             emulatorpin = ('<emulatorpin cpuset="%s"/>' %
                            self._def['emulator_pin'])
-        if cputune or emulatorpin:
-            cputune = '<cputune>%s%s</cputune>' % (emulatorpin, cputune)
+        iothreadpin = ''
+        if 'iothread_pin' in self._def:
+            iothreadpin = ('<iothreadpin iothread="1" cpuset="%s"/>' %
+                           self._def['iothread_pin'])
+        if cputune or emulatorpin or iothreadpin:
+            cputune = '<cputune>%s%s%s</cputune>' % (
+                emulatorpin, iothreadpin, cputune)
+
+        iothreads = ''
+        if 'iothreads' in self._def:
+            iothreads = '<iothreads>%s</iothreads>' % self._def['iothreads']
 
         numatune = ''
         for cellid, nodeset in self._def['memnodes'].items():
@@ -1659,9 +1786,11 @@ class Domain(object):
   <memory>%(memory)s</memory>
   <currentMemory>%(memory)s</currentMemory>
   <vcpu%(vcpuset)s>%(vcpu)s</vcpu>
+  %(iothreads)s
   <os>
     <type arch='%(arch)s' machine='pc-0.12'>hvm</type>
     %(loader)s
+    %(nvram)s
     <boot dev='hd'/>
   </os>
   <features>
@@ -1710,8 +1839,10 @@ class Domain(object):
                 'memory': self._def['memory'],
                 'vcpuset': vcpuset,
                 'vcpu': self._def['vcpu']['number'],
+                'iothreads': iothreads,
                 'arch': self._def['os']['arch'],
                 'loader': loader,
+                'nvram': nvram,
                 'disks': disks,
                 'filesystems': filesystems,
                 'nics': nics,
@@ -1832,12 +1963,15 @@ class Secret(object):
     def _parse_xml(self, xml):
         tree = etree.fromstring(xml)
         self._uuid = tree.find('./uuid').text
+        self._ephemeral = tree.get('ephemeral') == 'yes'
         self._private = tree.get('private') == 'yes'
         self._usage_id = None
         usage = tree.find('./usage')
         if usage is not None:
             if usage.get('type') == 'volume':
                 self._usage_id = usage.find('volume').text
+            if usage.get('type') == 'vtpm':
+                self._usage_id = usage.find('name').text
 
     def setValue(self, value, flags=0):
         self._value = value
@@ -1908,6 +2042,12 @@ class Connection(object):
         self._id_counter = 1  # libvirt reserves 0 for the hypervisor.
         self._nodedevs = {}
         self._secrets = {}
+        # NOTE(artom) The secret is undefined as soon as the guest has
+        # successfully started, but we still want to assert that is had been
+        # defined in this libvirt connection. We therefore keep a history of
+        # self._removed_secrets to allow functional tests to make those
+        # assertions.
+        self._removed_secrets = {}
         self._event_callbacks = {}
         self.fakeLibVersion = version
         self.fakeVersion = hv_version
@@ -1929,7 +2069,7 @@ class Connection(object):
         self._secrets[secret._uuid] = secret
 
     def _remove_secret(self, secret):
-        del self._secrets[secret._uuid]
+        self._removed_secrets[secret._uuid] = self._secrets.pop(secret._uuid)
 
     def _mark_running(self, dom):
         self._running_vms[self._id_counter] = dom
@@ -2591,91 +2731,6 @@ class LibvirtFixture(fixtures.Fixture):
             return real_exists(path)
 
         self.useFixture(fixtures.MonkeyPatch('os.path.exists', fake_exists))
-
-        # ...and on all machine types
-        fake_loaders = [
-            {
-                'description': 'UEFI firmware for x86_64',
-                'interface-types': ['uefi'],
-                'mapping': {
-                    'device': 'flash',
-                    'executable': {
-                        'filename': '/usr/share/OVMF/OVMF_CODE.fd',
-                        'format': 'raw',
-                    },
-                    'nvram-template': {
-                        'filename': '/usr/share/OVMF/OVMF_VARS.fd',
-                        'format': 'raw',
-                    },
-                },
-                'targets': [
-                    {
-                        'architecture': 'x86_64',
-                        'machines': ['pc-i440fx-*', 'pc-q35-*'],
-                    },
-                ],
-                'features': ['acpi-s3', 'amd-sev', 'verbose-dynamic'],
-                'tags': [],
-            },
-            {
-                'description': 'UEFI firmware for x86_64, with SB+SMM',
-                'interface-types': ['uefi'],
-                'mapping': {
-                    'device': 'flash',
-                    'executable': {
-                        'filename': '/usr/share/OVMF/OVMF_CODE.secboot.fd',
-                        'format': 'raw',
-                    },
-                    'nvram-template': {
-                        'filename': '/usr/share/OVMF/OVMF_VARS.secboot.fd',
-                        'format': 'raw',
-                    },
-                },
-                'targets': [
-                    {
-                        'architecture': 'x86_64',
-                        'machines': ['pc-q35-*'],
-                    },
-                ],
-                'features': [
-                    'acpi-s3',
-                    'amd-sev',
-                    'enrolled-keys',
-                    'requires-smm',
-                    'secure-boot',
-                    'verbose-dynamic',
-                ],
-                'tags': [],
-            },
-            {
-                'description': 'UEFI firmware for aarch64',
-                'interface-types': ['uefi'],
-                'mapping': {
-                    'device': 'flash',
-                    'executable': {
-                        'filename': '/usr/share/AAVMF/AAVMF_CODE.fd',
-                        'format': 'raw',
-                    },
-                    'nvram-template': {
-                        'filename': '/usr/share/AAVMF/AAVMF_VARS.fd',
-                        'format': 'raw',
-                    }
-                },
-                'targets': [
-                    {
-                        'architecture': 'aarch64',
-                        'machines': ['virt-*'],
-                    }
-                ],
-                'features': ['verbose-static'],
-                "tags": [],
-            },
-        ]
-        self.useFixture(
-            fixtures.MockPatch(
-                'nova.virt.libvirt.host.Host.loaders',
-                new_callable=mock.PropertyMock,
-                return_value=fake_loaders))
 
         disable_event_thread(self)
 

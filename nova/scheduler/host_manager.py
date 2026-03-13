@@ -18,10 +18,9 @@ Manage hosts in the current zone.
 """
 
 import collections
+import datetime
 import functools
-import time
 
-import iso8601
 from oslo_log import log as logging
 from oslo_utils import timeutils
 
@@ -88,7 +87,7 @@ def set_update_time_on_success(function):
         else:
             now = timeutils.utcnow()
             # NOTE(sbauza): Objects are UTC tz-aware by default
-            self.updated = now.replace(tzinfo=iso8601.UTC)
+            self.updated = now.replace(tzinfo=datetime.timezone.utc)
         return return_value
 
     return decorated_function
@@ -465,8 +464,7 @@ class HostManager(object):
                                                          "updated": False}
                         inst_dict = self._instance_info[host]
                         inst_dict["instances"][instance.uuid] = instance
-                    # Call sleep() to cooperatively yield
-                    time.sleep(0)
+                    utils.cooperative_yield()
                 LOG.debug("END:_async_init_instance_info")
 
         # Run this async so that we don't block the scheduler start-up

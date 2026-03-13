@@ -1159,6 +1159,31 @@ class LibvirtConfigGuestDiskTest(LibvirtConfigBaseTest):
               <target bus="scsi" dev="/dev/sda"/>
             </disk>""")
 
+    def test_config_block_lun_no_blockio(self):
+        """Test that blockio is not generated for LUN devices (bug 2127196).
+
+        QEMU's scsi-block device driver does not support physical_block_size
+        and logical_block_size properties, so blockio must not be included
+        in the XML when source_device is 'lun'.
+        """
+        obj = config.LibvirtConfigGuestDisk()
+        obj.source_type = "block"
+        obj.source_path = "/tmp/hello"
+        obj.source_device = "lun"
+        obj.driver_name = "qemu"
+        obj.target_dev = "/dev/sda"
+        obj.target_bus = "scsi"
+        obj.logical_block_size = "512"
+        obj.physical_block_size = "512"
+
+        xml = obj.to_xml()
+        self.assertXmlEqual(xml, """
+            <disk type="block" device="lun">
+              <driver name="qemu"/>
+              <source dev="/tmp/hello"/>
+              <target bus="scsi" dev="/dev/sda"/>
+            </disk>""")
+
     def test_config_block_parse(self):
         xml = """<disk type="block" device="cdrom">
                    <driver name="qemu"/>
@@ -2103,6 +2128,7 @@ class LibvirtConfigGuestInterfaceTest(LibvirtConfigBaseTest):
     def test_config_ethernet(self):
         obj = config.LibvirtConfigGuestInterface()
         obj.net_type = "ethernet"
+        obj.managed = "no"
         obj.mac_addr = "DE:AD:BE:EF:CA:FE"
         obj.model = "virtio"
         obj.target_dev = "vnet0"
@@ -2120,7 +2146,7 @@ class LibvirtConfigGuestInterfaceTest(LibvirtConfigBaseTest):
               <mac address="DE:AD:BE:EF:CA:FE"/>
               <model type="virtio"/>
               <driver name="vhost"/>
-              <target dev="vnet0"/>
+              <target dev="vnet0" managed="no"/>
               <bandwidth>
                 <inbound average="16384" peak="32768" burst="3276"/>
                 <outbound average="32768" peak="65536" burst="6553"/>
@@ -2136,6 +2162,7 @@ class LibvirtConfigGuestInterfaceTest(LibvirtConfigBaseTest):
     def test_config_ethernet_with_mtu(self):
         obj = config.LibvirtConfigGuestInterface()
         obj.net_type = "ethernet"
+        obj.managed = "no"
         obj.mac_addr = "DE:AD:BE:EF:CA:FE"
         obj.model = "virtio"
         obj.target_dev = "vnet0"
@@ -2155,7 +2182,7 @@ class LibvirtConfigGuestInterfaceTest(LibvirtConfigBaseTest):
               <model type="virtio"/>
               <driver name="vhost"/>
               <mtu size="9000"/>
-              <target dev="vnet0"/>
+              <target dev="vnet0" managed="no"/>
               <bandwidth>
                 <inbound average="16384" peak="32768" burst="3276"/>
                 <outbound average="32768" peak="65536" burst="6553"/>
@@ -2836,8 +2863,10 @@ class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
         obj.os_mach_type = "pc-q35-5.1"
         obj.os_loader = '/tmp/OVMF_CODE.secboot.fd'
         obj.os_loader_type = 'pflash'
+        obj.os_loader_readonly = True
         obj.os_loader_secure = True
         obj.os_loader_stateless = True
+        obj.os_nvram = '/foo/bar/instance-00000012_VARS.fd'
         xml = obj.to_xml()
 
         self.assertxmlequal(
@@ -2850,6 +2879,7 @@ class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
               <os>
                 <type machine="pc-q35-5.1">hvm</type>
                 <loader stateless='yes' secure='yes' readonly='yes' type='pflash'>/tmp/OVMF_CODE.secboot.fd</loader>
+                <nvram>/foo/bar/instance-00000012_VARS.fd</nvram>
               </os>
             </domain>""",  # noqa: E501
             xml,
@@ -2867,6 +2897,7 @@ class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
         obj.os_mach_type = "pc-q35-5.1"
         obj.os_loader_secure = secure
         obj.os_loader_stateless = stateless
+
         return obj.to_xml()
 
     def test_config_uefi_autoconfigure(self):
@@ -2881,6 +2912,9 @@ class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
               <memory>104857600</memory>
               <vcpu>1</vcpu>
               <os firmware="efi">
+                <firmware>
+                  <feature enabled='no' name='secure-boot'/>
+                </firmware>
                 <type machine="pc-q35-5.1">hvm</type>
                 <loader secure="no"/>
               </os>
@@ -2899,6 +2933,9 @@ class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
               <memory>104857600</memory>
               <vcpu>1</vcpu>
               <os firmware="efi">
+                <firmware>
+                  <feature enabled='yes' name='secure-boot'/>
+                </firmware>
                 <type machine="pc-q35-5.1">hvm</type>
                 <loader secure="yes"/>
               </os>
@@ -2917,6 +2954,9 @@ class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
               <memory>104857600</memory>
               <vcpu>1</vcpu>
               <os firmware="efi">
+                <firmware>
+                  <feature enabled='no' name='secure-boot'/>
+                </firmware>
                 <type machine="pc-q35-5.1">hvm</type>
                 <loader stateless="yes" secure="no"/>
               </os>
@@ -2993,6 +3033,18 @@ class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
                 <type machine="fake_machine_type">hvm</type>
               </os>
             </domain>""")
+
+    def test_config_guest_iothreads(self):
+        xml = """
+        <domain type="kvm">
+          <name>test42</name>
+          <iothreads>1</iothreads>
+        </domain>
+        """
+        obj = config.LibvirtConfigGuest()
+        obj.parse_str(xml)
+
+        self.assertEqual(1, obj.iothreads)
 
     def test_ConfigGuest_parse_devices(self):
         xmldoc = """ <domain type="kvm">
@@ -3083,7 +3135,13 @@ class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
         self.assertEqual('fake_machine_type', obj.os_mach_type)
         self.assertEqual('/tmp/vmlinuz', obj.os_kernel)
         self.assertEqual('/usr/lib/xen/boot/hvmloader', obj.os_loader)
+        self.assertNotIn(config.LibvirtConfigGuestFeatureSMM(), obj.features)
         self.assertIsNone(obj.os_loader_type)
+        self.assertIsNone(obj.os_loader_readonly)
+        self.assertIsNone(obj.os_loader_secure)
+        self.assertIsNone(obj.os_loader_stateless)
+        self.assertIsNone(obj.os_nvram)
+        self.assertIsNone(obj.os_nvram_template)
         self.assertEqual('/tmp/ramdisk', obj.os_initrd)
         self.assertEqual('console=xvc0', obj.os_cmdline)
         self.assertEqual('root=xvda', obj.os_root)
@@ -3098,9 +3156,15 @@ class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
             <os>
               <type>hvm</type>
               <loader readonly='yes' type='pflash'>/tmp/OVMF_CODE.fd</loader>
+              <nvram template='/tmp/OVMF_VARS.fd'>/var/lib/libvirt/qemu/nvram/instance.fd</nvram>
             </os>
+            <features>
+              <acpi/>
+              <smm state='on'/>
+            </features>
           </domain>
-        """
+        """  # noqa: E501
+
         obj = config.LibvirtConfigGuest()
         obj.parse_str(xmldoc)
 
@@ -3108,8 +3172,87 @@ class LibvirtConfigGuestTest(LibvirtConfigBaseTest):
         self.assertEqual('hvm', obj.os_type)
         self.assertIsNone(obj.os_mach_type)
         self.assertIsNone(obj.os_kernel)
+        self.assertIn(config.LibvirtConfigGuestFeatureSMM(), obj.features)
         self.assertEqual('/tmp/OVMF_CODE.fd', obj.os_loader)
         self.assertEqual('pflash', obj.os_loader_type)
+        self.assertTrue(obj.os_loader_readonly)
+        self.assertIsNone(obj.os_loader_secure)
+        self.assertIsNone(obj.os_loader_stateless)
+        self.assertEqual('/var/lib/libvirt/qemu/nvram/instance.fd',
+                         obj.os_nvram)
+        self.assertEqual('/tmp/OVMF_VARS.fd', obj.os_nvram_template)
+        self.assertIsNone(obj.os_initrd)
+        self.assertIsNone(obj.os_cmdline)
+        self.assertIsNone(obj.os_root)
+        self.assertIsNone(obj.os_init_path)
+        self.assertEqual([], obj.os_boot_dev)
+        self.assertFalse(obj.os_bootmenu)
+        self.assertIsNone(obj.os_smbios)
+
+        xmldoc = """
+          <domain>
+            <os>
+              <type>hvm</type>
+              <loader readonly='yes' secure='yes' type='pflash'>/tmp/OVMF_CODE.secboot.fd</loader>
+              <nvram template='/tmp/OVMF_VARS.secboot.fd'>/var/lib/libvirt/qemu/nvram/instance.fd</nvram>
+            </os>
+            <features>
+              <smm/>
+            </features>
+          </domain>
+        """  # noqa: E501
+
+        obj = config.LibvirtConfigGuest()
+        obj.parse_str(xmldoc)
+
+        self.assertIsNone(obj.virt_type)
+        self.assertEqual('hvm', obj.os_type)
+        self.assertIsNone(obj.os_mach_type)
+        self.assertIsNone(obj.os_kernel)
+        self.assertIn(config.LibvirtConfigGuestFeatureSMM(), obj.features)
+        self.assertEqual('/tmp/OVMF_CODE.secboot.fd', obj.os_loader)
+        self.assertEqual('pflash', obj.os_loader_type)
+        self.assertTrue(obj.os_loader_readonly)
+        self.assertTrue(obj.os_loader_secure)
+        self.assertIsNone(obj.os_loader_stateless)
+        self.assertEqual('/var/lib/libvirt/qemu/nvram/instance.fd',
+                         obj.os_nvram)
+        self.assertEqual('/tmp/OVMF_VARS.secboot.fd', obj.os_nvram_template)
+        self.assertIsNone(obj.os_initrd)
+        self.assertIsNone(obj.os_cmdline)
+        self.assertIsNone(obj.os_root)
+        self.assertIsNone(obj.os_init_path)
+        self.assertEqual([], obj.os_boot_dev)
+        self.assertFalse(obj.os_bootmenu)
+        self.assertIsNone(obj.os_smbios)
+
+        xmldoc = """
+          <domain>
+            <os>
+              <type>hvm</type>
+              <loader readonly='yes' stateless='yes' type='pflash'>/tmp/OVMF_CODE.fd</loader>
+            </os>
+            <features>
+              <acpi/>
+            </features>
+          </domain>
+        """  # noqa: E501
+
+        obj = config.LibvirtConfigGuest()
+        obj.parse_str(xmldoc)
+
+        self.assertIsNone(obj.virt_type)
+        self.assertEqual('hvm', obj.os_type)
+        self.assertIsNone(obj.os_mach_type)
+        self.assertIsNone(obj.os_kernel)
+        self.assertNotIn(config.LibvirtConfigGuestFeatureSMM(), obj.features)
+        self.assertEqual('/tmp/OVMF_CODE.fd', obj.os_loader)
+        self.assertEqual('pflash', obj.os_loader_type)
+        self.assertTrue(obj.os_loader_readonly)
+        self.assertIsNone(obj.os_loader_secure)
+        self.assertTrue(obj.os_loader_stateless)
+        self.assertIsNone(obj.os_nvram)
+        self.assertIsNone(obj.os_nvram_template)
         self.assertIsNone(obj.os_initrd)
         self.assertIsNone(obj.os_cmdline)
         self.assertIsNone(obj.os_root)
@@ -3992,6 +4135,55 @@ class LibvirtConfigGuestCPUTuneTest(LibvirtConfigBaseTest):
             <vcpusched vcpus="0-3" scheduler="fifo" priority="1"/>
             <vcpusched vcpus="4-7" scheduler="fifo" priority="99"/>
           </cputune>""")
+
+    def test_config_cputune_vcpus_iothread(self):
+        cputune = config.LibvirtConfigGuestCPUTune()
+
+        vcpu0 = config.LibvirtConfigGuestCPUTuneVCPUPin()
+        vcpu0.id = 0
+        vcpu0.cpuset = set([0, 1])
+        vcpu1 = config.LibvirtConfigGuestCPUTuneVCPUPin()
+        vcpu1.id = 1
+        vcpu1.cpuset = set([2, 3])
+        vcpu2 = config.LibvirtConfigGuestCPUTuneVCPUPin()
+        vcpu2.id = 2
+        vcpu2.cpuset = set([4, 5])
+        vcpu3 = config.LibvirtConfigGuestCPUTuneVCPUPin()
+        vcpu3.id = 3
+        vcpu3.cpuset = set([6, 7])
+        cputune.vcpupin.extend([vcpu0, vcpu1, vcpu2, vcpu3])
+
+        emu = config.LibvirtConfigGuestCPUTuneEmulatorPin()
+        emu.cpuset = set([0, 1, 2, 3, 4, 5, 6, 7])
+        cputune.emulatorpin = emu
+
+        iot = config.LibvirtConfigGuestCPUTuneIOThreadPin()
+        iot.iothread = 1
+        iot.cpuset = set([0, 1, 2, 3, 4, 5, 6, 7])
+        cputune.iothreadpin.append(iot)
+
+        sch0 = config.LibvirtConfigGuestCPUTuneVCPUSched()
+        sch0.vcpus = set([0, 1, 2, 3])
+        sch0.scheduler = "fifo"
+        sch0.priority = 1
+        sch1 = config.LibvirtConfigGuestCPUTuneVCPUSched()
+        sch1.vcpus = set([4, 5, 6, 7])
+        sch1.scheduler = "fifo"
+        sch1.priority = 99
+        cputune.vcpusched.extend([sch0, sch1])
+
+        xml = cputune.to_xml()
+        self.assertXmlEqual("""
+          <cputune>
+            <emulatorpin cpuset="0-7"/>
+            <iothreadpin iothread="1" cpuset="0-7"/>
+            <vcpupin vcpu="0" cpuset="0-1"/>
+            <vcpupin vcpu="1" cpuset="2-3"/>
+            <vcpupin vcpu="2" cpuset="4-5"/>
+            <vcpupin vcpu="3" cpuset="6-7"/>
+            <vcpusched vcpus="0-3" scheduler="fifo" priority="1"/>
+            <vcpusched vcpus="4-7" scheduler="fifo" priority="99"/>
+          </cputune>""", xml)
 
 
 class LibvirtConfigGuestMemoryBackingTest(LibvirtConfigBaseTest):

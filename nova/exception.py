@@ -2245,7 +2245,7 @@ class PlacementReshapeConflict(PlacementAPIConflict):
     """
     msg_fmt = _(
         "A conflict was encountered attempting to reshape a provider tree: "
-        "$(error)s"
+        "%(error)s"
     )
 
 
@@ -2666,3 +2666,18 @@ class HostConflict(Exception):
 class InstanceEventTimeout(Exception):
     """A custom timeout exception to replace eventlet.timeout.Timeout."""
     pass
+
+
+class VTPMSecretForbidden(Forbidden):
+    pass
+
+
+class VTPMOldCompute(Invalid):
+    msg_fmt = _('vTPM live migration is not supported by old nova-compute '
+                'services. Upgrade your nova-compute services to '
+                'Gazpacho (33.0.0) or later.')
+
+
+class VTPMSecretNotFound(NovaException):
+    msg_fmt = _('TPM encryption secret for instance %(instance_uuid)s was not '
+                'found.')

@@ -18,6 +18,7 @@
 import base64
 from unittest import mock
 
+import ddt
 import fixtures
 from openstack.baremetal.v1 import node as _node
 from openstack import exceptions as sdk_exc
@@ -96,6 +97,7 @@ def _make_compute_service(hostname):
     return objects.Service(host=hostname)
 
 
+@ddt.ddt
 class IronicDriverTestCase(test.NoDBTestCase):
 
     @mock.patch.object(ironic_driver.IronicDriver, '_refresh_hash_ring')
@@ -1742,9 +1744,94 @@ class IronicDriverTestCase(test.NoDBTestCase):
         # we call this innter function twice so we need to reset mocks
         self.mock_conn.set_node_provision_state.reset_mock()
 
-    def test_destroy(self):
-        for state in ironic_states.PROVISION_STATE_LIST:
-            self._test_destroy(state)
+    @ddt.data(*ironic_states.ALL_STATES)
+    def test_destroy(self, state):
+        self._test_destroy(state)
+
+    @mock.patch.object(ironic_driver.IronicDriver,
+                       '_remove_instance_info_from_node')
+    @mock.patch.object(ironic_driver.IronicDriver, '_cleanup_deploy')
+    def test_destroy_servicing_states_unprovision(self, mock_cleanup_deploy,
+                                                   mock_remove_instance_info):
+        """Test that servicing and deployhold states trigger unprovisioning.
+
+        This is a regression test for bug 2131960 where nodes in servicing
+        states (SERVICING, SERVICEWAIT, SERVICEHOLD, SERVICEFAIL) and
+        DEPLOYHOLD were not being properly unprovisioned when destroyed.
+        """
+        # Test all servicing-related states and deployhold
+        servicing_states = [
+            ironic_states.DEPLOYHOLD,
+            ironic_states.SERVICING,
+            ironic_states.SERVICEWAIT,
+            ironic_states.SERVICEFAIL,
+            ironic_states.SERVICEHOLD,
+        ]
+
+        for state in servicing_states:
+            mock_cleanup_deploy.reset_mock()
+            mock_remove_instance_info.reset_mock()
+            self.mock_conn.set_node_provision_state.reset_mock()
+
+            node_id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+            network_info = 'foo'
+
+            node = _get_cached_node(
+                driver='fake', id=node_id, provision_state=state)
+            instance = fake_instance.fake_instance_obj(self.ctx, node=node_id)
+
+            def fake_set_node_provision_state(*_):
+                node.provision_state = None
+
+            self.mock_conn.nodes.return_value = iter([node])
+            self.mock_conn.set_node_provision_state.side_effect = \
+                fake_set_node_provision_state
+            self.driver.destroy(self.ctx, instance, network_info, None)
+
+            # All these states should trigger unprovisioning, not cleanup
+            self.mock_conn.set_node_provision_state.assert_called_once_with(
+                node_id, 'deleted',
+            )
+            self.assertFalse(mock_remove_instance_info.called)
+            self.assertFalse(mock_cleanup_deploy.called)
+
+    @mock.patch.object(ironic_driver.IronicDriver,
+                       '_remove_instance_info_from_node')
+    @mock.patch.object(ironic_driver.IronicDriver, '_cleanup_deploy')
+    def test_destroy_unknown_state_unprovision(self, mock_cleanup_deploy,
+                                                mock_remove_instance_info):
+        """Test that unknown provision states trigger unprovisioning.
+
+        This is a regression test for bug 2131960. As a safety mechanism,
+        nodes in provision states that are not recognized (not in
+        PROVISION_STATE_LIST) should trigger unprovisioning rather than
+        cleanup to ensure proper node teardown even when encountering
+        unexpected or future Ironic states.
+        """
+        # Test with a completely unknown state that doesn't exist in
+        # PROVISION_STATE_LIST
+        node_id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+        network_info = 'foo'
+        unknown_state = 'unknown-future-state'
+
+        node = _get_cached_node(
+            driver='fake', id=node_id, provision_state=unknown_state)
+        instance = fake_instance.fake_instance_obj(self.ctx, node=node_id)
+
+        def fake_set_node_provision_state(*_):
+            node.provision_state = None
+
+        self.mock_conn.nodes.return_value = iter([node])
+        self.mock_conn.set_node_provision_state.side_effect = \
+            fake_set_node_provision_state
+        self.driver.destroy(self.ctx, instance, network_info, None)
+
+        # Unknown states should trigger unprovisioning for safety
+        self.mock_conn.set_node_provision_state.assert_called_once_with(
+            node_id, 'deleted',
+        )
+        self.assertFalse(mock_remove_instance_info.called)
+        self.assertFalse(mock_cleanup_deploy.called)
 
     @mock.patch.object(ironic_driver.IronicDriver,
                        '_validate_instance_and_node')
@@ -3357,6 +3444,8 @@ class IronicDriverConsoleTestCase(test.NoDBTestCase):
         CONF.set_default('api_retry_interval', default=0, group='ironic')
         CONF.set_default(
             'serial_console_state_timeout', default=1, group='ironic')
+        CONF.set_default(
+            'vnc_console_state_timeout', default=1, group='ironic')
 
         self.stub_out('nova.virt.ironic.driver.IronicDriver.'
                       '_validate_instance_and_node',
@@ -3503,6 +3592,139 @@ class IronicDriverConsoleTestCase(test.NoDBTestCase):
 
         mock_timer.start.assert_called_with(starting_interval=0.05, timeout=1,
                                             jitter=0.5)
+
+    @mock.patch.object(ironic_driver, '_CONSOLE_STATE_CHECKING_INTERVAL', 0.05)
+    def test_get_vnc_console_disabled(self):
+
+        console_data_disabled = self._create_console_data(
+                enabled=False,
+                console_type='vnc',
+                url='http://127.0.0.1:10001/vnc_lite.html')
+        console_data_enabled = self._create_console_data(
+                enabled=True,
+                console_type='vnc',
+                url='http://127.0.0.1:10001/vnc_lite.html')
+
+        self.mock_conn.get_node_console.side_effect = [
+            console_data_disabled,
+            console_data_disabled,
+            console_data_disabled,
+            console_data_enabled
+        ]
+        self.mock_conn.get_node.return_value = _get_cached_node(
+            driver_internal_info={
+                'vnc_host': '127.0.0.1',
+                'vnc_port': 10000})
+
+        result = self.driver.get_vnc_console(self.ctx, self.instance)
+
+        self.assertEqual(4, self.mock_conn.get_node_console.call_count)
+        self.assertEqual(1, self.mock_conn.enable_node_console.call_count)
+        self.assertIsInstance(result, console_type.ConsoleVNC)
+        self.assertEqual('127.0.0.1', result.host)
+        self.assertEqual(10000, result.port)
+
+    @mock.patch.object(ironic_driver, '_CONSOLE_STATE_CHECKING_INTERVAL', 0.05)
+    def test_get_vnc_console_enable_timeout(self):
+
+        self.mock_conn.get_node_console.return_value = \
+            self._create_console_data(
+                enabled=False,
+                console_type='vnc',
+                url='http://127.0.0.1:10001/vnc_lite.html')
+
+        self.mock_conn.get_node.return_value = _get_cached_node(
+            driver_internal_info={
+                'vnc_host': '127.0.0.1',
+                'vnc_port': 10000})
+
+        self.assertRaises(exception.ConsoleTypeUnavailable,
+                          self.driver.get_vnc_console,
+                          self.ctx, self.instance)
+
+        self.assertGreater(self.mock_conn.get_node_console.call_count, 2)
+        self.assertEqual(1, self.mock_conn.enable_node_console.call_count)
+
+    def test_get_vnc_console_enabled(self):
+
+        self.mock_conn.get_node_console.return_value = \
+            self._create_console_data(
+                enabled=True,
+                console_type='vnc',
+                url='http://127.0.0.1:10001/vnc_lite.html')
+
+        self.mock_conn.get_node.return_value = _get_cached_node(
+            driver_internal_info={
+                'vnc_host': '127.0.0.1',
+                'vnc_port': 10000})
+
+        result = self.driver.get_vnc_console(self.ctx, self.instance)
+
+        self.assertEqual(1, self.mock_conn.get_node_console.call_count)
+        self.assertEqual(0, self.mock_conn.enable_node_console.call_count)
+        self.assertIsInstance(result, console_type.ConsoleVNC)
+        self.assertEqual('127.0.0.1', result.host)
+        self.assertEqual(10000, result.port)
+
+    def test_get_vnc_console_missing_internal_info(self):
+
+        self.mock_conn.get_node_console.return_value = \
+            self._create_console_data(
+                enabled=True,
+                console_type='vnc',
+                url='http://127.0.0.1:10001/vnc_lite.html')
+
+        self.mock_conn.get_node.return_value = _get_cached_node(
+            driver_internal_info={})
+
+        self.assertRaises(exception.ConsoleTypeUnavailable,
+                          self.driver.get_vnc_console,
+                          self.ctx, self.instance)
+
+        self.assertEqual(1, self.mock_conn.get_node_console.call_count)
+        self.assertEqual(0, self.mock_conn.enable_node_console.call_count)
+
+    def test_get_vnc_console_wrong_type(self):
+
+        self.mock_conn.get_node_console.return_value = \
+            self._create_console_data(
+                enabled=True,
+                console_type='socat',
+                url='tcp://127.0.0.1:10001')
+
+        self.assertRaises(exception.ConsoleTypeUnavailable,
+                          self.driver.get_vnc_console,
+                          self.ctx, self.instance)
+
+        self.assertEqual(1, self.mock_conn.get_node_console.call_count)
+        self.assertEqual(0, self.mock_conn.enable_node_console.call_count)
+
+    def test_get_vnc_console_api_error(self):
+
+        self.mock_conn.get_node_console.side_effect = \
+            sdk_exc.ForbiddenException()
+
+        self.assertRaises(exception.ConsoleTypeUnavailable,
+                          self.driver.get_vnc_console,
+                          self.ctx, self.instance)
+
+        self.assertEqual(1, self.mock_conn.get_node_console.call_count)
+
+    def test_get_vnc_console_enable_api_error(self):
+
+        self.mock_conn.get_node_console.return_value = \
+            self._create_console_data(
+                enabled=False,
+                console_type='vnc',
+                url='http://127.0.0.1:10001/vnc_lite.html')
+        self.mock_conn.enable_node_console.side_effect = \
+            sdk_exc.ForbiddenException()
+
+        self.assertRaises(exception.ConsoleTypeUnavailable,
+                          self.driver.get_vnc_console,
+                          self.ctx, self.instance)
+
+        self.assertEqual(1, self.mock_conn.get_node_console.call_count)
 
     def test_get_serial_console_socat(self):
         temp_data = {'target_mode': True}

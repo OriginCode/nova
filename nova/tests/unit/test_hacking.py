@@ -1074,7 +1074,85 @@ class HackingTestCase(test.NoDBTestCase):
             code, checks.check_eventlet_primitives, expected_errors=errors)
 
         code = """
+                    from eventlet import timeout
+                    from eventlet import event
+                    eventlet.event.Event
+                    eventlet.timeout.Timeout(deadline)
+                    eventlet.semaphore.Semaphore(3)
+                    eventlet.semaphore.BoundedSemaphore(2)
+               """
+        errors = [(x + 1, 0, 'N373') for x in range(6)]
+        self._assert_has_errors(
+            code, checks.check_eventlet_primitives, expected_errors=errors)
+
+        code = """
+                    threading.Semaphore(value=1)
+                    threading.Event()
                     time.sleep(0)
                     time.sleep(1)
                """
         self._assert_has_no_errors(code, checks.check_eventlet_primitives)
+
+    def test_check_eventlet_yield(self):
+        code = """
+                   time.sleep(0)
+               """
+        errors = [(x + 1, 0, 'N374') for x in range(1)]
+        self._assert_has_errors(
+            code, checks.check_eventlet_yield, expected_errors=errors)
+
+        code = """
+                    time.sleep(1)
+               """
+        self._assert_has_no_errors(code, checks.check_eventlet_yield)
+
+    def test_check_threading_event_mock(self):
+        code = """
+                import threading
+
+                with mock.patch('threading.Event.wait') as m:
+                     pass
+
+                with mock.patch("threading.Event.wait") as m:
+                    pass
+
+                with mock.patch.object(threading, 'Event.wait') as m:
+                    pass
+
+                with mock.patch("threading.Event") as m:
+                    pass
+
+                with mock.patch.object(threading, 'Event') as m:
+                    pass
+
+                @mock.patch('threading.Event.wait', new=mock.Mock())
+                def test_foo(self):
+                    pass
+
+                @mock.patch("threading.Event.wait", new=mock.Mock())
+                def test_foo(self):
+                   pass
+
+                @mock.patch.object(threading, 'Event.wait', new=mock.Mock())
+                def test_foo(self):
+                   pass
+
+                @mock.patch("threading.Event", new=mock.Mock())
+                def test_foo(self):
+                   pass
+
+                @mock.patch.object(threading, 'Event', new=mock.Mock())
+                def test_foo(self):
+                   pass
+               """
+        errors = [(x + 1, 0, 'N375')
+                  for x in [2, 5, 8, 11, 14, 17, 21, 25, 29, 33]]
+        self._assert_has_errors(
+            code, checks.check_threading_event_mock, expected_errors=errors)
+
+        code = """
+                my_event = threading.Event()
+                with mock.patch.object(my_event, 'wait') as m:
+                    pass
+               """
+        self._assert_has_no_errors(code, checks.check_threading_event_mock)

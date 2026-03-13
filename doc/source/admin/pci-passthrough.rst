@@ -291,7 +291,7 @@ Refer to :oslo.config:option:`pci.alias` for syntax information.
 Refer to :ref:`Affinity  <pci-numa-affinity-policy>` for ``numa_policy``
 information.
 
-Once configured, restart the :program:`nova-api-wsgi` service.
+Once configured, restart the Compute API service.
 
 
 Configuring a flavor or image
@@ -392,6 +392,15 @@ PCI tracking in Placement
 .. warning::
    Please note that once it is enabled on a given compute host
    **it cannot be disabled there any more**.
+
+.. warning::
+   If you configure more than 8 PCI devices per compute with the same
+   product_id or resource_class then placement needs configuration tuning
+   to keep the scheduling speed acceptable. Please read the following
+   two release notes:
+
+   * https://github.com/openstack/placement/blob/master/releasenotes/notes/bug-2070257-allocation-candidates-generation-limit-and-strategy.yaml-e73796898163fb55.yaml
+   * https://github.com/openstack/placement/blob/master/releasenotes/notes/bug-2126751-optimize_for_wide_provider_trees-b50b7813fd0d9dd2.yaml
 
 Since nova 26.0.0 (Zed) PCI passthrough device inventories are tracked in
 Placement. If a PCI device exists on the hypervisor and

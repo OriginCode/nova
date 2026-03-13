@@ -11,15 +11,19 @@
 # under the License.
 
 """WSGI application entry-point for Nova Compute API."""
+# autopep8: off
+from nova import monkey_patch; monkey_patch.patch(backend='threading')  # noqa
+# autopep8: on
 
 import threading
 
 from nova.api.openstack import wsgi_app
 
 NAME = "osapi_compute"
+PROG = "nova-api-os-compute"
 
 application = None
 lock = threading.Lock()
 with lock:
     if application is None:
-        application = wsgi_app.init_application(NAME)
+        application = wsgi_app.init_application(NAME, PROG)

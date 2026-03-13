@@ -1104,6 +1104,14 @@ provided in the option value.
 The resulted host weight would then be multiplied by the value of
 :oslo.config:option:`filter_scheduler.image_props_weight_multiplier`.
 
+
+.. note::
+
+    The weigher compares the values of the image properties as strings. If some
+    image properties are lists (eg. hw_numa_nodes), then if the values are
+    ordered differently, then the weigher will consider them as different
+    values.
+
 Utilization-aware scheduling
 ----------------------------
 
@@ -1365,7 +1373,7 @@ via the ``nova.api.extra_spec_validator`` `entrypoint`__.
 
 The module containing your custom filter(s) must be packaged and available in
 the same environment(s) that the nova controllers, or specifically the
-:program:`nova-scheduler` and :program:`nova-api-wsgi` services, are available in.
+:program:`nova-scheduler` and Compute API services, are available in.
 As an example, consider the following sample package, which is the `minimal
 structure`__ for a standard, setuptools-based Python package:
 

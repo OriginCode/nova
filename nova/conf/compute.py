@@ -664,9 +664,18 @@ instances, if asked to do so. This limit is enforced to avoid building
 unlimited instance concurrently on a compute node. This value can be set
 per compute node.
 
+In native threading mode concurrent builds and concurrent snapshot operations
+are sharing the same executor and therefore the max limit values are common.
+If max_concurrent_builds and max_concurrent_snapshots are set to different
+values the bigger value will be used as the combined limit for both.
+
 Possible Values:
 
-* 0 : treated as unlimited.
+* ``0``: Deprecated since 33.0.0 (2026.1 Gazpacho). This value was previously
+  documented as meaning unlimited. Since this release, the implementation keeps
+  using 1000 as the real limit in eventlet mode and will use 10 in native
+  threading mode. In the future release when eventlet support is removed, 0 as
+  a valid value will also be removed.
 * Any positive integer representing maximum concurrent builds.
 """),
     cfg.IntOpt('max_concurrent_snapshots',
@@ -678,9 +687,18 @@ This limit is enforced to prevent snapshots overwhelming the
 host/network/storage and causing failure. This value can be set per
 compute node.
 
+In native threading mode concurrent builds and concurrent snapshot operations
+are sharing the same executor and therefore the max limit values are common.
+If max_concurrent_builds and max_concurrent_snapshots are set to different
+values the bigger value will be used as the combined limit for both.
+
 Possible Values:
 
-* 0 : treated as unlimited.
+* ``0``: Deprecated since 33.0.0 (2026.1 Gazpacho). This value was previously
+  documented as meaning unlimited. Since this release, the implementation keeps
+  using 1000 as the real limit in eventlet mode and will use 5 in native
+  threading mode. In the future release when eventlet support is removed, 0 as
+  a valid value will also be removed.
 * Any positive integer representing maximum concurrent snapshots.
 """),
     cfg.IntOpt('max_concurrent_live_migrations',
@@ -694,7 +712,12 @@ that doing so is safe and stable in your environment.
 
 Possible values:
 
-* 0 : treated as unlimited.
+* ``0``: Deprecated since 33.0.0 (2026.1 Gazpacho). This value was previously
+  documented as meaning unlimited but the actual implementation used maximum
+  1000 greenthreads. Since this release, the implementation keep using 1000
+  greenthreads in eventlet mode and will use 5 native threads in threading
+  mode. In the future release when eventlet support is removed, 0 as a valid
+  value will also be removed.
 * Any positive integer representing maximum number of live migrations
   to run concurrently.
 """),
@@ -732,9 +755,9 @@ Related options:
   checks
 """),
     cfg.IntOpt('sync_power_state_pool_size',
-        default=1000,
+        default=5,
         help="""
-Number of greenthreads available for use to sync power states.
+Number of threads available for use to sync instance power states.
 
 This option can be used to reduce the number of concurrent requests
 made to the hypervisor or system with real instance power states
@@ -742,8 +765,8 @@ for performance reasons, for example, with Ironic.
 
 Possible values:
 
-* Any positive integer representing greenthreads count.
-""")
+* Any positive integer representing threads count.
+"""),
 ]
 
 compute_group_opts = [

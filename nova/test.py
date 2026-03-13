@@ -20,10 +20,6 @@ Allows overriding of flags for use of fakes, and some black magic for
 inline callbacks.
 
 """
-# autopep8: off
-from nova import monkey_patch ; monkey_patch.patch()  # noqa
-# autopep8: on
-
 import abc
 import builtins
 import collections
@@ -66,6 +62,7 @@ from nova.pci import request
 from nova import quota
 from nova.scheduler.client import report
 from nova.scheduler import utils as scheduler_utils
+import nova.service_auth
 from nova.tests import fixtures as nova_fixtures
 from nova.tests.unit import matchers
 from nova import utils
@@ -200,6 +197,7 @@ class TestCase(base.BaseTestCase):
 
         self.useFixture(nova_fixtures.OpenStackSDKFixture())
         self.useFixture(nova_fixtures.IsolatedExecutorFixture(self.id()))
+        self.useFixture(nova_fixtures.DelayingExecutorWrapperCleanupFixture())
 
         self.useFixture(log_fixture.get_logging_handle_error_fixture())
 
@@ -233,6 +231,7 @@ class TestCase(base.BaseTestCase):
             # happens only in the RPCFixture
             CONF.set_default('driver', ['test'],
                              group='oslo_messaging_notifications')
+            self.useFixture(nova_fixtures.RPCPollerCleanupFixture())
 
         # NOTE(danms): Make sure to reset us back to non-remote objects
         # for each test to avoid interactions. Also, backup the object
@@ -246,8 +245,7 @@ class TestCase(base.BaseTestCase):
         # NOTE(danms): Reset the cached list of cells
         from nova.compute import api
         api.CELLS = []
-        context.CELL_CACHE = {}
-        context.CELLS = []
+        context.reset_globals()
 
         self.computes = {}
         self.cell_mappings = {}
@@ -338,6 +336,9 @@ class TestCase(base.BaseTestCase):
 
         # Reset the global identity client
         nova.limit.utils.IDENTITY_CLIENT = None
+
+        # Reset the global service auths and sessions
+        nova.service_auth.reset_globals()
 
     def _setup_cells(self):
         """Setup a normal cellsv2 environment.
@@ -460,6 +461,12 @@ class TestCase(base.BaseTestCase):
         if host is not None:
             # Make sure that CONF.host is relevant to the right hostname
             self.useFixture(nova_fixtures.ConfPatcher(host=host))
+        # By default, service creates a RPC server for auto populated
+        # 'topic' from service binary name. For compute service, we need
+        # to create the 2nd RPC server which will be done by pass the
+        # 'topic_alt' explicitly.
+        if name == 'compute' and 'topic_alt' not in kwargs:
+            kwargs['topic_alt'] = compute_rpcapi.RPC_TOPIC_ALT
 
         if name == 'compute' and self.USES_DB:
             # NOTE(danms): We need to create the HostMapping first, because
@@ -740,7 +747,15 @@ class APICoverage(object):
             testtools.matchers.ContainsAll(api_methods))
 
 
-class SubclassSignatureTestCase(testtools.TestCase, metaclass=abc.ABCMeta):
+class NoDBTestCase(TestCase):
+    """`NoDBTestCase` differs from TestCase in that DB access is not supported.
+    This makes tests run significantly faster. If possible, all new tests
+    should derive from this class.
+    """
+    USES_DB = False
+
+
+class SubclassSignatureTestCase(NoDBTestCase, metaclass=abc.ABCMeta):
     """Ensure all overridden methods of all subclasses of the class
     under test exactly match the signature of the base class.
 
@@ -759,10 +774,8 @@ class SubclassSignatureTestCase(testtools.TestCase, metaclass=abc.ABCMeta):
         raise NotImplementedError()
 
     def setUp(self):
-        self.useFixture(nova_fixtures.ConfFixture(CONF))
-        self.base = self._get_base_class()
-
         super(SubclassSignatureTestCase, self).setUp()
+        self.base = self._get_base_class()
 
     @staticmethod
     def _get_argspecs(cls):
@@ -839,14 +852,6 @@ class TimeOverride(fixtures.Fixture):
         super(TimeOverride, self).setUp()
         timeutils.set_time_override(override_time=self.override_time)
         self.addCleanup(timeutils.clear_time_override)
-
-
-class NoDBTestCase(TestCase):
-    """`NoDBTestCase` differs from TestCase in that DB access is not supported.
-    This makes tests run significantly faster. If possible, all new tests
-    should derive from this class.
-    """
-    USES_DB = False
 
 
 class MatchType(object):

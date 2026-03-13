@@ -13,11 +13,15 @@
 #    under the License.
 
 import datetime
+import futurist
 import hashlib
 import os
+import os.path
 import threading
+import time
 from unittest import mock
 
+import fasteners
 import fixtures
 from keystoneauth1 import adapter as ks_adapter
 from keystoneauth1.identity import base as ks_identity
@@ -216,12 +220,6 @@ class GenericUtilsTestCase(test.NoDBTestCase):
         utils.ssh_execute('remotehost', 'ls', '-l')
         mock_execute.assert_called_once_with(*expected_args)
 
-    @mock.patch('nova.utils.generate_uid')
-    def test_tpool_execute(self, mock_generate):
-        expected_kargs = {'size': 12}
-        utils.tpool_execute(utils.generate_uid, 'mytopic', size=12)
-        mock_generate.assert_called_once_with('mytopic', **expected_kargs)
-
     def test_generate_hostid(self):
         host = 'host'
         project_id = '9b9e3c847e904b0686e8ffb20e4c6381'
@@ -231,6 +229,24 @@ class GenericUtilsTestCase(test.NoDBTestCase):
     def test_generate_hostid_with_none_host(self):
         project_id = '9b9e3c847e904b0686e8ffb20e4c6381'
         self.assertEqual('', utils.generate_hostid(None, project_id))
+
+    @mock.patch('nova.utils.concurrency_mode_threading', return_value=False)
+    @mock.patch('nova.utils.tpool.Proxy')
+    def test_tpool_wrap_eventlet(self, mock_tpool, mock_concurrency_mode):
+        mock_target = mock.MagicMock()
+        target = utils.tpool_wrap(mock_target)
+
+        mock_tpool.assert_called_once_with(mock_target, autowrap=())
+        self.assertEqual(mock_tpool.return_value, target)
+        mock_concurrency_mode.assert_called_once_with()
+
+    @mock.patch('nova.utils.concurrency_mode_threading', return_value=True)
+    def test_tpool_wrap_threading(self, mock_concurrency_mode):
+        mock_target = mock.MagicMock()
+        target = utils.tpool_wrap(mock_target)
+
+        self.assertEqual(target, mock_target)
+        mock_concurrency_mode.assert_called_once_with()
 
 
 class TestCachedFile(test.NoDBTestCase):
@@ -1544,6 +1560,41 @@ class SpawnOnTestCase(test.NoDBTestCase):
             'nova.tests.unit.test_utils.SpawnOnTestCase.'
             'test_spawn_on_warns_on_full_executor.cell_worker', task)
 
+    @mock.patch.object(
+        utils, 'concurrency_mode_threading', new=mock.Mock(return_value=True))
+    @mock.patch.object(utils.LOG, 'warning')
+    def test_spawn_on_warns_on_full_executor_noname(self, mock_warning):
+        # Ensure we have executor for a single task only at a time
+        executor = utils.create_executor(max_workers=1)
+
+        work = threading.Event()
+        started = threading.Event()
+
+        # let the blocked tasks finish after the test case so that the leaked
+        # thread check is not triggered during cleanup
+        self.addCleanup(work.set)
+
+        def task():
+            started.set()
+            work.wait()
+
+        # Start two tasks that will wait, the first will execute the second
+        # will wait in the queue
+        utils.spawn_on(executor, task)
+        utils.spawn_on(executor, task)
+        # wait for the first task to consume the single executor thread
+        started.wait()
+        # start one more task to trigger the fullness check.
+        utils.spawn_on(executor, task)
+
+        # We expect that spawn_on will warn due to the second task being is
+        # waiting in the queue, and no idle worker thread exists.
+        mock_warning.assert_called_once_with(
+            'The %s pool does not have free threads so the task %s will be '
+            'queued. If this happens repeatedly then the size of the pool is '
+            'too small for the load or there are stuck threads filling the '
+            'pool.', 'unknown', task)
+
 
 class ExecutorStatsTestCase(test.NoDBTestCase):
 
@@ -1691,3 +1742,840 @@ class OsloServiceBackendSelectionTestCase(test.NoDBTestCase):
             "OS_NOVA_DISABLE_EVENTLET_PATCHING set to 'true', but then the "
             "service tried to call eventlet.monkey_patch(). This is a bug.",
             str(ex))
+
+    @mock.patch('oslo_service.backend.init_backend')
+    def test_threading_selected_by_default(self, init_backend):
+        with mock.patch.dict(os.environ):
+            del os.environ["OS_NOVA_DISABLE_EVENTLET_PATCHING"]
+            monkey_patch.patch(backend='threading')
+
+        init_backend.assert_called_once_with(
+            oslo_backend.BackendType.THREADING)
+
+    def test_invalid_default_backend(self):
+        ex = self.assertRaises(ValueError, monkey_patch.patch, backend='foo')
+        self.assertEqual(
+            "the backend can only be 'eventlet' or 'threading'", str(ex))
+
+
+class TestFairLockGuard(test.NoDBTestCase):
+
+    def test_aquire_single_lock(self):
+        lock_name = 'test_aquire_single_lock'
+        test_lock = utils.NOVA_FAIR_LOCKS.get(lock_name)
+        self.assertFalse(test_lock.has_pending_writers)
+        lock_guard = utils.FairLockGuard([lock_name])
+        with lock_guard:
+            self.assertTrue(lock_guard.is_locked())
+            self.assertIs(lock_guard.locks[0], test_lock)
+            self.assertTrue(test_lock.is_writer())
+
+    def test_aquire_multiple_locks(self):
+        lock_names = ['test_aquire_multiple_locks1',
+            'test_aquire_multiple_locks2']
+        test_locks = [utils.NOVA_FAIR_LOCKS.get(
+            lock_name) for lock_name in lock_names]
+        for lock in test_locks:
+            self.assertFalse(lock.has_pending_writers)
+        lock_guard = utils.FairLockGuard(lock_names)
+        with lock_guard:
+            self.assertTrue(lock_guard.is_locked())
+            for i, lock in enumerate(lock_guard.locks):
+                self.assertIs(lock, test_locks[i])
+                self.assertTrue(lock_guard.locks[i].is_writer())
+
+    def test_aquire_multiple_locks_sorted(self):
+        lock_names = ['test_aquire_multiple_locks_sorted2',
+            'test_aquire_multiple_locks_sorted1']
+        self.assertNotEqual(lock_names, sorted(lock_names))
+        test_locks = [utils.NOVA_FAIR_LOCKS.get(
+            lock_name) for lock_name in lock_names]
+        for lock in test_locks:
+            self.assertFalse(lock.has_pending_writers)
+        lock_guard = utils.FairLockGuard(lock_names)
+        with lock_guard:
+            self.assertTrue(lock_guard.is_locked())
+            for i, name in enumerate(sorted(lock_names)):
+                self.assertIs(lock_guard.locks[i],
+                              utils.NOVA_FAIR_LOCKS.get(name))
+                self.assertTrue(lock_guard.locks[i].is_writer())
+
+    def test_locks_are_released_on_exception(self):
+        lock_names = ['test_locks_are_released_on_exception1',
+            'test_locks_are_released_on_exception2']
+        test_locks = [utils.NOVA_FAIR_LOCKS.get(
+            lock_name) for lock_name in lock_names]
+        lock_guard = utils.FairLockGuard(lock_names)
+        try:
+            with lock_guard:
+                self.assertTrue(lock_guard.is_locked())
+                raise ValueError()
+        except ValueError:
+            pass
+        self.assertFalse(lock_guard.is_locked())
+        for lock in test_locks:
+            self.assertFalse(lock.is_writer())
+
+    def test_partial_acquire(self):
+        lock_names = ['test_partial_acquire1', 'test_partial_acquire2']
+        test_locks = [utils.NOVA_FAIR_LOCKS.get(
+            lock_name) for lock_name in lock_names]
+
+        lock_acquired = threading.Event()
+        lock_released = threading.Event()
+        worker_continue = threading.Event()
+
+        def worker():
+            test_locks[0].acquire_write_lock()
+            lock_acquired.set()
+            worker_continue.wait()
+            time.sleep(1)
+            test_locks[0].release_write_lock()
+            lock_released.set()
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        lock_guard = utils.FairLockGuard(lock_names)
+        self.assertFalse(lock_guard.is_locked())
+        lock_acquired.wait()
+        # we should not have acquired the lock yet
+        # as the worker thread is still holding it
+        self.assertFalse(test_locks[0].is_writer())
+        # Note the first lock is still held by the worker thread
+        # so this will block until the worker releases it
+        worker_continue.set()
+        with lock_guard:
+            self.assertTrue(lock_guard.is_locked())
+            self.assertTrue(test_locks[0].is_writer())
+            self.assertTrue(test_locks[1].is_writer())
+            self.assertTrue(lock_released.is_set())
+        thread.join()
+        self.assertFalse(lock_guard.is_locked())
+        self.assertFalse(test_locks[0].is_writer())
+        self.assertFalse(test_locks[1].is_writer())
+
+    def test_thread_ordering_subset_locks(self):
+        """Test that a thread requesting a subset of locks waits for the
+        first thread that requested all locks to complete first.
+        """
+        lock_names_t1 = ['test_thread_ordering_A',
+                         'test_thread_ordering_B',
+                         'test_thread_ordering_C']
+        lock_names_t2 = ['test_thread_ordering_A',
+                         'test_thread_ordering_B']
+        test_locks = [utils.NOVA_FAIR_LOCKS.get(
+            lock_name) for lock_name in lock_names_t1]
+
+        t1_acquired = threading.Event()
+        t1_acquired_time = None
+        t1_released = threading.Event()
+        t2_started = threading.Event()
+        t2_acquired = threading.Event()
+        t2_acquired_time = None
+        t1_continue = threading.Event()
+
+        def thread1():
+            lock_guard = utils.FairLockGuard(lock_names_t1)
+            with lock_guard:
+                nonlocal t1_acquired_time
+                t1_acquired_time = time.time()
+                t1_acquired.set()
+                # Wait for T2 to start trying to acquire locks
+                t2_started.wait()
+                # Give T2 time to block on the locks
+                time.sleep(0.1)
+                t1_continue.wait()
+                # Hold locks for a bit to ensure T2 is waiting
+                time.sleep(0.5)
+            t1_released.set()
+
+        def thread2():
+            t2_started.set()
+            lock_guard = utils.FairLockGuard(lock_names_t2)
+            # This should block until T1 releases all locks
+            with lock_guard:
+                nonlocal t2_acquired_time
+                t2_acquired_time = time.time()
+                t2_acquired.set()
+
+        t1 = threading.Thread(target=thread1)
+        t2 = threading.Thread(target=thread2)
+
+        t1.start()
+        # Wait for T1 to acquire all locks
+        self.assertTrue(t1_acquired.wait(timeout=2))
+        self.assertIsNotNone(t1_acquired_time)
+        t2.start()
+        # Wait for T2 to start trying to acquire locks
+        self.assertTrue(t2_started.wait(timeout=2))
+        # T2 should not have acquired locks yet
+        self.assertIsNone(t2_acquired_time)
+        t1_continue.set()
+        t1.join()
+        t2.join()
+
+        # T1 should have released all locks
+        self.assertTrue(t1_released.is_set())
+        # T2 should have acquired its subset of locks
+        self.assertTrue(t2_acquired.is_set())
+        self.assertIsNotNone(t2_acquired_time)
+        # T1 should have acquired its locks before T2
+        self.assertLess(t1_acquired_time, t2_acquired_time)
+
+        # and since all thread are now finished,
+        # all locks should be released
+        for lock in test_locks:
+            self.assertFalse(lock.is_writer())
+
+    def test_context_manager_shared_between_threads(self):
+        """Test that a context manager can be shared between threads
+        and that the locks are acquired in the correct order.
+        Do not do this in production code, while it works this is not
+        the intended usage pattern.
+        """
+        lock_names = ['test_context_manager_shared_between_threads1',
+            'test_context_manager_shared_between_threads2']
+        lock_guard = utils.FairLockGuard(lock_names)
+        sum = 0
+        started = threading.Event()
+
+        def worker(id, lock_guard):
+            started.wait()
+            nonlocal sum
+            with lock_guard:
+                sum += id
+        thread1 = threading.Thread(target=worker, args=(1, lock_guard))
+        thread2 = threading.Thread(target=worker, args=(2, lock_guard))
+        thread1.start()
+        thread2.start()
+        started.set()
+        thread1.join()
+        thread2.join()
+        self.assertEqual(3, sum)
+
+    def test_context_manager_can_be_acquired_multiple_times(self):
+        lock_names = ['test_context_manager_can_be_acquired_multiple_times1',
+            'test_context_manager_can_be_acquired_multiple_times2']
+        test_locks = [utils.NOVA_FAIR_LOCKS.get(
+            lock_name) for lock_name in lock_names]
+        lock_guard = utils.FairLockGuard(lock_names)
+        with lock_guard:
+            self.assertTrue(lock_guard.is_locked())
+            self.assertTrue(test_locks[0].is_writer())
+            self.assertTrue(test_locks[1].is_writer())
+
+        self.assertFalse(lock_guard.is_locked())
+        for lock in test_locks:
+            self.assertFalse(lock.is_writer())
+        with lock_guard:
+            self.assertTrue(lock_guard.is_locked())
+            self.assertTrue(test_locks[0].is_writer())
+            self.assertTrue(test_locks[1].is_writer())
+
+    def test_nested_context_managers(self):
+        lock_names = ['test_nested_context_managers1',
+            'test_nested_context_managers2']
+        test_locks = [utils.NOVA_FAIR_LOCKS.get(
+            lock_name) for lock_name in lock_names]
+        lock_guard = utils.FairLockGuard(lock_names)
+        lock_guard2 = utils.FairLockGuard(lock_names)
+
+        # on any one thread we can acquire the same lock
+        # multiple times provided we use separate context managers.
+        # In other words the locks are renterent.
+        # This is an implementation detail of the ReaderWriterLock
+        # provided by fasteners. if this test fails the api behavior
+        # of the FairLock has changed.
+        with lock_guard:
+            self.assertTrue(lock_guard.is_locked())
+            self.assertTrue(test_locks[0].is_writer())
+            self.assertTrue(test_locks[1].is_writer())
+            with lock_guard2:
+                self.assertTrue(lock_guard2.is_locked())
+                self.assertTrue(test_locks[0].is_writer())
+                self.assertTrue(test_locks[1].is_writer())
+            self.assertTrue(lock_guard.is_locked())
+            self.assertTrue(test_locks[0].is_writer())
+            self.assertTrue(test_locks[1].is_writer())
+
+        # Same instance nesting now works - locks are already held,
+        # so nested entry just increments depth counter.
+        with lock_guard:
+            self.assertTrue(lock_guard.is_locked())
+            self.assertTrue(test_locks[0].is_writer())
+            self.assertTrue(test_locks[1].is_writer())
+            with lock_guard:
+                # Still locked in nested context
+                self.assertTrue(lock_guard.is_locked())
+                self.assertTrue(test_locks[0].is_writer())
+                self.assertTrue(test_locks[1].is_writer())
+            # Still locked after inner exit
+            self.assertTrue(lock_guard.is_locked())
+            self.assertTrue(test_locks[0].is_writer())
+            self.assertTrue(test_locks[1].is_writer())
+        # Released after outer exit
+        self.assertFalse(lock_guard.is_locked())
+        self.assertFalse(test_locks[0].is_writer())
+        self.assertFalse(test_locks[1].is_writer())
+
+    @mock.patch.object(utils, 'NOVA_FAIR_LOCKS')
+    def test_deep_nesting(self, mock_fair_locks):
+        """Test that nesting works correctly at 3+ levels deep."""
+        test_lock = fasteners.ReaderWriterLock()
+        mock_fair_locks.get.return_value = test_lock
+        lock_guard = utils.FairLockGuard(['deep-test'])
+
+        with lock_guard:
+            self.assertTrue(lock_guard.is_locked())
+            with lock_guard:
+                self.assertTrue(lock_guard.is_locked())
+                with lock_guard:
+                    # Third level of nesting
+                    self.assertTrue(lock_guard.is_locked())
+                    self.assertTrue(test_lock.is_writer())
+                # Still locked after level 3 exit
+                self.assertTrue(lock_guard.is_locked())
+            # Still locked after level 2 exit
+            self.assertTrue(lock_guard.is_locked())
+        # Released after outermost exit
+        self.assertFalse(lock_guard.is_locked())
+        self.assertFalse(test_lock.is_writer())
+
+    @mock.patch.object(utils, 'NOVA_FAIR_LOCKS')
+    def test_nested_exception_outer_still_holds_locks(self, mock_fair_locks):
+        """Test that outer context retains locks when inner context raises."""
+        test_lock = fasteners.ReaderWriterLock()
+        mock_fair_locks.get.return_value = test_lock
+        lock_guard = utils.FairLockGuard(['exception-test'])
+
+        with lock_guard:
+            self.assertTrue(lock_guard.is_locked())
+            try:
+                with lock_guard:
+                    self.assertTrue(lock_guard.is_locked())
+                    raise ValueError("Test exception")
+            except ValueError:
+                pass
+            # Outer context still holds locks after inner raised
+            self.assertTrue(lock_guard.is_locked())
+            self.assertTrue(test_lock.is_writer())
+        # Released after outer exit
+        self.assertFalse(lock_guard.is_locked())
+        self.assertFalse(test_lock.is_writer())
+
+    @mock.patch.object(utils, 'NOVA_FAIR_LOCKS')
+    def test_empty_lock_list(self, mock_fair_locks):
+        """Test FairLockGuard with empty lock list."""
+        lock_guard = utils.FairLockGuard([])
+
+        with lock_guard:
+            # No locks to acquire, but should still work
+            self.assertFalse(lock_guard.is_locked())
+
+        mock_fair_locks.get.assert_not_called()
+
+
+class StaticallyDelayingCancellableTaskExecutorWrapperTest(test.NoDBTestCase):
+    def test_submit_one(self):
+        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
+            0.01, utils._get_default_executor())
+        self.addCleanup(executor.shutdown)
+
+        task_done = threading.Event()
+
+        def task(num, foo):
+            self.assertEqual(12, num)
+            self.assertEqual("bar", foo)
+            task_done.set()
+            return foo + str(num)
+
+        future = executor.submit_with_delay(task, 12, foo="bar")
+
+        result = future.result()
+        self.assertTrue(task_done.is_set())
+        self.assertEqual("bar12", result)
+
+    def test_submit_one_exception_result(self):
+        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
+            0.01, utils._get_default_executor())
+        self.addCleanup(executor.shutdown)
+
+        task_done = threading.Event()
+        exc_to_raise = ValueError()
+
+        def task(num, foo):
+            self.assertEqual(12, num)
+            self.assertEqual("bar", foo)
+            task_done.set()
+            raise exc_to_raise
+
+        future = executor.submit_with_delay(task, 12, foo="bar")
+        exc = future.exception()
+
+        self.assertTrue(task_done.is_set())
+        self.assertEqual(exc_to_raise, exc)
+
+    def test_submit_two_non_overlapping(self):
+
+        def task1():
+            return 42
+
+        def task2():
+            return 13
+
+        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
+            0.01, utils._get_default_executor())
+        self.addCleanup(executor.shutdown, wait=True)
+
+        future1 = executor.submit_with_delay(task1)
+        self.assertEqual(42, future1.result())
+
+        future2 = executor.submit_with_delay(task2)
+        self.assertEqual(13, future2.result())
+
+        self.assertTrue(executor._queue.empty())
+
+    def test_submit_second_while_delaying_first(self):
+        task1_started = threading.Event()
+
+        def task1():
+            task1_started.set()
+            return 42
+
+        task2_started = threading.Event()
+
+        def task2():
+            task2_started.set()
+            return 13
+
+        # Create a "long" delay so the task will be actively managed by
+        # the wrapper while we submit the second task
+        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
+            2, utils._get_default_executor())
+        self.addCleanup(executor.shutdown, wait=True)
+
+        task1_start = time.monotonic()
+        future1 = executor.submit_with_delay(task1)
+        # wait a bit so the wrapper is picking it up and waiting for its
+        # deadline
+        time.sleep(1)
+        self.assertTrue(executor._queue.empty())
+        self.assertFalse(task1_started.is_set())
+
+        # now submit the second task, it will be queued
+        task2_start = time.monotonic()
+        future2 = executor.submit_with_delay(task2)
+        self.assertFalse(executor._queue.empty())
+        self.assertFalse(task1_started.is_set())
+
+        # eventually both tasks finishes
+        self.assertEqual(42, future1.result())
+        task1_end = time.monotonic()
+        self.assertEqual(13, future2.result())
+        task2_end = time.monotonic()
+
+        # and both tasks took about delay seconds individually, but the two
+        # tasks together took less than 2x delay seconds as they were
+        # overlapped.
+        task1_runtime = task1_end - task1_start
+        self.assertLess(task1_runtime, 2.5)
+        self.assertGreater(task1_runtime, 2.0)
+        task2_runtime = task2_end - task2_start
+        self.assertLess(task2_runtime, 2.5)
+        self.assertGreater(task2_runtime, 2.0)
+        total_runtime = task2_end - task1_start
+        self.assertLess(total_runtime, 4)
+
+    def test_submit_multiple(self):
+        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
+            0.1, utils._get_default_executor())
+
+        def task(i):
+            return 2 * i
+
+        futures = []
+        for i in range(20):
+            futures.append(executor.submit_with_delay(task, i))
+
+        for i, f in enumerate(futures):
+            self.assertEqual(2 * i, f.result())
+
+        executor.shutdown(wait=True)
+
+    def test_submit_multiple_executor_rejects_first_executes_second(self):
+        def task1():
+            return 42
+
+        def task2():
+            return 13
+
+        check_and_reject = mock.Mock(
+            side_effect=[futurist.RejectedSubmission(), None])
+
+        if utils.concurrency_mode_threading():
+            ex = futurist.ThreadPoolExecutor(
+                max_workers=1, check_and_reject=check_and_reject)
+        else:
+            ex = futurist.GreenThreadPoolExecutor(
+                max_workers=1, check_and_reject=check_and_reject)
+
+        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
+            0.1, ex)
+        self.addCleanup(executor.shutdown, wait=True)
+
+        future1 = executor.submit_with_delay(task1)
+        future2 = executor.submit_with_delay(task2)
+
+        self.assertEqual(
+            futurist.RejectedSubmission, type(future1.exception()))
+        self.assertEqual(13, future2.result())
+
+    def test_cancel_during_delay(self):
+        task1_started = threading.Event()
+
+        def task1():
+            task1_started.set()
+            return 42
+
+        def task2():
+            return 13
+
+        # Create a "long" delay so the task will be actively delayed by
+        # the wrapper when we cancel it
+        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
+            2, utils._get_default_executor())
+        self.addCleanup(executor.shutdown, wait=True)
+
+        future1 = executor.submit_with_delay(task1)
+        # wait a bit to let the task being picked up
+        time.sleep(1)
+        # it is not in the queue, so it is picked up
+        self.assertTrue(executor._queue.empty())
+        # but not executing yet so it is being delayed
+        self.assertFalse(task1_started.is_set())
+
+        # cancel the task
+        future1.cancel()
+
+        # Submit and wait for the execution of the second task to prove
+        # that the executor had time to finish waiting for the deadline of
+        # the first task, detected the cancellation and skipped the task,
+        # then executed the second task.
+        future2 = executor.submit_with_delay(task2)
+        self.assertEqual(13, future2.result())
+
+        # task1 is still not executed
+        self.assertFalse(task1_started.is_set())
+        self.assertTrue(future1.cancelled())
+        # no tasks remaining in the executor queue
+        self.assertTrue(executor._queue.empty())
+
+    def test_cancel_while_in_queue(self):
+        task1_started = threading.Event()
+
+        def task1():
+            task1_started.set()
+            return 42
+
+        task2_started = threading.Event()
+
+        def task2():
+            task2_started.set()
+            return 13
+
+        # Create a "long" delay so one task will be actively delayed while
+        # we submit a second task then cancel the second task.
+        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
+            2, utils._get_default_executor())
+
+        future1 = executor.submit_with_delay(task1)
+        # Wait a bit to let the task being picked up.
+        time.sleep(1)
+        # It is not in the queue, so it is picked up,
+        self.assertTrue(executor._queue.empty())
+        # but not executing yet, so it is being delayed
+        self.assertFalse(task1_started.is_set())
+
+        # Submit a second task that will be queued.
+        future2 = executor.submit_with_delay(task2)
+        self.assertFalse(executor._queue.empty())
+        self.assertFalse(task2_started.is_set())
+
+        # Cancel the second task while it is in the queue.
+        future2.cancel()
+
+        # The first task should finish normally
+        self.assertEqual(42, future1.result())
+
+        # But the second task should never be executed.
+        # To prove that we shutdown both the wrapper and the real executor
+        # then check the second task again.
+        executor.shutdown(wait=True)
+        utils._get_default_executor().shutdown(wait=True)
+        self.assertFalse(task2_started.is_set())
+        self.assertTrue(future2.cancelled())
+
+    def test_instantaneous_shutdown(self):
+        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
+            0.1, utils._get_default_executor())
+        self.addCleanup(executor.shutdown, wait=True)
+
+        executor.shutdown(wait=False)
+        self.assertTrue(executor._shutdown)
+
+    def test_shutdown_wait(self):
+        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
+            0.1, utils._get_default_executor())
+
+        executor.shutdown(wait=True)
+        self.assertTrue(executor._shutdown)
+        self.assertTrue(executor._queue.empty())
+        self.assertFalse(executor.is_alive)
+        # Shutting down the wrapper does not affect the real executor
+        self.assertTrue(executor._executor.alive)
+
+    def test_submit_after_shutdown_rejected(self):
+        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
+            0.1, utils._get_default_executor())
+
+        executor.shutdown()
+        self.assertTrue(executor._shutdown)
+        self.assertTrue(executor._queue.empty())
+        self.assertFalse(executor.is_alive)
+
+        exc = self.assertRaises(
+            RuntimeError, executor.submit_with_delay, lambda: None)
+        self.assertEqual(
+            "Cannot schedule new tasks after being shutdown", str(exc))
+
+    def test_submit_while_shutting_down(self):
+        task_started = threading.Event()
+
+        def task():
+            task_started.set()
+
+        # Create a "long" delay so the task will be actively managed by
+        # the wrapper while the test calls shutdown on it.
+        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
+            2, utils._get_default_executor())
+        self.addCleanup(executor.shutdown, wait=True)
+
+        executor.submit_with_delay(task)
+        executor.shutdown(wait=False)
+
+        # the task is actively managed, delayed, by our wrapper while we are
+        # shutting the executor down, we should not be able to add new tasks
+        # even if the shutdown is not finished yet
+        self.assertFalse(task_started.is_set())
+        exc = self.assertRaises(
+            RuntimeError, executor.submit_with_delay, lambda: None)
+        self.assertEqual(
+            "Cannot schedule new tasks after being shutdown", str(exc))
+
+    def test_shutdown_after_task_finished(self):
+        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
+            0.01, utils._get_default_executor())
+        self.addCleanup(executor.shutdown)
+
+        def task():
+            return
+
+        future = executor.submit_with_delay(task)
+        future.result()
+
+        executor.shutdown()
+
+        self.assertTrue(executor._shutdown)
+        self.assertTrue(executor._queue.empty())
+        self.assertFalse(executor.is_alive)
+
+    def test_no_wait_shutdown_task_finishes_normally(self):
+        task_started = threading.Event()
+
+        def task():
+            task_started.set()
+            return 42
+
+        # Create a "long" delay so the task will be actively managed by
+        # the wrapper while the test calls shutdown on it.
+        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
+            2, utils._get_default_executor())
+        self.addCleanup(executor.shutdown, wait=True)
+
+        future = executor.submit_with_delay(task)
+        # Task is not executing it is being delayed
+        self.assertFalse(task_started.is_set())
+
+        # We expect that shutdown returns even though there are tasks being
+        # actively managed, delayed, by the executor as we called it with
+        # wait=False
+        executor.shutdown(wait=False)
+
+        self.assertTrue(executor._shutdown)
+        self.assertFalse(executor._queue.empty())
+        self.assertTrue(executor.is_alive)
+
+        # Task is still delayed
+        self.assertFalse(task_started.is_set())
+        # and it is not cancelled
+        self.assertFalse(future.cancelled())
+        # and eventually executed
+        self.assertEqual(42, future.result())
+        # and eventually the executor is terminated. This also covers the case
+        # when multiple shutdown call is made to the same executor.
+        executor.shutdown(wait=True)
+        self.assertTrue(executor._queue.empty())
+        self.assertFalse(executor.is_alive)
+
+    def test_no_wait_shutdown_multiple_tasks_finishes_normally(self):
+        task1_started = threading.Event()
+
+        def task1():
+            task1_started.set()
+            return 42
+
+        task2_started = threading.Event()
+
+        def task2():
+            task2_started.set()
+            return 13
+
+        # Create a "long" delay so the task will be actively managed by
+        # the wrapper while the test calls shutdown on it.
+        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
+            2, utils._get_default_executor())
+
+        future1 = executor.submit_with_delay(task1)
+        future2 = executor.submit_with_delay(task2)
+        # Tasks are not executing they are being delayed
+        self.assertFalse(task1_started.is_set())
+        self.assertFalse(task2_started.is_set())
+
+        # wait a bit so the wrapper actually starts waiting for the deadline
+        # of task1
+        time.sleep(1)
+        # Task are still not executing
+        self.assertFalse(task1_started.is_set())
+        self.assertFalse(task2_started.is_set())
+        # task1 is already popped from the queue and the code is waiting for
+        # its deadline, while task2 is in the queue waiting
+        self.assertEqual(1, executor._queue.qsize())
+
+        # Shut down the executor. We expect that the tasks are still executed
+        executor.shutdown(wait=True)
+
+        self.assertEqual(42, future1.result())
+        self.assertEqual(13, future2.result())
+        # and our wrapper is in a shutdown state
+        self.assertTrue(executor._shutdown)
+        self.assertTrue(executor._queue.empty())
+        self.assertFalse(executor.is_alive)
+
+    def test_shutdown_wait_task_finishes_normally(self):
+        task_started = threading.Event()
+
+        def task():
+            task_started.set()
+            return 42
+
+        # Create a "long" delay so the task will be actively managed by
+        # the wrapper while the test calls shutdown on it.
+        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
+            2, utils._get_default_executor())
+
+        future = executor.submit_with_delay(task)
+        # Task is not executing it is being delayed
+        self.assertFalse(task_started.is_set())
+
+        # We expect that shutdown waits for the task to be submitted to the
+        # real executor after the delay
+        executor.shutdown(wait=True)
+        # Task is now submitted to the real executor so it can actually run
+        # and produce a result
+        result = future.result()
+        self.assertTrue(task_started.is_set())
+        self.assertEqual(42, result)
+        # but our wrapper is in a shutdown state
+        self.assertTrue(executor._shutdown)
+        self.assertTrue(executor._queue.empty())
+        self.assertFalse(executor.is_alive)
+
+    def test_shutdown_does_not_wait_for_cancelled_task(self):
+        task_started = threading.Event()
+
+        def task():
+            task_started.set()
+            return 42
+
+        # Create a very long delay so the task will be actively managed by
+        # the wrapper while the test calls shutdown on it and we can
+        # check that the wrapper detects cancelled tasks during shutdown and
+        # does not wait for the whole deadline.
+        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
+            2000, utils._get_default_executor())
+
+        future = executor.submit_with_delay(task)
+        # Task is not executing it is being delayed
+        self.assertFalse(task_started.is_set())
+
+        # Cancel the task, shutdown the executor. We expect that the cancelled
+        # task is not submitted for execution.
+        future.cancel()
+        executor.shutdown(wait=True)
+        self.assertFalse(task_started.is_set())
+        self.assertTrue(future.cancelled())
+        # and our wrapper is in a shutdown state
+        self.assertTrue(executor._shutdown)
+        self.assertTrue(executor._queue.empty())
+        self.assertFalse(executor.is_alive)
+
+    def test_shutdown_does_not_wait_for_multiple_cancelled_tasks(self):
+        task1_started = threading.Event()
+
+        def task1():
+            task1_started.set()
+            return 42
+
+        task2_started = threading.Event()
+
+        def task2():
+            task2_started.set()
+            return 13
+
+        # Create a very long delay so the task will be actively managed by
+        # the wrapper while the test calls shutdown on it and we can
+        # check that the wrapper detects cancelled tasks during shutdown and
+        # does not wait for the whole deadline.
+        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
+            2000, utils._get_default_executor())
+
+        future1 = executor.submit_with_delay(task1)
+        future2 = executor.submit_with_delay(task2)
+        # Tasks are not executing they are being delayed
+        self.assertFalse(task1_started.is_set())
+        self.assertFalse(task2_started.is_set())
+
+        # wait a bit so the wrapper actually starts waiting for the deadline
+        # of task1
+        time.sleep(1)
+        # Task are still not executing
+        self.assertFalse(task1_started.is_set())
+        self.assertFalse(task2_started.is_set())
+        # task1 is already popped from the queue and the code is waiting for
+        # its deadline, while task2 is in the queue waiting
+        self.assertEqual(1, executor._queue.qsize())
+
+        # Cancel both tasks then shutdown the executor and expect that no
+        # task will be executed.
+        future1.cancel()
+        future2.cancel()
+        executor.shutdown(wait=True)
+
+        self.assertFalse(task1_started.is_set())
+        self.assertTrue(future1.cancelled())
+        self.assertFalse(task2_started.is_set())
+        self.assertTrue(future2.cancelled())
+        # and our wrapper is in a shutdown state
+        self.assertTrue(executor._shutdown)
+        self.assertTrue(executor._queue.empty())
+        self.assertFalse(executor.is_alive)

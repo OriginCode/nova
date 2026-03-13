@@ -44,8 +44,6 @@ from nova.tests import fixtures as nova_fixtures
 from nova.tests.functional.api import client as api_client
 from nova.tests.functional import fixtures as func_fixtures
 from nova import utils
-import typing as ty
-
 
 CONF = nova.conf.CONF
 LOG = logging.getLogger(__name__)
@@ -336,7 +334,7 @@ class InstanceHelperMixin:
         return api.post_aggregate(body)['id']
 
     def _build_flavor(self, id=None, name=None, memory_mb=2048, vcpu=2,
-                      disk=10, ephemeral=10, swap=0, rxtx_factor=1.0,
+                      disk=10, ephemeral=10, swap=0, rxtx_factor=None,
                       is_public=True):
         """Build a request for the flavor create API.
 
@@ -355,7 +353,7 @@ class InstanceHelperMixin:
             name = ''.join(
                 random.choice(string.ascii_lowercase) for i in range(20))
 
-        return {
+        body = {
             "flavor": {
                 "id": id,
                 "name": name,
@@ -364,13 +362,17 @@ class InstanceHelperMixin:
                 "disk": disk,
                 "OS-FLV-EXT-DATA:ephemeral": ephemeral,
                 "swap": swap,
-                "rxtx_factor": rxtx_factor,
                 "os-flavor-access:is_public": is_public,
             }
         }
 
+        if rxtx_factor is not None:
+            body["rxtx_factor"] = rxtx_factor
+
+        return body
+
     def _create_flavor(self, id=None, name=None, memory_mb=2048, vcpu=2,
-                       disk=10, ephemeral=10, swap=0, rxtx_factor=1.0,
+                       disk=10, ephemeral=10, swap=0, rxtx_factor=None,
                        is_public=True, extra_spec=None):
         """Build and submit a request to the flavor create API.
 
@@ -516,12 +518,16 @@ class InstanceHelperMixin:
         self.api.delete_server(server['id'])
         self._wait_until_deleted(server)
 
-    def _reboot_server(self, server, hard=False, expected_state='ACTIVE'):
+    def _reboot_server(self, server, hard=False, expected_state='ACTIVE',
+                       api=None):
         """Reboot a server."""
-        self.api.post_server_action(
+        api = api or self.api
+        api.post_server_action(
             server['id'], {'reboot': {'type': 'HARD' if hard else 'SOFT'}},
         )
-        self.notifier.wait_for_versioned_notifications('instance.reboot.end')
+        if expected_state != 'ERROR':
+            self.notifier.wait_for_versioned_notifications(
+                    'instance.reboot.end')
         return self._wait_for_state_change(server, expected_state)
 
     def _show_server(self, server):
@@ -581,6 +587,16 @@ class InstanceHelperMixin:
         self.notifier.wait_for_versioned_notifications(
             'instance.share_detach.error')
 
+    def _attach_volume(self, server, volume_id):
+        """attach a cinder volume to a server."""
+        self.api.post_server_volume(
+            server['id'],
+            {'volumeAttachment': {'volumeId': volume_id}}
+        )
+        self._wait_for_volume_attach(server['id'], volume_id)
+        self.notifier.wait_for_versioned_notifications(
+            'instance.volume_attach.end')
+
     def _rebuild_server(self, server, image_uuid, expected_state='ACTIVE'):
         """Rebuild a server."""
         self.api.post_server_action(
@@ -589,11 +605,13 @@ class InstanceHelperMixin:
         self.notifier.wait_for_versioned_notifications('instance.rebuild.end')
         return self._wait_for_state_change(server, expected_state)
 
-    def _migrate_server(self, server, host=None):
+    def _migrate_server(self, server, host=None,
+                        expected_state='VERIFY_RESIZE', api=None):
         """Cold migrate a server."""
         body = {'host': host} if host else None
-        self.api.post_server_action(server['id'], {'migrate': body})
-        return self._wait_for_state_change(server, 'VERIFY_RESIZE')
+        api = api or self.api
+        api.post_server_action(server['id'], {'migrate': body})
+        return self._wait_for_state_change(server, expected_state)
 
     def _resize_server(self, server, flavor_id):
         self.api.post_server_action(
@@ -627,11 +645,12 @@ class InstanceHelperMixin:
 
     def _live_migrate(
         self, server, migration_expected_state='completed',
-        server_expected_state='ACTIVE',
+        server_expected_state='ACTIVE', api=None, host=None,
     ):
-        self.api.post_server_action(
+        api = api or self.api
+        api.post_server_action(
             server['id'],
-            {'os-migrateLive': {'host': None, 'block_migration': 'auto'}})
+            {'os-migrateLive': {'host': host, 'block_migration': 'auto'}})
         self._wait_for_migration_status(server, [migration_expected_state])
         return self._wait_for_state_change(server, server_expected_state)
 
@@ -711,7 +730,7 @@ class InstanceHelperMixin:
             {'createImage': {'name': snapshot_name}}
         )
 
-    def _attach_volumes(self, server, vol_ids: ty.List[str]):
+    def _attach_volumes(self, server, vol_ids: list[str]):
         # attach volumes to server
         # these attachments are done by nova api, that means
         # nova know about these attachments and so they are valid ones.
@@ -1376,7 +1395,9 @@ class _IntegratedTestBase(test.TestCase, PlacementInstanceHelperMixin):
         if self.CAST_AS_CALL:
             self.useFixture(nova_fixtures.CastAsCallFixture(self))
 
-        self.placement = self.useFixture(func_fixtures.PlacementFixture()).api
+        self.placement_fixture = self.useFixture(
+            func_fixtures.PlacementFixture())
+        self.placement = self.placement_fixture.api
         self.neutron = self.useFixture(nova_fixtures.NeutronFixture(self))
         self.cinder = self.useFixture(nova_fixtures.CinderFixture(self))
         self.glance = self.useFixture(nova_fixtures.GlanceFixture(self))

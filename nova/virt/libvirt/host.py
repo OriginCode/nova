@@ -27,25 +27,19 @@ the raw libvirt API. These APIs are then used by all
 the other libvirt related classes
 """
 
+from collections.abc import Callable
+from collections.abc import Mapping
 from collections import defaultdict
-import fnmatch
-import glob
 import inspect
-from lxml import etree
 import operator
 import os
 import queue
 import threading
 import typing as ty
 
-from eventlet import greenio
-from eventlet import greenthread
-from eventlet import patcher
-from eventlet import tpool
+from lxml import etree
 from oslo_log import log as logging
-from oslo_serialization import jsonutils
 from oslo_utils import excutils
-from oslo_utils import importutils
 from oslo_utils import strutils
 from oslo_utils import units
 from oslo_utils import versionutils
@@ -68,19 +62,15 @@ from nova.virt.libvirt import migration as libvirt_migrate
 from nova.virt.libvirt import utils as libvirt_utils
 import nova.virt.node  # noqa
 
-if ty.TYPE_CHECKING:
+try:
+    # This is optional for unit testing but required at runtime. We check for
+    # it during driver init.
     import libvirt
-else:
+except ImportError:
     libvirt = None
 
-LOG = logging.getLogger(__name__)
-
-native_socket = patcher.original('socket')
-native_threading = patcher.original("threading")
-native_Queue = patcher.original("queue")
-
 CONF = nova.conf.CONF
-
+LOG = logging.getLogger(__name__)
 
 # This list is for libvirt hypervisor drivers that need special handling.
 # This is *not* the complete list of supported hypervisor drivers.
@@ -88,114 +78,92 @@ HV_DRIVER_QEMU = "QEMU"
 
 SEV_KERNEL_PARAM_FILE = '/sys/module/kvm_amd/parameters/%s'
 
-# These are taken from the spec
-# https://github.com/qemu/qemu/blob/v5.2.0/docs/interop/firmware.json
-QEMU_FIRMWARE_DESCRIPTOR_PATHS = [
-    '/usr/share/qemu/firmware',
-    '/etc/qemu/firmware',
-    # we intentionally ignore '$XDG_CONFIG_HOME/qemu/firmware'
-]
-
 MIN_QEMU_SEV_ES_VERSION = (8, 0, 0)
 
 
-def _get_loaders():
-    if not any(
-        os.path.exists(path) for path in QEMU_FIRMWARE_DESCRIPTOR_PATHS
-    ):
-        msg = _("Failed to locate firmware descriptor files")
-        raise exception.InternalError(msg)
-
-    _loaders = []
-
-    for path in QEMU_FIRMWARE_DESCRIPTOR_PATHS:
-        if not os.path.exists(path):
-            continue
-
-        for spec_path in sorted(glob.glob(f'{path}/*.json')):
-            with open(spec_path, 'rb') as fh:
-                spec = jsonutils.load(fh)
-
-            _loaders.append(spec)
-
-    return _loaders
-
-
-class Host(object):
-
-    def __init__(self, uri, read_only=False,
-                 conn_event_handler=None,
-                 lifecycle_event_handler=None):
-
-        global libvirt
-        if libvirt is None:
-            libvirt = importutils.import_module('libvirt')
-
-        self._uri = uri
-        self._read_only = read_only
-        self._initial_connection = True
-        self._conn_event_handler = conn_event_handler
-        self._conn_event_handler_queue: queue.Queue[ty.Callable] = (
-          queue.Queue())
+class LibvirtEventHandler:
+    def __init__(self, conn_event_handler=None, lifecycle_event_handler=None):
         self._lifecycle_event_handler = lifecycle_event_handler
-        self._caps = None
-        self._domain_caps = None
-        self._hostname = None
-        self._node_uuid = None
+        self._conn_event_handler = conn_event_handler
 
-        self._wrapped_conn = None
-        self._wrapped_conn_lock = threading.Lock()
-        self._event_queue: ty.Optional[queue.Queue[ty.Callable]] = None
+    def _queue_event(self, event):
+        raise NotImplementedError()
 
-        self._events_delayed = {}
-        # Note(toabctl): During a reboot of a domain, STOPPED and
-        #                STARTED events are sent. To prevent shutting
-        #                down the domain during a reboot, delay the
-        #                STOPPED lifecycle event some seconds.
-        self._lifecycle_delay = 15
+    def start(self):
+        raise NotImplementedError()
 
-        self._initialized = False
-        self._libvirt_proxy_classes = self._get_libvirt_proxy_classes(libvirt)
-        self._libvirt_proxy = self._wrap_libvirt_proxy(libvirt)
+    @classmethod
+    def create(cls, conn_event_handler=None, lifecycle_event_handler=None):
+        if utils.concurrency_mode_threading():
+            return _ThreadingLibvirtEventHandler(
+                conn_event_handler, lifecycle_event_handler)
+        else:
+            return _EventletLibvirtEventHandler(
+                conn_event_handler, lifecycle_event_handler)
 
-        self._loaders: ty.Optional[ty.List[dict]] = None
 
-        # A number of features are conditional on support in the hardware,
-        # kernel, QEMU, and/or libvirt. These are determined on demand and
-        # memoized by various properties below
-        self._supports_amd_sev: ty.Optional[bool] = None
-        self._supports_amd_sev_es: ty.Optional[bool] = None
-        self._max_sev_guests: ty.Optional[int] = None
-        self._max_sev_es_guests: ty.Optional[int] = None
-        self._supports_uefi: ty.Optional[bool] = None
-        self._supports_secure_boot: ty.Optional[bool] = None
+class _EventletLibvirtEventHandler(LibvirtEventHandler):
+    def __init__(self, conn_event_handler=None, lifecycle_event_handler=None):
+        super().__init__(conn_event_handler, lifecycle_event_handler)
 
-        self._has_hyperthreading: ty.Optional[bool] = None
+        from eventlet import greenio
+        from eventlet import patcher
 
-    @staticmethod
-    def _get_libvirt_proxy_classes(libvirt_module):
-        """Return a tuple for tpool.Proxy's autowrap argument containing all
-        public vir* classes defined by the libvirt module.
+        self.native_threading = patcher.original("threading")
+        self.native_queue = patcher.original("queue")
+
+        self._event_thread = None
+        # This is a Queue between the native libvirt event thread
+        # and the main thread with the eventlet hub. This needs to be
+        # a native queue.
+        self._event_queue: queue.Queue[
+            virtevent.InstanceEvent | Mapping[str, ty.Any]
+            ] = self.native_queue.Queue()
+
+        # Create a self-pipe for the native thread to synchronize on.
+        #
+        # This code is taken from the eventlet tpool module, under terms
+        # of the Apache License v2.0.
+        rpipe, wpipe = os.pipe()
+        self._event_notify_send = greenio.GreenPipe(wpipe, 'wb', 0)
+        self._event_notify_recv = greenio.GreenPipe(rpipe, 'rb', 0)
+
+    def start(self):
+        """Initializes the libvirt events subsystem.
+
+        This requires running a native thread to provide the
+        libvirt event loop integration. This forwards events
+        to a green thread which does the actual dispatching.
+        """
+        libvirt.virEventRegisterDefaultImpl()
+
+        LOG.debug("Starting event thread")
+        self._event_thread = self.native_threading.Thread(
+            target=self._native_thread)
+        self._event_thread.daemon = True
+        self._event_thread.start()
+
+        LOG.debug("Starting event dispatch greenthread")
+        utils.spawn(self._dispatch_thread)
+
+    def _queue_event(self, event):
+        """Puts an event on the queue for dispatch.
+
+        This method is called by the native event thread to
+        put events on the queue for later dispatch by the
+        green thread. Any use of logging APIs is forbidden.
         """
 
-        # Get a list of (name, class) tuples of libvirt classes
-        classes = inspect.getmembers(libvirt_module, inspect.isclass)
+        if self._event_queue is None:
+            return
 
-        # Return a list of just the vir* classes, filtering out libvirtError
-        # and any private globals pointing at private internal classes.
-        return tuple([cls[1] for cls in classes if cls[0].startswith("vir")])
+        # Queue the event...
+        self._event_queue.put(event)
 
-    def _wrap_libvirt_proxy(self, obj):
-        """Return an object wrapped in a tpool.Proxy using autowrap appropriate
-        for the libvirt module.
-        """
-
-        # libvirt is not pure python, so eventlet monkey patching doesn't work
-        # on it. Consequently long-running libvirt calls will not yield to
-        # eventlet's event loop, starving all other greenthreads until
-        # completion. eventlet's tpool.Proxy handles this situation for us by
-        # executing proxied calls in a native thread.
-        return tpool.Proxy(obj, autowrap=self._libvirt_proxy_classes)
+        # ...then wakeup the green thread to dispatch it
+        c = ' '.encode()
+        self._event_notify_send.write(c)
+        self._event_notify_send.flush()
 
     def _native_thread(self):
         """Receives async events coming in from libvirtd.
@@ -224,11 +192,175 @@ class Host(object):
         while True:
             self._dispatch_events()
 
+    def _dispatch_events(self):
+        """Wait for & dispatch events from native thread
+
+        Blocks until native thread indicates some events
+        are ready. Then dispatches all queued events.
+        """
+
+        # Wait to be notified that there are some
+        # events pending
+        try:
+            _c = self._event_notify_recv.read(1)
+            assert _c
+        except ValueError:
+            return  # will be raised when pipe is closed
+
+        # Process as many events as possible without
+        # blocking
+        last_close_event = None
+        # required for mypy
+        if self._event_queue is None:
+            return
+        while not self._event_queue.empty():
+            try:
+                event: virtevent.InstanceEvent | Mapping[str, ty.Any] = (
+                    self._event_queue.get(block=False))
+                if issubclass(type(event), virtevent.InstanceEvent):
+                    self._lifecycle_event_handler(event)
+
+                elif 'conn' in event and 'reason' in event:
+                    last_close_event = event
+            except self.native_queue.Empty:
+                pass
+        if last_close_event is None:
+            return
+
+        conn = last_close_event['conn']
+        reason = str(last_close_event['reason'])
+        msg = _("Connection to libvirt lost: %s") % reason
+        self._conn_event_handler(conn, False, msg)
+
+
+class _ThreadingLibvirtEventHandler(LibvirtEventHandler):
+    def __init__(self, conn_event_handler=None, lifecycle_event_handler=None):
+        super().__init__(conn_event_handler, lifecycle_event_handler)
+
+        self._event_thread = None
+        self._started = False
+
+    def start(self):
+        """Initializes the libvirt events subsystem.
+
+        This requires running a native thread that pools for libvirt events.
+        """
+        libvirt.virEventRegisterDefaultImpl()
+
+        LOG.debug("Starting event thread")
+        self._event_thread = threading.Thread(target=self._native_thread)
+        self._event_thread.daemon = True
+        self._event_thread.start()
+
+    def _queue_event(self, event):
+        """Puts an event on the queue for dispatch.
+
+        In native threading mode instead of queueing we directly dispatch on
+        the thread that receives the event as we don't have the requirement to
+        move the event handler to the main thread with the eventlet hub
+        """
+
+        if issubclass(type(event), virtevent.InstanceEvent):
+            self._lifecycle_event_handler(event)
+        elif 'conn' in event and 'reason' in event:
+            conn = event['conn']
+            reason = str(event['reason'])
+            msg = _("Connection to libvirt lost: %s") % reason
+            self._conn_event_handler(conn, False, msg)
+
+    def _native_thread(self):
+        """Receives async events coming in from libvirtd.
+
+        This is a native thread which runs the default
+        libvirt event loop implementation. This processes
+        any incoming async events from libvirtd.
+        """
+
+        while True:
+            libvirt.virEventRunDefaultImpl()
+
+
+class Host(object):
+
+    def __init__(self, uri, read_only=False,
+                 conn_event_handler=None,
+                 lifecycle_event_handler=None):
+        self._uri = uri
+        self._read_only = read_only
+        self._initial_connection = True
+
+        self._event_handler = LibvirtEventHandler.create(
+            self._connection_closed, self._event_emit_delayed)
+
+        self._conn_event_handler = conn_event_handler
+        # This queue is just for the async handling of connection closed
+        # events. In eventlet mode this only pass events within the main
+        # native thread with the eventlet hub, so no proxying is needed.
+        self._conn_event_handler_queue: queue.Queue[
+            Callable[[], None]
+        ] = queue.Queue()
+        self._lifecycle_event_handler = lifecycle_event_handler
+        self._caps = None
+        self._domain_caps = None
+        self._hostname = None
+        self._node_uuid = None
+
+        self._wrapped_conn = None
+        self._wrapped_conn_lock = threading.Lock()
+
+        self._events_delayed = {}
+        # Note(toabctl): During a reboot of a domain, STOPPED and
+        #                STARTED events are sent. To prevent shutting
+        #                down the domain during a reboot, delay the
+        #                STOPPED lifecycle event some seconds.
+        self._delayed_executor = None
+
+        self._initialized = False
+        self._libvirt_proxy_classes = self._get_libvirt_proxy_classes(libvirt)
+        self._libvirt_proxy = self._wrap_libvirt_proxy(libvirt)
+
+        # A number of features are conditional on support in the hardware,
+        # kernel, QEMU, and/or libvirt. These are determined on demand and
+        # memoized by various properties below
+        self._supports_amd_sev: bool | None = None
+        self._supports_amd_sev_es: bool | None = None
+        self._max_sev_guests: int | None = None
+        self._max_sev_es_guests: int | None = None
+        self._supports_uefi: bool | None = None
+        self._supports_secure_boot: bool | None = None
+
+        self._has_hyperthreading: bool | None = None
+
+    @staticmethod
+    def _get_libvirt_proxy_classes(libvirt_module):
+        """Return a tuple for tpool.Proxy's autowrap argument containing all
+        public vir* classes defined by the libvirt module.
+        """
+
+        # Get a list of (name, class) tuples of libvirt classes
+        classes = inspect.getmembers(libvirt_module, inspect.isclass)
+
+        # Return a list of just the vir* classes, filtering out libvirtError
+        # and any private globals pointing at private internal classes.
+        return tuple([cls[1] for cls in classes if cls[0].startswith("vir")])
+
+    def _wrap_libvirt_proxy(self, obj):
+        """Return an object wrapped in a tpool.Proxy using autowrap appropriate
+        for the libvirt module.
+        """
+
+        # libvirt is not pure python, so eventlet monkey patching doesn't work
+        # on it. Consequently long-running libvirt calls will not yield to
+        # eventlet's event loop, starving all other greenthreads until
+        # completion. eventlet's tpool.Proxy handles this situation for us by
+        # executing proxied calls in a native thread.
+        return utils.tpool_wrap(obj, autowrap=self._libvirt_proxy_classes)
+
     def _conn_event_thread(self):
         """Dispatches async connection events"""
         # NOTE(mdbooth): This thread doesn't need to jump through the same
-        # hoops as _dispatch_thread because it doesn't interact directly
-        # with the libvirt native thread.
+        # hoops as the lifecycle event handling because it doesn't interact
+        # directly with the libvirt native thread.
         while True:
             self._dispatch_conn_event()
 
@@ -250,12 +382,13 @@ class Host(object):
 
         NB: this method is executing in a native thread, not
         an eventlet coroutine. It can only invoke other libvirt
-        APIs, or use self._queue_event(). Any use of logging APIs
-        in particular is forbidden.
+        APIs, or use self._event_handler._queue_event(). Any use of logging
+        APIs in particular is forbidden.
         """
         self = opaque
         uuid = dom.UUIDString()
-        self._queue_event(libvirtevent.DeviceRemovedEvent(uuid, dev))
+        self._event_handler._queue_event(
+            libvirtevent.DeviceRemovedEvent(uuid, dev))
 
     @staticmethod
     def _event_device_removal_failed_callback(conn, dom, dev, opaque):
@@ -263,12 +396,13 @@ class Host(object):
 
         NB: this method is executing in a native thread, not
         an eventlet coroutine. It can only invoke other libvirt
-        APIs, or use self._queue_event(). Any use of logging APIs
-        in particular is forbidden.
+        APIs, or use self._event_handler._queue_event(). Any use of logging
+        APIs in particular is forbidden.
         """
         self = opaque
         uuid = dom.UUIDString()
-        self._queue_event(libvirtevent.DeviceRemovalFailedEvent(uuid, dev))
+        self._event_handler._queue_event(
+            libvirtevent.DeviceRemovalFailedEvent(uuid, dev))
 
     @staticmethod
     def _event_lifecycle_callback(conn, dom, event, detail, opaque):
@@ -276,8 +410,8 @@ class Host(object):
 
         NB: this method is executing in a native thread, not
         an eventlet coroutine. It can only invoke other libvirt
-        APIs, or use self._queue_event(). Any use of logging APIs
-        in particular is forbidden.
+        APIs, or use self._event_handler._queue_event(). Any use of logging
+        APIs in particular is forbidden.
         """
 
         self = opaque
@@ -318,11 +452,12 @@ class Host(object):
             transition = virtevent.EVENT_LIFECYCLE_RESUMED
 
         if transition is not None:
-            self._queue_event(virtevent.LifecycleEvent(uuid, transition))
+            self._event_handler._queue_event(
+                virtevent.LifecycleEvent(uuid, transition))
 
     def _close_callback(self, conn, reason, opaque):
         close_info = {'conn': conn, 'reason': reason}
-        self._queue_event(close_info)
+        self._event_handler._queue_event(close_info)
 
     @staticmethod
     def _test_connection(conn):
@@ -361,97 +496,40 @@ class Host(object):
             flags = libvirt.VIR_CONNECT_RO
         return self._libvirt_proxy.openAuth(uri, auth, flags)
 
-    def _queue_event(self, event):
-        """Puts an event on the queue for dispatch.
-
-        This method is called by the native event thread to
-        put events on the queue for later dispatch by the
-        green thread. Any use of logging APIs is forbidden.
-        """
-
-        if self._event_queue is None:
-            return
-
-        # Queue the event...
-        self._event_queue.put(event)
-
-        # ...then wakeup the green thread to dispatch it
-        c = ' '.encode()
-        self._event_notify_send.write(c)
-        self._event_notify_send.flush()
-
-    def _dispatch_events(self):
-        """Wait for & dispatch events from native thread
-
-        Blocks until native thread indicates some events
-        are ready. Then dispatches all queued events.
-        """
-
-        # Wait to be notified that there are some
-        # events pending
-        try:
-            _c = self._event_notify_recv.read(1)
-            assert _c
-        except ValueError:
-            return  # will be raised when pipe is closed
-
-        # Process as many events as possible without
-        # blocking
-        last_close_event = None
-        # required for mypy
-        if self._event_queue is None:
-            return
-        while not self._event_queue.empty():
-            try:
-                event_type = ty.Union[
-                    virtevent.InstanceEvent, ty.Mapping[str, ty.Any]]
-                event: event_type = self._event_queue.get(block=False)
-                if issubclass(type(event), virtevent.InstanceEvent):
-                    # call possibly with delay
-                    self._event_emit_delayed(event)
-
-                elif 'conn' in event and 'reason' in event:
-                    last_close_event = event
-            except native_Queue.Empty:
-                pass
-        if last_close_event is None:
-            return
-        conn = last_close_event['conn']
+    def _connection_closed(self, conn, *args, **kwargs):
         # get_new_connection may already have disabled the host,
         # in which case _wrapped_conn is None.
         with self._wrapped_conn_lock:
             if conn == self._wrapped_conn:
-                reason = str(last_close_event['reason'])
-                msg = _("Connection to libvirt lost: %s") % reason
                 self._wrapped_conn = None
-                self._queue_conn_event_handler(False, msg)
+
+        self._queue_conn_event_handler(*args, **kwargs)
 
     def _event_emit_delayed(self, event):
         """Emit events - possibly delayed."""
-        def event_cleanup(gt, *args, **kwargs):
-            """Callback function for greenthread. Called
-            to cleanup the _events_delayed dictionary when an event
-            was called.
-            """
-            event = args[0]
-            self._events_delayed.pop(event.uuid, None)
 
-        # Cleanup possible delayed stop events.
-        if event.uuid in self._events_delayed.keys():
+        # Cancel possible delayed stop events when we received any other
+        # event for the same domain.
+        if (isinstance(event, virtevent.LifecycleEvent) and
+            event.uuid in self._events_delayed.keys()
+        ):
             self._events_delayed[event.uuid].cancel()
             self._events_delayed.pop(event.uuid, None)
-            LOG.debug("Removed pending event for %s due to event", event.uuid)
+            LOG.debug(
+                "Removed pending STOPPED event for %s due to new event %s",
+                event.uuid, event)
 
         if (isinstance(event, virtevent.LifecycleEvent) and
             event.transition == virtevent.EVENT_LIFECYCLE_STOPPED):
             # Delay STOPPED event, as they may be followed by a STARTED
             # event in case the instance is rebooting
-            id_ = greenthread.spawn_after(self._lifecycle_delay,
-                                          self._event_emit, event)
-            self._events_delayed[event.uuid] = id_
+            future = self._delayed_executor.submit_with_delay(  # type: ignore
+                self._event_emit, event)
+            self._events_delayed[event.uuid] = future
             # add callback to cleanup self._events_delayed dict after
             # event was called
-            id_.link(event_cleanup, event)
+            future.add_done_callback(
+                lambda _: self._events_delayed.pop(event.uuid, None))
         else:
             self._event_emit(event)
 
@@ -459,37 +537,17 @@ class Host(object):
         if self._lifecycle_event_handler is not None:
             self._lifecycle_event_handler(event)
 
-    def _init_events_pipe(self):
-        """Create a self-pipe for the native thread to synchronize on.
-
-        This code is taken from the eventlet tpool module, under terms
-        of the Apache License v2.0.
-        """
-
-        self._event_queue = native_Queue.Queue()
-        rpipe, wpipe = os.pipe()
-        self._event_notify_send = greenio.GreenPipe(wpipe, 'wb', 0)
-        self._event_notify_recv = greenio.GreenPipe(rpipe, 'rb', 0)
-
     def _init_events(self):
         """Initializes the libvirt events subsystem.
-
-        This requires running a native thread to provide the
-        libvirt event loop integration. This forwards events
-        to a green thread which does the actual dispatching.
         """
+        self._delayed_executor = (
+            utils.StaticallyDelayingCancellableTaskExecutorWrapper(
+                delay=15, executor=utils._get_default_executor()))
+        self._event_handler.start()
 
-        self._init_events_pipe()
-
-        LOG.debug("Starting native event thread")
-        self._event_thread = native_threading.Thread(
-            target=self._native_thread)
-        self._event_thread.daemon = True
-        self._event_thread.start()
-
-        LOG.debug("Starting green dispatch thread")
-        utils.spawn(self._dispatch_thread)
-
+        # This thread is just for async connection closed event handling.
+        # In eventlet mode it only handles tasks within the main thread with
+        # the eventlet hub.
         LOG.debug("Starting connection event dispatch thread")
         utils.spawn(self._conn_event_thread)
 
@@ -609,10 +667,26 @@ class Host(object):
         #                connection is used for the first time.  Otherwise, the
         #                handler does not get registered.
         libvirt.registerErrorHandler(self._libvirt_error_handler, None)
-        libvirt.virEventRegisterDefaultImpl()
         self._init_events()
 
         self._initialized = True
+
+    def cleanup(self):
+        # TODO(gibi): We might want to stop the _event_handler here as well
+        # as the _conn_event_thread loop to have a fully graceful and clean
+        # shutdown
+
+        # If domain STOPPED events are delayed then the executor shutdown can
+        # take up to 15 seconds. Also as nova-compute is shutting down not
+        # having a power off synced to the DB does not matter much as during
+        # the next nova-compute startup the power states are synced anyhow. So
+        # lets cancel all the outstanding delayed events instead of waiting a
+        # lot.
+        for future in list(self._events_delayed.values()):
+            future.cancel()
+
+        if self._delayed_executor:
+            self._delayed_executor.shutdown(wait=True)
 
     def _version_check(self, lv_ver=None, hv_ver=None, hv_type=None,
                        op=operator.lt):
@@ -897,7 +971,7 @@ class Host(object):
         if self._domain_caps:
             return self._domain_caps
 
-        domain_caps: ty.Dict = defaultdict(dict)
+        domain_caps: dict = defaultdict(dict)
         caps = self.get_capabilities()
         virt_type = CONF.libvirt.virt_type
 
@@ -1070,7 +1144,7 @@ class Host(object):
     def find_secret(self, usage_type, usage_id):
         """Find a secret.
 
-        usage_type: one of 'iscsi', 'ceph', 'rbd' or 'volume'
+        usage_type: one of 'iscsi', 'ceph', 'rbd', 'volume' or 'vtpm'
         usage_id: name of resource in secret
         """
         if usage_type == 'iscsi':
@@ -1079,6 +1153,8 @@ class Host(object):
             usage_type_const = libvirt.VIR_SECRET_USAGE_TYPE_CEPH
         elif usage_type == 'volume':
             usage_type_const = libvirt.VIR_SECRET_USAGE_TYPE_VOLUME
+        elif usage_type == 'vtpm':
+            usage_type_const = libvirt.VIR_SECRET_USAGE_TYPE_VTPM
         else:
             msg = _("Invalid usage_type: %s")
             raise exception.InternalError(msg % usage_type)
@@ -1090,7 +1166,8 @@ class Host(object):
             if e.get_error_code() == libvirt.VIR_ERR_NO_SECRET:
                 return None
 
-    def create_secret(self, usage_type, usage_id, password=None, uuid=None):
+    def create_secret(self, usage_type, usage_id, password=None, uuid=None,
+                      ephemeral=None, private=None):
         """Create a secret.
 
         :param usage_type: one of 'iscsi', 'ceph', 'rbd', 'volume', 'vtpm'.
@@ -1102,8 +1179,14 @@ class Host(object):
             libvirt
         """
         secret_conf = vconfig.LibvirtConfigSecret()
-        secret_conf.ephemeral = usage_type == 'vtpm'
-        secret_conf.private = usage_type == 'vtpm'
+        if ephemeral is None:
+            secret_conf.ephemeral = usage_type == 'vtpm'
+        else:
+            secret_conf.ephemeral = ephemeral
+        if private is None:
+            secret_conf.private = usage_type == 'vtpm'
+        else:
+            secret_conf.private = private
         secret_conf.usage_id = usage_id
         secret_conf.uuid = uuid
         if usage_type in ('rbd', 'ceph'):
@@ -1300,8 +1383,8 @@ class Host(object):
     def _get_pcinet_info(
         self,
         dev: 'libvirt.virNodeDevice',
-        net_devs: ty.List['libvirt.virNodeDevice']
-    ) -> ty.Optional[ty.List[str]]:
+        net_devs: list['libvirt.virNodeDevice']
+    ) -> list[str] | None:
         """Returns a dict of NET device."""
         net_dev = {dev.parent(): dev for dev in net_devs}.get(dev.name(), None)
         if net_dev is None:
@@ -1315,8 +1398,8 @@ class Host(object):
         self,
         vf_device: 'libvirt.virNodeDevice',
         parent_pf_name: str,
-        candidate_devs: ty.List['libvirt.virNodeDevice']
-    ) -> ty.Optional[vconfig.LibvirtConfigNodeDeviceVpdCap]:
+        candidate_devs: list['libvirt.virNodeDevice']
+    ) -> vconfig.LibvirtConfigNodeDeviceVpdCap | None:
         """Returns PCI VPD info of a parent device of a PCI VF.
 
         :param vf_device: a VF device object to use for lookup.
@@ -1339,7 +1422,7 @@ class Host(object):
     @staticmethod
     def _get_vpd_card_serial_number(
         dev: 'libvirt.virNodeDevice',
-    ) -> ty.Optional[ty.List[str]]:
+    ) -> list[str] | None:
         """Returns a card serial number stored in PCI VPD (if present)."""
         xmlstr = dev.XMLDesc(0)
         cfgdev = vconfig.LibvirtConfigNodeDevice()
@@ -1367,19 +1450,19 @@ class Host(object):
         self,
         devname: str,
         dev: 'libvirt.virNodeDevice',
-        net_devs: ty.List['libvirt.virNodeDevice'],
-        vdpa_devs: ty.List['libvirt.virNodeDevice'],
-        pci_devs: ty.List['libvirt.virNodeDevice'],
-    ) -> ty.Dict[str, ty.Union[str, dict]]:
+        net_devs: list['libvirt.virNodeDevice'],
+        vdpa_devs: list['libvirt.virNodeDevice'],
+        pci_devs: list['libvirt.virNodeDevice'],
+    ) -> dict[str, str | dict]:
         """Returns a dict of PCI device."""
 
         def _get_device_type(
             cfgdev: vconfig.LibvirtConfigNodeDevice,
             pci_address: str,
             device: 'libvirt.virNodeDevice',
-            net_devs: ty.List['libvirt.virNodeDevice'],
-            vdpa_devs: ty.List['libvirt.virNodeDevice'],
-        ) -> ty.Dict[str, str]:
+            net_devs: list['libvirt.virNodeDevice'],
+            vdpa_devs: list['libvirt.virNodeDevice'],
+        ) -> dict[str, str]:
             """Get a PCI device's device type.
 
             An assignable PCI device can be a normal PCI device,
@@ -1435,8 +1518,8 @@ class Host(object):
         def _get_vpd_details(
             device_dict: dict,
             device: 'libvirt.virNodeDevice',
-            pci_devs: ty.List['libvirt.virNodeDevice']
-        ) -> ty.Dict[str, ty.Any]:
+            pci_devs: list['libvirt.virNodeDevice']
+        ) -> dict[str, ty.Any]:
             """Get information from PCI VPD (if present).
 
             PCI/PCIe devices may include the optional VPD capability. It may
@@ -1449,7 +1532,7 @@ class Host(object):
             the VPD capability or not may be controlled via a vendor-specific
             firmware setting.
             """
-            vpd_info: ty.Dict[str, ty.Any] = {}
+            vpd_info: dict[str, ty.Any] = {}
             # At the time of writing only the serial number had a clear
             # use-case. However, the set of fields may be extended.
             card_serial_number = self._get_vpd_card_serial_number(device)
@@ -1479,9 +1562,9 @@ class Host(object):
         def _get_sriov_netdev_details(
             device_dict: dict,
             device: 'libvirt.virNodeDevice',
-        ) -> ty.Dict[str, ty.Dict[str, ty.Any]]:
+        ) -> dict[str, dict[str, ty.Any]]:
             """Get SR-IOV related information"""
-            sriov_info: ty.Dict[str, ty.Any] = {}
+            sriov_info: dict[str, ty.Any] = {}
 
             if device_dict.get('dev_type') != fields.PciDeviceType.SRIOV_VF:
                 return sriov_info
@@ -1510,16 +1593,16 @@ class Host(object):
         def _get_device_capabilities(
             device_dict: dict,
             device: 'libvirt.virNodeDevice',
-            pci_devs: ty.List['libvirt.virNodeDevice'],
-            net_devs: ty.List['libvirt.virNodeDevice']
-        ) -> ty.Dict[str, ty.Any]:
+            pci_devs: list['libvirt.virNodeDevice'],
+            net_devs: list['libvirt.virNodeDevice']
+        ) -> dict[str, ty.Any]:
             """Get PCI VF device's additional capabilities.
 
             If a PCI device is a virtual function, this function reads the PCI
             parent's network capabilities (must be always a NIC device) and
             appends this information to the device's dictionary.
             """
-            caps: ty.Dict[str, ty.Any] = {}
+            caps: dict[str, ty.Any] = {}
 
             if device_dict.get('dev_type') == fields.PciDeviceType.SRIOV_VF:
                 pcinet_info = self._get_pcinet_info(device, net_devs)
@@ -1610,28 +1693,28 @@ class Host(object):
         nodedev = self.get_vdpa_nodedev_by_address(pci_address)
         return nodedev.vdpa_capability.dev_path
 
-    def list_pci_devices(self, flags: int = 0) -> ty.List[str]:
+    def list_pci_devices(self, flags: int = 0) -> list[str]:
         """Lookup pci devices.
 
         :returns: a list of strings, names of the virNodeDevice instances
         """
         return self._list_devices("pci", flags=flags)
 
-    def list_mdev_capable_devices(self, flags: int = 0) -> ty.List[str]:
+    def list_mdev_capable_devices(self, flags: int = 0) -> list[str]:
         """Lookup devices supporting mdev capabilities.
 
         :returns: a list of strings, names of the virNodeDevice instances
         """
         return self._list_devices("mdev_types", flags=flags)
 
-    def list_mediated_devices(self, flags: int = 0) -> ty.List[str]:
+    def list_mediated_devices(self, flags: int = 0) -> list[str]:
         """Lookup mediated devices.
 
         :returns: a list of strings, names of the virNodeDevice instances
         """
         return self._list_devices("mdev", flags=flags)
 
-    def _list_devices(self, cap, flags: int = 0) -> ty.List[str]:
+    def _list_devices(self, cap, flags: int = 0) -> list[str]:
         """Lookup devices.
 
         :returns: a list of strings, names of the virNodeDevice instances
@@ -1650,7 +1733,7 @@ class Host(object):
 
     def list_all_devices(
         self, flags: int = 0,
-    ) -> ty.List['libvirt.virNodeDevice']:
+    ) -> list['libvirt.virNodeDevice']:
         """Lookup devices.
 
         :param flags: a bitmask of flags to filter the returned devices.
@@ -1889,7 +1972,7 @@ class Host(object):
         return False
 
     @property
-    def supports_vtpm(self) -> ty.Optional[bool]:
+    def supports_vtpm(self) -> bool | None:
         # we only check the host architecture and the first machine type
         # because vtpm support is independent from cpu architecture
         arch = self.get_capabilities().host.cpu.arch
@@ -1904,7 +1987,7 @@ class Host(object):
         return False
 
     @property
-    def tpm_versions(self) -> ty.Optional[ty.List[str]]:
+    def tpm_versions(self) -> list[str] | None:
         # we only check the host architecture and the first machine type
         # because vtpm support is independent from cpu architecture
         arch = self.get_capabilities().host.cpu.arch
@@ -1922,7 +2005,7 @@ class Host(object):
         return []
 
     @property
-    def tpm_models(self) -> ty.Optional[ty.List[str]]:
+    def tpm_models(self) -> list[str] | None:
         # we only check the host architecture and the first machine type
         # because vtpm support is independent from cpu architecture
         arch = self.get_capabilities().host.cpu.arch
@@ -2025,7 +2108,7 @@ class Host(object):
         return self._supports_amd_sev_es
 
     @property
-    def max_sev_guests(self) -> ty.Optional[int]:
+    def max_sev_guests(self) -> int | None:
         """Determine maximum number of guests with AMD SEV.
         """
         if not self.supports_amd_sev:
@@ -2033,12 +2116,26 @@ class Host(object):
         return self._max_sev_guests
 
     @property
-    def max_sev_es_guests(self) -> ty.Optional[int]:
+    def max_sev_es_guests(self) -> int | None:
         """Determine maximum number of guests with AMD SEV-ES.
         """
         if not self.supports_amd_sev:
             return None
         return self._max_sev_es_guests
+
+    @property
+    def supports_mem_encryption(self) -> bool:
+        """Determine if the host supports memory encryption for guests.
+
+        This checks whether any memory encryption technology
+        (e.g., AMD SEV, Arm CCA) is supported by the host.
+        This is conditional on support in the hardware,
+        kernel, qemu, and libvirt for the specific encryption technology.
+        Returns a boolean indicating whether any memory encryption
+        is supported.
+        """
+
+        return self.supports_amd_sev
 
     @property
     def supports_remote_managed_ports(self) -> bool:
@@ -2056,69 +2153,3 @@ class Host(object):
         is meant to be checked elsewhere.
         """
         return self.has_min_version(lv_ver=(7, 9, 0))
-
-    @property
-    def loaders(self) -> ty.List[dict]:
-        """Retrieve details of loader configuration for the host.
-
-        Inspect the firmware metadata files provided by QEMU [1] to retrieve
-        information about the firmware supported by this host. Note that most
-        distros only publish this information for UEFI loaders currently.
-
-        This should be removed when libvirt correctly supports switching
-        between loaders with or without secure boot enabled [2].
-
-        [1] https://github.com/qemu/qemu/blob/v5.2.0/docs/interop/firmware.json
-        [2] https://bugzilla.redhat.com/show_bug.cgi?id=1906500
-
-        :returns: An ordered list of loader configuration dictionaries.
-        """
-        if self._loaders is not None:
-            return self._loaders
-
-        self._loaders = _get_loaders()
-        return self._loaders
-
-    def get_loader(
-        self,
-        arch: str,
-        machine: str,
-        has_secure_boot: bool,
-    ) -> ty.Tuple[str, str, bool]:
-        """Get loader for the specified architecture and machine type.
-
-        :returns: A the bootloader executable path and the NVRAM
-            template path and a bool indicating if we need to enable SMM.
-        """
-
-        machine = self.get_canonical_machine_type(arch, machine)
-
-        for loader in self.loaders:
-            for target in loader['targets']:
-                if arch != target['architecture']:
-                    continue
-
-                for machine_glob in target['machines']:
-                    # the 'machines' attribute supports glob patterns (e.g.
-                    # 'pc-q35-*') so we need to resolve these
-                    if fnmatch.fnmatch(machine, machine_glob):
-                        break
-                else:
-                    continue
-
-                # if we've got this far, we have a match on the target
-                break
-            else:
-                continue
-
-            # if we request secure boot then we should get it and vice versa
-            if has_secure_boot != ('secure-boot' in loader['features']):
-                continue
-
-            return (
-                loader['mapping']['executable']['filename'],
-                loader['mapping']['nvram-template']['filename'],
-                'requires-smm' in loader['features'],
-            )
-
-        raise exception.UEFINotSupported()

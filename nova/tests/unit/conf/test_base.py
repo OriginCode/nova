@@ -9,12 +9,20 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
-"""WSGI application entry-point for Nova Compute API, installed by pbr."""
 
-from nova.api.openstack import wsgi_app
+import nova.conf
+from nova.conf import base
+from nova import test
 
-NAME = "osapi_compute"
+
+CONF = nova.conf.CONF
 
 
-def init_application():
-    return wsgi_app.init_application(NAME)
+class BaseConfTestCase(test.NoDBTestCase):
+
+    def test_graceful_shutdown_timeout_default(self):
+        # Check that CONF.graceful_shutdown_timeout default is overridden
+        # by the Nova.
+        self.assertEqual(
+            base.NOVA_DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT,
+            CONF.graceful_shutdown_timeout)

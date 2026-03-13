@@ -28,13 +28,11 @@ then used by all the other libvirt related classes
 """
 
 import time
-import typing as ty
 
 from lxml import etree
 from oslo_log import log as logging
 from oslo_utils import encodeutils
 from oslo_utils import excutils
-from oslo_utils import importutils
 
 from nova.compute import power_state
 from nova import exception
@@ -42,10 +40,11 @@ from nova.i18n import _
 from nova.virt import hardware
 from nova.virt.libvirt import config as vconfig
 
-
-if ty.TYPE_CHECKING:
+try:
+    # This is optional for unit testing but required at runtime. We check for
+    # it during driver init.
     import libvirt
-else:
+except ImportError:
     libvirt = None
 
 try:
@@ -103,14 +102,9 @@ LIBVIRT_BLOCK_JOB_TYPE = {
 }
 
 
-class Guest(object):
+class Guest:
 
     def __init__(self, domain):
-
-        global libvirt
-        if libvirt is None:
-            libvirt = importutils.import_module('libvirt')
-
         self._domain = domain
 
     def __repr__(self):
@@ -241,7 +235,7 @@ class Guest(object):
         self,
         cfg: vconfig.LibvirtConfigGuestDevice,
         from_persistent_config: bool = False
-    ) -> ty.Optional[vconfig.LibvirtConfigGuestDevice]:
+    ) -> vconfig.LibvirtConfigGuestDevice | None:
         """Lookup a full LibvirtConfigGuestDevice with
         LibvirtConfigGuesDevice generated
         by nova.virt.libvirt.vif.get_config.
@@ -295,11 +289,32 @@ class Guest(object):
             yield VCPUInfo(
                 id=vcpu[0], cpu=vcpu[3], state=vcpu[1], time=vcpu[2])
 
-    def delete_configuration(self):
-        """Undefines a domain from hypervisor."""
+    def delete_configuration(self, keep_vtpm=False, keep_nvram=False):
+        """Undefines a domain from hypervisor.
+
+        :param keep_vtpm: If true, the vTPM data will be preserved. Otherwise,
+            it will be deleted. Defaults to false (that is, deleting the vTPM
+            data).
+        :param keep_nvram: If true, the NVRAM data will be preserved.
+            Otherwise, it will be deleted. Defaults to false (that is, deleting
+            the NVRAM data).
+
+        Calling this with `keep_vtpm` set to True should, eventually, be
+        followed up with a call where it is set to False (after re-defining
+        the VM in libvirt with the same UUID), to prevent orphaning the vTPM
+        data in libvirt's data directory.
+
+        It is the caller's responsibility to ensure that keep_vtpm is only set
+        to true on libvirt versions which support it, that is >= 8.9.0.
+        """
         try:
             flags = libvirt.VIR_DOMAIN_UNDEFINE_MANAGED_SAVE
-            flags |= libvirt.VIR_DOMAIN_UNDEFINE_NVRAM
+            if keep_vtpm:
+                flags |= libvirt.VIR_DOMAIN_UNDEFINE_KEEP_TPM
+            if keep_nvram:
+                flags |= libvirt.VIR_DOMAIN_UNDEFINE_KEEP_NVRAM
+            else:
+                flags |= libvirt.VIR_DOMAIN_UNDEFINE_NVRAM
             self._domain.undefineFlags(flags)
         except libvirt.libvirtError:
             LOG.debug("Error from libvirt during undefineFlags for guest "
@@ -371,7 +386,7 @@ class Guest(object):
         self,
         device: str,
         from_persistent_config: bool = False
-    ) -> ty.Optional[vconfig.LibvirtConfigGuestDisk]:
+    ) -> vconfig.LibvirtConfigGuestDisk | None:
         """Returns the disk mounted at device
 
         :param device: the name of either the source or the target device
@@ -421,7 +436,7 @@ class Guest(object):
         self,
         devtype: vconfig.LibvirtConfigGuestDevice = None,
         from_persistent_config: bool = False
-    ) -> ty.List[vconfig.LibvirtConfigGuestDevice]:
+    ) -> list[vconfig.LibvirtConfigGuestDevice]:
         """Returns all devices for a guest
 
         :param devtype: a LibvirtConfigGuestDevice subclass class
@@ -583,7 +598,8 @@ class Guest(object):
         self._domain.suspend()
 
     def migrate(self, destination, migrate_uri=None, migrate_disks=None,
-                destination_xml=None, flags=0, bandwidth=0):
+                destination_xml=None, flags=0, bandwidth=0,
+                parallel=0):
         """Migrate guest object from its current host to the destination
 
         :param destination: URI of host destination where guest will be migrate
@@ -609,9 +625,12 @@ class Guest(object):
                                      not change its memory faster than a
                                      hypervisor can transfer the changed
                                      memory to the destination host
+           VIR_MIGRATE_PARALLEL Send memory pages to the destination host
+                                through several network connections.
            VIR_MIGRATE_POSTCOPY Tell libvirt to enable post-copy migration
            VIR_MIGRATE_TLS Use QEMU-native TLS
         :param bandwidth: The maximum bandwidth in MiB/s
+        :param parallel: Number of connections used during live migration
         """
         params = {}
         # In migrateToURI3 these parameters are extracted from the
@@ -625,6 +644,8 @@ class Guest(object):
             params['migrate_disks'] = migrate_disks
         if migrate_uri:
             params['migrate_uri'] = migrate_uri
+        if parallel > 1:
+            params[libvirt.VIR_MIGRATE_PARAM_PARALLEL_CONNECTIONS] = parallel
 
         # Due to a quirk in the libvirt python bindings,
         # VIR_MIGRATE_NON_SHARED_INC with an empty migrate_disks is

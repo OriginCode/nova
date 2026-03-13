@@ -52,7 +52,7 @@ following components:
 
 - One or more :program:`nova-novncproxy` service. Supports browser-based noVNC
   clients. For simple deployments, this service typically runs on the same
-  machine as :program:`nova-api-wsgi` because it operates as a proxy between
+  machine as the Compute API because it operates as a proxy between
   the public network and the private compute host network.
 
 - One or more :program:`nova-compute` services. Hosts the instances for which
@@ -184,6 +184,12 @@ Replace ``IP_ADDRESS`` with the IP address from which the proxy is accessible
 by the outside world. For example, this may be the management interface IP
 address of the controller or the VIP.
 
+If using the ironic hypervisor driver, the following additional option is
+supported:
+
+- :oslo.config:option:`ironic.vnc_console_state_timeout`
+
+
 .. _vnc-security:
 
 VNC proxy security
@@ -270,6 +276,11 @@ set.
 
    [vnc]
    auth_schemes=vencrypt,none
+
+.. note::
+
+    Enabling ``vencrypt`` is not yet implemented for ironic, so this is not
+    yet supported for the ironic hypervisor driver.
 
 The :oslo.config:option:`vnc.auth_schemes` values should be listed in order
 of preference. If enabling VeNCrypt on an existing deployment which already has
@@ -427,7 +438,7 @@ Here's the general flow of actions:
 
 1. The user requests a serial console connection string for an instance
    from the REST API.
-2. The :program:`nova-api-wsgi` service asks the :program:`nova-compute`
+2. The Compute API service asks the :program:`nova-compute`
    service, which manages that instance, to fulfill that request.
 3. That connection string gets used by the user to connect to the
    :program:`nova-serialproxy` service.

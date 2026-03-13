@@ -22,6 +22,7 @@ import os.path
 from unittest import mock
 
 from oslo_config import cfg
+import oslo_messaging as messaging
 from oslo_service import service as _service
 
 from nova import exception
@@ -124,6 +125,7 @@ class ServiceTestCase(test.NoDBTestCase):
                                self.binary,
                                self.topic,
                                'nova.tests.unit.test_service.FakeManager')
+        self.addCleanup(serv.stop)
         serv.manager = mock_manager
         serv.manager.service_name = self.topic
         serv.manager.additional_endpoints = []
@@ -165,6 +167,7 @@ class ServiceTestCase(test.NoDBTestCase):
 
         serv = service.Service(self.host, self.binary, self.topic,
                               'nova.tests.unit.test_service.FakeManager')
+        self.addCleanup(serv.stop)
         serv.start()
 
         # test service version got updated and saved:
@@ -230,7 +233,7 @@ class ServiceTestCase(test.NoDBTestCase):
 
     @mock.patch('nova.servicegroup.API')
     @mock.patch('nova.objects.service.Service.get_by_host_and_binary')
-    def test_parent_graceful_shutdown_with_cleanup_host(
+    def test_service_stop_call_manager_graceful_shutdown(
             self, mock_svc_get_by_host_and_binary, mock_API):
         mock_manager = mock.Mock(target=None)
 
@@ -247,7 +250,8 @@ class ServiceTestCase(test.NoDBTestCase):
             mock_svc_get_by_host_and_binary.return_value)
 
         serv.stop()
-        serv.manager.cleanup_host.assert_called_with()
+        # Check service with one RPC server calls manager graceful_shutdown
+        serv.manager.graceful_shutdown.assert_called_once_with()
 
     @mock.patch('nova.servicegroup.API')
     @mock.patch('nova.objects.service.Service.get_by_host_and_binary')
@@ -263,6 +267,189 @@ class ServiceTestCase(test.NoDBTestCase):
         serv.rpcserver.start.assert_called_once_with()
         serv.rpcserver.stop.assert_called_once_with()
         serv.rpcserver.wait.assert_called_once_with()
+        self.assertIsNone(serv.rpcserver_alt)
+        self.assertEqual(mock_rpc.call_count, 1)
+
+    @mock.patch('nova.objects.service.Service.get_by_host_and_binary')
+    @mock.patch.object(rpc, 'TRANSPORT')
+    @mock.patch.object(messaging, 'get_rpc_server')
+    def test_service_with_two_rpcservers(
+            self, mock_get, mock_TRANSPORT, mock_svc_get):
+        topic_alt = 'fake_alt'
+        fake_manager = 'nova.tests.unit.test_service.FakeManager'
+        serv = service.Service(self.host,
+                               self.binary,
+                               self.topic,
+                               fake_manager,
+                               topic_alt=topic_alt)
+        serv.start()
+        serv.stop()
+        target = messaging.Target(topic=self.topic, server=self.host)
+        target_alt = messaging.Target(topic=topic_alt, server=self.host)
+
+        # Check the two calls to oslo.messasing get_rpc_server()
+        # with different target
+        self.assertEqual(mock_get.call_count, 2)
+        mock_get.assert_any_call(mock_TRANSPORT, target, mock.ANY,
+                      executor=mock.ANY, serializer=mock.ANY,
+                      access_policy=mock.ANY)
+        mock_get.assert_any_call(mock_TRANSPORT, target_alt, mock.ANY,
+                      executor=mock.ANY, serializer=mock.ANY,
+                      access_policy=mock.ANY)
+        self.assertIsNotNone(serv.rpcserver)
+        self.assertIsNotNone(serv.rpcserver_alt)
+
+    @mock.patch('nova.objects.service.Service.get_by_host_and_binary')
+    @mock.patch.object(messaging.rpc.server.RPCServer, '_create_listener')
+    def test_service_with_two_rpc_topics_get_two_different_rpcservers(
+            self, mock_listner, mock_svc_get):
+        topic_alt = 'fake_alt'
+        fake_manager = 'nova.tests.unit.test_service.FakeManager'
+        serv = service.Service(self.host,
+                               self.binary,
+                               self.topic,
+                               fake_manager,
+                               topic_alt=topic_alt)
+        serv.start()
+        self.assertIsNotNone(serv.rpcserver)
+        self.assertIsNotNone(serv.rpcserver_alt)
+        self.assertNotEqual(serv.rpcserver, serv.rpcserver_alt)
+
+    @mock.patch('nova.servicegroup.API')
+    @mock.patch('nova.objects.service.Service.get_by_host_and_binary')
+    @mock.patch.object(rpc, 'get_server')
+    def test_service_stop_with_two_rpcservers(
+            self, mock_rpc, mock_svc_get_by_host_and_binary, mock_API):
+        serv = service.Service(self.host,
+                               self.binary,
+                               self.topic,
+                               'nova.tests.unit.test_service.FakeManager',
+                               topic_alt='fake_alt')
+        serv.start()
+        rpcserver = serv.rpcserver
+        rpcserver_alt = serv.rpcserver_alt
+        self.assertIsNotNone(rpcserver_alt)
+        with mock.patch.object(serv.manager, 'graceful_shutdown') as mock_gs:
+            serv.stop()
+            # Both rpcservers stop and wait is called.
+            rpcserver.stop.assert_called_with()
+            rpcserver.wait.assert_called_with()
+            rpcserver_alt.stop.assert_called_with()
+            rpcserver_alt.wait.assert_called_with()
+            # Check service with two RPC server calls manager graceful_shutdown
+            mock_gs.assert_called_once_with()
+
+    @mock.patch('nova.servicegroup.API')
+    @mock.patch('nova.objects.service.Service.get_by_host_and_binary')
+    @mock.patch.object(rpc, 'get_server')
+    def test_service_stop_handle_manager_gs_exception(
+            self, mock_rpc, mock_svc_get_by_host_and_binary, mock_API):
+        serv = service.Service(self.host,
+                               self.binary,
+                               self.topic,
+                               'nova.tests.unit.test_service.FakeManager')
+        serv.start()
+        serv.manager.graceful_shutdown = mock.Mock(side_effect=Exception())
+        # service.stop() should proceed even manager graceful_shutdown raise
+        # error
+        serv.stop()
+        serv.manager.graceful_shutdown.assert_called_once_with()
+
+    @mock.patch('nova.servicegroup.API')
+    @mock.patch('nova.objects.service.Service.get_by_host_and_binary')
+    @mock.patch.object(rpc, 'get_server')
+    def test_stop_with_two_rpcservers_handle_manager_gs_exception(
+            self, mock_rpc, mock_svc_get_by_host_and_binary, mock_API):
+        serv = service.Service(self.host,
+                               self.binary,
+                               self.topic,
+                               'nova.tests.unit.test_service.FakeManager',
+                               topic_alt='fake-alt')
+        serv.start()
+        rpcserver = serv.rpcserver
+        rpcserver_alt = serv.rpcserver_alt
+        serv.manager.graceful_shutdown = mock.Mock(side_effect=Exception())
+        serv.stop()
+        # Even manager graceful_shutdown() raise error, both rpcservers stop
+        # and wait is called.
+        rpcserver.stop.assert_called_with()
+        rpcserver.wait.assert_called_with()
+        rpcserver_alt.stop.assert_called_with()
+        rpcserver_alt.wait.assert_called_with()
+        serv.manager.graceful_shutdown.assert_called_once_with()
+
+    def test_shutdown_rpc_server(self):
+        serv = service.Service(self.host,
+                               self.binary,
+                               self.topic,
+                               'nova.tests.unit.test_service.FakeManager')
+        mock_rpc_server = mock.Mock()
+        serv._shutdown_rpc_server(mock_rpc_server, self.topic)
+        mock_rpc_server.stop.assert_called_once_with()
+        mock_rpc_server.wait.assert_called_once_with()
+
+    def test_shutdown_rpc_server_handle_exception(self):
+        serv = service.Service(self.host,
+                               self.binary,
+                               self.topic,
+                               'nova.tests.unit.test_service.FakeManager')
+        mock_rpc_server = mock.Mock()
+        mock_rpc_server.stop.side_effect = Exception()
+        serv._shutdown_rpc_server(mock_rpc_server, self.topic)
+        mock_rpc_server.stop.assert_called_once_with()
+        mock_rpc_server.wait.assert_not_called()
+
+    @mock.patch('nova.servicegroup.API')
+    @mock.patch('nova.objects.service.Service.get_by_host_and_binary')
+    @mock.patch.object(rpc, 'get_server')
+    def test_service_stop_handle_first_rpcserver_exception(
+            self, mock_rpc, mock_svc_get_by_host_and_binary, mock_API):
+        serv = service.Service(self.host,
+                               self.binary,
+                               self.topic,
+                               'nova.tests.unit.test_service.FakeManager',
+                               topic_alt='fake_alt')
+        serv.start()
+        serv.rpcserver = mock.Mock()
+        rpcserver = serv.rpcserver
+        serv.rpcserver.stop.side_effect = Exception()
+        rpcserver_alt = serv.rpcserver_alt
+        self.assertIsNotNone(rpcserver_alt)
+        with mock.patch.object(serv.manager, 'graceful_shutdown') as mock_gs:
+            serv.stop()
+            rpcserver.stop.assert_called_once_with()
+            rpcserver.wait.assert_not_called()
+            # Check if first RPC server stop() raise exception, it still call
+            # manager graceful_shutdown() and 2nd RPC server stop/wait.
+            mock_gs.assert_called_once_with()
+            rpcserver_alt.stop.assert_called_once_with()
+            rpcserver_alt.wait.assert_called_once_with()
+
+    @mock.patch('nova.servicegroup.API')
+    @mock.patch('nova.objects.service.Service.get_by_host_and_binary')
+    @mock.patch.object(rpc, 'get_server')
+    def test_service_stop_handle_2nd_rpcserver_exception(
+            self, mock_rpc, mock_svc_get_by_host_and_binary, mock_API):
+        serv = service.Service(self.host,
+                               self.binary,
+                               self.topic,
+                               'nova.tests.unit.test_service.FakeManager',
+                               topic_alt='fake_alt')
+        serv.start()
+        rpcserver = serv.rpcserver
+        serv.rpcserver_alt = mock.Mock()
+        serv.rpcserver_alt.stop.side_effect = Exception()
+        rpcserver_alt = serv.rpcserver_alt
+        self.assertIsNotNone(rpcserver_alt)
+        with mock.patch.object(serv.manager, 'graceful_shutdown') as mock_gs:
+            serv.stop()
+            rpcserver.stop.assert_called_once_with()
+            rpcserver.wait.assert_called_once_with()
+            mock_gs.assert_called_once_with()
+            # service.stop() should proceed even 2nd RPC server stop() raise
+            # error.
+            rpcserver_alt.stop.assert_called_once_with()
+            rpcserver_alt.wait.assert_not_called()
 
     def test_reset(self):
         serv = service.Service(self.host,
@@ -324,7 +511,8 @@ class TestLauncher(test.NoDBTestCase):
         mock_launch.assert_called_once_with(mock.ANY,
                                             mock.sentinel.service,
                                             workers=None,
-                                            restart_method='mutate')
+                                            restart_method='mutate',
+                                            no_fork=False)
 
     @mock.patch.object(_service, 'launch')
     def test_launch_app_with_workers(self, mock_launch):
@@ -333,7 +521,19 @@ class TestLauncher(test.NoDBTestCase):
         mock_launch.assert_called_once_with(mock.ANY,
                                             mock.sentinel.service,
                                             workers=mock.sentinel.workers,
-                                            restart_method='mutate')
+                                            restart_method='mutate',
+                                            no_fork=False)
+
+    @mock.patch.object(_service, 'launch')
+    def test_launch_app_with_workers_no_fork(self, mock_launch):
+        service._launcher = None
+        service.serve(
+            mock.sentinel.service, workers=mock.sentinel.workers, no_fork=True)
+        mock_launch.assert_called_once_with(mock.ANY,
+                                            mock.sentinel.service,
+                                            workers=mock.sentinel.workers,
+                                            restart_method='mutate',
+                                            no_fork=True)
 
     @mock.patch.object(_service, 'launch')
     def test_launch_app_more_than_once_raises(self, mock_launch):

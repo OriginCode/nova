@@ -21,7 +21,6 @@ import datetime
 from unittest import mock
 
 from dateutil import parser as dateutil_parser
-import iso8601
 import netaddr
 from oslo_db import api as oslo_db_api
 from oslo_db import exception as db_exc
@@ -330,8 +329,8 @@ def _create_aggregate_with_hosts(context=context.get_admin_context(),
     return result
 
 
-@mock.patch.object(db, '_get_regexp_ops',
-        return_value=(lambda x: x, 'LIKE'))
+@mock.patch.object(
+    db_utils, 'get_regexp_ops', return_value=(lambda x: x, 'LIKE'))
 class UnsupportedDbRegexpTestCase(DbTestCase):
 
     def test_instance_get_all_by_filters_paginate(self, mock_get_regexp):
@@ -682,8 +681,8 @@ class SqlAlchemyDbApiNoDbTestCase(test.NoDBTestCase):
         t2 = t1 + datetime.timedelta(seconds=10)
         t3 = t2 + datetime.timedelta(hours=1)
 
-        t2_utc = t2.replace(tzinfo=iso8601.UTC)
-        t3_utc = t3.replace(tzinfo=iso8601.UTC)
+        t2_utc = t2.replace(tzinfo=datetime.timezone.utc)
+        t3_utc = t3.replace(tzinfo=datetime.timezone.utc)
 
         datetime_keys = ('created_at', 'deleted_at')
 
@@ -720,28 +719,6 @@ class SqlAlchemyDbApiNoDbTestCase(test.NoDBTestCase):
         db.convert_objects_related_datetimes(test1, *datetime_keys)
         self.assertEqual(test1, expected_dict)
 
-    def test_get_regexp_op_for_database_sqlite(self):
-        filter, op = db._get_regexp_ops('sqlite:///')
-        self.assertEqual('|', filter('|'))
-        self.assertEqual('REGEXP', op)
-
-    def test_get_regexp_op_for_database_mysql(self):
-        filter, op = db._get_regexp_ops(
-                    'mysql+pymysql://root@localhost')
-        self.assertEqual('\\|', filter('|'))
-        self.assertEqual('REGEXP', op)
-
-    def test_get_regexp_op_for_database_postgresql(self):
-        filter, op = db._get_regexp_ops(
-                    'postgresql://localhost')
-        self.assertEqual('|', filter('|'))
-        self.assertEqual('~', op)
-
-    def test_get_regexp_op_for_database_unknown(self):
-        filter, op = db._get_regexp_ops('notdb:///')
-        self.assertEqual('|', filter('|'))
-        self.assertEqual('LIKE', op)
-
     @mock.patch.object(db, 'context_manager')
     def test_get_engine(self, mock_ctxt_mgr):
         db.get_engine()
@@ -769,22 +746,6 @@ class SqlAlchemyDbApiNoDbTestCase(test.NoDBTestCase):
         db.instance_get_all_by_filters_sort(ctxt, {}, marker='foo')
         mock_get.assert_called_once_with(mock.sentinel.elevated, 'foo')
         ctxt.elevated.assert_called_once_with(read_deleted='yes')
-
-    def test_replace_sub_expression(self):
-        ret = db._safe_regex_mysql('|')
-        self.assertEqual('\\|', ret)
-
-        ret = db._safe_regex_mysql('||')
-        self.assertEqual('\\|\\|', ret)
-
-        ret = db._safe_regex_mysql('a||')
-        self.assertEqual('a\\|\\|', ret)
-
-        ret = db._safe_regex_mysql('|a|')
-        self.assertEqual('\\|a\\|', ret)
-
-        ret = db._safe_regex_mysql('||a')
-        self.assertEqual('\\|\\|a', ret)
 
 
 class SqlAlchemyDbApiTestCase(DbTestCase):
@@ -1553,7 +1514,7 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
         dt_keys = ('created_at', 'deleted_at', 'updated_at',
                    'launched_at', 'terminated_at')
         dt = timeutils.utcnow()
-        dt_utc = dt.replace(tzinfo=iso8601.UTC)
+        dt_utc = dt.replace(tzinfo=datetime.timezone.utc)
         for key in dt_keys:
             values[key] = dt_utc
         inst = db.instance_create(self.ctxt, values)
@@ -1570,7 +1531,7 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
         dt_keys = ('created_at', 'deleted_at', 'updated_at',
                    'launched_at', 'terminated_at')
         dt = timeutils.utcnow()
-        dt_utc = dt.replace(tzinfo=iso8601.UTC)
+        dt_utc = dt.replace(tzinfo=datetime.timezone.utc)
         for key in dt_keys:
             values[key] = dt_utc
         inst = db.instance_create(self.ctxt, {})
@@ -1795,13 +1756,13 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
                                             '2013-12-05T15:03:25.000000')
         i2 = self.create_instance_with_args(updated_at=
                                             '2013-12-05T15:03:26.000000')
-        changes_since = iso8601.parse_date('2013-12-05T15:03:25.000000')
+        changes_since = timeutils.parse_isotime('2013-12-05T15:03:25.000000')
         result = db.instance_get_all_by_filters(self.ctxt,
                                                 {'changes-since':
                                                  changes_since})
         self._assertEqualListsOfInstances([i1, i2], result)
 
-        changes_since = iso8601.parse_date('2013-12-05T15:03:26.000000')
+        changes_since = timeutils.parse_isotime('2013-12-05T15:03:26.000000')
         result = db.instance_get_all_by_filters(self.ctxt,
                                                 {'changes-since':
                                                  changes_since})
@@ -1820,13 +1781,13 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
                                             '2013-12-05T15:03:25.000000')
         i2 = self.create_instance_with_args(updated_at=
                                             '2013-12-05T15:03:26.000000')
-        changes_before = iso8601.parse_date('2013-12-05T15:03:26.000000')
+        changes_before = timeutils.parse_isotime('2013-12-05T15:03:26.000000')
         result = db.instance_get_all_by_filters(self.ctxt,
                                                 {'changes-before':
                                                  changes_before})
         self._assertEqualListsOfInstances([i1, i2], result)
 
-        changes_before = iso8601.parse_date('2013-12-05T15:03:25.000000')
+        changes_before = timeutils.parse_isotime('2013-12-05T15:03:25.000000')
         result = db.instance_get_all_by_filters(self.ctxt,
                                                 {'changes-before':
                                                  changes_before})
@@ -1847,8 +1808,8 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
                                             '2013-12-05T15:03:26.000000')
         i3 = self.create_instance_with_args(updated_at=
                                             '2013-12-05T15:03:27.000000')
-        changes_since = iso8601.parse_date('2013-12-05T15:03:25.000000')
-        changes_before = iso8601.parse_date('2013-12-05T15:03:27.000000')
+        changes_since = timeutils.parse_isotime('2013-12-05T15:03:25.000000')
+        changes_before = timeutils.parse_isotime('2013-12-05T15:03:27.000000')
         result = db.instance_get_all_by_filters(self.ctxt,
                                                 {'changes-since':
                                                  changes_since,
@@ -1856,8 +1817,8 @@ class InstanceTestCase(test.TestCase, ModelsObjectComparatorMixin):
                                                  changes_before})
         self._assertEqualListsOfInstances([i1, i2, i3], result)
 
-        changes_since = iso8601.parse_date('2013-12-05T15:03:26.000000')
-        changes_before = iso8601.parse_date('2013-12-05T15:03:27.000000')
+        changes_since = timeutils.parse_isotime('2013-12-05T15:03:26.000000')
+        changes_before = timeutils.parse_isotime('2013-12-05T15:03:27.000000')
         result = db.instance_get_all_by_filters(self.ctxt,
                                                 {'changes-since':
                                                  changes_since,

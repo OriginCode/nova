@@ -23,11 +23,14 @@ import hashlib
 import inspect
 import multiprocessing
 import os
+import queue
 import random
 import re
 import shutil
 import tempfile
+import threading
 import time
+import typing as ty
 
 from eventlet import tpool
 import futurist
@@ -59,6 +62,7 @@ CONF = nova.conf.CONF
 LOG = logging.getLogger(__name__)
 
 synchronized = lockutils.synchronized_with_prefix('nova-')
+NOVA_FAIR_LOCKS = lockutils.FairLocks()
 
 SM_IMAGE_PROP_PREFIX = "image_"
 SM_INHERITABLE_KEYS = (
@@ -74,18 +78,23 @@ SM_SKIP_KEYS = (
     'img_mappings', 'img_block_device_mapping',
 )
 
-_FILE_CACHE = {}
+_FILE_CACHE: dict[str, dict] = {}
 
 _SERVICE_TYPES = service_types.ServiceTypes()
 
-DEFAULT_EXECUTOR = None
+# NOTE(gibi): futurist does not expose the common based class.
+# NOTE(gibi): we can simplify this when eventlet is removed.
+Executor: ty.TypeAlias = (
+    futurist.GreenThreadPoolExecutor | futurist.ThreadPoolExecutor)
+
+DEFAULT_EXECUTOR: Executor | None = None
 
 
 def cooperative_yield():
     # TODO(ksambor) Remove all cooperative_yield calls after dropping Eventlet
     #  support.
     if not concurrency_mode_threading():
-        time.sleep(0)
+        time.sleep(0)  # noqa: N374
 
 
 def destroy_default_executor():
@@ -104,19 +113,23 @@ def destroy_default_executor():
     DEFAULT_EXECUTOR = None
 
 
-def _get_default_executor():
+def create_executor(max_workers) -> Executor:
+    if concurrency_mode_threading():
+        executor = futurist.ThreadPoolExecutor(max_workers)
+    else:
+        executor = futurist.GreenThreadPoolExecutor(max_workers)
+    return executor
+
+
+def _get_default_executor() -> Executor:
     global DEFAULT_EXECUTOR
 
     if not DEFAULT_EXECUTOR:
-        if concurrency_mode_threading():
-            DEFAULT_EXECUTOR = futurist.ThreadPoolExecutor(
-                CONF.default_thread_pool_size
+        max_workers = (
+            CONF.default_thread_pool_size if concurrency_mode_threading()
+            else CONF.default_green_pool_size
             )
-        else:
-            DEFAULT_EXECUTOR = futurist.GreenThreadPoolExecutor(
-                CONF.default_green_pool_size
-            )
-
+        DEFAULT_EXECUTOR = create_executor(max_workers)
         pname = multiprocessing.current_process().name
         executor_name = f"{pname}.default"
         DEFAULT_EXECUTOR.name = executor_name
@@ -558,13 +571,52 @@ def _serialize_profile_info():
     return trace_info
 
 
-def _pass_context(runner, func, *args, **kwargs):
-    """Generalised passthrough method
-    It will grab the context from the threadlocal store and add it to
-    the store on the runner.  This allows for continuity in logging the
-    context when using this method to spawn a new thread through the
-    runner function
+def spawn(
+    func: ty.Callable[..., ty.Any], *args: ty.Any, **kwargs: ty.Any
+) -> futurist.Future:
+    """Passthrough method for eventlet.spawn.
+
+    This utility exists so that it can be stubbed for testing without
+    interfering with the service spawns.
+
+    It will also grab the context from the threadlocal store and add it to
+    the store on the new thread.  This allows for continuity in logging the
+    context when using this method to spawn a new thread.
     """
+
+    return spawn_on(_get_default_executor(), func, *args, **kwargs)
+
+
+def _executor_is_full(executor: Executor) -> bool:
+    if concurrency_mode_threading():
+        # TODO(gibi): Move this whole logic to futurist ThreadPoolExecutor
+        # so that we can avoid accessing the internals of the executor
+        with executor._shutdown_lock:
+            idle_workers = len([w for w in executor._workers if w.idle]) > 0
+            queued_tasks = executor._work_queue.qsize() > 0
+            return queued_tasks and not idle_workers
+
+    return False
+
+
+def spawn_on(
+    executor: Executor,
+    func: ty.Callable[..., ty.Any],
+    *args: ty.Any, **kwargs: ty.Any,
+) -> futurist.Future:
+    """Passthrough method to run func on a thread in a given executor.
+
+    It will also grab the context from the threadlocal store and add it to
+    the store on the new thread.  This allows for continuity in logging the
+    context when using this method to spawn a new thread.
+    """
+    _log_executor_stats(executor)
+    if _executor_is_full(executor):
+        LOG.warning(
+            "The %s pool does not have free threads so the task %s will be "
+            "queued. If this happens repeatedly then the size of the pool is "
+            "too small for the load or there are stuck threads filling the "
+            "pool.", getattr(executor, "name", "unknown"), func)
 
     _context = common_context.get_current()
     profiler_info = _serialize_profile_info()
@@ -579,55 +631,7 @@ def _pass_context(runner, func, *args, **kwargs):
             profiler.init(**profiler_info)
         return func(*args, **kwargs)
 
-    return runner(context_wrapper, *args, **kwargs)
-
-
-def spawn(func, *args, **kwargs) -> futurist.Future:
-    """Passthrough method for eventlet.spawn.
-
-    This utility exists so that it can be stubbed for testing without
-    interfering with the service spawns.
-
-    It will also grab the context from the threadlocal store and add it to
-    the store on the new thread.  This allows for continuity in logging the
-    context when using this method to spawn a new thread.
-    """
-
-    return spawn_on(_get_default_executor(), func, *args, **kwargs)
-
-
-def _executor_is_full(executor):
-    if concurrency_mode_threading():
-        # TODO(gibi): Move this whole logic to futurist ThreadPoolExecutor
-        # so that we can avoid accessing the internals of the executor
-        with executor._shutdown_lock:
-            idle_workers = len([w for w in executor._workers if w.idle]) > 0
-            queued_tasks = executor._work_queue.qsize() > 0
-            return queued_tasks and not idle_workers
-
-    return False
-
-
-def spawn_on(executor, func, *args, **kwargs) -> futurist.Future:
-    """Passthrough method to run func on a thread in a given executor.
-
-    It will also grab the context from the threadlocal store and add it to
-    the store on the new thread.  This allows for continuity in logging the
-    context when using this method to spawn a new thread.
-    """
-    _log_executor_stats(executor)
-    if _executor_is_full(executor):
-        LOG.warning(
-            "The %s pool does not have free threads so the task %s will be "
-            "queued. If this happens repeatedly then the size of the pool is "
-            "too small for the load or there are stuck threads filling the "
-            "pool.", executor.name, func)
-    return _pass_context(executor.submit, func, *args, **kwargs)
-
-
-def tpool_execute(func, *args, **kwargs):
-    """Run func in a native thread"""
-    return _pass_context(tpool.execute, func, *args, **kwargs)
+    return executor.submit(context_wrapper, *args, **kwargs)
 
 
 def is_none_string(val):
@@ -775,8 +779,6 @@ def read_cached_file(filename, force_reload=False):
     :returns: A tuple with a boolean specifying if the data is fresh
               or not.
     """
-    global _FILE_CACHE
-
     if force_reload:
         delete_cached_file(filename)
 
@@ -798,8 +800,6 @@ def delete_cached_file(filename):
 
     :param filename: filename to delete
     """
-    global _FILE_CACHE
-
     if filename in _FILE_CACHE:
         del _FILE_CACHE[filename]
 
@@ -1093,6 +1093,7 @@ def run_once(message, logger, cleanup=None):
     logger and cleanup function will be propagated to the caller.
     """
     def outer_wrapper(func):
+        @ty.no_type_check
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             if not wrapper.called:
@@ -1142,6 +1143,7 @@ def latch_error_on_raise(retryable=(_SentinelException,)):
     """
 
     def outer_wrapper(func):
+        @ty.no_type_check
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             if wrapper.error:
@@ -1167,6 +1169,170 @@ def latch_error_on_raise(retryable=(_SentinelException,)):
     return outer_wrapper
 
 
+class FairLockGuard:
+    """A lock guard context manager
+
+    This class supports acquiring multiple locks safely by name
+    and releasing them via the context manager protocol
+    i.e. with FairLockGuard([list of lock names]):
+
+    The intended usage model for this context manager is to
+    mediate access to a set of locks by name, not by pre-creating
+    the locks and passing them in. Lock creation and management
+    is handled entirely internally.
+
+    Thread Safety:
+        While sharing a FairLockGuard instance between threads is
+        supported, it is discouraged. Each thread should create its
+        own context manager instance with the same set of lock names
+        for clarity and to avoid confusion about lock ownership. If
+        shared, threads will correctly wait for each other due to the
+        underlying fair locks.
+
+    Nesting:
+        Same-instance nesting is supported but discouraged. When the
+        same thread re-enters an active context manager, the nesting
+        depth is tracked and locks are only released on the outermost
+        exit. For clarity, prefer creating separate FairLockGuard
+        instances for nested contexts.
+
+    Example Recommended Usage:
+    ```
+    # Each context creates its own guard - clear ownership
+    with FairLockGuard(['lock1', 'lock2']):
+        with FairLockGuard(['lock1', 'lock2']):
+            pass
+    ```
+
+    Example Discouraged (but supported) Usage:
+    ```
+    # Same instance nesting - works but less clear
+    lock_guard = FairLockGuard(['lock1', 'lock2'])
+    with lock_guard:
+        with lock_guard:  # Increments nesting depth
+            pass          # Decrements but doesn't release
+        pass              # Still holds locks
+    # Locks released here
+    ```
+
+    In general you should avoid naming the context manager instance
+    and only construct it in the with statement to keep usage clear.
+    """
+
+    def __init__(self, names):
+        # we need to sort the lock to ensure we acquire
+        # them in the same order. This ensures we do not
+        # fall afoul of the Dining philosophers problem
+        # https://en.wikipedia.org/wiki/Dining_philosophers_problem
+        # by implementing the simplest Ordered solution
+        # https://howardhinnant.github.io/dining_philosophers.html
+        self.names = sorted(names)
+        self.locks = []
+        # NOTE(sean-k-mooney): this is technically not required
+        # but it protect the internal state of self.locks list
+        # from incorrect usage where a context manager instance is
+        # shared between threads. We use a reader-writer lock to
+        # allow concurrent reads in is_locked() while ensuring
+        # exclusive access for state modifications.
+        self.locks_lock = lockutils.ReaderWriterLock()
+        self._active = False
+        self._active_thread = None
+        self._nesting_depth = 0
+
+    @staticmethod
+    def _release_locks(locks):
+        for lock in locks:
+            if lock.is_writer():
+                try:
+                    lock.release_write_lock()
+                except Exception:
+                    pass
+
+    def __enter__(self):
+        current_thread = threading.current_thread()
+
+        # Check for same-thread nesting - allow it by incrementing depth
+        with self.locks_lock.write_lock():
+            if self._active and self._active_thread == current_thread:
+                # Same thread re-entering - just increment depth.
+                # Locks are already held, no need to re-acquire.
+                self._nesting_depth += 1
+                return
+
+        # First entry (or different thread that will wait on named locks).
+        # IMPORTANT: Acquire named locks OUTSIDE of locks_lock to prevent
+        # deadlock. If we acquired named locks while holding locks_lock:
+        #   1. Thread-A holds locks_lock, acquires named locks, releases
+        #      locks_lock, does work
+        #   2. Thread-B takes locks_lock, blocks waiting for named locks
+        #      (still holding locks_lock)
+        #   3. Thread-A tries to __exit__, needs locks_lock - DEADLOCK!
+        # By acquiring named locks outside locks_lock, Thread-B blocks on
+        # named locks without holding locks_lock, allowing Thread-A to exit.
+        #
+        # NOTE: We append to acquired_locks BEFORE calling
+        # acquire_write_lock().
+        # This ordering is intentional for exception safety: if acquire fails
+        # for a lock, we can still release all previously acquired locks
+        # (the is_writer() check ensures we only release locks that were
+        # actually acquired).
+        acquired_locks = []
+        try:
+            for name in self.names:
+                named_lock = NOVA_FAIR_LOCKS.get(name)
+                acquired_locks.append(named_lock)
+                named_lock.acquire_write_lock()
+        except Exception:
+            # Release any locks acquired so far on failure
+            self._release_locks(acquired_locks)
+            raise
+
+        # Update internal state after acquiring locks
+        with self.locks_lock.write_lock():
+            self.locks = acquired_locks
+            self._active = True
+            self._active_thread = current_thread
+            self._nesting_depth = 1
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        current_thread = threading.current_thread()
+        with self.locks_lock.write_lock():
+            # Validate the exiting thread owns the lock. This handles the
+            # edge case where a shared guard's __exit__ is called from a
+            # thread that didn't successfully __enter__ (e.g., Thread-B
+            # calls exit while Thread-A holds nested locks). In normal
+            # context manager usage this shouldn't happen, but we handle
+            # it defensively by returning early without modifying state.
+            if self._active_thread != current_thread:
+                return
+
+            self._nesting_depth -= 1
+            if self._nesting_depth > 0:
+                # Still nested, don't release locks yet
+                return
+        # Release locks OUTSIDE of locks_lock to prevent holding it
+        # while other threads may be waiting
+        self._release_locks(self.locks)
+        with self.locks_lock.write_lock():
+            self.locks = []
+            self._active = False
+            self._active_thread = None
+
+    def is_locked(self):
+        # NOTE(sean-k-mooney): LockGuards exist in several programming
+        # languages such as c++, in general a LockGuard can support a
+        # single lock or many but by convention a LockGuard is only
+        # considered locked if all locks are acquired. FairLocks in
+        # oslo are implemented as ReaderWriter inter-process locks.
+        # that means that we hold the lock if we are hold the writer
+        # lock aka if the lock is the writer. We use a read lock here
+        # to allow concurrent reads while state modifications use write
+        # locks.
+        with self.locks_lock.read_lock():
+            return (
+                self.locks and all(lock.is_writer() for lock in self.locks))
+
+
 def concurrency_mode_threading():
     """Returns true if the service is running in threading mode, false if
     running in Eventlet mode
@@ -1175,19 +1341,19 @@ def concurrency_mode_threading():
     return not monkey_patch.is_patched()
 
 
-SCATTER_GATHER_EXECUTOR = None
+SCATTER_GATHER_EXECUTOR: Executor | None = None
 
 
-def get_scatter_gather_executor():
+def get_scatter_gather_executor() -> Executor:
     """Returns the executor used for scatter/gather operations."""
     global SCATTER_GATHER_EXECUTOR
 
     if not SCATTER_GATHER_EXECUTOR:
-        if concurrency_mode_threading():
-            SCATTER_GATHER_EXECUTOR = futurist.ThreadPoolExecutor(
-                CONF.cell_worker_thread_pool_size)
-        else:
-            SCATTER_GATHER_EXECUTOR = futurist.GreenThreadPoolExecutor()
+        max_workers = (
+            CONF.cell_worker_thread_pool_size
+            if concurrency_mode_threading() else 1000
+            )
+        SCATTER_GATHER_EXECUTOR = create_executor(max_workers)
 
         pname = multiprocessing.current_process().name
         executor_name = f"{pname}.cell_worker"
@@ -1216,7 +1382,44 @@ def destroy_scatter_gather_executor():
     SCATTER_GATHER_EXECUTOR = None
 
 
-def _log_executor_stats(executor):
+CACHE_IMAGES_EXECUTOR: Executor | None = None
+
+
+def get_cache_images_executor() -> Executor:
+    """Returns the executor used for cache images operations."""
+    global CACHE_IMAGES_EXECUTOR
+
+    if not CACHE_IMAGES_EXECUTOR:
+        max_workers = CONF.image_cache.precache_concurrency
+        CACHE_IMAGES_EXECUTOR = create_executor(max_workers)
+
+        pname = multiprocessing.current_process().name
+        executor_name = f"{pname}.cache_images"
+        CACHE_IMAGES_EXECUTOR.name = executor_name
+
+        LOG.info("The cache images executor %s is initialized", executor_name)
+
+    return CACHE_IMAGES_EXECUTOR
+
+
+def destroy_cache_images_executor():
+    """Closes the executor and resets the global to None to allow forked worker
+    processes to properly init it.
+    """
+    global CACHE_IMAGES_EXECUTOR
+    if CACHE_IMAGES_EXECUTOR:
+        LOG.info(
+            "The cache images thread pool %s is shutting down",
+            CACHE_IMAGES_EXECUTOR.name)
+        CACHE_IMAGES_EXECUTOR.shutdown()
+        LOG.info(
+            "The cache images thread pool %s is closed",
+            CACHE_IMAGES_EXECUTOR.name)
+
+    CACHE_IMAGES_EXECUTOR = None
+
+
+def _log_executor_stats(executor: Executor) -> None:
     if CONF.thread_pool_statistic_period < 0:
         return
 
@@ -1247,3 +1450,261 @@ def _log_executor_stats(executor):
             name,
             len(executor._pool.coroutines_running), executor._pool.size,
             executor._delayed_work.unfinished_tasks, stats)
+
+
+def tpool_wrap(target, autowrap=()):
+    """Wrap the target into an eventlet Tpool Proxy object if running
+    in eventlet mode. In threading mode no wrapping is applied.
+    """
+    if concurrency_mode_threading():
+        return target
+    else:
+        return tpool.Proxy(target, autowrap=autowrap)
+
+
+class StaticallyDelayingCancellableTaskExecutorWrapper:
+    """Executor wrapper that submit work to another executor but delays each
+    task's submission with a statically defined delay and supports cancelling
+    the task during such delay.
+
+    Note that tasks that are actually started running in the real executor
+    might not be cancellable anymore depending on that executor and the
+    concurrency mode used. See
+    https://docs.python.org/3.12/library/concurrent.futures.html#concurrent.futures.Future.cancel
+
+    Note that shutting down the wrapper only shuts down its own scheduler
+    thread but does not shut down the real executor that is passed in __init__.
+
+    Note that this class does not support a different delay length for
+    different tasks.
+    """
+
+    class Task:
+        def __init__(
+            self,
+            delay: float,
+            fn: ty.Callable[..., ty.Any],
+            args: tuple,
+            kwargs: dict
+        ):
+            self.deadline = time.monotonic() + delay
+            self.future = futurist.Future()
+            self.fn = fn
+            self.args = args
+            self.kwargs = kwargs
+
+        @property
+        def remaining_delay(self):
+            return self.deadline - time.monotonic()
+
+        def __str__(self):
+            return (
+                f"Task(fn={self.fn}, "
+                f"remaining_delay={self.remaining_delay} "
+                f"future={self.future})")
+
+    def __init__(self, delay: float, executor: Executor):
+        """Initialize the wrapper
+
+        :param delay: delay length in seconds
+        :param executor: executor object to run each task. It supports both
+            native threading and eventlet based executors.
+        """
+
+        self._queue: queue.Queue = queue.Queue()
+        self._executor = executor
+        self._delay = delay
+        self._shutdown = threading.Condition()
+        self._shutdown_requested = False
+        self._sentinel = self.Task(0, lambda: None, (), {})
+        # We are intentionally not running our _run() in the executor
+        # as we cannot assume that the executor has more than one worker
+        # and our logic never finishes so it would consume one worker
+        # constantly.
+        self._thread = threading.Thread(target=self._run)
+        self._thread.daemon = True
+        self._thread.start()
+
+    @staticmethod
+    def _log(msg, *args):
+        LOG.debug(msg, *args)
+
+    @staticmethod
+    def _task_wrapper(task) -> None:
+        """This wraps the original task so when it finishes in the real
+        executor the result of the task can be copied to the Future object
+        already returned to our caller from submit_with_delay(). So
+        the caller can get the result or exception from the task.
+        """
+        try:
+            task.future.set_result(task.fn(*task.args, **task.kwargs))
+        except BaseException as e:
+            task.future.set_exception(e)
+
+    def _wait_for_deadline_then_set_running(self, task) -> bool:
+        """Waiting for the task's deadline then mark it running
+
+        Wait can be interrupted by shutdown of the wrapper in such a case
+        the task's state is checked. If the task is cancelled then return
+        immediately with False. If the task is not cancelled then wait for
+        its deadline and eventually return True if the task is still not
+        cancelled.
+
+        If True is returned the future in the task is also atomically set to
+        running state and the future cannot be cancelled anymore.
+        """
+        if task.remaining_delay <= 0:
+            return task.future.set_running_or_notify_cancel()
+
+        self._log("Waitig for the deadline of %s", task)
+        with self._shutdown:
+            shutdown = self._shutdown.wait_for(
+                lambda: self._shutdown_requested, task.remaining_delay)
+
+        if shutdown:
+            self._log(
+                "Shutdown is requested while waiting "
+                "for the deadline of %s", task)
+
+            if task.future.cancelled():
+                return False
+
+            self._log(
+                "%s is not cancelled so still waiting for its "
+                "deadline", task)
+            if task.remaining_delay > 0:
+                # Blocking here is fine as we have the assumption that
+                # no new task can arrive that has a deadline that is sooner
+                # than the deadline of the oldest task in the queue due to
+                # our static delay (and we assume that time travel is not
+                # allowed).
+                time.sleep(task.remaining_delay)
+
+        return task.future.set_running_or_notify_cancel()
+
+    def _run(self):
+        while True:
+            self._log("Waiting for the next task")
+            task: StaticallyDelayingCancellableTaskExecutorWrapper.Task = (
+                self._queue.get())
+            self._log("Received %s", task)
+
+            if task is self._sentinel:
+                # We are asked to terminate so exit the loop.
+                self._queue.task_done()
+                self._log("Sentinel received, thread is exiting")
+                return
+
+            if task.future.cancelled():
+                # The task was cancelled while it was in the queue.
+                # We don't need to run it. Just move on to the next task
+                self._log("%s was cancelled while queued, skipping", task)
+                self._queue.task_done()
+                continue
+
+            # The task is still valid, wait for its deadline
+            run_it = self._wait_for_deadline_then_set_running(task)
+            if not run_it:
+                # The task was cancelled during the delay period.
+                # We don't need to run it. Just move on to the next task.
+                self._log(
+                    "%s was cancelled during its delay period, skipping", task)
+                self._queue.task_done()
+                continue
+
+            # Push the task to the real executor. We don't need to wait
+            # for the result here as the client can do that
+            # via the task.future we already returned from submit_with_delay()
+            try:
+                self._executor.submit(self._task_wrapper, task)
+            except BaseException as e:
+                # If for any reason we cannot submit a task then we should not
+                # let the exception escape as that will prevent our thread
+                # to terminate cleanly. Instead, we log and propagate back.
+                LOG.exception(
+                    "Failed to submit %s to executor %s", task, self._executor)
+                task.future.set_exception(e)
+                self._queue.task_done()
+                continue
+
+            self._log("%s submitted to %s", task, self._executor)
+            # The task is not done from the executor perspective, but it is
+            # done from the _run() logic perspective. Signal it, so shutdown()
+            # can use Queue.join()
+            self._queue.task_done()
+
+    def submit_with_delay(
+        self, fn: ty.Callable[..., ty.Any], *args: ty.Any, **kwargs: ty.Any
+    ) -> futurist.Future:
+        """Submit work with delay."""
+        # We need this wide locking as we don't want to queue a task behind
+        # the sentinel as that task will never be processed.
+        with self._shutdown:
+            if self._shutdown_requested:
+                raise RuntimeError(
+                    "Cannot schedule new tasks after being shutdown")
+
+            task = self.Task(self._delay, fn, args, kwargs)
+            self._queue.put(task)
+            self._log("Queued %s", task)
+            return task.future
+
+    def shutdown(self, wait: bool = True):
+        """Shutdown the executor"""
+        with self._shutdown:
+            if not self._shutdown_requested:
+                # Ensure that our thread wakes at least one more time to allow
+                # it to exit by queuing up a sentinel task after the shutdown
+                # condition is set. This task won't be executed.
+                self._queue.put(self._sentinel)
+                self._log("Sentinel is queued")
+                self._shutdown_requested = True
+                self._shutdown.notify_all()
+                self._log("Shutdown is set")
+
+        # If wait is set we need to wait for our sentinel to be processed and
+        # therefore our thread to exit.
+        # NOTE(gibi): We are intentionally not shutting down the real executor
+        # as we are not the one created it or owning it so it might be shared
+        # between different callers.
+        if wait:
+            self._queue.join()
+            self._log("Queue joined")
+            self._thread.join()
+            self._log("Scheduler thread joined")
+
+    @property
+    def is_alive(self) -> bool:
+        return self._thread.is_alive()
+
+
+LONG_TASK_EXECUTOR: Executor | None = None
+
+
+def get_long_task_executor(max_workers) -> Executor:
+    """Returns the executor used for long compute operations."""
+    global LONG_TASK_EXECUTOR
+
+    if not LONG_TASK_EXECUTOR:
+        LONG_TASK_EXECUTOR = create_executor(max_workers)
+
+        pname = multiprocessing.current_process().name
+        executor_name = f"{pname}.long_task"
+        LONG_TASK_EXECUTOR.name = executor_name
+
+        LOG.info("The long task thread pool %s is initialized",
+                 executor_name)
+
+    return LONG_TASK_EXECUTOR
+
+
+def destroy_long_task_executor():
+    """Closes the executor and resets the global to None"""
+    global LONG_TASK_EXECUTOR
+    if LONG_TASK_EXECUTOR:
+        LOG.info(
+            "The thread pool %s is shutting down", LONG_TASK_EXECUTOR.name)
+        LONG_TASK_EXECUTOR.shutdown()
+        LOG.info("The thread pool %s is closed", LONG_TASK_EXECUTOR.name)
+
+    LONG_TASK_EXECUTOR = None

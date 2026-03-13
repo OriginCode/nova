@@ -24,7 +24,6 @@ helpers for populating up config object instances.
 """
 
 import time
-import typing as ty
 
 from collections import OrderedDict
 from lxml import etree
@@ -104,7 +103,7 @@ class LibvirtConfigObject(object):
         return xml_str
 
     @classmethod
-    def parse_on_off_str(self, value: ty.Optional[str]) -> bool:
+    def parse_on_off_str(self, value: str | None) -> bool:
         if value is not None and value not in ('on', 'off'):
             msg = _(
                 "Element should contain either 'on' or 'off'; "
@@ -828,8 +827,10 @@ class LibvirtConfigCPUFeature(LibvirtConfigObject):
 
         return ft
 
-    def __eq__(self, obj):
-        return obj.name == self.name
+    def __eq__(self, other):
+        if not isinstance(other, LibvirtConfigCPUFeature):
+            return False
+        return other.name == self.name
 
     def __ne__(self, obj):
         return obj.name != self.name
@@ -1360,8 +1361,12 @@ class LibvirtConfigGuestDisk(LibvirtConfigGuestDevice):
         self._format_iotune(dev)
 
         # Block size tuning
-        if (self.logical_block_size is not None or
-                self.physical_block_size is not None):
+        # NOTE(bug 2127196): Block size properties are not supported for
+        # device='lun' because QEMU's scsi-block driver does not support
+        # physical_block_size and logical_block_size properties.
+        if (self.source_device != 'lun' and
+                (self.logical_block_size is not None or
+                 self.physical_block_size is not None)):
 
             blockio = etree.Element("blockio")
             if self.logical_block_size is not None:
@@ -1913,6 +1918,7 @@ class LibvirtConfigGuestInterface(LibvirtConfigGuestDevice):
         self.device_addr = None
         self.mtu = None
         self.alias = None
+        self.managed = None
 
     def __eq__(self, other):
         if not isinstance(other, LibvirtConfigGuestInterface):
@@ -2019,7 +2025,11 @@ class LibvirtConfigGuestInterface(LibvirtConfigGuestDevice):
             dev.append(vlan_elem)
 
         if self.target_dev is not None:
-            dev.append(etree.Element("target", dev=self.target_dev))
+            if self.managed is not None:
+                dev.append(etree.Element("target", dev=self.target_dev,
+                                         managed=self.managed))
+            else:
+                dev.append(etree.Element("target", dev=self.target_dev))
 
         if self.vporttype is not None:
             vport = etree.Element("virtualport", type=self.vporttype)
@@ -2105,6 +2115,7 @@ class LibvirtConfigGuestInterface(LibvirtConfigGuestDevice):
                     self.source_dev = c.get('bridge')
             elif c.tag == 'target':
                 self.target_dev = c.get('dev')
+                self.managed = c.get('managed')
             elif c.tag == 'script':
                 self.script = c.get('path')
             elif c.tag == 'vlan':
@@ -2658,6 +2669,28 @@ class LibvirtConfigGuestCPUTuneEmulatorPin(LibvirtConfigObject):
         return root
 
 
+class LibvirtConfigGuestCPUTuneIOThreadPin(LibvirtConfigObject):
+
+    def __init__(self, **kwargs):
+        super(LibvirtConfigGuestCPUTuneIOThreadPin, self).__init__(
+            root_name="iothreadpin",
+            **kwargs)
+
+        self.cpuset = None
+        self.iothread = None
+
+    def format_dom(self):
+        root = super(LibvirtConfigGuestCPUTuneIOThreadPin, self).format_dom()
+
+        if self.cpuset is not None:
+            root.set("cpuset",
+                     hardware.format_cpu_spec(self.cpuset))
+        if self.iothread is not None:
+            root.set("iothread", str(self.iothread))
+
+        return root
+
+
 class LibvirtConfigGuestCPUTuneVCPUSched(LibvirtConfigObject):
 
     def __init__(self, **kwargs):
@@ -2693,6 +2726,7 @@ class LibvirtConfigGuestCPUTune(LibvirtConfigObject):
         self.period = None
         self.vcpupin = []
         self.emulatorpin = None
+        self.iothreadpin = []
         self.vcpusched = []
 
     def format_dom(self):
@@ -2707,6 +2741,11 @@ class LibvirtConfigGuestCPUTune(LibvirtConfigObject):
 
         if self.emulatorpin is not None:
             root.append(self.emulatorpin.format_dom())
+        # Only render <iothreadpin> if fully configured to avoid bug #2140537:
+        # libvirt requires 'iothread' attribute and non-empty 'cpuset'
+        for pin in self.iothreadpin:
+            if pin.iothread is not None and pin.cpuset:
+                root.append(pin.format_dom())
         for vcpu in self.vcpupin:
             root.append(vcpu.format_dom())
         for sched in self.vcpusched:
@@ -2870,6 +2909,11 @@ class LibvirtConfigGuestFeature(LibvirtConfigObject):
         super(LibvirtConfigGuestFeature, self).__init__(root_name=name,
                                                         **kwargs)
 
+    def __eq__(self, other):
+        if not isinstance(other, LibvirtConfigGuestFeature):
+            return False
+        return other.root_name == self.root_name
+
 
 class LibvirtConfigGuestFeatureACPI(LibvirtConfigGuestFeature):
 
@@ -2903,6 +2947,11 @@ class LibvirtConfigGuestFeatureSMM(LibvirtConfigGuestFeature):
 
     def __init__(self, **kwargs):
         super(LibvirtConfigGuestFeatureSMM, self).__init__("smm", **kwargs)
+        # NOTE(tkajinam): The smm feature also supports tseg sub-element, which
+        # has not set by nova or libvirt. Using the tseg option requires
+        # huge caution according to libvirt doc[1], so the option is
+        # intentionally left unimplemented now.
+        # [1] https://libvirt.org/formatdomain.html#hypervisor-features
 
     def format_dom(self):
         root = super(LibvirtConfigGuestFeatureSMM, self).format_dom()
@@ -3086,6 +3135,7 @@ class LibvirtConfigGuest(LibvirtConfigObject):
         self.cpuset = None
         self.cpu = None
         self.cputune = None
+        self.iothreads = None
         self.features = []
         self.clock = None
         self.sysinfo = None
@@ -3093,6 +3143,7 @@ class LibvirtConfigGuest(LibvirtConfigObject):
         self.os_loader = None
         self.os_firmware = None
         self.os_loader_type = None
+        self.os_loader_readonly = None
         self.os_loader_secure = None
         self.os_loader_stateless = None
         self.os_nvram = None
@@ -3146,6 +3197,14 @@ class LibvirtConfigGuest(LibvirtConfigObject):
 
         if self.os_firmware is not None:
             os.set("firmware", self.os_firmware)
+            if self.os_loader_secure is not None:
+                firmware = etree.Element("firmware")
+                sb_feature = etree.Element("feature")
+                sb_feature.set("name", "secure-boot")
+                sb_feature.set(
+                    "enabled", self.get_yes_no_str(self.os_loader_secure))
+                firmware.append(sb_feature)
+                os.append(firmware)
 
         type_node = self._text_node("type", self.os_type)
         if self.os_arch is not None:
@@ -3160,13 +3219,16 @@ class LibvirtConfigGuest(LibvirtConfigObject):
         if (
             self.os_loader is not None or
             self.os_loader_type is not None or
+            self.os_loader_readonly is not None or
             self.os_loader_secure is not None or
             self.os_loader_stateless is not None
         ):
             loader = self._text_node("loader", self.os_loader)
             if self.os_loader_type is not None:
                 loader.set("type", self.os_loader_type)
-                loader.set("readonly", "yes")
+            if self.os_loader_readonly is not None:
+                loader.set(
+                    "readonly", self.get_yes_no_str(self.os_loader_readonly))
             if self.os_loader_secure is not None:
                 loader.set(
                     "secure", self.get_yes_no_str(self.os_loader_secure))
@@ -3255,6 +3317,10 @@ class LibvirtConfigGuest(LibvirtConfigObject):
         self._format_os(root)
         self._format_features(root)
 
+        # Set 1 IO thread per VM for all instances.
+        if self.iothreads is not None:
+            root.append(self._text_node("iothreads", str(self.iothreads)))
+
         if self.cputune is not None:
             root.append(self.cputune.format_dom())
 
@@ -3302,8 +3368,16 @@ class LibvirtConfigGuest(LibvirtConfigObject):
                 self.os_kernel = c.text
             elif c.tag == 'loader':
                 self.os_loader = c.text
-                if c.get('type') == 'pflash':
-                    self.os_loader_type = 'pflash'
+                self.os_loader_type = c.get('type')
+                if c.get('readonly'):
+                    self.os_loader_readonly = (c.get('readonly') == 'yes')
+                if c.get('secure'):
+                    self.os_loader_secure = (c.get('secure') == 'yes')
+                if c.get('stateless'):
+                    self.os_loader_stateless = (c.get('stateless') == 'yes')
+            elif c.tag == 'nvram':
+                self.os_nvram = c.text
+                self.os_nvram_template = c.get('template')
             elif c.tag == 'initrd':
                 self.os_initrd = c.text
             elif c.tag == 'cmdline':
@@ -3323,6 +3397,7 @@ class LibvirtConfigGuest(LibvirtConfigObject):
     def parse_dom(self, xmldoc):
         self.virt_type = xmldoc.get('type')
         # Note: This cover only for: LibvirtConfigGuestDisks
+        #                            LibvirtConfigGuestFeatureSMM
         #                            LibvirtConfigGuestFilesys
         #                            LibvirtConfigGuestHostdevPCI
         #                            LibvirtConfigGuestHostdevMDEV
@@ -3384,6 +3459,12 @@ class LibvirtConfigGuest(LibvirtConfigObject):
                         self.add_perf_event(p.get('name'))
             elif c.tag == 'os':
                 self._parse_os(c)
+            elif c.tag == 'iothreads':
+                self.iothreads = int(c.text)
+            elif c.tag == 'features':
+                for f in c:
+                    if f.tag == 'smm' and f.get('state', 'on') == 'on':
+                        self.features.append(LibvirtConfigGuestFeatureSMM())
             else:
                 self._parse_basic_props(c)
 

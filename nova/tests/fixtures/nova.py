@@ -26,6 +26,7 @@ import logging as std_logging
 import os
 import sys
 import time
+import traceback
 from unittest import mock
 import warnings
 
@@ -420,7 +421,6 @@ class CellDatabases(fixtures.Fixture):
     def _cache_schema(self, connection_str):
         # NOTE(melwitt): See the regular Database fixture for why
         # we do this.
-        global DB_SCHEMA
         if not DB_SCHEMA[('main', None)]:
             ctxt_mgr = self._ctxt_mgrs[connection_str]
             engine = ctxt_mgr.writer.get_engine()
@@ -706,7 +706,6 @@ class Database(fixtures.Fixture):
         self.addCleanup(self.cleanup)
 
     def _apply_schema(self):
-        global DB_SCHEMA
         if not DB_SCHEMA[(self.database, self.version)]:
             # apply and cache schema
             engine = self.get_engine()
@@ -1199,12 +1198,18 @@ class IsolatedExecutorFixture(fixtures.Fixture):
         # Just safety that the previous testcase cleaned up after itself
         assert utils.SCATTER_GATHER_EXECUTOR is None
         assert utils.DEFAULT_EXECUTOR is None
+        assert utils.CACHE_IMAGES_EXECUTOR is None
+        assert utils.LONG_TASK_EXECUTOR is None
 
         origi_get_scatter_gather = utils.get_scatter_gather_executor
         origi_default_executor = utils._get_default_executor
+        origi_get_cache_images_executor = utils.get_cache_images_executor
+        origi_get_long_task_executor = utils.get_long_task_executor
 
         self.executor = None
         self.scatter_gather_executor = None
+        self.cache_images_executor = None
+        self.long_task_executor = None
 
         def _get_default_executor():
             self.executor = origi_default_executor()
@@ -1232,11 +1237,39 @@ class IsolatedExecutorFixture(fixtures.Fixture):
         self.addCleanup(
             lambda: self.do_cleanup_executor(self.scatter_gather_executor))
 
+        def _get_cache_images_executor():
+            self.cache_images_executor = origi_get_cache_images_executor()
+            self.cache_images_executor.name = (
+                f"{self.test_case_id}.cache_images")
+            return self.cache_images_executor
+
+        self.useFixture(fixtures.MonkeyPatch(
+            'nova.utils.get_cache_images_executor',
+            _get_cache_images_executor))
+
+        self.addCleanup(
+            lambda: self.do_cleanup_executor(self.cache_images_executor))
+
+        def _get_long_task_executor(max_workers):
+            self.long_task_executor = origi_get_long_task_executor(max_workers)
+            self.long_task_executor.name = (
+                f"{self.test_case_id}.long_task")
+            return self.long_task_executor
+
+        self.useFixture(fixtures.MonkeyPatch(
+            'nova.utils.get_long_task_executor',
+            _get_long_task_executor))
+
+        self.addCleanup(
+            lambda: self.do_cleanup_executor(self.long_task_executor))
+
         self.addCleanup(self.reset_globals)
 
     def reset_globals(self):
         utils.SCATTER_GATHER_EXECUTOR = None
         utils.DEFAULT_EXECUTOR = None
+        utils.CACHE_IMAGES_EXECUTOR = None
+        utils.LONG_TASK_EXECUTOR = None
 
     def do_cleanup_executor(self, executor):
         # NOTE(gibi): we cannot rely on utils.concurrency_mode_threading
@@ -1592,7 +1625,7 @@ class DownCellFixture(fixtures.Fixture):
                 ctxt.cell_uuid = cell_uuid
                 return multi_cell_list.RecordWrapper(ctxt, sort_ctx, thing)
 
-            if fn is multi_cell_list.query_wrapper:
+            if fn.__func__ is multi_cell_list.CrossCellLister.query_wrapper:
                 # If the function called through scatter-gather utility is the
                 # multi_cell_list.query_wrapper, we should wrap the exception
                 # object into the multi_cell_list.RecordWrapper. This is
@@ -2166,3 +2199,68 @@ class UnifiedLimitsFixture(fixtures.Fixture):
         pl.region_id = attrs.get('region_id')
         pl.service_id = attrs.get('service_id')
         self.limits_list.append(pl)
+
+
+class RPCPollerCleanupFixture(fixtures.Fixture):
+    def setUp(self):
+        super().setUp()
+        orig_start = (
+            messaging._drivers.base.PollStyleListenerAdapter.start)
+
+        def wrapped_start(_self, *args, **kwargs):
+            stack = "".join(traceback.format_stack())
+            self.addCleanup(lambda: self._check_listener_stopped(_self, stack))
+            return orig_start(_self, *args, **kwargs)
+
+        self.useFixture(
+            fixtures.MonkeyPatch(
+                'oslo_messaging._drivers.base.'
+                'PollStyleListenerAdapter.start',
+                wrapped_start))
+
+    @staticmethod
+    def _check_listener_stopped(
+        listener: messaging._drivers.base.PollStyleListenerAdapter,
+        stack: str,
+    ):
+        if listener._started:
+            raise RuntimeError(
+                'The test case leaked an active oslo_messaging poller thread. '
+                'This can lead to unexpected failures in later test case. '
+                'Please stop the RPC server or the nova.service.Service '
+                'instance in your test case e.g. by using '
+                'self.addCleanup(...). The test started the poller at the '
+                'following place:\n%s' % stack)
+
+
+class DelayingExecutorWrapperCleanupFixture(fixtures.Fixture):
+    def setUp(self):
+        super().setUp()
+
+        orig = utils.StaticallyDelayingCancellableTaskExecutorWrapper.__init__
+
+        def wrapped_init(executor_wrapper, delay, executor):
+            stack = "".join(traceback.format_stack())
+            self.addCleanup(
+                self._check_wrapper_stopped, executor_wrapper, stack)
+            orig(executor_wrapper, delay, executor)
+
+        self.useFixture(
+            fixtures.MonkeyPatch(
+                'nova.utils.StaticallyDelayingCancellableTaskExecutorWrapper.'
+                '__init__', wrapped_init))
+
+    @staticmethod
+    def _check_wrapper_stopped(
+        wrapper: utils.StaticallyDelayingCancellableTaskExecutorWrapper,
+        stack: str,
+    ):
+        if wrapper.is_alive:
+            raise RuntimeError(
+                'The test case leaked an active '
+                'nova.utils.StaticallyDelayingCancellableTaskExecutorWrapper'
+                'instance. This can lead to unexpected failures in later test '
+                'case. Please ensure that shutdown(wait=true) is called on '
+                'the wrapper before the end of the test case e.g. by using '
+                'self.addCleanup(...). The test instantiated the wrapper at '
+                'the following place:\n%s' % stack)

@@ -24,7 +24,6 @@ import inspect
 import time
 import typing as ty
 
-from keystoneauth1 import loading as ks_loading
 from neutronclient.common import exceptions as neutron_client_exc
 from neutronclient.v2_0 import client as clientv20
 from oslo_concurrency import lockutils
@@ -55,26 +54,15 @@ CONF = nova.conf.CONF
 
 LOG = logging.getLogger(__name__)
 
-_SESSION = None
-_ADMIN_AUTH = None
 
-
-def reset_state():
-    global _ADMIN_AUTH
-    global _SESSION
-
-    _ADMIN_AUTH = None
-    _SESSION = None
-
-
-def _load_auth_plugin(conf):
-    auth_plugin = ks_loading.load_auth_from_conf_options(conf,
-                                    nova.conf.neutron.NEUTRON_GROUP)
+def _load_auth_plugin():
+    auth_plugin = service_auth.get_service_auth_plugin(
+                nova.conf.neutron.NEUTRON_GROUP)
 
     if auth_plugin:
         return auth_plugin
 
-    if conf.neutron.auth_type is None:
+    if CONF.neutron.auth_type is None:
         # If we're coming in through a REST API call for something like
         # creating a server, the end user is going to get a 500 response
         # which is accurate since the system is mis-configured, but we should
@@ -84,7 +72,7 @@ def _load_auth_plugin(conf):
                   'service endpoint. See the networking service install guide '
                   'for details: '
                   'https://docs.openstack.org/neutron/latest/install/')
-    err_msg = _('Unknown auth type: %s') % conf.neutron.auth_type
+    err_msg = _('Unknown auth type: %s') % CONF.neutron.auth_type
     raise neutron_client_exc.Unauthorized(message=err_msg)
 
 
@@ -223,33 +211,24 @@ def _get_auth_plugin(context, admin=False):
     # neutron admin tenant credentials if it is an admin context.  This is to
     # support some services (metadata API) where an admin context is used
     # without an auth token.
-    global _ADMIN_AUTH
     user_auth = None
     if admin or (context.is_admin and not context.auth_token):
-        if not _ADMIN_AUTH:
-            _ADMIN_AUTH = _load_auth_plugin(CONF)
-        user_auth = _ADMIN_AUTH
+        user_auth = _load_auth_plugin()
 
     if context.auth_token or user_auth:
         # When user_auth = None, user_auth will be extracted from the context.
-        return service_auth.get_auth_plugin(context, user_auth=user_auth)
+        return service_auth.get_service_user_token_auth_plugin(
+                context, user_auth=user_auth)
 
     # We did not get a user token and we should not be using
     # an admin token so log an error
     raise exception.Unauthorized()
 
 
-def _get_session():
-    global _SESSION
-    if not _SESSION:
-        _SESSION = ks_loading.load_session_from_conf_options(
-            CONF, nova.conf.neutron.NEUTRON_GROUP)
-    return _SESSION
-
-
 def get_client(context, admin=False):
     auth_plugin = _get_auth_plugin(context, admin=admin)
-    session = _get_session()
+    session = service_auth.get_service_auth_session(
+            nova.conf.neutron.NEUTRON_GROUP)
     client_args = dict(session=session,
                        auth=auth_plugin,
                        global_request_id=context.global_id,
@@ -645,14 +624,14 @@ class API:
 
         # it is a dict of network dicts as returned by the neutron client keyed
         # by network UUID
-        networks: ty.Dict[str, ty.Dict] = {}
+        networks: dict[str, dict] = {}
         for port_id in ports:
             # A port_id is optional in the NetworkRequest object so check here
             # in case the caller forgot to filter the list.
             if port_id is None:
                 continue
 
-            port_req_body: ty.Dict[str, ty.Any] = {
+            port_req_body: dict[str, ty.Any] = {
                 'port': {
                     constants.BINDING_HOST_ID: None,
                 }
@@ -1120,8 +1099,8 @@ class API:
         self,
         context: nova_context.RequestContext,
         port_id: str,
-        resource_provider_mapping: ty.Dict[str, ty.List[str]],
-    ) -> ty.Union[None, str, ty.Dict[str, str]]:
+        resource_provider_mapping: dict[str, list[str]],
+    ) -> None | str | dict[str, str]:
         """Calculate the value of the allocation key of the binding:profile
         based on the allocated resources.
 
@@ -1579,7 +1558,7 @@ class API:
 
         client = get_client(context, admin=True)
 
-        bindings_by_port_id: ty.Dict[str, ty.Any] = {}
+        bindings_by_port_id: dict[str, ty.Any] = {}
         for vif in network_info:
             # Now bind each port to the destination host and keep track of each
             # port that is bound to the resulting binding so we can rollback in
@@ -1650,7 +1629,7 @@ class API:
         need to do the necessary plumbing in order to set a VF up for packet
         forwarding.
         """
-        vf_profile: ty.Dict[str, ty.Union[str, int]] = {}
+        vf_profile: dict[str, str | int] = {}
 
         pf_mac = pci_dev.sriov_cap.get('pf_mac_address')
         vf_num = pci_dev.sriov_cap.get('vf_num')
@@ -1919,7 +1898,7 @@ class API:
         # only
         neutron_admin = get_client(context, admin=True)
         neutron = get_client(context)
-        port_allocation: ty.Dict = {}
+        port_allocation: dict = {}
         try:
             # NOTE(gibi): we need to read the port resource information from
             # neutron here as we might delete the port below
@@ -2652,8 +2631,8 @@ class API:
         self,
         context: nova_context.RequestContext,
         instance_uuid: str
-    ) -> ty.Tuple[
-            ty.List['objects.RequestGroup'], 'objects.RequestLevelParams']:
+    ) -> tuple[
+            list['objects.RequestGroup'], 'objects.RequestLevelParams']:
         """Collect resource requests from the ports associated to the instance
 
         :param context: nova request context
@@ -3945,7 +3924,7 @@ class API:
         self,
         context: nova.context.RequestContext,
         network_id: str,
-    ) -> ty.List[str]:
+    ) -> list[str]:
         """Query the segmentation ids for the given network.
 
         :param context: The request context.
@@ -3976,7 +3955,7 @@ class API:
         self,
         context: nova.context.RequestContext,
         subnet_id: str,
-    ) -> ty.Optional[str]:
+    ) -> str | None:
         """Query the segmentation id for the given subnet.
 
         :param context: The request context.

@@ -15,13 +15,14 @@
 """Handles database requests from other nova services."""
 
 import collections
+import concurrent.futures
 import contextlib
 import copy
 import functools
 import sys
-import typing as ty
+import threading
+import time
 
-import futurist
 from keystoneauth1 import exceptions as ks_exc
 from oslo_config import cfg
 from oslo_db import exception as db_exc
@@ -202,6 +203,28 @@ class ConductorManager(manager.Manager):
     def reset(self):
         objects.Service.clear_min_version_cache()
 
+    def graceful_shutdown(self):
+        """Gracefully shutdown the manager.
+
+        This will be called during graceful shutdown (SIGTERM) and manager
+        should transit the in-progress tasks to safe termination point. The
+        safe termination point can be either complete or abort them.
+        """
+        # TODO(gmaan) Time based wait is temporary solution and it will be
+        # replaced by the better solution to finish in-progress tasks.
+        if CONF.manager_shutdown_timeout > CONF.graceful_shutdown_timeout:
+            LOG.warning('manager_shutdown_timeout (%s) is higher than '
+                        'graceful_shutdown_timeout (%s); the service may be '
+                        'killed before the manager finishes waiting.',
+                        CONF.manager_shutdown_timeout,
+                        CONF.graceful_shutdown_timeout)
+            sleep_time = max(0, CONF.graceful_shutdown_timeout - 10)
+        else:
+            sleep_time = CONF.manager_shutdown_timeout
+        LOG.debug('Conductor service manager is waiting for %s seconds to '
+                  'finish in-progress tasks', sleep_time)
+        time.sleep(sleep_time)
+
 
 @contextlib.contextmanager
 def try_target_cell(context, cell):
@@ -237,7 +260,7 @@ class ComputeTaskManager:
     may involve coordinating activities on multiple compute nodes.
     """
 
-    target = messaging.Target(namespace='compute_task', version='1.25')
+    target = messaging.Target(namespace='compute_task', version='1.26')
 
     def __init__(self):
         self.compute_rpcapi = compute_rpcapi.ComputeAPI()
@@ -978,8 +1001,8 @@ class ComputeTaskManager:
         flavor: 'objects.Flavor',
         request_spec: 'objects.RequestSpec',
         orig_num_req: int,
-        project_id: ty.Optional[str] = None,
-        user_id: ty.Optional[str] = None
+        project_id: str | None = None,
+        user_id: str | None = None
     ) -> None:
         # A quota "recheck" is a quota check that is performed *after* quota
         # limited resources are consumed. It is meant to address race
@@ -2062,7 +2085,7 @@ class ComputeTaskManager:
                           the host list
         :param image_id: The IDs of the image to cache
         """
-
+        local_lock = threading.Lock()
         # TODO(mriedem): Consider including the list of images in the
         # notification payload.
         compute_utils.notify_about_aggregate_action(
@@ -2071,8 +2094,8 @@ class ComputeTaskManager:
             fields.NotificationPhase.START)
 
         clock = timeutils.StopWatch()
-        threads = CONF.image_cache.precache_concurrency
-        fetch_executor = futurist.GreenThreadPoolExecutor(max_workers=threads)
+        cache_image_executor = utils.get_cache_images_executor()
+        futures = []
 
         hosts_by_cell = {}
         cells_by_uuid = {}
@@ -2099,24 +2122,24 @@ class ComputeTaskManager:
         }
 
         def host_completed(context, host, result):
-            for image_id, status in result.items():
-                cached, existing, error, unsupported = stats[image_id]
-                if status == 'error':
-                    failed_images[image_id] += 1
-                    error += 1
-                elif status == 'cached':
-                    cached += 1
-                elif status == 'existing':
-                    existing += 1
-                elif status == 'unsupported':
-                    unsupported += 1
-                stats[image_id] = (cached, existing, error, unsupported)
+            with local_lock:
+                for image_id, status in result.items():
+                    cached, existing, error, unsupported = stats[image_id]
+                    if status == 'error':
+                        failed_images[image_id] += 1
+                        error += 1
+                    elif status == 'cached':
+                        cached += 1
+                    elif status == 'existing':
+                        existing += 1
+                    elif status == 'unsupported':
+                        unsupported += 1
+                    stats[image_id] = (cached, existing, error, unsupported)
 
             host_stats['completed'] += 1
-            compute_utils.notify_about_aggregate_cache(context, aggregate,
-                                                       host, result,
-                                                       host_stats['completed'],
-                                                       host_stats['total'])
+            compute_utils.notify_about_aggregate_cache(
+                context, aggregate, host, result,
+                host_stats['completed'], host_stats['total'])
 
         def wrap_cache_images(ctxt, host, image_ids):
             result = self.compute_rpcapi.cache_images(
@@ -2143,11 +2166,12 @@ class ComputeTaskManager:
                             {'host': host})
                         skipped_host(target_ctxt, host, image_ids)
                         continue
-                    utils.spawn_on(fetch_executor, wrap_cache_images,
-                                   target_ctxt, host, image_ids)
-
+                    future = utils.spawn_on(cache_image_executor,
+                                    wrap_cache_images,
+                                    target_ctxt, host, image_ids)
+                    futures.append(future)
         # Wait until all those things finish
-        fetch_executor.shutdown(wait=True)
+        concurrent.futures.wait(futures)
 
         overall_stats = {'cached': 0, 'existing': 0, 'error': 0,
                          'unsupported': 0}
@@ -2216,3 +2240,62 @@ class ComputeTaskManager:
         task = cross_cell_migrate.RevertResizeTask(
             context, instance, migration, self.notifier, self.compute_rpcapi)
         task.execute()
+
+    def _create_volume_bdm(self, context, instance, device, volume,
+                           disk_bus, device_type, tag=None,
+                           delete_on_termination=False):
+        volume_id = volume['id']
+        # NOTE(vish): This is done on the compute host because we want
+        #             to avoid a race where two devices are requested at
+        #             the same time. When db access is removed from
+        #             compute, the bdm will be created here and we will
+        #             have to make sure that they are assigned atomically.
+        volume_bdm = self.compute_rpcapi.reserve_block_device_name(
+            context, instance, device, volume_id, disk_bus=disk_bus,
+            device_type=device_type, tag=tag,
+            multiattach=volume['multiattach'])
+        volume_bdm.delete_on_termination = delete_on_termination
+        volume_bdm.save()
+        return volume_bdm
+
+    @targets_cell
+    def attach_volume(self, context, instance, volume, device, disk_bus,
+            device_type, tag=None, supports_multiattach=False,
+            delete_on_termination=False):
+        """Attach an existing volume to an existing instance.
+
+        This method lives in conductor so it can do the synchronous call to
+        compute for reserving a block-device mapping instead of having nova-api
+        do it starting with API version 2.101.
+        """
+        try:
+            volume_bdm = self._create_volume_bdm(
+                context, instance, device, volume, disk_bus=disk_bus,
+                device_type=device_type, tag=tag,
+                delete_on_termination=delete_on_termination)
+        except messaging.exceptions.MessagingTimeout:
+            # The compute node might have already created the attachment but
+            # we never received the answer. In this case it is safe to delete
+            # the attachment as nobody will ever pick it up again.
+            with excutils.save_and_reraise_exception():
+                try:
+                    objects.BlockDeviceMapping.get_by_volume_and_instance(
+                        context, volume['id'], instance.uuid).destroy()
+                    LOG.debug("Delete BDM after compute did not respond to "
+                              f"attachment request for volume {volume['id']}")
+                except exception.VolumeBDMNotFound:
+                    LOG.debug("BDM not found, ignoring removal. "
+                              f"Error attaching volume {volume['id']}")
+        try:
+            compute_utils.check_attach_and_reserve_volume(
+                context, self.volume_api, volume, instance, volume_bdm,
+                supports_multiattach)
+            objects.InstanceAction.action_start(
+                context, instance.uuid, instance_actions.ATTACH_VOLUME,
+                want_result=False)
+            self.compute_rpcapi.attach_volume(context, instance, volume_bdm)
+        except Exception:
+            with excutils.save_and_reraise_exception():
+                volume_bdm.destroy()
+
+        return volume_bdm.device_name
