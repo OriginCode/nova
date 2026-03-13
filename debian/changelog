@@ -4,6 +4,9 @@ nova (2:33.0.0~rc1-1) experimental; urgency=medium
   * Add pybuild-plugin-pyproject as build-depends
   * Removed --format when building the policy yaml file.
   * Fixed (build-)depends for this release.
+  * Use openstack-pkg-tools to configure TimeoutStopSec to 185, so that it is
+    higher than [DEFAULT]/graceful_shutdown_timeout in nova.conf. Affected
+    services are: -scheduler, -compute and -conductor.
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 13 Mar 2026 11:38:59 +0100
 
