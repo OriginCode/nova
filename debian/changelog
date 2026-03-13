@@ -1,3 +1,10 @@
+nova (2:33.0.0~rc1-3) experimental; urgency=medium
+
+  * Blacklist all of virt.vmwareapi.* tests, as they get stuck, and I don't
+    care about VMWare.
+
+ -- Thomas Goirand <zigo@debian.org>  Fri, 13 Mar 2026 15:39:49 +0100
+
 nova (2:33.0.0~rc1-2) experimental; urgency=medium
 
   * Relax openstack-pkg-tools version in build-depends to allow backports.
