@@ -9,6 +9,7 @@ nova (2:33.0.0~rc1-1) experimental; urgency=medium
     services are: -scheduler, -compute and -conductor.
   * Remove patch applied upstream:
     - Fix-test_simple_tenant_usage-test.patch
+    - fix-test_validate_volume_mount_not_working.patch
   * Refreshed patch:
     - fix-failing-timebased-tests.patch
 
