@@ -2,6 +2,7 @@ nova (2:33.0.0~rc1-3) experimental; urgency=medium
 
   * Blacklist all of virt.vmwareapi.* tests, as they get stuck, and I don't
     care about VMWare.
+  * Blacklist all of virt.zvm too.
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 13 Mar 2026 15:39:49 +0100
 
