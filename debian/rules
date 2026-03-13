@@ -4,6 +4,8 @@ include /usr/share/openstack-pkg-tools/pkgos.make
 
 NOVA_CONF=$(CURDIR)/debian/nova-common/usr/share/nova-common/nova.conf
 
+export OS_NOVA_DISABLE_EVENTLET_PATCHING=false
+
 %:
 	dh $@ --buildsystem=pybuild --with python3,sphinxdoc
 

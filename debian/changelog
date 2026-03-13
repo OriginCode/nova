@@ -13,6 +13,8 @@ nova (2:33.0.0~rc1-1) experimental; urgency=medium
     - cve-2026-24708-make-disk.extend-pass-format-to-qemu-img-2025.2.patch
   * Refreshed patch:
     - fix-failing-timebased-tests.patch
+  * d/rules export OS_NOVA_DISABLE_EVENTLET_PATCHING=false to avoid failure
+    during unit testing.
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 13 Mar 2026 11:38:59 +0100
 
