@@ -101,7 +101,6 @@ endif
 	mkdir -p $(CURDIR)/debian/nova-common/etc/nova/policy.d
 	PYTHONPATH=$(CURDIR)/debian/tmp/usr/lib/python3/dist-packages oslopolicy-sample-generator \
 		--output-file=$(CURDIR)/debian/nova-common/etc/nova/policy.d/00_default_policy.yaml \
-		--format yaml \
 		--namespace nova
 
 	# Comment out deprecated policies, otherwise, Nova doesn't work
