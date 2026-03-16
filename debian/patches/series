@@ -1,6 +1,5 @@
 Install-missed-files.patch
 remove-svg-converter-from-doc-conf.py.patch
-Add-a-healtcheck-url.patch
 #fix-fake_get_by_flavor_id.patch
 fix-exception.NovaException.patch
 fix-failing-timebased-tests.patch
