@@ -1,6 +1,8 @@
 nova (2:33.0.0~rc1-4) experimental; urgency=medium
 
   * Fixed UWSGI_INI_APP in api and api-metadata init scripts.
+  * Blacklist non-deterministic test:
+    - RevertResizeTaskTestCase.test_update_source_obj_from_target_cell
 
  -- Thomas Goirand <zigo@debian.org>  Wed, 18 Mar 2026 11:07:28 +0100
 
