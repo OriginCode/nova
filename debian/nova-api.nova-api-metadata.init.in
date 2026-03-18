@@ -20,3 +20,4 @@ NAME=${PROJECT_NAME}-api-metadata
 UWSGI_PORT=8775
 UWSGI_INI_PATH=/etc/nova/nova-api-metadata-uwsgi.ini
 UWSGI_INI_APP=/usr/bin/nova-api-wsgi
+UWSGI_INI_APP=/usr/lib/python3/dist-packages/nova/wsgi/metadata.py

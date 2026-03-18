@@ -19,4 +19,4 @@ PROJECT_NAME=nova
 NAME=${PROJECT_NAME}-api
 UWSGI_PORT=8774
 UWSGI_INI_PATH=/etc/nova/nova-api-uwsgi.ini
-UWSGI_INI_APP=/usr/bin/nova-api-wsgi
+UWSGI_INI_APP=/usr/lib/python3/dist-packages/nova/wsgi/osapi_compute.py
