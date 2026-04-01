@@ -1,3 +1,9 @@
+nova (2:33.0.0-1) unstable; urgency=medium
+
+  * New upstream release.
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 01 Apr 2026 14:37:26 +0200
+
 nova (2:33.0.0~rc1-5) unstable; urgency=medium
 
   * Uploading to unstable.
