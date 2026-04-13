@@ -1,3 +1,9 @@
+nova (2:33.0.0-4) unstable; urgency=medium
+
+  * Fix "su" usage (parameters order).
+
+ -- Thomas Goirand <zigo@debian.org>  Mon, 13 Apr 2026 11:48:24 +0200
+
 nova (2:33.0.0-3) unstable; urgency=medium
 
   * Blacklist 4 more unit tests in build and autopkgtest (Closes: #1132505).

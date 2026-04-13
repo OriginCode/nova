@@ -134,7 +134,7 @@ run_db_sync (){
 	pkgos_inifile get ${NOVA_CONF} api_database connection
 	if echo ${RET} | egrep 'mysql(\+pymysql)?:.*:.*@.*\/.*' > /dev/null; then
 		echo "===> nova-common: Now running \"nova-manage db sync\", this may take a while..."
-		su nova -s /bin/sh -c "nova-manage db sync" || true
+		su -s /bin/sh -c "nova-manage db sync" nova || true
 	else
 		echo "===> nova-common: \"nova-manage db sync\" needs api_database.connection set. Sorry."
 	fi
