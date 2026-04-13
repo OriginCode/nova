@@ -1,6 +1,8 @@
 nova (2:33.0.0-4) unstable; urgency=medium
 
   * Fix "su" usage (parameters order).
+  * Blacklist test_setup_service_pci_alias_validation that needs SQL
+    connection.
 
  -- Thomas Goirand <zigo@debian.org>  Mon, 13 Apr 2026 11:48:24 +0200
 
