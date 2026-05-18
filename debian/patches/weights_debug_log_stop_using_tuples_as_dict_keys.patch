@@ -1,0 +1,80 @@
+Author: Artom Lifshitz <alifshit@redhat.com>
+Date: Tue, 19 Dec 2023 22:40:48 -0500
+Description: weights debug log: stop using tuples as dict keys
+ While Python supports using tuples as dict keys, json.dumps() (which
+ is what oslo_serialization.jsonutils.dumps() calls under the hood)
+ does not. Stop using tuples as keys in our weight debug log.
+Change-Id: Ieaaa11bd78bf479c968ccbe614d1c42525b74bd6
+Bug: https://launchpad.net/bugs/2028518
+Origin: https://review.opendev.org/c/openstack/nova/+/904060
+Last-Update: 2026-05-18
+
+diff --git a/nova/weights.py b/nova/weights.py
+index 75d51dc..7983a90 100644
+--- a/nova/weights.py
++++ b/nova/weights.py
+@@ -20,6 +20,7 @@
+ import abc
+ 
+ from oslo_log import log as logging
++from oslo_serialization import jsonutils
+ 
+ from nova import loadables
+ 
+@@ -130,27 +131,32 @@
+         if len(weighed_objs) <= 1:
+             return weighed_objs
+ 
++        def get_log_string(weighed_objs, weights):
++            return {
++                'Host %s node %s' % (obj.obj.host, obj.obj.nodename): weight
++                for obj, weight in zip(weighed_objs, weights)
++            }
++
+         for weigher in weighers:
+             weights = weigher.weigh_objects(weighed_objs, weighing_properties)
+ 
+-            LOG.debug(
+-                "%s: raw weights %s",
+-                weigher.__class__.__name__,
+-                {(obj.obj.host, obj.obj.nodename): weight
+-                 for obj, weight in zip(weighed_objs, weights)}
+-            )
++            # NOTE(artom) This is a sentinel to make sure we don't repeat bug
++            # 2028518. By sending the log string directly to jsonutils.dumps(),
++            # we avoid hiding buggy code behind LOG.debug.
++            jsonutils.dumps(get_log_string(weighed_objs, weights))
++
++            LOG.debug("%s: raw weights %s",
++                      weigher.__class__.__name__, get_log_string(weighed_objs,
++                                                                 weights))
+ 
+             # Normalize the weights
+             weights = list(
+                 normalize(
+                     weights, minval=weigher.minval, maxval=weigher.maxval))
+ 
+-            LOG.debug(
+-                "%s: normalized weights %s",
+-                weigher.__class__.__name__,
+-                {(obj.obj.host, obj.obj.nodename): weight
+-                 for obj, weight in zip(weighed_objs, weights)}
+-            )
++            LOG.debug("%s: normalized weights %s",
++                      weigher.__class__.__name__, get_log_string(weighed_objs,
++                                                                 weights))
+ 
+             log_data = {}
+ 
+@@ -160,8 +166,9 @@
+                 weigher_score = multiplier * weight
+                 obj.weight += weigher_score
+ 
+-                log_data[(obj.obj.host, obj.obj.nodename)] = (
+-                    f"{multiplier} * {weight}")
++                log_data[
++                    'Host %s node %s' % (obj.obj.host, obj.obj.nodename)
++                ] = f"{multiplier} * {weight}"
+ 
+             LOG.debug(
+                 "%s: score (multiplier * weight) %s",

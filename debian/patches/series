@@ -4,3 +4,4 @@ remove-svg-converter-from-doc-conf.py.patch
 fix-exception.NovaException.patch
 fix-failing-timebased-tests.patch
 testtools-2.8.2-TestMatchersInterface-is-removed.patch
+weights_debug_log_stop_using_tuples_as_dict_keys.patch
