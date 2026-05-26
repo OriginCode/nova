@@ -1,3 +1,10 @@
+nova (2:33.0.1-3) unstable; urgency=medium
+
+  * Add
+    Retrieve_the_image_metadata_from_instance.image_meta_during_resize.patch.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 26 May 2026 12:12:35 +0200
+
 nova (2:33.0.1-2) unstable; urgency=medium
 
   * Add weights_debug_log_stop_using_tuples_as_dict_keys.patch.

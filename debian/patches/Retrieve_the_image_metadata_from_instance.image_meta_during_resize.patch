@@ -1,0 +1,224 @@
+Author: Masanori Kuroha <mkuroha@lycorp.co.jp>
+Date: Tue, 03 Dec 2024 10:35:42 +0900
+Description: Retrieve the image metadata from instance.image_meta during resize
+ In the current process, image metadata is obtained from `request_spec`
+ during resize or migrate, retaining the values from when the instance
+ was initially launched. As a result, if the image metadata is updated
+ and the instance is rebuilt, the latest values are not retrieved from
+ `request_spec`. This patch addresses this issue.
+ Additionally, it also resolves the following problem:
+  Changing the `hw_machine_type` of an image from None to a specific
+ value and rebuilding the instance causes the `image_hw_machine_type`
+ in `instance_system_metadata` to revert to its default value during
+ resize/migrate.
+Bug: https://launchpad.net/bugs/2088949
+Change-Id: Ia9e08157781b8498edd482fd1823bae2bd96a208
+Origin: upstream, https://review.opendev.org/c/openstack/nova/+/936910
+Last-Update: 2026-05-26
+
+Index: nova/nova/compute/rpcapi.py
+===================================================================
+--- nova.orig/nova/compute/rpcapi.py
++++ nova/nova/compute/rpcapi.py
+@@ -1054,9 +1054,6 @@ class ComputeAPI(object):
+                     migration, request_spec, filter_properties, node,
+                     clean_shutdown, host_list):
+         version = '6.0'
+-        # TODO(mriedem): We should pass the ImageMeta object through to the
+-        # compute but that also requires plumbing changes through the resize
+-        # flow for other methods like resize_instance and finish_resize.
+         image_p = objects_base.obj_to_primitive(image)
+         msg_args = {'instance': instance,
+                     'flavor': flavor,
+Index: nova/nova/conductor/tasks/migrate.py
+===================================================================
+--- nova.orig/nova/conductor/tasks/migrate.py
++++ nova/nova/conductor/tasks/migrate.py
+@@ -327,12 +327,7 @@ class MigrationTask(base.TaskBase):
+                   self.host_list, instance=self.instance)
+         # RPC cast to the destination host to start the migration process.
+         self.compute_rpcapi.prep_resize(
+-            # NOTE(mriedem): Using request_spec.image here is potentially
+-            # dangerous if it is not kept up to date (i.e. rebuild/unshelve);
+-            # seems like the sane thing to do would be to pass the current
+-            # instance.image_meta since that is what MoveClaim will use for
+-            # any NUMA topology claims on the destination host...
+-            self.context, self.instance, self.request_spec.image,
++            self.context, self.instance, self.instance.image_meta,
+             self.flavor, host, migration,
+             request_spec=self.request_spec, filter_properties=legacy_props,
+             node=node, clean_shutdown=self.clean_shutdown,
+Index: nova/nova/tests/functional/regressions/test_bug_2088949.py
+===================================================================
+--- /dev/null
++++ nova/nova/tests/functional/regressions/test_bug_2088949.py
+@@ -0,0 +1,70 @@
++# Licensed under the Apache License, Version 2.0 (the "License"); you may
++# not use this file except in compliance with the License. You may obtain
++# a copy of the License at
++#
++#      http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++# License for the specific language governing permissions and limitations
++# under the License.
++
++from unittest import mock
++
++from nova import context as nova_context
++from nova import objects
++from nova.tests.functional.libvirt import base as libvirt_base
++
++
++class TestImageMetaConsistency(libvirt_base.ServersTestBase):
++    """Regression test for bug #2088949
++    """
++
++    def setUp(self):
++        super().setUp()
++        self.ctxt = nova_context.get_admin_context()
++
++        self.start_compute(hostname='host1')
++        self.start_compute(hostname='host2')
++
++    @mock.patch('nova.virt.libvirt.driver.LibvirtDriver.'
++                'migrate_disk_and_power_off', return_value='{}')
++    @mock.patch('nova.virt.libvirt.utils.get_default_machine_type')
++    def test_resize_after_updating_image_meta(self, mock_get_machine_type, _):
++        # Set the default value of hw_machine_type to 'q35'
++        default_hw_machine_type = 'q35'
++        mock_get_machine_type.return_value = default_hw_machine_type
++
++        # Create a server
++        flavor_id = self._create_flavor(vcpu=1)
++        image_metadata = {}
++        image = self._create_image(image_metadata)
++        server = self._create_server(flavor_id=flavor_id,
++                                     image_uuid=image['id'],
++                                     networks=[])
++
++        instance = objects.Instance.get_by_uuid(self.ctxt, server['id'])
++        self.assertEqual(instance.system_metadata.get('image_hw_machine_type'),
++                         default_hw_machine_type)
++
++        # Set hw_machine_type of the image to 'pc', which is different
++        # from `default_hw_machine_type`.
++        updated_hw_machine_type = 'pc'
++        update_image_metadata = {'hw_machine_type': updated_hw_machine_type}
++        image['properties'].update(update_image_metadata)
++
++        # Rebuild a server by the updated image
++        server = self._rebuild_server(server, image['id'])
++        instance = objects.Instance.get_by_uuid(self.ctxt, server['id'])
++        self.assertEqual(instance.system_metadata.get('image_hw_machine_type'),
++                         updated_hw_machine_type)
++
++        # Resize a server
++        resize_flavor_id = self._create_flavor(vcpu=2)
++        server = self._resize_server(server, resize_flavor_id)
++        instance = objects.Instance.get_by_uuid(self.ctxt, server['id'])
++        # Ensure that instance.system_metadata remains
++        # `updated_hw_machine_type` after resize.
++        self.assertEqual(instance.system_metadata.get('image_hw_machine_type'),
++                         updated_hw_machine_type)
+Index: nova/nova/tests/unit/conductor/tasks/test_migrate.py
+===================================================================
+--- nova.orig/nova/tests/unit/conductor/tasks/test_migrate.py
++++ nova/nova/tests/unit/conductor/tasks/test_migrate.py
+@@ -42,7 +42,7 @@ class MigrationTaskTestCase(test.NoDBTes
+         self.flavor = fake_flavor.fake_flavor_obj(self.context)
+         self.flavor.extra_specs = {'extra_specs': 'fake'}
+         inst = fake_instance.fake_db_instance(
+-            image_ref='image_ref', flavor=self.flavor)
++            image_ref=uuids.image_ref, flavor=self.flavor)
+         inst_object = objects.Instance(
+             flavor=self.flavor,
+             numa_topology=None,
+@@ -80,6 +80,7 @@ class MigrationTaskTestCase(test.NoDBTes
+ 
+     @mock.patch.object(objects.MigrationList, 'get_by_filters')
+     @mock.patch('nova.scheduler.client.report.SchedulerReportClient')
++    @mock.patch('nova.objects.Instance.image_meta')
+     @mock.patch('nova.objects.ComputeNode.get_by_host_and_nodename')
+     @mock.patch('nova.objects.Migration.save')
+     @mock.patch('nova.objects.Migration.create')
+@@ -92,10 +93,12 @@ class MigrationTaskTestCase(test.NoDBTes
+                 'CrossCellMigrationTask.execute')
+     def _test_execute(self, cross_cell_exec_mock, prep_resize_mock,
+                       sel_dest_mock, sig_mock, az_mock, gmv_mock, cm_mock,
+-                      sm_mock, cn_mock, rc_mock, gbf_mock,
++                      sm_mock, cn_mock, im_mock, rc_mock, gbf_mock,
+                       requested_destination=False, same_cell=True):
+         sel_dest_mock.return_value = self.host_lists
+         az_mock.return_value = 'myaz'
++        im_mock.return_value = objects.ImageMeta.from_dict(
++            {'id': uuids.image_ref})
+         gbf_mock.return_value = objects.MigrationList()
+         mock_get_resources = \
+             self.mock_network_api.get_requested_resource_for_instance
+@@ -142,7 +145,7 @@ class MigrationTaskTestCase(test.NoDBTes
+ 
+         if same_cell:
+             prep_resize_mock.assert_called_once_with(
+-                self.context, self.instance, self.request_spec.image,
++                self.context, self.instance, self.instance.image_meta,
+                 self.flavor, selection.service_host, task._migration,
+                 request_spec=self.request_spec,
+                 filter_properties=self.filter_properties,
+Index: nova/nova/tests/unit/conductor/test_conductor.py
+===================================================================
+--- nova.orig/nova/tests/unit/conductor/test_conductor.py
++++ nova/nova/tests/unit/conductor/test_conductor.py
+@@ -3953,7 +3953,7 @@ class ConductorTaskTestCase(_BaseTaskTes
+     @mock.patch.object(objects.InstanceMapping, 'get_by_instance_uuid')
+     @mock.patch.object(scheduler_utils, 'setup_instance_group')
+     @mock.patch.object(objects.RequestSpec, 'from_components')
+-    @mock.patch.object(utils, 'get_image_from_system_metadata')
++    @mock.patch.object(objects.Instance, 'image_meta')
+     @mock.patch.object(query.SchedulerQueryClient, 'select_destinations')
+     @mock.patch.object(conductor_manager.ComputeTaskManager,
+                        '_set_vm_state_and_notify')
+@@ -3962,7 +3962,7 @@ class ConductorTaskTestCase(_BaseTaskTes
+     @mock.patch.object(migrate.MigrationTask, '_preallocate_migration')
+     def test_cold_migrate_exception_host_in_error_state_and_raise(
+             self, _preallocate_migration, prep_resize_mock, rollback_mock,
+-            notify_mock, select_dest_mock, metadata_mock, spec_fc_mock,
++            notify_mock, select_dest_mock, image_meta_mock, spec_fc_mock,
+             sig_mock, im_mock, check_cell_mock):
+         inst_obj = objects.Instance(
+             image_ref='fake-image_ref',
+@@ -3976,7 +3976,8 @@ class ConductorTaskTestCase(_BaseTaskTes
+             pci_requests=None,
+             numa_topology=None,
+             project_id=self.context.project_id)
+-        image = 'fake-image'
++        image_meta_mock.return_value = objects.ImageMeta.from_dict(
++            {'id': uuids.image_ref})
+         fake_spec = objects.RequestSpec(image=objects.ImageMeta())
+         spec_fc_mock.return_value = fake_spec
+ 
+@@ -3985,7 +3986,6 @@ class ConductorTaskTestCase(_BaseTaskTes
+                                                          uuids.cell1))
+ 
+         hosts = [dict(host='host1', nodename='node1', limits={})]
+-        metadata_mock.return_value = image
+         exc_info = test.TestingException('something happened')
+         select_dest_mock.return_value = [[fake_selection1]]
+ 
+@@ -4004,13 +4004,12 @@ class ConductorTaskTestCase(_BaseTaskTes
+                                          'hosts': [['host1', 'node1']]},
+                                'limits': {}}
+ 
+-        metadata_mock.assert_called_with({})
+         sig_mock.assert_called_once_with(self.context, fake_spec)
+         self.assertEqual(inst_obj.project_id, fake_spec.project_id)
+         select_dest_mock.assert_called_once_with(self.context, fake_spec,
+                 [inst_obj.uuid], return_objects=True, return_alternates=True)
+         prep_resize_mock.assert_called_once_with(
+-            self.context, inst_obj, fake_spec.image,
++            self.context, inst_obj, inst_obj.image_meta,
+             self.flavor, hosts[0]['host'], _preallocate_migration.return_value,
+             request_spec=fake_spec,
+             filter_properties=legacy_filter_props,
