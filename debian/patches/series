@@ -6,3 +6,4 @@ fix-failing-timebased-tests.patch
 testtools-2.8.2-TestMatchersInterface-is-removed.patch
 weights_debug_log_stop_using_tuples_as_dict_keys.patch
 Retrieve_the_image_metadata_from_instance.image_meta_during_resize.patch
+CVE-2026-46448-stable-2026.1_Strip-internal-_nova-prefixed-scheduler-hints-on-create.patch
