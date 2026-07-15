@@ -1,3 +1,11 @@
+nova (2:33.0.1-5) unstable; urgency=high
+
+  * OSSN-0101: Nova console WebSocket proxy Origin allow-list poisoning.
+    Applied upstream patch: "Fix mutating global config in websocket proxy"
+    (Closes: #1142113).
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 15 Jul 2026 14:38:22 +0200
+
 nova (2:33.0.1-4) unstable; urgency=medium
 
   * CVE-2026-46448 / OSSN-2026-022: Nova scheduler hint injection bypasses
