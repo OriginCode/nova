@@ -1,6 +1,8 @@
 nova (2:33.0.2-1) unstable; urgency=medium
 
   * New upstream release.
+  * Removed patches applied upstream:
+    - CVE-2026-46448-stable-2026.1_Strip-internal-_nova-prefixed-sched....patch
 
  -- Thomas Goirand <zigo@debian.org>  Sun, 06 Sep 2026 11:44:08 +0200
 
