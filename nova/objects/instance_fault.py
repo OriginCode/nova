@@ -18,7 +18,6 @@ from oslo_log import log as logging
 
 from nova.db.main import api as db
 from nova import exception
-from nova import objects
 from nova.objects import base
 from nova.objects import fields
 
@@ -58,7 +57,8 @@ class InstanceFault(base.NovaPersistentObject, base.NovaObject,
         fault.obj_reset_changes()
         return fault
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_latest_for_instance(cls, context, instance_uuid):
         db_faults = db.instance_fault_get_by_instance_uuids(context,
                                                             [instance_uuid])
@@ -95,19 +95,19 @@ class InstanceFaultList(base.ObjectListBase, base.NovaObject):
         'objects': fields.ListOfObjectsField('InstanceFault'),
         }
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_latest_by_instance_uuids(cls, context, instance_uuids):
         db_faultdict = db.instance_fault_get_by_instance_uuids(context,
                                                                instance_uuids,
                                                                latest=True)
         db_faultlist = itertools.chain(*db_faultdict.values())
-        return base.obj_make_list(context, cls(context), objects.InstanceFault,
-                                  db_faultlist)
+        return base.obj_make_list(context, cls(context), db_faultlist)
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_instance_uuids(cls, context, instance_uuids):
         db_faultdict = db.instance_fault_get_by_instance_uuids(context,
                                                                instance_uuids)
         db_faultlist = itertools.chain(*db_faultdict.values())
-        return base.obj_make_list(context, cls(context), objects.InstanceFault,
-                                  db_faultlist)
+        return base.obj_make_list(context, cls(context), db_faultlist)

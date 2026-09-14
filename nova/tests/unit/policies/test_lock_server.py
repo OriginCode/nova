@@ -21,7 +21,6 @@ from nova.api.openstack.compute import lock_server
 from nova.compute import vm_states
 import nova.conf
 from nova import exception
-from nova.policies import base as base_policy
 from nova.policies import lock_server as ls_policies
 from nova.tests.unit.api.openstack import fakes
 from nova.tests.unit import fake_instance
@@ -58,7 +57,7 @@ class LockServerPolicyTest(base.BasePolicyTest):
         # owner- having same project id and no role check) is able to lock,
         # unlock the server.
         self.project_action_authorized_contexts = [
-            self.legacy_admin_context, self.system_admin_context,
+            self.legacy_admin_context,
             self.project_admin_context, self.project_manager_context,
             self.project_member_context, self.project_reader_context,
             self.project_foo_context]
@@ -67,7 +66,7 @@ class LockServerPolicyTest(base.BasePolicyTest):
         # system admin, legacy admin, and project admin is able to override
         # unlock, regardless who locked the server.
         self.project_admin_authorized_contexts = [
-            self.legacy_admin_context, self.system_admin_context,
+            self.legacy_admin_context,
             self.project_admin_context]
 
     @mock.patch('nova.compute.api.API.lock')
@@ -95,11 +94,8 @@ class LockServerPolicyTest(base.BasePolicyTest):
         rule = ls_policies.POLICY_ROOT % 'unlock'
         self.policy.set_rules({rule: "@"}, overwrite=False)
         rule_name = ls_policies.POLICY_ROOT % 'unlock:unlock_override'
-        if not CONF.oslo_policy.enforce_scope:
-            check_rule = rule_name
-        else:
-            check_rule = functools.partial(base.rule_if_system,
-                rule, rule_name)
+        check_rule = functools.partial(base.rule_if_system,
+            rule, rule_name)
         self.common_policy_auth(self.project_admin_authorized_contexts,
                                 check_rule,
                                 self.controller._unlock,
@@ -129,57 +125,23 @@ class LockServerPolicyTest(base.BasePolicyTest):
                               body={'lock': {}})
 
 
-class LockServerNoLegacyNoScopePolicyTest(LockServerPolicyTest):
+class LockServerNoLegacyPolicyTest(LockServerPolicyTest):
     """Test lock/unlock server APIs policies with no legacy deprecated rules
-    and no scope checks which means new defaults only.
+    which means new defaults only.
 
     """
 
     without_deprecated_rules = True
 
     def setUp(self):
-        super(LockServerNoLegacyNoScopePolicyTest, self).setUp()
+        super(LockServerNoLegacyPolicyTest, self).setUp()
         # With no legacy rule, only project admin or member will be
         # able to lock/unlock the server.
-        self.project_action_authorized_contexts = (
-            self.project_member_or_admin_with_no_scope_no_legacy)
-
-
-class LockServerScopeTypePolicyTest(LockServerPolicyTest):
-    """Test Lock Server APIs policies with system scope enabled.
-    This class set the nova.conf [oslo_policy] enforce_scope to True
-    so that we can switch on the scope checking on oslo policy side.
-    It defines the set of context with scoped token
-    which are allowed and not allowed to pass the policy checks.
-    With those set of context, it will run the API operation and
-    verify the expected behaviour.
-    """
-
-    def setUp(self):
-        super(LockServerScopeTypePolicyTest, self).setUp()
-        self.flags(enforce_scope=True, group="oslo_policy")
-        # Scope enable will not allow system admin to lock/unlock the server.
-        self.project_action_authorized_contexts = (
-            self.project_m_r_or_admin_with_scope_and_legacy)
-        self.project_admin_authorized_contexts = [
-            self.legacy_admin_context, self.project_admin_context]
-
-
-class LockServerScopeTypeNoLegacyPolicyTest(LockServerScopeTypePolicyTest):
-    """Test Lock Server APIs policies with system scope enabled,
-    and no more deprecated rules.
-    """
-    without_deprecated_rules = True
-
-    def setUp(self):
-        super(LockServerScopeTypeNoLegacyPolicyTest, self).setUp()
-        # With scope enable and no legacy rule, only project admin/member
-        # will be able to lock/unlock the server.
         self.project_action_authorized_contexts = (
             self.project_member_or_admin_with_scope_no_legacy)
 
 
-class LockServerOverridePolicyTest(LockServerScopeTypeNoLegacyPolicyTest):
+class LockServerOverridePolicyTest(LockServerNoLegacyPolicyTest):
     """Test Lock Server APIs policies with system and project scoped
     but default to system roles only are allowed for project roles
     if override by operators. This test is with system scope enable
@@ -189,7 +151,7 @@ class LockServerOverridePolicyTest(LockServerScopeTypeNoLegacyPolicyTest):
     def setUp(self):
         super(LockServerOverridePolicyTest, self).setUp()
         # We are overriding the 'unlock:unlock_override' policy
-        # to PROJECT_MEMBER so testing it with both admin as well
+        # to rule:project_member_api so testing it with both admin as well
         # as project member as allowed context.
         self.project_admin_authorized_contexts = [
             self.project_admin_context, self.project_manager_context,
@@ -201,6 +163,6 @@ class LockServerOverridePolicyTest(LockServerScopeTypeNoLegacyPolicyTest):
         # make unlock allowed for everyone so that we can check unlock
         # override policy.
         ls_policies.POLICY_ROOT % 'unlock': "@",
-        rule: base_policy.PROJECT_MEMBER}, overwrite=False)
+        rule: "rule:project_member_api"}, overwrite=False)
         super(LockServerOverridePolicyTest,
               self).test_unlock_override_server_policy()

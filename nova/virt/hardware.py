@@ -12,6 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import abc
 import collections
 import itertools
 import re
@@ -48,8 +49,240 @@ class VTPMConfig(ty.NamedTuple):
     model: str
 
 
-class MemEncryptionConfig(ty.NamedTuple):
-    model: str
+class MemEncryptionConfig(metaclass=abc.ABCMeta):
+    @property
+    @abc.abstractmethod
+    def model(self) -> str:
+        pass
+
+    @property
+    @abc.abstractmethod
+    def needs_locked_memory(self) -> bool:
+        pass
+
+    @property
+    @abc.abstractmethod
+    def required_trait(self) -> str:
+        pass
+
+    @property
+    @abc.abstractmethod
+    def required_firmware_type(self) -> str:
+        pass
+
+    @property
+    @abc.abstractmethod
+    def required_machine_type(self) -> str:
+        pass
+
+    @property
+    @abc.abstractmethod
+    def needs_stateless_firmware(self) -> bool:
+        pass
+
+    def _check_firmware_type(self, image_meta: 'objects.ImageMeta',
+                             requesters: list[str]) -> None:
+        required = self.required_firmware_type
+        if image_meta.properties.get('hw_firmware_type') == required:
+            return
+
+        emsg = _(
+            "Memory encryption is requested by %(requesters)s but the image "
+            "metadata doesn't have the 'hw_firmware_type' property set to "
+            "'%(required)s'"
+        )
+        data = {'requesters': " and ".join(requesters), 'required': required}
+        raise exception.FlavorImageConflict(emsg % data)
+
+    def _check_machine_type(self, image_meta: 'objects.ImageMeta',
+                            machine_type: str | None) -> None:
+        # This checks that the resolved machine type matches the machine
+        # type required by this encryption model (self.required_machine_type),
+        # e.g. AMD SEV requires a q35 machine type in order to bind all the
+        # virtio devices to the PCIe bridge so that they use virtio 1.0 and
+        # not virtio 0.9, since QEMU's iommu_platform feature was added in
+        # virtio 1.0 only:
+        #
+        # http://specs.openstack.org/openstack/nova-specs/specs/train/approved/amd-sev-libvirt-support.html
+        #
+        # If the image explicitly requests a machine type which doesn't
+        # match this model's required machine type, raise an exception.
+        #
+        # This check can be triggered both at API-level, at which point we
+        # can't check here what value of CONF.libvirt.hw_machine_type may
+        # have been configured on the compute node, and by the libvirt
+        # driver, in which case the driver can check that config option
+        # and will pass the machine_type parameter.
+        mach_type = machine_type or image_meta.properties.get(
+            'hw_machine_type')
+
+        # If hw_machine_type is not specified on the image and is not
+        # configured correctly on compute nodes supporting this encryption
+        # model, then a separate check in the driver will catch that and
+        # potentially retry on other compute nodes.
+        if mach_type is None:
+            LOG.debug(
+                "Machine type not specified, will be validated by driver.")
+            return
+
+        # image_meta.name is not set if image object represents root Cinder
+        # volume.
+        image_name = (image_meta.name if 'name' in image_meta else None)
+        # image_meta.id is not set when booting from volume.
+        image_id = (image_meta.id if 'id' in image_meta else '<no-id>')
+        # Could be something like pc-q35-2.11 if a specific version of the
+        # machine type is required, so do substring matching.
+        required = self.required_machine_type
+        if required not in mach_type:
+            raise exception.InvalidMachineType(
+                mtype=mach_type,
+                image_id=image_id, image_name=image_name,
+                reason=_("%s type is required for %s to work") %
+                    (required, self.model))
+
+    def _check_stateless_firmware(
+        self, image_meta: 'objects.ImageMeta'
+    ) -> None:
+        if not self.needs_stateless_firmware:
+            return
+
+        if not get_stateless_firmware_constraint(image_meta):
+            emsg = _(
+                "The %s memory encryption model requires stateless firmware "
+                "but the image metadata doesn't have "
+                "the 'hw_firmware_stateless' property set to True"
+            )
+            raise exception.StatelessFirmwareRequired(emsg % self.model)
+
+    def check_constraints(self, image_meta: 'objects.ImageMeta',
+                          machine_type: str | None,
+                          requesters: list[str]) -> None:
+        self._check_firmware_type(image_meta, requesters)
+        self._check_machine_type(image_meta, machine_type)
+        self._check_stateless_firmware(image_meta)
+
+    def __eq__(self, other) -> bool:
+        if not isinstance(other, MemEncryptionConfig):
+            return False
+        return self.model == other.model
+
+    def __hash__(self) -> int:
+        return hash(self.model)
+
+    @classmethod
+    def create(cls, model: str) -> 'MemEncryptionConfig':
+        """Factory returning a MemEncryptionConfig class object
+        from the MemEncryptionModel.
+        """
+        model2cls = {
+            fields.MemEncryptionModel.AMD_SEV: MemEncryptionConfigSev,
+            fields.MemEncryptionModel.AMD_SEV_ES: MemEncryptionConfigSevEs,
+            fields.MemEncryptionModel.AMD_SEV_SNP: MemEncryptionConfigSevSnp,
+            fields.MemEncryptionModel.INTEL_TDX: MemEncryptionConfigTDX,
+        }
+
+        if model not in model2cls:
+            raise exception.Invalid(
+                ("Invalid memory encryption model %(model)r. "
+                 "Allowed values: %(valid)s.") %
+                {'model': model,
+                 'valid': ', '.join(model2cls.keys())}
+            )
+        return model2cls[model]()
+
+
+class MemEncryptionConfigSev(MemEncryptionConfig):
+    @property
+    def model(self) -> str:
+        return fields.MemEncryptionModel.AMD_SEV
+
+    @property
+    def needs_locked_memory(self) -> bool:
+        return True
+
+    @property
+    def required_trait(self) -> str:
+        return os_traits.HW_CPU_X86_AMD_SEV
+
+    @property
+    def required_firmware_type(self) -> str:
+        return "uefi"
+
+    @property
+    def required_machine_type(self) -> str:
+        return "q35"
+
+    @property
+    def needs_stateless_firmware(self) -> bool:
+        return False
+
+
+class MemEncryptionConfigSevEs(MemEncryptionConfigSev):
+    @property
+    def model(self) -> str:
+        return fields.MemEncryptionModel.AMD_SEV_ES
+
+    @property
+    def required_trait(self) -> str:
+        return os_traits.HW_CPU_X86_AMD_SEV_ES
+
+
+class MemEncryptionConfigSevSnp(MemEncryptionConfigSev):
+    @property
+    def model(self) -> str:
+        return fields.MemEncryptionModel.AMD_SEV_SNP
+
+    @property
+    def required_trait(self) -> str:
+        return os_traits.HW_CPU_X86_AMD_SEV_SNP
+
+    @property
+    def needs_locked_memory(self) -> bool:
+        return False
+
+    @property
+    def needs_stateless_firmware(self) -> bool:
+        return True
+
+
+class MemEncryptionConfigTDX(MemEncryptionConfig):
+    @property
+    def model(self) -> str:
+        return fields.MemEncryptionModel.INTEL_TDX
+
+    @property
+    def needs_locked_memory(self) -> bool:
+        return False
+
+    @property
+    def required_trait(self) -> str:
+        return os_traits.HW_CPU_X86_INTEL_TDX
+
+    @property
+    def required_firmware_type(self) -> str:
+        return "uefi"
+
+    @property
+    def required_machine_type(self) -> str:
+        return "q35"
+
+    @property
+    def needs_stateless_firmware(self) -> bool:
+        return True
+
+    def check_constraints(self, image_meta: 'objects.ImageMeta',
+                          machine_type: str | None,
+                          requesters: list[str]) -> None:
+        super().check_constraints(image_meta, machine_type, requesters)
+
+        if image_meta.properties.get(
+                'hw_video_model') != fields.VideoModel.NONE:
+            emsg = _(
+                "The %s memory encryption model is incompatible with an "
+                "attached video device. Set the 'hw_video_model' image "
+                "property to 'none' to disable it"
+            )
+            raise exception.InvalidVideoMode(emsg % self.model)
 
 
 def get_vcpu_pin_set():
@@ -1189,9 +1422,15 @@ def get_mem_encryption_constraint(
     :param flavor: Flavor object
     :param image: an ImageMeta object
     :param machine_type: a string representing the machine type (optional)
-    :raises: nova.exception.FlavorImageConflict
-    :raises: nova.exception.InvalidMachineType
-    :returns: A named tuple containing the memory encryption model, else None.
+    :raises: exception.FlavorImageConflict if memory encryption constraints
+        between flavor and image conflicts
+    :raises: exception.InvalidMachineType if the machine type does not
+       support memory encryption even if it is requested
+    :raises: exception.StatelessFirmwareNotSupported if stateles firmware
+        is requested but non-uefi firmware is selected
+    :raises: exception.StatelessFirmwareRequired if memory encryption requires
+        stateless firmware but stateful firmware is selected
+    :returns: A MemEncryptionConfig object, else None.
     """
 
     flavor_mem_enc_str, image_mem_enc = _get_flavor_image_meta(
@@ -1226,9 +1465,6 @@ def get_mem_encryption_constraint(
         enc_requesters.append("hw_mem_encryption property of image %s" %
                               image_id)
 
-    _check_mem_encryption_uses_uefi_image(enc_requesters, image_meta)
-    _check_mem_encryption_machine_type(image_meta, machine_type)
-
     LOG.debug("Memory encryption requested by %s",
               " and ".join(enc_requesters))
 
@@ -1250,20 +1486,15 @@ def get_mem_encryption_constraint(
             "hw_mem_encryption_model property of image %s" % image_id)
 
     if not mem_enc_model:
-        return MemEncryptionConfig(model=fields.MemEncryptionModel.AMD_SEV)
+        mem_enc_model = fields.MemEncryptionModel.AMD_SEV
+    else:
+        LOG.debug("Memory encryption model requested by %s",
+                  " and ".join(model_requesters))
 
-    LOG.debug("Memory encryption model requested by %s",
-              " and ".join(model_requesters))
+    mem_enc_config = MemEncryptionConfig.create(mem_enc_model)
+    mem_enc_config.check_constraints(image_meta, machine_type, enc_requesters)
 
-    if mem_enc_model not in fields.MemEncryptionModel.ALL:
-        raise exception.Invalid(
-            ("Invalid memory encryption model %(model)r. "
-             "Allowed values: %(valid)s.") %
-            {'model': mem_enc_model,
-             'valid': ', '.join(fields.MemEncryptionModel.ALL)}
-        )
-
-    return MemEncryptionConfig(model=mem_enc_model)
+    return mem_enc_config
 
 
 def _check_for_mem_encryption_requirement_conflicts(
@@ -1313,62 +1544,6 @@ def _check_for_mem_encryption_model_conflicts(
             'image_val': image_mem_enc_model,
         }
         raise exception.FlavorImageConflict(emsg % data)
-
-
-def _check_mem_encryption_uses_uefi_image(requesters, image_meta):
-    if image_meta.properties.get('hw_firmware_type') == 'uefi':
-        return
-
-    emsg = _(
-        "Memory encryption requested by %(requesters)s but image "
-        "%(image_name)s doesn't have 'hw_firmware_type' property set to "
-        "'uefi' or volume-backed instance was requested"
-    )
-    # image_meta.name is not set if image object represents root Cinder
-    # volume, for this case FlavorImageConflict should be raised, but
-    # image_meta.name can't be extracted.
-    image_name = (image_meta.name if 'name' in image_meta else None)
-    data = {'requesters': " and ".join(requesters),
-            'image_name': image_name}
-    raise exception.FlavorImageConflict(emsg % data)
-
-
-def _check_mem_encryption_machine_type(image_meta, machine_type=None):
-    # NOTE(aspiers): As explained in the SEV spec, SEV needs a q35
-    # machine type in order to bind all the virtio devices to the PCIe
-    # bridge so that they use virtio 1.0 and not virtio 0.9, since
-    # QEMU's iommu_platform feature was added in virtio 1.0 only:
-    #
-    # http://specs.openstack.org/openstack/nova-specs/specs/train/approved/amd-sev-libvirt-support.html
-    #
-    # So if the image explicitly requests a machine type which is not
-    # in the q35 family, raise an exception.
-    #
-    # This check can be triggered both at API-level, at which point we
-    # can't check here what value of CONF.libvirt.hw_machine_type may
-    # have been configured on the compute node, and by the libvirt
-    # driver, in which case the driver can check that config option
-    # and will pass the machine_type parameter.
-    mach_type = machine_type or image_meta.properties.get('hw_machine_type')
-
-    # If hw_machine_type is not specified on the image and is not
-    # configured correctly on SEV compute nodes, then a separate check
-    # in the driver will catch that and potentially retry on other
-    # compute nodes.
-    if mach_type is None:
-        return
-
-    # image_meta.name is not set if image object represents root Cinder volume.
-    image_name = (image_meta.name if 'name' in image_meta else None)
-    # image_meta.id is not set when booting from volume.
-    image_id = (image_meta.id if 'id' in image_meta else '<no-id>')
-    # Could be something like pc-q35-2.11 if a specific version of the
-    # machine type is required, so do substring matching.
-    if 'q35' not in mach_type:
-        raise exception.InvalidMachineType(
-            mtype=mach_type,
-            image_id=image_id, image_name=image_name,
-            reason=_("q35 type is required for SEV to work"))
 
 
 def _get_numa_pagesize_constraint(
@@ -1442,13 +1617,25 @@ def _get_constraint_mappings_from_flavor(flavor, key, func):
 def get_locked_memory_constraint(
     flavor: 'objects.Flavor',
     image_meta: 'objects.ImageMeta',
+    mach_type: str | None = None
 ) -> bool | None:
     """Validate and return the requested locked memory.
 
     :param flavor: ``nova.objects.Flavor`` instance
     :param image_meta: ``nova.objects.ImageMeta`` instance
+    :param mach_type: optional machine type string of the guest
     :raises: exception.LockMemoryForbidden if mem_page_size is not set
         while provide locked_memory value in image or flavor.
+    :raises: exception.FlavorImageLockedMemoryConflict if memory locking
+        constraints between flavor and image conflicts
+    :raises: exception.FlavorImageConflict if memory encryption constraints
+        between flavor and image conflicts
+    :raises: exception.InvalidMachineType if the machine type does not
+       support memory encryption even if it is requested
+    :raises: exception.StatelessFirmwareNotSupported if stateles firmware
+        is requested but non-uefi firmware is selected
+    :raises: exception.StatelessFirmwareRequired if memory encryption requires
+        stateless firmware but stateful firmware is selected
     :returns: The locked memory flag requested.
     """
     mem_page_size_flavor, mem_page_size_image = _get_flavor_image_meta(
@@ -1477,6 +1664,18 @@ def get_locked_memory_constraint(
             mem_page_size_flavor or mem_page_size_image
     ):
         raise exception.LockMemoryForbidden()
+
+    # If flavor or image explicitly requests locked memory, no need to check
+    # memory encryption constraint.
+    if locked_memory:
+        return True
+
+    me_config = get_mem_encryption_constraint(flavor, image_meta, mach_type)
+    if me_config is not None and me_config.needs_locked_memory:
+        # If flavor or image denies locked_memory but memory encryption
+        # requests locked memory, FlavorImageLockedMemoryConflict exception
+        # should be raised here, but keep the existing behavior for now.
+        return True
 
     return locked_memory
 
@@ -2169,23 +2368,20 @@ def get_secure_boot_constraint(
 
 def get_stateless_firmware_constraint(
     image_meta: 'objects.ImageMeta',
-) -> bool:
+) -> bool | None:
     """Validate and return the requested statless firmware policy.
 
-    :param flavor: ``nova.objects.Flavor`` instance
     :param image_meta: ``nova.objects.ImageMeta`` instance
-    :raises: nova.exception.Invalid if a value or combination of values is
-        invalid
     """
-    if not image_meta.properties.get('hw_firmware_stateless', False):
-        return False
+    if image_meta.properties.get('hw_firmware_stateless') is None:
+        return None
 
     if image_meta.properties.get('hw_firmware_type') != 'uefi':
-        raise exception.Invalid(_(
-            'Stateless firmware is supported only when UEFI firmware type is '
-            'used.'
-        ))
-    return True
+        LOG.warning("The image property 'hw_firmware_stateless' is set for "
+                    "non UEFI firmware type. This property is ignored.")
+        return None
+
+    return image_meta.properties.get('hw_firmware_stateless', False)
 
 
 def numa_get_constraints(flavor, image_meta):

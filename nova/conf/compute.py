@@ -938,7 +938,7 @@ destination host before starting the guest transfer in the hypervisor.
    The compute service cannot reliably determine which types of virtual
    interfaces (``port.binding:vif_type``) will send ``network-vif-plugged``
    events without an accompanying port ``binding:host_id`` change.
-   Open vSwitch and linuxbridge should be OK, but OpenDaylight is at least
+   Open vSwitch should be OK, but OpenDaylight is at least
    one known backend that will not currently work in this case, see bug
    https://launchpad.net/bugs/1755890 for more details.
 
@@ -1078,6 +1078,28 @@ Possible values:
 * ``True``: Packing VM's NUMA cell on most used host NUMA cell.
 * ``False``: Spreading VM's NUMA cell on host's NUMA cells with more resources
   available.
+"""),
+    cfg.IntOpt(
+        'update_resources_max_workers',
+        default=1,
+        min=1,
+        help="""
+Maximum number of worker threads used to run per-node
+update_available_resource() calls in parallel during the
+update_available_resource periodic task.
+
+For drivers that manage a single compute node (most hypervisors) the
+default of 1 is optimal.  For the Ironic driver, which manages hundreds
+or thousands of baremetal nodes under a single nova-compute service,
+increasing this value allows node updates to proceed concurrently and
+dramatically reduces startup and periodic-task latency.
+
+Setting this to 1 (the default) preserves the original sequential
+behaviour.
+
+Related options:
+
+* update_resources_interval
 """),
 ]
 
@@ -1308,6 +1330,26 @@ Possible values:
 * 0: Will run at the default periodic interval.
 * Any value < 0: Disables the option.
 * Any positive integer in seconds.
+"""),
+    cfg.IntOpt('stale_share_access_reconcile_interval',
+        default=1800,
+        help="""
+Interval for reconciling stale Manila share access rules.
+
+Each compute periodically scans the cell's share mappings and revokes
+Manila access rules left behind when a cold migration or resize
+confirm/revert failed to clean them up (for example because manila-api
+was unreachable). A start-up reconcile always runs during host init;
+this option only controls the periodic task.
+
+The scan is cell-wide, so in large deployments you may want to raise
+this interval to reduce load on the Manila API.
+
+Possible values:
+
+* Any positive integer in seconds.
+* 0 or any negative value disables the periodic task (the start-up
+  reconcile still runs).
 """)
 ]
 

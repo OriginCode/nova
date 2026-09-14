@@ -1594,15 +1594,18 @@ class _ComputeAPIUnitTestMixIn(object):
 
         test()
 
+    @mock.patch.object(objects.BlockDeviceMappingList, 'get_by_instance_uuid')
     @mock.patch('nova.compute.utils.notify_about_instance_delete')
     @mock.patch('nova.objects.Instance.destroy')
-    def test_delete_instance_from_cell0(self, destroy_mock, notify_mock):
+    def test_delete_instance_from_cell0(self, destroy_mock, notify_mock,
+                                        mock_bdm_get):
         """Tests the case that the instance does not have a host and was not
         deleted while building, so conductor put it into cell0 so the API has
         to delete the instance from cell0.
         """
         instance = self._create_instance_obj({'host': None})
         cell0 = objects.CellMapping(uuid=objects.CellMapping.CELL0_UUID)
+        mock_bdm_get.return_value = objects.BlockDeviceMappingList()
 
         with test.nested(
             mock.patch.object(self.compute_api, '_delete_while_booting',
@@ -1621,6 +1624,8 @@ class _ComputeAPIUnitTestMixIn(object):
             notify_mock.assert_called_once_with(
                 self.compute_api.notifier, self.context, instance)
             destroy_mock.assert_called_once_with()
+            mock_bdm_get.assert_called_once_with(
+                self.context, instance.uuid)
 
     def test_delete_instance_while_booting_host_changes_lookup_fails(self):
         """Tests the case where the instance become scheduled while being
@@ -1649,6 +1654,68 @@ class _ComputeAPIUnitTestMixIn(object):
                 self.context, instance.uuid)
             _local_delete_cleanup.assert_called_once_with(
                 self.context, instance.uuid)
+
+    @mock.patch('nova.objects.Instance.destroy')
+    @mock.patch.object(objects.BlockDeviceMapping, 'destroy')
+    @mock.patch('nova.compute.utils.notify_about_instance_delete')
+    @mock.patch.object(objects.BlockDeviceMappingList, 'get_by_instance_uuid')
+    def test_delete_instance_while_scheduling_with_bdm(self, mock_bdm_get,
+                                                       notify_mock,
+                                                       mock_bdm_destroy,
+                                                       instance_destroy):
+        """Tests the scenario where an instance is destroyed during scheduling.
+        This checks that we call Cinder to delete the volume attachment for any
+        existing Block Device Mappings (BDMs). This can occur when the instance
+        is in BUILDING state and has a BDM with a volume attachment
+        (volume state reserved on cinder side).
+        """
+        instance = self._create_instance_obj({'host': None,
+                    'vm_state': vm_states.BUILDING,
+                    'task_state': task_states.SCHEDULING,
+                    })
+        cell1 = objects.CellMapping(uuid=uuids.cell1)
+
+        bdm = objects.BlockDeviceMapping(
+                        **fake_block_device.FakeDbBlockDeviceDict(
+                        {'no_device': False, 'volume_id': '1', 'boot_index': 0,
+                         'connection_info': 'inf', 'device_name': '/dev/vda',
+                         'source_type': 'volume', 'destination_type': 'volume',
+                         'tag': None, 'attachment_id': uuids.attachment_id,
+                         'instance_uuid': instance.uuid,
+                         'delete_on_termination': 0}, anon=True))
+        bdms = objects.BlockDeviceMappingList(objects=[bdm])
+
+        instance.block_device_mapping = bdms
+        mock_bdm_get.return_value = bdms
+
+        with test.nested(
+            mock.patch.object(
+                self.compute_api, '_delete_while_booting',
+                return_value=False),
+            mock.patch.object(
+                self.compute_api, '_lookup_instance',
+                return_value=(cell1, instance)),
+            mock.patch.object(self.compute_api, '_local_delete_cleanup'),
+            mock.patch.object(
+                self.compute_api.volume_api, 'attachment_delete'),
+        ) as (
+            _delete_while_booting, _lookup_instance, _local_delete_cleanup,
+            _mock_attachment_delete
+        ):
+            self.compute_api._delete(
+                self.context, instance, 'delete', mock.NonCallableMock())
+
+            _delete_while_booting.assert_called_once_with(
+                self.context, instance)
+            _lookup_instance.assert_called_once_with(
+                self.context, instance.uuid)
+            _local_delete_cleanup.assert_called_once_with(
+                self.context, instance.uuid)
+            _mock_attachment_delete.assert_called_once_with(
+                self.context, uuids.attachment_id)
+            notify_mock.assert_called_once_with(
+                self.compute_api.notifier, self.context, instance)
+            instance_destroy.assert_called_once_with()
 
     @mock.patch.object(context, 'target_cell')
     @mock.patch.object(objects.InstanceMapping, 'get_by_instance_uuid',
@@ -2096,8 +2163,8 @@ class _ComputeAPIUnitTestMixIn(object):
                 self.context, host_name, True)
 
         if flavor_id_passed:
-            mock_get_flavor.assert_called_once_with('new-flavor-id',
-                                                    ctxt=self.context,
+            mock_get_flavor.assert_called_once_with(self.context,
+                                                    'new-flavor-id',
                                                     read_deleted='no')
 
         if not (flavor_id_passed and same_flavor):
@@ -2247,6 +2314,80 @@ class _ComputeAPIUnitTestMixIn(object):
             self.context, fake_inst, flavor_id=uuids.new_falvor
         )
 
+    @mock.patch(
+        'nova.servicegroup.api.API.service_is_up',
+        new=mock.Mock(return_value=True),
+    )
+    @mock.patch(
+        'nova.objects.service.get_minimum_version_all_cells',
+        new=mock.Mock(return_value=73),
+    )
+    @mock.patch(
+        'nova.compute.api.instance_has_share',
+        new=mock.Mock(return_value=True),
+    )
+    def test_resize_with_shares_old_compute_blocked(self):
+        fake_inst = self._create_instance_obj()
+
+        self.assertRaises(
+            exception.ForbiddenWithShare,
+            self.compute_api.resize,
+            self.context, fake_inst, flavor_id=uuids.new_flavor
+        )
+
+    @mock.patch(
+        'nova.servicegroup.api.API.service_is_up',
+        new=mock.Mock(return_value=True),
+    )
+    @mock.patch(
+        'nova.objects.service.get_minimum_version_all_cells',
+        new=mock.Mock(return_value=74),
+    )
+    @mock.patch(
+        'nova.compute.api.instance_has_share',
+        new=mock.Mock(return_value=True),
+    )
+    @mock.patch('nova.compute.flavors.get_flavor_by_flavor_id')
+    def test_resize_with_shares_new_compute_allowed(self, mock_get_flavor):
+        fake_inst = self._create_instance_obj()
+        new_flavor = self._create_flavor(
+            id=200, flavorid='new-flavor-id', name='new_flavor',
+            disabled=False)
+        mock_get_flavor.return_value = new_flavor
+
+        # Should not raise ForbiddenWithShare; will fail later for
+        # other reasons but that's fine — we just check the share
+        # gate lets us through.
+        try:
+            self.compute_api.resize(
+                self.context, fake_inst,
+                flavor_id=new_flavor.flavorid)
+        except exception.ForbiddenWithShare:
+            self.fail("resize raised ForbiddenWithShare with new compute")
+        except Exception:
+            pass
+
+    @mock.patch(
+        'nova.servicegroup.api.API.service_is_up',
+        new=mock.Mock(return_value=True),
+    )
+    @mock.patch(
+        'nova.objects.service.get_minimum_version_all_cells',
+        new=mock.Mock(return_value=73),
+    )
+    @mock.patch(
+        'nova.compute.api.instance_has_share',
+        new=mock.Mock(return_value=True),
+    )
+    def test_resize_with_shares_old_service_version_blocked(self):
+        fake_inst = self._create_instance_obj()
+
+        self.assertRaises(
+            exception.ForbiddenWithShare,
+            self.compute_api.resize,
+            self.context, fake_inst, flavor_id=uuids.new_flavor
+        )
+
     def _test_migrate(self, *args, **kwargs):
         self._test_resize(*args, flavor_id_passed=False, **kwargs)
 
@@ -2306,8 +2447,8 @@ class _ComputeAPIUnitTestMixIn(object):
         self.assertRaises(exception.FlavorNotFound,
                           self.compute_api.resize, self.context,
                           fake_inst, flavor_id='flavor-id')
-        mock_get_flavor.assert_called_once_with('flavor-id',
-                                                ctxt=self.context,
+        mock_get_flavor.assert_called_once_with(self.context,
+                                                'flavor-id',
                                                 read_deleted='no')
         # Should never reach these.
         mock_count.assert_not_called()
@@ -2341,7 +2482,7 @@ class _ComputeAPIUnitTestMixIn(object):
         self.assertRaises(exception.FlavorMemoryTooSmall,
                           self.compute_api.resize, self.context,
                           fake_inst, flavor_id=new_flavor.id)
-        mock_get_flavor.assert_called_once_with(200, ctxt=self.context,
+        mock_get_flavor.assert_called_once_with(self.context, 200,
                                                 read_deleted='no')
         # Should never reach these.
         mock_count.assert_not_called()
@@ -2370,8 +2511,8 @@ class _ComputeAPIUnitTestMixIn(object):
         self.assertRaises(exception.FlavorNotFound,
                           self.compute_api.resize, self.context,
                           fake_inst, flavor_id='flavor-id')
-        mock_get_flavor.assert_called_once_with('flavor-id',
-                                                ctxt=self.context,
+        mock_get_flavor.assert_called_once_with(self.context,
+                                                'flavor-id',
                                                 read_deleted='no')
         # Should never reach these.
         mock_count.assert_not_called()
@@ -2471,8 +2612,8 @@ class _ComputeAPIUnitTestMixIn(object):
                           fake_inst, flavor_id='flavor-id')
 
         mock_save.assert_not_called()
-        mock_get_flavor.assert_called_once_with('flavor-id',
-                                                ctxt=self.context,
+        mock_get_flavor.assert_called_once_with(self.context,
+                                                'flavor-id',
                                                 read_deleted='no')
         mock_upsize.assert_called_once_with(test.MatchType(objects.Flavor),
                                             test.MatchType(objects.Flavor))
@@ -2548,13 +2689,13 @@ class _ComputeAPIUnitTestMixIn(object):
             self.assertEqual('2, 1024', e.kwargs['req'])
             self.assertEqual('1, 512', e.kwargs['used'])
             self.assertEqual('1, 512', e.kwargs['allowed'])
-            mock_get_flavor.assert_called_once_with('fake_flavor_id',
-                                                    ctxt=self.context,
+            mock_get_flavor.assert_called_once_with(self.context,
+                                                    'fake_flavor_id',
                                                     read_deleted="no")
         else:
             self.fail("Exception not raised")
 
-    @mock.patch.object(placement_limit, 'enforce_num_instances_and_flavor')
+    @mock.patch.object(placement_limit, 'enforce_num_instances_and_resources')
     @mock.patch.object(compute_utils, 'is_volume_backed_instance',
                        new=mock.Mock(return_value=False))
     @mock.patch('nova.servicegroup.api.API.service_is_up',
@@ -2575,11 +2716,11 @@ class _ComputeAPIUnitTestMixIn(object):
                           self.context, self._create_instance_obj(),
                           'fake_flavor_id')
 
-        mock_get_flavor.assert_called_once_with('fake_flavor_id',
-                                                ctxt=self.context,
+        mock_get_flavor.assert_called_once_with(self.context,
+                                                'fake_flavor_id',
                                                 read_deleted="no")
         mock_enforce.assert_called_once_with(
-            self.context, "fake", mock_get_flavor.return_value, False, 1, 1)
+            self.context, "fake", mock.ANY, 1, 1)
 
     # TODO(huaqiang): Remove in Wallaby
     @mock.patch('nova.servicegroup.api.API.service_is_up',
@@ -3398,8 +3539,7 @@ class _ComputeAPIUnitTestMixIn(object):
 
         @classmethod
         def fake_bdm_list_get_by_instance_uuid(cls, context, instance_uuid):
-            return obj_base.obj_make_list(context, cls(),
-                    objects.BlockDeviceMapping, instance_bdms)
+            return obj_base.obj_make_list(context, cls(), instance_bdms)
 
         def fake_image_create(_self, context, image_meta, data=None):
             self.assertThat(image_meta, matchers.DictMatches(expect_meta))
@@ -5254,20 +5394,19 @@ class _ComputeAPIUnitTestMixIn(object):
                      'device_name': 'vda',
                      'boot_index': 0,
                      }))])
-            shutdown_terminate = True
             instance_group = None
             check_server_group_quota = False
             filter_properties = {'scheduler_hints': None,
                     'instance_type': flavor}
             trusted_certs = None
 
-            self.assertRaises(expected_exception,
-                              self.compute_api._provision_instances, ctxt,
-                              flavor, min_count, max_count, base_options,
-                              boot_meta, security_groups, block_device_mapping,
-                              shutdown_terminate, instance_group,
-                              check_server_group_quota, filter_properties,
-                              None, objects.TagList(), trusted_certs, False)
+            self.assertRaises(
+                expected_exception,
+                self.compute_api._provision_instances, ctxt,
+                flavor, min_count, max_count, base_options,
+                boot_meta, security_groups, block_device_mapping,
+                instance_group, check_server_group_quota, filter_properties,
+                None, objects.TagList(), trusted_certs, False)
 
         do_test()
 
@@ -5310,14 +5449,14 @@ class _ComputeAPIUnitTestMixIn(object):
             mock_cniq.return_value = 1
             self.compute_api._provision_instances(
                 self.context, flavor, 1, 1, mock.MagicMock(), {}, None, None,
-                None, None, {}, None, fake_keypair, objects.TagList(), None,
+                None, {}, None, fake_keypair, objects.TagList(), None,
                 False)
             self.assertEqual(
                 'test',
                 mock_instance.return_value.keypairs.objects[0].name)
             self.compute_api._provision_instances(
                 self.context, flavor, 1, 1, mock.MagicMock(), {}, None, None,
-                None, None, {}, None, None, objects.TagList(), None, False)
+                None, {}, None, None, objects.TagList(), None, False)
             self.assertEqual(
                 0,
                 len(mock_instance.return_value.keypairs.objects))
@@ -5346,14 +5485,9 @@ class _ComputeAPIUnitTestMixIn(object):
                            '_bdm_validate_set_size_and_instance')
         def do_test(mock_bdm_v, mock_sg, mock_cniq, mock_get_vols):
             mock_cniq.return_value = 1
-            self.compute_api._provision_instances(self.context,
-                                                  flavor,
-                                                  1, 1, mock.MagicMock(),
-                                                  {}, None,
-                                                  None, None, None, {}, None,
-                                                  None,
-                                                  objects.TagList(), None,
-                                                  False)
+            self.compute_api._provision_instances(
+                self.context, flavor, 1, 1, mock.MagicMock(), {}, None, None,
+                None, {}, None, None, objects.TagList(), None, False)
 
         mock_get_dp.return_value = dp_request_groups
         fake_rs = fake_request_spec.fake_spec_obj()
@@ -5390,6 +5524,43 @@ class _ComputeAPIUnitTestMixIn(object):
             flavor, [], prev_groups)
         mock_get_dp.assert_not_called()
         self.assertEqual(prev_groups, fake_rs.requested_resources)
+
+    @mock.patch(
+        'nova.compute.api.placement_limits.'
+        'enforce_num_instances_and_resources')
+    @mock.patch('nova.compute.api.scheduler_utils.request_spec_for_limits')
+    @mock.patch('nova.objects.RequestSpec.from_components')
+    @mock.patch('nova.objects.BuildRequest')
+    @mock.patch('nova.objects.Instance')
+    @mock.patch('nova.objects.InstanceMapping.create')
+    def test_provision_instances_unified_limits_disabled_skips_limits_spec(
+            self, mock_im, mock_instance, mock_br, mock_rs,
+            mock_req_spec_for_limits, mock_enforce):
+        flavor = self._create_flavor()
+
+        @mock.patch.object(self.compute_api, '_get_volumes_for_bdms')
+        @mock.patch.object(
+            self.compute_api, '_create_reqspec_buildreq_instmapping',
+            new=mock.MagicMock())
+        @mock.patch('nova.compute.utils.check_num_instances_quota')
+        @mock.patch('nova.network.security_group_api')
+        @mock.patch.object(
+            self.compute_api, '_populate_instance_for_create',
+            new=mock.MagicMock())
+        @mock.patch.object(self.compute_api,
+                           '_bdm_validate_set_size_and_instance')
+        def do_test(mock_bdm_v, mock_sg, mock_cniq, mock_get_vols):
+            mock_cniq.return_value = 1
+            self.flags(driver="nova.quota.NoopQuotaDriver", group="quota")
+            self.compute_api._provision_instances(
+                self.context, flavor, 1, 1, mock.MagicMock(), {}, None, None,
+                None, None, {}, None, objects.TagList(), None, False)
+
+        fake_rs = fake_request_spec.fake_spec_obj()
+        mock_rs.return_value = fake_rs
+        do_test()
+        mock_req_spec_for_limits.assert_not_called()
+        mock_enforce.assert_not_called()
 
     def test_provision_instances_creates_build_request(self):
         @mock.patch.object(self.compute_api, '_get_volumes_for_bdms')
@@ -5448,7 +5619,6 @@ class _ComputeAPIUnitTestMixIn(object):
                      'boot_index': 0,
                      }))])
             instance_tags = objects.TagList(objects=[objects.Tag(tag='tag')])
-            shutdown_terminate = True
             trusted_certs = None
             instance_group = None
             check_server_group_quota = False
@@ -5456,16 +5626,17 @@ class _ComputeAPIUnitTestMixIn(object):
                     'instance_type': flavor}
 
             with mock.patch.object(
-                    self.compute_api,
-                    '_bdm_validate_set_size_and_instance',
-                    return_value=block_device_mappings) as validate_bdm:
+                self.compute_api,
+                '_bdm_validate_set_size_and_instance',
+                return_value=block_device_mappings,
+            ) as validate_bdm:
                 instances_to_build = self.compute_api._provision_instances(
-                        ctxt, flavor,
-                        min_count, max_count, base_options, boot_meta,
-                        security_groups, block_device_mappings,
-                        shutdown_terminate, instance_group,
-                        check_server_group_quota, filter_properties, None,
-                        instance_tags, trusted_certs, False)
+                    ctxt, flavor,
+                    min_count, max_count, base_options, boot_meta,
+                    security_groups, block_device_mappings, instance_group,
+                    check_server_group_quota, filter_properties, None,
+                    instance_tags, trusted_certs, False)
+
             validate_bdm.assert_has_calls([mock.call(
                 ctxt, test.MatchType(objects.Instance), flavor,
                 block_device_mappings, {}, mock_get_volumes.return_value,
@@ -5552,20 +5723,19 @@ class _ComputeAPIUnitTestMixIn(object):
                      'device_name': 'vda',
                      'boot_index': 0,
                      }))])
-            shutdown_terminate = True
             instance_group = None
             check_server_group_quota = False
             filter_properties = {'scheduler_hints': None,
                     'instance_type': flavor}
             trusted_certs = None
 
-            instances_to_build = (
-                self.compute_api._provision_instances(ctxt, flavor,
-                    min_count, max_count, base_options, boot_meta,
-                    security_groups, block_device_mapping, shutdown_terminate,
-                    instance_group, check_server_group_quota,
-                    filter_properties, None, objects.TagList(), trusted_certs,
-                    False))
+            instances_to_build = self.compute_api._provision_instances(
+                ctxt, flavor,
+                min_count, max_count, base_options, boot_meta,
+                security_groups, block_device_mapping,
+                instance_group, check_server_group_quota,
+                filter_properties, None, objects.TagList(), trusted_certs,
+                False)
             rs, br, im = instances_to_build[0]
             self.assertTrue(uuidutils.is_uuid_like(br.instance.uuid))
             self.assertEqual(br.instance_uuid, im.instance_uuid)
@@ -5653,24 +5823,23 @@ class _ComputeAPIUnitTestMixIn(object):
                      'device_name': 'vda',
                      'boot_index': 0,
                      }))])
-            shutdown_terminate = True
             instance_group = None
             check_server_group_quota = False
             filter_properties = {'scheduler_hints': None,
                     'instance_type': flavor}
             tags = objects.TagList()
             trusted_certs = None
-            self.assertRaises(exception.InvalidVolume,
-                              self.compute_api._provision_instances, ctxt,
-                              flavor, min_count, max_count, base_options,
-                              boot_meta, security_groups, block_device_mapping,
-                              shutdown_terminate, instance_group,
-                              check_server_group_quota, filter_properties,
-                              None, tags, trusted_certs, False)
+            self.assertRaises(
+                exception.InvalidVolume,
+                self.compute_api._provision_instances,
+                ctxt, flavor, min_count, max_count, base_options,
+                boot_meta, security_groups, block_device_mapping,
+                instance_group,
+                check_server_group_quota, filter_properties,
+                None, tags, trusted_certs, False)
             # First instance, build_req, mapping is created and destroyed
-            mock_create_rs_br_im.assert_called_once_with(ctxt, req_spec_mock,
-                                                         build_req_mocks[0],
-                                                         inst_map_mocks[0])
+            mock_create_rs_br_im.assert_called_once_with(
+                ctxt, req_spec_mock, build_req_mocks[0], inst_map_mocks[0])
             self.assertTrue(build_req_mocks[0].destroy.called)
             self.assertTrue(inst_map_mocks[0].destroy.called)
             # Second instance, build_req, mapping is not created nor destroyed
@@ -5701,7 +5870,7 @@ class _ComputeAPIUnitTestMixIn(object):
             flavor = self._create_flavor()
             self.compute_api._provision_instances(
                 ctxt, flavor, None, None, mock.MagicMock(), None, None, [],
-                None, None, None, None, None, objects.TagList(), None, False)
+                None, None, None, None, objects.TagList(), None, False)
             secgroups = mock_secgroup.return_value
             mock_objects.RequestSpec.from_components.assert_called_once_with(
                 mock.ANY, mock.ANY, mock.ANY, mock.ANY, mock.ANY, mock.ANY,
@@ -7278,8 +7447,7 @@ class _ComputeAPIUnitTestMixIn(object):
             secgroup_obj.SecurityGroup(uuid=uuids.secgroup_id)
         ]
         instance = self.compute_api._populate_instance_for_create(
-            self.context, instance, {}, 0, security_groups, flavor, 1,
-            False)
+            self.context, instance, {}, 0, security_groups, flavor, 1)
         self.assertEqual(0, len(instance.security_groups))
 
     def test_retrieve_trusted_certs_object(self):

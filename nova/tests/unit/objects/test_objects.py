@@ -71,7 +71,8 @@ class MyObj(base.NovaPersistentObject, base.NovaObject,
     def obj_load_attr(self, attrname):
         setattr(self, attrname, 'loaded!')
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def query(cls, context):
         obj = cls(context=context, foo=1, bar='bar')
         obj.obj_reset_changes()
@@ -1105,7 +1106,7 @@ object_data = {
     'HyperVLiveMigrateData': '1.5-b424b27305f259fb3c15d720856585c7',
     'IDEDeviceBus': '1.0-29d4c9f27ac44197f01b6ac1b7e16502',
     'ImageMeta': '1.8-642d1b2eb3e880a367f37d72dd76162d',
-    'ImageMetaProps': '1.42-e2e85f8e6d66bfa2a32f3ee13506bb58',
+    'ImageMetaProps': '1.44-fd4f63a7cfab5a0ea0e034c40a554b26',
     'Instance': '2.8-2727dba5e4a078e6cc848c1f94f7eb24',
     'InstanceAction': '1.2-9a5abc87fdd3af46f45731960651efb5',
     'InstanceActionEvent': '1.4-5b1f361bd81989f8bb2c20bb7e8a4cb4',
@@ -1169,7 +1170,7 @@ object_data = {
     'Service': '1.22-8a740459ab9bf258a19c8fcb875c2d9a',
     'ServiceList': '1.19-5325bce13eebcbf22edc9678285270cc',
     'ShareMapping': '1.2-ae6ba712dc8022d08c4de34fb8b6e015',
-    'ShareMappingList': '1.0-634980d5efdf3656e28c8dec3d862ab9',
+    'ShareMappingList': '1.1-4b834bee6431b8ea64ac3d7f0874675f',
     'ShareMetadata': '1.0-09f69ac0bd47371417b5477a277e43af',
     'Tag': '1.1-8b8d7d5b48887651a0e01241672e2963',
     'TagList': '1.1-55231bdb671ecf7641d6a2e9109b5d8e',
@@ -1350,12 +1351,13 @@ class TestObjEqualPrims(_BaseTestCase):
 
 class TestObjMethodOverrides(test.NoDBTestCase):
     def test_obj_reset_changes(self):
-        args = inspect.getfullargspec(base.NovaObject.obj_reset_changes)
+        # ignore annotations
+        args = inspect.getfullargspec(base.NovaObject.obj_reset_changes)[:-1]
         obj_classes = base.NovaObjectRegistry.obj_classes()
         for obj_name in obj_classes:
             obj_class = obj_classes[obj_name][0]
-            self.assertEqual(args,
-                inspect.getfullargspec(obj_class.obj_reset_changes))
+            self.assertEqual(
+                args, inspect.getfullargspec(obj_class.obj_reset_changes)[:-1])
 
 
 class TestObjectsDefaultingOnInit(test.NoDBTestCase):

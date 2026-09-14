@@ -38,6 +38,7 @@ import threading
 import typing as ty
 
 from lxml import etree
+import os_traits as ot
 from oslo_log import log as logging
 from oslo_utils import excutils
 from oslo_utils import strutils
@@ -52,6 +53,7 @@ from nova.i18n import _
 from nova.objects import fields
 from nova.pci import utils as pci_utils
 from nova import rpc
+from nova import thread_pool_factory
 from nova import utils
 from nova.virt import event as virtevent
 from nova.virt.libvirt import config as vconfig
@@ -80,6 +82,8 @@ SEV_KERNEL_PARAM_FILE = '/sys/module/kvm_amd/parameters/%s'
 
 MIN_QEMU_SEV_ES_VERSION = (8, 0, 0)
 
+MISC_CONTROL_GROUP_CAPACITY_FILE = '/sys/fs/cgroup/misc.capacity'
+
 
 class LibvirtEventHandler:
     def __init__(self, conn_event_handler=None, lifecycle_event_handler=None):
@@ -106,11 +110,10 @@ class _EventletLibvirtEventHandler(LibvirtEventHandler):
     def __init__(self, conn_event_handler=None, lifecycle_event_handler=None):
         super().__init__(conn_event_handler, lifecycle_event_handler)
 
-        from eventlet import greenio
-        from eventlet import patcher
+        eventlet = utils.get_eventlet()
 
-        self.native_threading = patcher.original("threading")
-        self.native_queue = patcher.original("queue")
+        self.native_threading = eventlet.patcher.original("threading")
+        self.native_queue = eventlet.patcher.original("queue")
 
         self._event_thread = None
         # This is a Queue between the native libvirt event thread
@@ -125,8 +128,8 @@ class _EventletLibvirtEventHandler(LibvirtEventHandler):
         # This code is taken from the eventlet tpool module, under terms
         # of the Apache License v2.0.
         rpipe, wpipe = os.pipe()
-        self._event_notify_send = greenio.GreenPipe(wpipe, 'wb', 0)
-        self._event_notify_recv = greenio.GreenPipe(rpipe, 'rb', 0)
+        self._event_notify_send = eventlet.greenio.GreenPipe(wpipe, 'wb', 0)
+        self._event_notify_recv = eventlet.greenio.GreenPipe(rpipe, 'rb', 0)
 
     def start(self):
         """Initializes the libvirt events subsystem.
@@ -144,7 +147,7 @@ class _EventletLibvirtEventHandler(LibvirtEventHandler):
         self._event_thread.start()
 
         LOG.debug("Starting event dispatch greenthread")
-        utils.spawn(self._dispatch_thread)
+        thread_pool_factory.spawn(self._dispatch_thread)
 
     def _queue_event(self, event):
         """Puts an event on the queue for dispatch.
@@ -324,8 +327,11 @@ class Host(object):
         # memoized by various properties below
         self._supports_amd_sev: bool | None = None
         self._supports_amd_sev_es: bool | None = None
-        self._max_sev_guests: int | None = None
-        self._max_sev_es_guests: int | None = None
+        self._supports_amd_sev_snp: bool | None = None
+        self._max_sev_guests: int = 0
+        self._max_sev_es_guests: int = 0
+        self._supports_intel_tdx: bool | None = None
+        self._max_intel_tdx_guests: int | None = None
         self._supports_uefi: bool | None = None
         self._supports_secure_boot: bool | None = None
 
@@ -541,15 +547,16 @@ class Host(object):
         """Initializes the libvirt events subsystem.
         """
         self._delayed_executor = (
-            utils.StaticallyDelayingCancellableTaskExecutorWrapper(
-                delay=15, executor=utils._get_default_executor()))
+    thread_pool_factory.StaticallyDelayingCancellableTaskExecutorWrapper(
+        delay=15, executor=thread_pool_factory.get_executor(
+             thread_pool_factory.ExecutorType.DEFAULT)))
         self._event_handler.start()
 
         # This thread is just for async connection closed event handling.
         # In eventlet mode it only handles tasks within the main thread with
         # the eventlet hub.
         LOG.debug("Starting connection event dispatch thread")
-        utils.spawn(self._conn_event_thread)
+        thread_pool_factory.spawn(self._conn_event_thread)
 
     def _get_new_connection(self):
         # call with _wrapped_conn_lock held
@@ -1863,23 +1870,13 @@ class Host(object):
                 'ram_allocation_ratio configured to 1.0')
 
         if CONF.reserved_host_memory_mb:
-            # this is a hard failure as placement won't allow total < reserved
-            if CONF.reserved_host_memory_mb >= CONF.libvirt.file_backed_memory:
-                msg = _(
-                    "'[libvirt] file_backed_memory', which represents total "
-                    "memory reported to placement, must be greater than "
-                    "reserved memory configured via '[DEFAULT] "
-                    "reserved_host_memory_mb'"
-                )
-                raise exception.InternalError(msg)
-
-            # TODO(stephenfin): Change this to an exception in W or later
-            LOG.warning(
+            msg = _(
                 "Reserving memory via '[DEFAULT] reserved_host_memory_mb' "
-                "is not compatible with file-backed memory. Consider "
-                "setting '[DEFAULT] reserved_host_memory_mb' to 0. This will "
-                "be an error in a future release."
+                "is not compatible with file-backed memory. Set "
+                "'[DEFAULT] reserved_host_memory_mb' to 0."
             )
+            raise exception.InternalError(msg)
+
         return True
 
     @property
@@ -1972,16 +1969,13 @@ class Host(object):
         return False
 
     @property
-    def supports_vtpm(self) -> bool | None:
+    def supports_vtpm(self) -> bool:
         # we only check the host architecture and the first machine type
         # because vtpm support is independent from cpu architecture
         arch = self.get_capabilities().host.cpu.arch
         domain_caps = self.get_domain_capabilities()
         for machine_type in domain_caps[arch]:
             _tpm = domain_caps[arch][machine_type].devices.tpm
-            # TODO(tkajinam): Remove this once libvirt >= 8.0.0 is required
-            if _tpm is None:
-                return None
             return (_tpm.supported and 'emulator' in _tpm.backend_models)
         # safe guard
         return False
@@ -1994,30 +1988,22 @@ class Host(object):
         domain_caps = self.get_domain_capabilities()
         for machine_type in domain_caps[arch]:
             _tpm = domain_caps[arch][machine_type].devices.tpm
-            # TODO(tkajinam): Remove first check once libvirt >= 8.0.0 is
+            # TODO(tkajinam): Remove this check once libvirt >= 8.6.0 is
             # required
-            # TODO(tkajinam): Remove second check once libvirt >= 8.6.0 is
-            # required
-            if _tpm is None or _tpm.backend_versions is None:
+            if _tpm.backend_versions is None:
                 return None
             return _tpm.backend_versions
         # safe guard
         return []
 
     @property
-    def tpm_models(self) -> list[str] | None:
+    def tpm_models(self) -> list[str]:
         # we only check the host architecture and the first machine type
         # because vtpm support is independent from cpu architecture
         arch = self.get_capabilities().host.cpu.arch
         domain_caps = self.get_domain_capabilities()
         for machine_type in domain_caps[arch]:
             _tpm = domain_caps[arch][machine_type].devices.tpm
-            # TODO(tkajinam): Remove first check once libvirt >= 8.0.0 is
-            # required
-            # TODO(tkajinam): Remove second check once libvirt >= 8.6.0 is
-            # required
-            if _tpm is None or _tpm.models is None:
-                return None
             return _tpm.models
         # safe guard
         return []
@@ -2062,19 +2048,21 @@ class Host(object):
             return self._supports_amd_sev
 
         domain_caps = self.get_domain_capabilities()
-        for arch in domain_caps:
-            for machine_type in domain_caps[arch]:
-                LOG.debug("Checking SEV support for arch %s "
-                          "and machine type %s", arch, machine_type)
-                for feature in domain_caps[arch][machine_type].features:
-                    feature_is_sev = isinstance(
-                        feature, vconfig.LibvirtConfigDomainCapsFeatureSev)
-                    if feature_is_sev and feature.supported:
-                        LOG.info("AMD SEV support detected")
-                        self._supports_amd_sev = True
-                        self._max_sev_guests = feature.max_guests
-                        self._max_sev_es_guests = feature.max_es_guests
-                        return self._supports_amd_sev
+        arch = fields.Architecture.X86_64
+        if arch not in domain_caps:
+            return self._supports_amd_sev
+        for machine_type in domain_caps[arch]:
+            LOG.debug("Checking SEV support for arch %s and machine type %s",
+                      arch, machine_type)
+            for feature in domain_caps[arch][machine_type].features:
+                feature_is_sev = isinstance(
+                    feature, vconfig.LibvirtConfigDomainCapsFeatureSev)
+                if feature_is_sev and feature.supported:
+                    LOG.info("AMD SEV support detected")
+                    self._supports_amd_sev = True
+                    self._max_sev_guests = feature.max_guests
+                    self._max_sev_es_guests = feature.max_es_guests
+                    return self._supports_amd_sev
 
         LOG.debug("No AMD SEV support detected for any (arch, machine_type)")
         return self._supports_amd_sev
@@ -2083,7 +2071,7 @@ class Host(object):
     def supports_amd_sev_es(self) -> bool:
         """Determine if the host supports AMD SEV-ES for guests.
 
-        Returns a boolean indicating whether AMD SEV (Secure Encrypted
+        Returns a boolean indicating whether AMD SEV-ES (Secure Encrypted
         Virtualization-Encrypted State) is supported.  This is conditional on
         support in the hardware, kernel, qemu, and libvirt. SEV-ES is enabled
         in kernel only when SEV is enabled, so this check depends on
@@ -2104,24 +2092,183 @@ class Host(object):
             LOG.info("QEMU doesn't support AMD SEV-ES")
             return self._supports_amd_sev_es
 
+        if self._kernel_supports_amd_sev(model='sev-snp'):
+            LOG.warning("AMD SEV-ES support is detected, but ignored because "
+                        "AMD SEV-SNP support is detected")
+            return False
+
+        LOG.info("AMD SEV-ES support detected")
         self._supports_amd_sev_es = True
         return self._supports_amd_sev_es
 
     @property
-    def max_sev_guests(self) -> int | None:
-        """Determine maximum number of guests with AMD SEV.
+    def supports_amd_sev_snp(self) -> bool:
+        """Determine if the host supports AMD SEV-SNP for guests.
+
+        Returns a boolean indicating whether AMD SEV-SNP (Secure Encrypted
+        Secure Encrypted Virtualization State) is supported.  This is
+        conditional on support in the hardware, kernel, qemu, and libvirt.
+        SEV-SNP is enabled in kernel only when SEV is enabled, so this check
+        depends on the supports_amd_sev check.
         """
+        if self._supports_amd_sev_snp is not None:
+            return self._supports_amd_sev_snp
+
+        self._supports_amd_sev_snp = False
         if not self.supports_amd_sev:
-            return None
-        return self._max_sev_guests
+            return self._supports_amd_sev_snp
+
+        if not self._kernel_supports_amd_sev(model='sev-snp'):
+            LOG.info("kernel doesn't support AMD SEV-SNP")
+            return self._supports_amd_sev_snp
+
+        domain_caps = self.get_domain_capabilities()
+        arch = fields.Architecture.X86_64
+        if arch not in domain_caps:
+            return self._supports_amd_sev_snp
+        for machine_type in domain_caps[arch]:
+            LOG.debug("Checking SEV-SNP support for arch %s "
+                      "and machine type %s", arch, machine_type)
+            for feature in domain_caps[arch][machine_type].features:
+                feature_is_launch_security = isinstance(
+                    feature,
+                    vconfig.LibvirtConfigDomainCapsFeatureLaunchSecurity)
+                if feature_is_launch_security:
+                    if feature.supported and 'sev-snp' in feature.sectypes:
+                        LOG.info("AMD SEV-SNP support detected")
+                        self._supports_amd_sev_snp = True
+                        return self._supports_amd_sev_snp
+                    else:
+                        break
+
+        LOG.info("Libvirt or QEMU doesn't support AMD SEV-SNP")
+        self._supports_amd_sev_snp = False
+        return self._supports_amd_sev_snp
 
     @property
-    def max_sev_es_guests(self) -> int | None:
-        """Determine maximum number of guests with AMD SEV-ES.
+    def supports_intel_tdx(self) -> bool:
+        """Determine if the host supports Intel TDX for guests.
+
+        Returns a boolean indicating whether Intel Trust Domain Extensions
+        (Intel TDX) is supported. This is conditional on support in the
+        hardware, kernel, qemu, and libvirt.
+
+        CPU mode also has to be configured to host-passthrough, since Intel TDX
+        enabled guests require it.
+
+        This checks whether the feature is supported by *any* machine type.
+        This is only used for trait-reporting purposes and a machine
+        type-specific check should be used when creating guests.
         """
-        if not self.supports_amd_sev:
+        if self._supports_intel_tdx is not None:
+            return self._supports_intel_tdx
+
+        self._supports_intel_tdx = False
+
+        caps = self.get_capabilities()
+        if caps.host.cpu.arch != fields.Architecture.X86_64:
+            return self._supports_intel_tdx
+
+        # NOTE(antia): This effectively requires cpu_mode to be explicitly
+        # configured to "host-passthrough" to enable Intel TDX support. TDX
+        # requires the guest to see the real host CPU, so host-passthrough is a
+        # hard prerequisite.
+        cpu_mode = CONF.libvirt.cpu_mode
+        if cpu_mode != "host-passthrough":
+            LOG.debug(
+                "Skipping Intel TDX detection: cpu_mode is not "
+                "'host-passthrough', which is required.",
+            )
+            return self._supports_intel_tdx
+
+        domain_caps = self.get_domain_capabilities()
+        arch = fields.Architecture.X86_64
+        for machine_type in domain_caps[arch]:
+            LOG.debug("Checking TDX support for arch %s and machine type %s",
+                      arch, machine_type)
+            for feature in domain_caps[arch][machine_type].features:
+                feature_is_tdx = isinstance(
+                    feature, vconfig.LibvirtConfigDomainCapsFeatureTDX
+                )
+                if feature_is_tdx and feature.supported:
+                    LOG.info("Intel TDX support detected")
+                    self._supports_intel_tdx = True
+                    return self._supports_intel_tdx
+
+        LOG.debug("No Intel TDX support detected for any (arch, machine_type)")
+        return self._supports_intel_tdx
+
+    def _get_cgroup_tdx_capacity(self):
+        """Read kernel misc control group for maximum Intel TDX guests.
+
+        The misc control group is a generic interface for any resource that may
+        need limiting, it is not specific to Intel TDX. Only the capacity part
+        is used.
+        https://lwn.net/Articles/856438/
+        """
+        capacity_file = MISC_CONTROL_GROUP_CAPACITY_FILE
+
+        if not os.path.exists(capacity_file):
+            LOG.debug("%s does not exist", capacity_file)
             return None
-        return self._max_sev_es_guests
+
+        with open(capacity_file) as f:
+            content = f.read()
+            LOG.debug("%s contains [%s]", capacity_file, content)
+            for line in content.splitlines():
+                parts = line.split()
+                if len(parts) == 2 and parts[0] == 'tdx':
+                    try:
+                        return int(parts[1])
+                    except ValueError:
+                        LOG.warning(
+                            "Failed to parse TDX capacity from %s: "
+                            "unexpected value [%s]", capacity_file, parts[1])
+                        return None
+            LOG.warning("No TDX entry found in %s", capacity_file)
+            return None
+
+    def _get_tdx_capacity(self) -> int:
+        """Determine the maximum number of Intel TDX guests this host can run
+        concurrently.
+
+        The primary source is the kernel misc control group (see
+        _get_cgroup_tdx_capacity). In case this is unavailable
+        [libvirt] num_tdx_guests becomes the only source and must be set.
+        If both are set then the smallest of the two are used.
+        """
+        cgroup_capacity = self._get_cgroup_tdx_capacity()
+        conf_capacity = CONF.libvirt.num_intel_tdx_guests
+
+        if cgroup_capacity is None:
+            if conf_capacity is None:
+                LOG.warning(
+                    "Unable to determine Intel TDX capacity from the misc "
+                    "cgroup, and libvirt.num_intel_tdx_guests is not set. "
+                    "Assuming this host does not support Intel TDX.")
+                return 0
+            return conf_capacity
+
+        if conf_capacity is not None:
+            if conf_capacity > cgroup_capacity:
+                LOG.warning(
+                    "Host is configured with libvirt.num_intel_tdx_guests "
+                    "set to %d, but only supports %d Intel TDX guests "
+                    "according to the misc cgroup.",
+                    conf_capacity, cgroup_capacity)
+            return conf_capacity
+
+        return cgroup_capacity
+
+    @property
+    def max_intel_tdx_guests(self) -> int:
+        """Determine maximum number of guests with Intel TDX.
+        """
+        if not self.supports_intel_tdx:
+            return 0
+        if self._max_intel_tdx_guests is None:
+            self._max_intel_tdx_guests = self._get_tdx_capacity()
+        return self._max_intel_tdx_guests
 
     @property
     def supports_mem_encryption(self) -> bool:
@@ -2135,7 +2282,68 @@ class Host(object):
         is supported.
         """
 
-        return self.supports_amd_sev
+        return self.supports_amd_sev or self.supports_intel_tdx
+
+    def get_mem_encryption_inventories(self) -> dict[str, ty.Any]:
+        """Return a dictionary of memory encryption information.
+
+        The return value contains total slots and required traits for
+        each memory encryption model supported by this host.
+        """
+        inventories: dict[str, ty.Any] = {}
+        for model in fields.MemEncryptionModel.ALL:
+            modelsym = model.replace('-', '_')
+            prop_supports = 'supports_%s' % modelsym
+            func_slots = '_get_mem_encryption_slots_%s' % modelsym
+            func_traits = '_get_mem_encryption_traits_%s' % modelsym
+            inv = {'supported': getattr(self, prop_supports)}
+            if inv['supported']:
+                inv.update(
+                    total=getattr(self, func_slots)(),
+                    traits=getattr(self, func_traits)())
+            else:
+                slots = getattr(self, func_slots)()
+                if slots > 0:
+                    LOG.debug("Host does not support %s but function %s "
+                              "returns number of slots %d.",
+                              model, func_slots, slots)
+
+            inventories[modelsym] = inv
+
+        return inventories
+
+    def _get_mem_encryption_slots_amd_sev(self) -> int:
+        if self.supports_amd_sev:
+            return self._max_sev_guests
+        else:
+            return 0
+
+    def _get_mem_encryption_traits_amd_sev(self) -> list[str]:
+        return [ot.HW_CPU_X86_AMD_SEV]
+
+    def _get_mem_encryption_slots_amd_sev_es(self) -> int:
+        if self.supports_amd_sev_es:
+            return self._max_sev_es_guests
+        else:
+            return 0
+
+    def _get_mem_encryption_traits_amd_sev_es(self) -> list[str]:
+        return [ot.HW_CPU_X86_AMD_SEV_ES]
+
+    def _get_mem_encryption_slots_amd_sev_snp(self) -> int:
+        if self.supports_amd_sev_snp:
+            return self._max_sev_es_guests
+        else:
+            return 0
+
+    def _get_mem_encryption_traits_amd_sev_snp(self) -> list[str]:
+        return [ot.HW_CPU_X86_AMD_SEV_SNP]
+
+    def _get_mem_encryption_slots_intel_tdx(self) -> int:
+        return self.max_intel_tdx_guests
+
+    def _get_mem_encryption_traits_intel_tdx(self) -> list[str]:
+        return [ot.HW_CPU_X86_INTEL_TDX]
 
     @property
     def supports_remote_managed_ports(self) -> bool:

@@ -413,8 +413,7 @@ def fake_compute_get_all(num_servers=5, **kwargs):
         expected = ['metadata', 'system_metadata', 'flavor',
                     'info_cache', 'security_groups']
         return base.obj_make_list(context, objects.InstanceList(),
-                                  objects.Instance, db_insts,
-                                  expected_attrs=expected)
+                                  db_insts, expected_attrs=expected)
     return _return_servers_objs
 
 
@@ -449,8 +448,10 @@ def stub_instance(id=1, user_id=None, project_id=None, host=None,
     else:
         metadata = []
 
+    ctxt = context.get_admin_context()
     sys_meta = flavors.save_flavor_info(
-        {}, flavors.get_flavor_by_flavor_id(int(flavor_id)))
+        {}, flavors.get_flavor_by_flavor_id(
+            ctxt, int(flavor_id)))
     sys_meta.update(system_metadata or {})
 
     if host is not None:
@@ -476,7 +477,7 @@ def stub_instance(id=1, user_id=None, project_id=None, host=None,
 
     if flavor is None:
         flavor = objects.Flavor.get_by_name(
-            context.get_admin_context(), 'm1.small')
+            ctxt, 'm1.small')
     flavorinfo = jsonutils.dumps({
         'cur': flavor.obj_to_primitive(),
         'old': None,

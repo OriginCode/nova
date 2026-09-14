@@ -1136,9 +1136,9 @@ class MigrationTestCase(test.TestCase):
         migrations = db.migration_get_all_by_filters(self.ctxt, filters)
         self.assertEqual(2, len(migrations))
         sources = [x['source_compute'] for x in migrations]
-        self.assertEqual(['host2', 'host2'], sources)
+        self.assertEqual(['host2', 'host2'], sorted(sources))
         dests = [x['dest_compute'] for x in migrations]
-        self.assertEqual(['host1', 'host3'], dests)
+        self.assertEqual(['host1', 'host3'], sorted(dests))
 
     def test_get_migrations_by_filters_instance_uuid(self):
         migrations = db.migration_get_all_by_filters(self.ctxt, filters={})
@@ -4377,6 +4377,29 @@ class ShareMappingDBApiTestCase(test.TestCase):
             share_mappings[0],
             expected_share_mappings[share_mappings[0].share_id]
         )
+
+    def test_share_mapping_get_by_instance_uuids(self):
+        ctxt = context.get_admin_context()
+        expected_share_mappings = self.create_test_data(ctxt)
+
+        share_mappings = db.share_mapping_get_by_instance_uuids(
+            ctxt, ['fake-instance-uuid1', 'fake-instance-uuid2'])
+        self.assertEqual(len(share_mappings), 2)
+        for share_mapping in share_mappings:
+            self._compare(
+                share_mapping,
+                expected_share_mappings[share_mapping.share_id])
+
+    def test_share_mapping_get_by_instance_uuids_subset(self):
+        ctxt = context.get_admin_context()
+        expected_share_mappings = self.create_test_data(ctxt)
+
+        share_mappings = db.share_mapping_get_by_instance_uuids(
+            ctxt, ['fake-instance-uuid1'])
+        self.assertEqual(len(share_mappings), 1)
+        self._compare(
+            share_mappings[0],
+            expected_share_mappings[share_mappings[0].share_id])
 
     def test_share_mapping_get_by_instance_uuid_and_share_id(self):
         ctxt = context.get_admin_context()

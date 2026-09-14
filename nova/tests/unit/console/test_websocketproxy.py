@@ -94,7 +94,7 @@ class NovaProxyRequestHandlerDBTestCase(test.TestCase):
             self.wh.socket.return_value = '<socket>'
         else:
             tsock = mock.MagicMock()
-            tsock.recv.return_value = "HTTP/1.1 200 OK\r\n\r\n"
+            tsock.recv.return_value = b"HTTP/1.1 200 OK\r\n\r\n"
             self.wh.socket.return_value = tsock
 
         self.wh.path = "http://127.0.0.1/?token=123-456-789"
@@ -286,7 +286,7 @@ class NovaProxyRequestHandlerTestCase(test.NoDBTestCase):
         validate.return_value = objects.ConsoleAuthToken(**params)
 
         tsock = mock.MagicMock()
-        tsock.recv.return_value = "HTTP/1.1 200 OK\r\n\r\n"
+        tsock.recv.return_value = b"HTTP/1.1 200 OK\r\n\r\n"
 
         self.wh.socket.return_value = tsock
         self.wh.path = "http://127.0.0.1/?token=123-456-789"
@@ -318,7 +318,7 @@ class NovaProxyRequestHandlerTestCase(test.NoDBTestCase):
         validate.return_value = objects.ConsoleAuthToken(**params)
 
         tsock = mock.MagicMock()
-        tsock.recv.return_value = "HTTP/1.1 500 Internal Server Error\r\n\r\n"
+        tsock.recv.return_value = b"HTTP/1.1 500 Internal Server Error\r\n\r\n"
 
         self.wh.socket.return_value = tsock
         self.wh.path = "http://127.0.0.1/?token=123-456-789"
@@ -346,8 +346,8 @@ class NovaProxyRequestHandlerTestCase(test.NoDBTestCase):
         validate.return_value = objects.ConsoleAuthToken(**params)
 
         tsock = mock.MagicMock()
-        HTTP_RESP = "HTTP/1.1 200 OK\r\n\r\n"
-        RFB_MSG = "RFB 003.003\n"
+        HTTP_RESP = b"HTTP/1.1 200 OK\r\n\r\n"
+        RFB_MSG = b"RFB 003.003\n"
         # RFB negotiation message may arrive earlier.
         tsock.recv.side_effect = [HTTP_RESP + RFB_MSG,
                                   HTTP_RESP]
@@ -657,6 +657,81 @@ class NovaProxyRequestHandlerTestCase(test.NoDBTestCase):
 
     def test_reject_open_redirect_3_slashes(self):
         self.test_reject_open_redirect(url='///example.com/%2F..')
+
+    @mock.patch('nova.console.websocketproxy.NovaProxyRequestHandler.'
+                '_check_console_port')
+    @mock.patch('nova.objects.ConsoleAuthToken.validate')
+    def test_host_header_does_not_poison_allowed_origins(
+            self, validate, check_port):
+        """Verify that the Host header from one request does not persist in
+        CONF.console.allowed_origins and affect subsequent origin checks.
+
+        Regression test for bug 2158919.
+        """
+        params = {
+            'id': 1,
+            'token': '123-456-789',
+            'instance_uuid': uuids.instance,
+            'host': 'node1',
+            'port': '10000',
+            'console_type': 'novnc',
+            'access_url_base': 'https://example.net:6080'
+        }
+        validate.return_value = objects.ConsoleAuthToken(**params)
+
+        self.wh.socket.return_value = '<socket>'
+        self.wh.path = "http://127.0.0.1/?token=123-456-789"
+        self.wh.headers = self.fake_header
+
+        original_conf_origins = list(CONF.console.allowed_origins)
+
+        self.wh.new_websocket_client()
+
+        self.assertEqual(original_conf_origins,
+                         CONF.console.allowed_origins)
+
+    @mock.patch('nova.console.websocketproxy.NovaProxyRequestHandler.'
+                '_check_console_port')
+    @mock.patch('nova.objects.ConsoleAuthToken.validate')
+    def test_previous_host_does_not_bypass_origin_check(
+            self, validate, check_port):
+        """Verify that a Host header from a prior request cannot be used to
+        bypass the origin check on a subsequent request.
+
+        Regression test for bug 2158919.
+        """
+        params = {
+            'id': 1,
+            'token': '123-456-789',
+            'instance_uuid': uuids.instance,
+            'host': 'node1',
+            'port': '10000',
+            'console_type': 'novnc',
+            'access_url_base': 'https://example.net:6080'
+        }
+        validate.return_value = objects.ConsoleAuthToken(**params)
+
+        self.wh.socket.return_value = '<socket>'
+        self.wh.path = "http://127.0.0.1/?token=123-456-789"
+
+        # First request: Host header introduces evil.com
+        self.wh.headers = {
+            'cookie': 'token="123-456-789"',
+            'Origin': 'https://evil.com:6080',
+            'Host': 'evil.com:6080',
+        }
+        self.wh.new_websocket_client()
+
+        # Second request: Origin is evil.com but Host is legitimate.
+        # This must be rejected — evil.com should not have been persisted
+        # into the allow-list by the first request.
+        self.wh.headers = {
+            'cookie': 'token="123-456-789"',
+            'Origin': 'https://evil.com:6080',
+            'Host': 'example.net:6080',
+        }
+        self.assertRaises(exception.ValidationError,
+                          self.wh.new_websocket_client)
 
     @mock.patch('nova.objects.ConsoleAuthToken.validate')
     def test_no_compute_rpcapi_with_invalid_token(self, mock_validate):

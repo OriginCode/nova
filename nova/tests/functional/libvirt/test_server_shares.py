@@ -14,6 +14,7 @@ import fixtures
 from lxml import etree
 import os
 from requests import request
+from unittest import mock
 
 from nova import context as nova_context
 from nova import exception
@@ -43,8 +44,10 @@ class ServerSharesTestBase(base.ServersTestBase):
 
         self.context = nova_context.get_admin_context()
         self.manila_fixture = self.useFixture(nova_fixtures.ManilaFixture())
+        self.flags(auth_type='password', group='manila')
         self.flags(ram_allocation_ratio=1.0)
         self.flags(file_backed_memory=8192, group='libvirt')
+        self.flags(reserved_host_memory_mb=0)
         self.compute = self.start_compute(
             'host1',
             libvirt_version=self.FAKE_LIBVIRT_VERSION,
@@ -201,12 +204,9 @@ class ServerSharesTest(ServerSharesTestBase):
 
     def test_server_cephfs_share_metadata(self):
         """Verify that cephfs share metadata are available"""
-        # update the mock to call the cephfs fake values
+        # update the mock to return a cephfs share
         self.manila_fixture.mock_get.side_effect = (
             self.manila_fixture.fake_get_cephfs
-        )
-        self.manila_fixture.mock_get_access.side_effect = (
-            self.manila_fixture.fake_get_access_cephfs
         )
 
         self._check_traits()
@@ -224,7 +224,77 @@ class ServerSharesTest(ServerSharesTestBase):
 
         self._assert_share_in_metadata(
             self._get_metadata_url(server), share_id, share_id)
+
+        # The share must be authorized to a per-instance cephx identity,
+        # not the legacy shared "nova" identity.
+        cephx_grants = [
+            grant for grant in self.manila_fixture.share_access
+            if grant[0] == share_id and grant[1] == 'cephx'
+        ]
+        self.assertEqual(1, len(cephx_grants))
+        access_to = cephx_grants[0][2]
+        self.assertTrue(access_to.startswith('nova-'))
+        self.assertNotEqual('nova', access_to)
         return (server, share_id)
+
+    def _cephfs_grants(self, share_id):
+        return {
+            grant[2] for grant in self.manila_fixture.share_access
+            if grant[0] == share_id and grant[1] == 'cephx'
+        }
+
+    def test_cephfs_share_per_instance_identity(self):
+        """Verify per-instance cephx identity for a shared cephfs share"""
+        self.manila_fixture.mock_get.side_effect = (
+            self.manila_fixture.fake_get_cephfs
+        )
+        self._check_traits()
+        share_id = '4b021746-d0eb-4031-92aa-23c3bec182cd'
+
+        server1 = self._create_server(networks='auto')
+        self._stop_server(server1)
+        self._attach_share(server1, share_id)
+        self._start_server(server1)
+        grants = self._cephfs_grants(share_id)
+        self.assertEqual(1, len(grants))
+        id1 = grants.pop()
+        self.assertTrue(id1.startswith('nova-'))
+
+        server2 = self._create_server(networks='auto')
+        self._stop_server(server2)
+        self._attach_share(server2, share_id)
+        self._start_server(server2)
+        grants = self._cephfs_grants(share_id)
+        self.assertEqual(2, len(grants))
+        id2 = (grants - {id1}).pop()
+        self.assertNotEqual(id1, id2)
+
+        # Detaching from the first instance revokes only its own cephx
+        # identity; the second instance keeps its independent access.
+        self._stop_server(server1)
+        self._detach_share(server1, share_id)
+        self.assertEqual({id2}, self._cephfs_grants(share_id))
+
+    def test_reconcile_removes_stale_cephfs_grant(self):
+        server, share_id = self.test_server_cephfs_share_metadata()
+        live = self._cephfs_grants(share_id)
+        self.assertEqual(1, len(live))
+        live_id = live.pop()
+
+        # Seed a stale orphan identity (as if a cold migration confirm
+        # failed to revoke the source host's grant) and a legacy shared
+        # 'nova' grant (drained only by operators, never by reconcile).
+        self.manila_fixture.share_access.add(
+            (share_id, 'cephx', 'nova-deadbeefdeadbeef'))
+        self.manila_fixture.share_access.add((share_id, 'cephx', 'nova'))
+
+        self.computes[self.compute].manager._reconcile_stale_share_access(
+            self.context)
+
+        grants = self._cephfs_grants(share_id)
+        self.assertNotIn('nova-deadbeefdeadbeef', grants)
+        self.assertIn(live_id, grants)
+        self.assertIn('nova', grants)
 
     def test_server_share_after_hard_reboot(self):
         """Verify that share is still available after a reboot"""
@@ -274,7 +344,7 @@ class ServerSharesTest(ServerSharesTestBase):
 
         sm = share_mapping.ShareMapping.get_by_instance_uuid_and_share_id(
             self.context, server['id'], share_id)
-        self.assertEqual(sm.status, 'error')
+        self.assertEqual(sm.status, 'inactive')
         self.instance = instance.Instance.get_by_uuid(
             self.context, server['id'])
         self.assertEqual(self.instance.vm_state, 'error')
@@ -286,9 +356,6 @@ class ServerSharesTest(ServerSharesTestBase):
            soon as the share issue is fixed.
         """
         server, share_id = self.test_server_share_mount_failure()
-        self._verify_start_fails_share_in_error(server, share_id)
-
-        server, share_id = self.test_server_share_umount_failure()
         self._verify_start_fails_share_in_error(server, share_id)
 
     def _verify_start_fails_share_in_error(self, server, share_id):
@@ -324,7 +391,7 @@ class ServerSharesTest(ServerSharesTestBase):
 
         sm = share_mapping.ShareMapping.get_by_instance_uuid_and_share_id(
             self.context, server['id'], share_id)
-        self.assertEqual(sm.status, 'error')
+        self.assertEqual(sm.status, 'inactive')
         self.instance = instance.Instance.get_by_uuid(
             self.context, server['id'])
         self.assertEqual(self.instance.vm_state, 'error')
@@ -372,10 +439,11 @@ class ServerSharesTest(ServerSharesTestBase):
         )
         self.instance = instance.Instance.get_by_uuid(
             self.context, server['id'])
-        self.assertEqual(self.instance.vm_state, 'error')
+        self.assertEqual(self.instance.vm_state, 'stopped')
 
-        # Reboot the server to restart it without the share.
-        self._reboot_server(server, hard=True)
+        # Start the server without the share.
+        self.mock_disconnect.side_effect = None
+        self._start_server(server)
 
         self.instance = instance.Instance.get_by_uuid(
             self.context, server['id'])
@@ -392,16 +460,8 @@ class ServerSharesTest(ServerSharesTestBase):
         self._attach_share(server, share_id)
         self._start_server(server)
 
-        # Here we are using CastAsCallFixture so we got an exception from
-        # nova compute. This should not happen without the fixture and
-        # the api should answer with a 202 status code.
-        exc = self.assertRaises(
-            client.OpenStackApiException,
-            self._stop_server,
-            server,
-        )
-
-        self.assertIn("nova.exception.ShareUmountError", str(exc))
+        # umount failure during power-off is caught; stop completes.
+        self._stop_server(server)
 
         log_out = self.stdlog.logger.output
 
@@ -412,10 +472,10 @@ class ServerSharesTest(ServerSharesTestBase):
 
         sm = share_mapping.ShareMapping.get_by_instance_uuid_and_share_id(
             self.context, server['id'], share_id)
-        self.assertEqual(sm.status, 'error')
+        self.assertEqual(sm.status, 'inactive')
         self.instance = instance.Instance.get_by_uuid(
             self.context, server['id'])
-        self.assertEqual(self.instance.vm_state, 'error')
+        self.assertEqual(self.instance.vm_state, 'stopped')
         return (server, share_id)
 
     def test_server_resume_with_shares(self):
@@ -452,3 +512,134 @@ class ServerSharesTest(ServerSharesTestBase):
         self._assert_share_in_metadata(
             self._get_metadata_url(server), share_id, share_id)
         return (server, share_id)
+
+
+class ServerSharesColdMigrateTest(ServerSharesTestBase):
+
+    def setUp(self):
+        super(ServerSharesColdMigrateTest, self).setUp()
+        self.compute2 = self.start_compute(
+            'host2',
+            libvirt_version=self.FAKE_LIBVIRT_VERSION,
+            qemu_version=self.FAKE_QEMU_VERSION
+        )
+        self.flags(allow_resize_to_same_host=False)
+
+    def _get_xml_on_host(self, server, hostname):
+        host = self.computes[hostname].driver._host
+        inst = instance.Instance.get_by_uuid(self.context, server['id'])
+        guest = host.get_guest(inst)
+        return guest.get_xml_desc()
+
+    def _setup_server_with_share(self):
+        server = self._create_server(networks='auto')
+        self._stop_server(server)
+        share_id = '4b021746-d0eb-4031-92aa-23c3bec182cd'
+        self._attach_share(server, share_id)
+        self._start_server(server)
+        return server, share_id
+
+    def test_cold_migrate_with_share(self):
+        server, share_id = self._setup_server_with_share()
+        src_host = server['OS-EXT-SRV-ATTR:host']
+        self._assert_filesystem_tag(
+            self._get_xml_on_host(server, src_host), share_id)
+
+        with mock.patch(
+            'nova.virt.libvirt.driver.LibvirtDriver'
+            '.migrate_disk_and_power_off', return_value='{}',
+        ):
+            server = self._migrate_server(server)
+        dest_host = server['OS-EXT-SRV-ATTR:host']
+        self.assertNotEqual(src_host, dest_host)
+
+        xml = self._get_xml_on_host(server, dest_host)
+        self._assert_filesystem_tag(xml, share_id)
+
+        server = self._confirm_resize(server)
+        xml = self._get_xml_on_host(server, dest_host)
+        self._assert_filesystem_tag(xml, share_id)
+
+    def test_cold_migrate_revert_with_share(self):
+        server, share_id = self._setup_server_with_share()
+        src_host = server['OS-EXT-SRV-ATTR:host']
+
+        with mock.patch(
+            'nova.virt.libvirt.driver.LibvirtDriver'
+            '.migrate_disk_and_power_off', return_value='{}',
+        ):
+            server = self._migrate_server(server)
+        dest_host = server['OS-EXT-SRV-ATTR:host']
+        self.assertNotEqual(src_host, dest_host)
+        self._assert_filesystem_tag(
+            self._get_xml_on_host(server, dest_host), share_id)
+
+        server = self._revert_resize(server)
+        self.assertEqual(src_host, server['OS-EXT-SRV-ATTR:host'])
+        self._assert_filesystem_tag(
+            self._get_xml_on_host(server, src_host), share_id)
+
+    def test_cold_migrate_with_share_mount_failure(self):
+        server, share_id = self._setup_server_with_share()
+        self.mock_connect.side_effect = processutils.ProcessExecutionError
+
+        with mock.patch(
+            'nova.virt.libvirt.driver.LibvirtDriver'
+            '.migrate_disk_and_power_off', return_value='{}',
+        ):
+            exc = self.assertRaises(
+                client.OpenStackApiException,
+                self.api.post_server_action,
+                server['id'], {'migrate': None})
+        self.assertIn("ShareMountError", str(exc))
+
+        server = self.api.get_server(server['id'])
+        self.assertEqual('ERROR', server['status'])
+        sm = share_mapping.ShareMapping.get_by_instance_uuid_and_share_id(
+            self.context, server['id'], share_id)
+        self.assertEqual(sm.status, 'active')
+
+    def test_cold_migrate_same_host_with_share(self):
+        self.flags(allow_resize_to_same_host=True)
+        server, share_id = self._setup_server_with_share()
+        src_host = server['OS-EXT-SRV-ATTR:host']
+
+        # Stop the other compute so the scheduler is forced to pick
+        # the same host for the resize.
+        other_host = 'host2' if src_host == 'host1' else 'host1'
+        other_svc = self.admin_api.get_services(
+            host=other_host, binary='nova-compute')[0]
+        self.computes[other_host].stop()
+        self.admin_api.put_service(other_svc['id'],
+                                  {'forced_down': True})
+
+        connect_count_before = self.mock_connect.call_count
+        disconnect_count_before = self.mock_disconnect.call_count
+
+        flavors = self.api.get_flavors()
+        server_flavor = server['flavor']['original_name']
+        new_flavor = flavors[1]
+        if new_flavor['name'] == server_flavor:
+            new_flavor = flavors[0]
+        with mock.patch(
+            'nova.virt.libvirt.driver.LibvirtDriver'
+            '.migrate_disk_and_power_off', return_value='{}',
+        ):
+            server = self._resize_server(server, new_flavor['id'])
+        self.assertEqual(src_host, server['OS-EXT-SRV-ATTR:host'])
+
+        self._assert_filesystem_tag(
+            self._get_xml_on_host(server, src_host), share_id)
+
+        server = self._confirm_resize(server)
+        # After confirm on a same-host resize the old domain is destroyed
+        # and recreated, so we can't inspect XML via fakelibvirt. Verify
+        # through the DB instead.
+        sm = share_mapping.ShareMapping.get_by_instance_uuid_and_share_id(
+            self.context, server['id'], share_id)
+        self.assertEqual('active', sm.status)
+
+        self.assertEqual(connect_count_before,
+                         self.mock_connect.call_count)
+        self.assertEqual(disconnect_count_before,
+                         self.mock_disconnect.call_count)

@@ -223,73 +223,11 @@ class TestConversions(test.NoDBTestCase):
         self.assertEqual(result['updated_at'], NOW_DATETIME)
         self.assertEqual(result['deleted_at'], NOW_DATETIME)
 
-    def _test_extracting_missing_attributes(self, include_locations):
-        # Verify behavior from glance objects that are missing attributes
-        # TODO(jaypipes): Find a better way of testing this crappy
-        #                 glanceclient magic object stuff.
-        class MyFakeGlanceImage(object):
-            def __init__(self, metadata):
-                IMAGE_ATTRIBUTES = ['size', 'owner', 'id', 'created_at',
-                                    'updated_at', 'status', 'min_disk',
-                                    'min_ram', 'is_public']
-                raw = dict.fromkeys(IMAGE_ATTRIBUTES)
-                raw.update(metadata)
-                self.__dict__['raw'] = raw
-
-            def __getattr__(self, key):
-                try:
-                    return self.__dict__['raw'][key]
-                except KeyError:
-                    raise AttributeError(key)
-
-            def __setattr__(self, key, value):
-                try:
-                    self.__dict__['raw'][key] = value
-                except KeyError:
-                    raise AttributeError(key)
-
-        metadata = {
-            'id': 1,
-            'created_at': NOW_DATETIME,
-            'updated_at': NOW_DATETIME,
-        }
-        image = MyFakeGlanceImage(metadata)
-        observed = glance._extract_attributes(
-            image, include_locations=include_locations)
-        expected = {
-            'id': 1,
-            'name': None,
-            'is_public': None,
-            'size': 0,
-            'min_disk': None,
-            'min_ram': None,
-            'disk_format': None,
-            'container_format': None,
-            'checksum': None,
-            'created_at': NOW_DATETIME,
-            'updated_at': NOW_DATETIME,
-            'deleted_at': None,
-            'deleted': None,
-            'status': None,
-            'properties': {},
-            'owner': None
-        }
-        if include_locations:
-            expected['locations'] = None
-            expected['direct_url'] = None
-        self.assertEqual(expected, observed)
-
-    def test_extracting_missing_attributes_include_locations(self):
-        self._test_extracting_missing_attributes(include_locations=True)
-
-    def test_extracting_missing_attributes_exclude_locations(self):
-        self._test_extracting_missing_attributes(include_locations=False)
-
 
 class TestExceptionTranslations(test.NoDBTestCase):
 
     def test_client_forbidden_to_imagenotauthed(self):
-        in_exc = glanceclient.exc.Forbidden('123')
+        in_exc = glanceclient.exc.HTTPForbidden('123')
         out_exc = glance._translate_image_exception('123', in_exc)
         self.assertIsInstance(out_exc, exception.ImageNotAuthorized)
 
@@ -299,7 +237,7 @@ class TestExceptionTranslations(test.NoDBTestCase):
         self.assertIsInstance(out_exc, exception.ImageNotAuthorized)
 
     def test_client_notfound_converts_to_imagenotfound(self):
-        in_exc = glanceclient.exc.NotFound('123')
+        in_exc = glanceclient.exc.HTTPNotFound('123')
         out_exc = glance._translate_image_exception('123', in_exc)
         self.assertIsInstance(out_exc, exception.ImageNotFound)
 
@@ -419,7 +357,7 @@ class TestGlanceClientWrapperRetries(test.NoDBTestCase):
     @mock.patch('nova.image.glance._glanceclient_from_endpoint')
     def test_static_client_without_retries(self, create_client_mock,
                                            sleep_mock):
-        side_effect = glanceclient.exc.ServiceUnavailable
+        side_effect = glanceclient.exc.HTTPServiceUnavailable
         self._mock_client_images_response(create_client_mock, side_effect)
         self.flags(num_retries=0, group='glance')
         client = self._get_static_client(create_client_mock)
@@ -430,7 +368,7 @@ class TestGlanceClientWrapperRetries(test.NoDBTestCase):
     def test_static_client_with_retries(self, create_client_mock,
                                         sleep_mock):
         side_effect = [
-            glanceclient.exc.ServiceUnavailable,
+            glanceclient.exc.HTTPServiceUnavailable,
             None
         ]
         self._mock_client_images_response(create_client_mock, side_effect)
@@ -444,7 +382,7 @@ class TestGlanceClientWrapperRetries(test.NoDBTestCase):
     def test_default_client_with_retries(self, create_client_mock,
                                          sleep_mock, shuffle_mock):
         side_effect = [
-            glanceclient.exc.ServiceUnavailable,
+            glanceclient.exc.HTTPServiceUnavailable,
             None
         ]
         self._mock_client_images_response(create_client_mock, side_effect)
@@ -473,7 +411,7 @@ class TestGlanceClientWrapperRetries(test.NoDBTestCase):
                                          sleep_mock, shuffle_mock):
         def some_generator(exception):
             if exception:
-                raise glanceclient.exc.ServiceUnavailable('Boom!')
+                raise glanceclient.exc.HTTPServiceUnavailable('Boom!')
             yield 'something'
 
         side_effect = [
@@ -490,7 +428,7 @@ class TestGlanceClientWrapperRetries(test.NoDBTestCase):
     @mock.patch('nova.image.glance._glanceclient_from_endpoint')
     def test_default_client_without_retries(self, create_client_mock,
                                             sleep_mock, shuffle_mock):
-        side_effect = glanceclient.exc.ServiceUnavailable
+        side_effect = glanceclient.exc.HTTPServiceUnavailable
         self._mock_client_images_response(create_client_mock, side_effect)
         self.flags(num_retries=0, group='glance')
         client = glance.GlanceClientWrapper()
@@ -1450,7 +1388,7 @@ class TestShow(test.NoDBTestCase):
                                  reraise_mock):
         raised = exception.ImageNotAuthorized(image_id=123)
         client = mock.MagicMock()
-        client.call.side_effect = glanceclient.exc.Forbidden
+        client.call.side_effect = glanceclient.exc.HTTPForbidden
         ctx = mock.sentinel.ctx
         reraise_mock.side_effect = raised
         service = glance.GlanceImageServiceV2(client)
@@ -1638,7 +1576,7 @@ class TestDetail(test.NoDBTestCase):
         ext_query_mock.return_value = params
         raised = exception.Forbidden()
         client = mock.MagicMock()
-        client.call.side_effect = glanceclient.exc.Forbidden
+        client.call.side_effect = glanceclient.exc.HTTPForbidden
         ctx = mock.sentinel.ctx
         reraise_mock.side_effect = raised
         service = glance.GlanceImageServiceV2(client)
@@ -1842,7 +1780,7 @@ class TestCreate(test.NoDBTestCase):
         image_mock = mock.MagicMock(spec=dict)
         raised = exception.Invalid()
         client = mock.MagicMock()
-        client.call.side_effect = glanceclient.exc.BadRequest
+        client.call.side_effect = glanceclient.exc.HTTPBadRequest
         ctx = mock.sentinel.ctx
         reraise_mock.side_effect = raised
         service = glance.GlanceImageServiceV2(client)
@@ -2022,7 +1960,7 @@ class TestUpdate(test.NoDBTestCase):
         trans_from_mock.return_value = mock.sentinel.trans_from
         raised = exception.ImageNotAuthorized(image_id=123)
         client = mock.MagicMock()
-        client.call.side_effect = glanceclient.exc.Forbidden
+        client.call.side_effect = glanceclient.exc.HTTPForbidden
         ctx = mock.sentinel.ctx
         reraise_mock.side_effect = raised
         show_mock.return_value = {
@@ -2060,7 +1998,7 @@ class TestDelete(test.NoDBTestCase):
 
     def test_delete_client_failure_v2(self):
         client = mock.MagicMock()
-        client.call.side_effect = glanceclient.exc.NotFound
+        client.call.side_effect = glanceclient.exc.HTTPNotFound
         ctx = mock.sentinel.ctx
         service = glance.GlanceImageServiceV2(client)
         self.assertRaises(exception.ImageNotFound, service.delete, ctx,
@@ -2111,36 +2049,13 @@ class TestGlanceApiServers(test.NoDBTestCase):
         """Test get_api_servers via nova.utils.get_ksa_adapter()."""
         self.flags(api_servers=None, group='glance')
         with mock.patch('keystoneauth1.adapter.Adapter.'
-                        'get_endpoint_data') as mock_epd:
-            mock_epd.return_value.catalog_url = catalog_url
+                        'get_endpoint') as mock_epd:
+            mock_epd.return_value = catalog_url
             api_servers = glance.get_api_servers(mock.Mock())
             self.assertEqual(stripped, next(api_servers))
             # Still get itertools.cycle behavior
             self.assertEqual(stripped, next(api_servers))
             mock_epd.assert_called_once_with()
-
-    @mock.patch('keystoneauth1.adapter.Adapter.get_endpoint_data')
-    def test_get_api_servers_get_ksa_adapter_endpoint_override(self,
-                                                               mock_epd):
-        self.flags(endpoint_override='foo', group='glance')
-        api_servers = glance.get_api_servers(mock.Mock())
-        self.assertEqual('foo', next(api_servers))
-        self.assertEqual('foo', next(api_servers))
-        mock_epd.assert_not_called()
-
-
-class TestUpdateGlanceImage(test.NoDBTestCase):
-    @mock.patch('nova.image.glance.GlanceImageServiceV2')
-    def test_start(self, mock_glance_image_service):
-        consumer = glance.UpdateGlanceImage(
-            'context', 'id', 'metadata', 'stream')
-
-        with mock.patch.object(glance, 'get_remote_image_service') as a_mock:
-            a_mock.return_value = (mock_glance_image_service, 'image_id')
-
-            consumer.start()
-            mock_glance_image_service.update.assert_called_with(
-                'context', 'image_id', 'metadata', 'stream', purge_props=False)
 
 
 class TestExtractAttributes(test.NoDBTestCase):
@@ -2314,7 +2229,7 @@ class TestImportCopy(test.NoDBTestCase):
     def test_image_import_copy_not_found(self):
         self.assertRaises(exception.ImageNotFound,
                           self._test_import,
-                          glanceclient.exc.NotFound)
+                          glanceclient.exc.HTTPNotFound)
 
     def test_image_import_copy_not_authorized(self):
         self.assertRaises(exception.ImageNotAuthorized,

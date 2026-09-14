@@ -13,6 +13,7 @@
 from urllib import parse as urlparse
 
 from oslo_log import log as logging
+from oslo_utils import netutils
 from oslo_utils import versionutils
 from sqlalchemy import sql
 from sqlalchemy.sql import expression
@@ -50,16 +51,9 @@ def _parse_netloc(netloc):
         hostport = netloc
         userpass = ''
 
-    if hostport.startswith('['):
-        host_end = hostport.find(']')
-        if host_end < 0:
-            raise ValueError('Invalid IPv6 URL')
-        these['hostname'] = hostport[1:host_end]
-        these['port'] = hostport[host_end + 1:]
-    elif ':' in hostport:
-        these['hostname'], these['port'] = hostport.split(':', 1)
-    else:
-        these['hostname'] = hostport
+    host, port = netutils.parse_host_port(hostport)
+    these['hostname'] = host
+    these['port'] = port
 
     if ':' in userpass:
         these['username'], these['password'] = userpass.split(':', 1)
@@ -183,7 +177,8 @@ class CellMapping(base.NovaTimestampObject, base.NovaObject):
 
         return db_mapping
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_uuid(cls, context, uuid):
         db_mapping = cls._get_by_uuid_from_db(context, uuid)
 
@@ -256,10 +251,11 @@ class CellMappingList(base.ObjectListBase, base.NovaObject):
         return context.session.query(api_db_models.CellMapping).order_by(
             expression.asc(api_db_models.CellMapping.id)).all()
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_all(cls, context):
         db_mappings = cls._get_all_from_db(context)
-        return base.obj_make_list(context, cls(), CellMapping, db_mappings)
+        return base.obj_make_list(context, cls(), db_mappings)
 
     @staticmethod
     @api_db_api.context_manager.reader
@@ -273,10 +269,11 @@ class CellMappingList(base.ObjectListBase, base.NovaObject):
                 .filter_by(disabled=sql.false())\
                 .order_by(expression.asc(api_db_models.CellMapping.id)).all()
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_disabled(cls, context, disabled):
         db_mappings = cls._get_by_disabled_from_db(context, disabled)
-        return base.obj_make_list(context, cls(), CellMapping, db_mappings)
+        return base.obj_make_list(context, cls(), db_mappings)
 
     @staticmethod
     @api_db_api.context_manager.reader
@@ -300,4 +297,4 @@ class CellMappingList(base.ObjectListBase, base.NovaObject):
         which project_id has InstanceMappings.
         """
         db_mappings = cls._get_by_project_id_from_db(context, project_id)
-        return base.obj_make_list(context, cls(), CellMapping, db_mappings)
+        return base.obj_make_list(context, cls(), db_mappings)

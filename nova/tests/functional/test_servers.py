@@ -844,21 +844,199 @@ class ServersTest(integrated_helpers._IntegratedTestBase):
         self._delete_server(found_server)
 
     def test_resize_server_overquota(self):
+        """Test that a resize request to exceed quota is rejected."""
+        # Set default ram quota to 512.
         self.flags(cores=1, group='quota')
         self.flags(ram=512, group='quota')
-        # Create server with default flavor, 1 core, 512 ram
+
+        # Create server with default flavor, 1 core, 512 ram.
         server = self._build_server()
         created_server = self.api.post_server({"server": server})
         created_server_id = created_server['id']
 
         self._wait_for_state_change(created_server, 'ACTIVE')
 
-        # Try to resize to flavorid 2, 1 core, 2048 ram
+        # Try to resize to flavorid 2, 1 core, 2048 ram.
+        # This should fail because 2048 - 512 = 1536 > 512 ram quota.
         post = {'resize': {'flavorRef': '2'}}
         ex = self.assertRaises(client.OpenStackApiException,
                                self.api.post_server_action,
                                created_server_id, post)
         self.assertEqual(403, ex.response.status_code)
+        msg = ('Quota exceeded for ram: Requested 1536, but already used 512 '
+               'of 512 ram')
+        self.assertIn(msg, str(ex))
+
+    def test_resize_server_overquota_multiple_users(self):
+        """Test behavior when there is more than one user in the project."""
+        # Set default ram quota to 4000.
+        self.flags(ram=4000, group='quota')
+
+        # Create server as user 'fake' with default flavor, 1 core, 512 ram.
+        server1 = self._build_server()
+        created_server1 = self.api.post_server({"server": server1})
+        self._wait_for_state_change(created_server1, 'ACTIVE')
+
+        # Project usage should now be 512.
+        # User 'fake' usage should be 512.
+        # Create server as user 'other' with flavor 1 core, 2048 ram.
+        server2 = self._build_server(flavor_id='2')
+        server2 = self.api_fixture.other_api.post_server({"server": server2})
+        self._wait_for_state_change(server2, 'ACTIVE')
+
+        # Project usage should now be 512 + 2048 = 2560.
+        # User 'fake' usage should still be 512.
+        # user'other' usage should be 2048.
+        # Try to create server as user 'fake' with flavor 1 core, 2048 ram.
+        # This should fail because 2560 + 2048 = 4608 > 4000 ram quota.
+        server3 = self._build_server(flavor_id='2')
+        ex = self.assertRaises(client.OpenStackApiException,
+                               self.api.post_server, {"server": server3})
+        self.assertEqual(403, ex.response.status_code)
+        msg = ('Quota exceeded for ram: Requested 2048, but already used 2560 '
+               'of 4000 ram')
+        self.assertIn(msg, str(ex))
+
+        # Project usage should still be 2560.
+        # User 'fake' usage should still be 512.
+        # User 'other' usage should still be 2048.
+        # Try to resize server1 of user 'fake' to flavorid 2, 1 core, 2048 ram.
+        # This should fail because 2560 + 2048 - 512 = 4096 > 4000 ram quota.
+        post = {'resize': {'flavorRef': '2'}}
+        ex = self.assertRaises(client.OpenStackApiException,
+                               self.api.post_server_action,
+                               created_server1['id'], post)
+        self.assertEqual(403, ex.response.status_code)
+        msg = ('Quota exceeded for ram: Requested 1536, but already used '
+               '2560 of 4000 ram')
+        self.assertIn(msg, str(ex))
+
+        # Add a user-scoped ram quota of 4000 for user 'fake'.
+        # This is intentionally set the same as the default quota because it
+        # covers a specific corner case. We need to create a situation where we
+        # will have a user-scoped quota set in the database but our request
+        # will exceed the project-scoped quota rather than a lower user-scoped
+        # quota.
+        self.admin_api.update_quota(
+            {'ram': 4000}, project_id=self.api_fixture.project_id,
+            user_id='fake')
+
+        # Project usage should still be 2560.
+        # User 'fake' usage should still be 512.
+        # User 'other' usage should still be 2048.
+        # Try to create server as user 'fake' with flavor 1 core, 2048 ram.
+        # This should fail because 2560 + 2048 = 4608 > 4000 ram quota.
+        server3 = self._build_server(flavor_id='2')
+        ex = self.assertRaises(client.OpenStackApiException,
+                               self.api.post_server, {"server": server3})
+        self.assertEqual(403, ex.response.status_code)
+        msg = ('Quota exceeded for ram: Requested 2048, but already used '
+               '2560 of 4000 ram')
+        self.assertIn(msg, str(ex))
+
+    def test_resize_server_overquota_user_quota(self):
+        """Test behavior when user-scoped quota is exceeded."""
+        # Set default ram quota to 4000
+        self.flags(ram=4000, group='quota')
+
+        # Create server as user 'fake' with default flavor, 1 core, 512 ram
+        server1 = self._build_server()
+        created_server1 = self.api.post_server({"server": server1})
+        self._wait_for_state_change(created_server1, 'ACTIVE')
+
+        # Create server as user 'other' with flavor 1 core, 2048 ram
+        server2 = self._build_server(flavor_id='2')
+        self.api_fixture.other_api.post_server({"server": server2})
+
+        # Project usage should now be 2560.
+        # Try to create server as user 'fake' with flavor 1 core, 2048 ram
+        # This should fail because 2560 + 2048 = 4608 > 4000 ram quota
+        server3 = self._build_server(flavor_id='2')
+        ex = self.assertRaises(
+            client.OpenStackApiException,
+            self.api.post_server, {"server": server3})
+        self.assertEqual(403, ex.response.status_code)
+        msg = ('Quota exceeded for ram: Requested 2048, but already used 2560 '
+               'of 4000 ram')
+        self.assertIn(msg, str(ex))
+
+        # Project usage should still be 2560.
+        # Try to resize server1 to flavorid 2, 1 core, 2048 ram
+        # This should fail because 2560 + 2048 - 512 = 4096 > 4000 ram quota
+        post = {'resize': {'flavorRef': '2'}}
+        ex = self.assertRaises(client.OpenStackApiException,
+                               self.api.post_server_action,
+                               created_server1['id'], post)
+        self.assertEqual(403, ex.response.status_code)
+        msg = ('Quota exceeded for ram: Requested 1536, but already used '
+               '2560 of 4000 ram')
+        self.assertIn(msg, str(ex))
+
+        # Add a user quota for user 'other' of 2400.
+        self.admin_api.update_quota(
+            {'ram': 2400}, project_id=self.api_fixture.project_id,
+            user_id='other')
+
+        # Project usage should still be 2560.
+        # User 'other' usage should be 2048.
+        # Try to create server as user 'other' with flavor 1 core, 512 ram
+        # This should fail because 2048 + 512 = 2560 > 2400 user ram quota
+        ex = self.assertRaises(
+            client.OpenStackApiException,
+            self.api_fixture.other_api.post_server, {"server": server1})
+        self.assertEqual(403, ex.response.status_code)
+        msg = ('Quota exceeded for ram: Requested 512, but already used 2048 '
+               'of 2400 ram')
+        self.assertIn(msg, str(ex))
+
+    def test_update_quota_user_exceeds_project(self):
+        """Test that user quota cannot be set larger than project quota."""
+        # Set the project quota for instances to 5.
+        self.admin_api.update_quota(
+            {'instances': 5},
+            project_id=self.api_fixture.project_id)
+
+        # Try to set user quota for instances to 10 which exceeds the
+        # project quota of 5. This should fail with a 400 error.
+        ex = self.assertRaises(
+            client.OpenStackApiException,
+            self.admin_api.update_quota,
+            {'instances': 10},
+            project_id=self.api_fixture.project_id,
+            user_id='fake')
+        self.assertEqual(400, ex.response.status_code)
+        self.assertIn(
+            'Quota limit 10 for instances must be less than or equal to 5',
+            str(ex))
+
+    def test_update_quota_project_below_user(self):
+        """Test that project quota cannot be set less than user quota."""
+        # Set the project quota for instances to 10.
+        self.admin_api.update_quota(
+            {'instances': 10},
+            project_id=self.api_fixture.project_id)
+
+        # Set the user quota for instances to 5.
+        self.admin_api.update_quota(
+            {'instances': 5},
+            project_id=self.api_fixture.project_id,
+            user_id='fake')
+
+        # Try to set the project quota for instances to 3, which is less
+        # than the user quota of 5. This should fail with a 400 error.
+        ex = self.assertRaises(
+            client.OpenStackApiException,
+            self.admin_api.update_quota,
+            {'instances': 3},
+            project_id=self.api_fixture.project_id)
+        self.assertEqual(400, ex.response.status_code)
+        # The minimum for a project quota is the sum of user quotas, but the
+        # error message says "already used and reserved" because the same
+        # message is used for both user and project quota validation.
+        self.assertIn(
+            'Quota limit 3 for instances must be greater than or equal '
+            'to already used and reserved 5',
+            str(ex))
 
     def test_attach_vol_maximum_disk_devices_exceeded(self):
         server = self._build_server()
@@ -1712,6 +1890,7 @@ class ServersTestV280(integrated_helpers._IntegratedTestBase):
 
         # Check it's there
         found_server = self.api.get_server(server_id)
+        found_server = self._wait_for_state_change(found_server, 'ACTIVE')
         self.assertEqual(server_id, found_server['id'])
 
         self.start_service('compute', host='host2')
@@ -1747,7 +1926,7 @@ class ServersTestV280(integrated_helpers._IntegratedTestBase):
         found_server = self.api.get_server(server_id)
         self.assertEqual(server_id, found_server['id'])
 
-        server = self._wait_for_state_change(found_server, 'BUILD')
+        server = self._wait_for_state_change(found_server, 'ACTIVE')
 
         self.start_service('compute', host='host2')
 
@@ -2963,6 +3142,7 @@ class ServerMovingTests(integrated_helpers.ProviderUsageBaseTestCase):
         self._wait_for_server_parameter(server,
             {'OS-EXT-SRV-ATTR:host': dest_hostname,
              'status': 'ACTIVE'})
+        self._wait_for_migration_status(server, ['completed'])
 
         self._run_periodics()
 
@@ -3025,6 +3205,8 @@ class ServerMovingTests(integrated_helpers.ProviderUsageBaseTestCase):
         self._wait_for_server_parameter(server,
                                         {'OS-EXT-SRV-ATTR:host': dest_hostname,
                                          'status': 'ACTIVE'})
+        self.notifier.wait_for_versioned_notifications(
+            'instance.live_migration_post.end')
 
         self._run_periodics()
 
@@ -3789,6 +3971,7 @@ class ServerLiveMigrateForceAndAbort(
         self._wait_for_server_parameter(server,
                                         {'OS-EXT-SRV-ATTR:host': dest_hostname,
                                          'status': 'ACTIVE'})
+        self._wait_for_migration_status(server, ['completed'])
 
         self._run_periodics()
 
@@ -6167,6 +6350,12 @@ class AcceleratorServerReschedTest(AcceleratorServerBase):
             networks='none', expected_state='ERROR')
 
         server_uuid = server['id']
+        # This is ugly but even the last notification from the build is sent
+        # before the allocation and arqs is cleaned up after the failed
+        # re-schedule so we don't have a wait to wait for a signal. So we
+        # wait blindly to keep the test case stable. See
+        # _cleanup_when_reschedule_fails for the sequence of events.
+        time.sleep(1)
         self._check_no_allocs_usage(server_uuid)
         self.cyborg.mock_del_arqs.assert_has_calls(
             [mock.call(server_uuid),
@@ -6872,3 +7061,52 @@ class PortBindingShelvedServerTest(integrated_helpers._IntegratedTestBase):
 
         # Assert that the port still uses the same DNS name
         self.assertEqual(port['dns_name'], server_name)
+
+
+class CreateServerConstraintsTest(integrated_helpers._IntegratedTestBase):
+
+    def test_create_server_locked_memory_without_mem_page_size(self):
+        image = self._create_image(metadata={'hw_locked_memory': 'true'})
+
+        with self.assertRaisesRegex(client.OpenStackApiException,
+                                    ".*Unexpected status code.*") as cm:
+            self._create_server(image_uuid=image['id'])
+        self.assertEqual(400, cm.exception.response.status_code)
+        self.assertEqual(
+            'locked_memory value in image or flavor is forbidden '
+            'when mem_page_size is not set.',
+            cm.exception.response.json()['badRequest']['message'])
+
+    def test_create_server_locked_memory_conflict(self):
+        image = self._create_image(metadata={'hw_locked_memory': 'true'})
+        flavor_id = self._create_flavor(extra_spec={
+            'hw:locked_memory': 'false',
+            'hw:mem_page_size': 'any'})
+
+        with self.assertRaisesRegex(client.OpenStackApiException,
+                                    ".*Unexpected status code.*") as cm:
+            self._create_server(flavor_id=flavor_id, image_uuid=image['id'])
+        self.assertEqual(400, cm.exception.response.status_code)
+        self.assertEqual(
+            'locked_memory value in image (True) and flavor '
+            '(False) conflict. A consistent value is expected if '
+            'both specified.',
+            cm.exception.response.json()['badRequest']['message'])
+
+    def test_create_server_amd_sev_snp_non_stateless_firmware(self):
+        image = self._create_image(metadata={
+            'hw_mem_encryption': 'true',
+            'hw_mem_encryption_model': 'amd-sev-snp',
+            'hw_firmware_type': 'uefi',
+            'hw_machine_type': 'q35',
+        })
+
+        with self.assertRaisesRegex(client.OpenStackApiException,
+                                    ".*Unexpected status code.*") as cm:
+            self._create_server(image_uuid=image['id'])
+        self.assertEqual(400, cm.exception.response.status_code)
+        self.assertEqual(
+            "The amd-sev-snp memory encryption model requires stateless "
+            "firmware but the image metadata doesn't have "
+            "the 'hw_firmware_stateless' property set to True",
+            cm.exception.response.json()['badRequest']['message'])

@@ -18,10 +18,10 @@ import os
 import tempfile
 from unittest import mock
 
-import eventlet
 import fixtures
 
 from nova import test
+from nova import thread_pool_factory
 from nova import utils
 from nova.virt.disk.mount import nbd
 from nova.virt.image import model as imgmodel
@@ -325,10 +325,10 @@ class NbdTestCase(test.NoDBTestCase):
             n.get_dev()
             chosen_devices.append(n.device)
 
-        thread1 = eventlet.spawn(get_a_device)
-        thread2 = eventlet.spawn(get_a_device)
-        thread1.wait()
-        thread2.wait()
+        thread1 = thread_pool_factory.spawn(get_a_device)
+        thread2 = thread_pool_factory.spawn(get_a_device)
+        thread1.result()
+        thread2.result()
 
         self.assertEqual(2, len(chosen_devices))
         self.assertNotEqual(chosen_devices[0], chosen_devices[1])

@@ -365,9 +365,28 @@ class ComputeDriver(object):
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
+    def process_instances_at_startup(self, context, instances):
+        """Process instances during compute service startup.
+
+        Virt drivers can override this to validate or update the local,
+        non-evacuated instances loaded by the compute manager during service
+        startup.
+
+        :param context: security context
+        :param instances: nova.objects.instance.InstanceList
+        :returns: nova.objects.instance.InstanceList
+        """
+        return instances
+
     def cleanup_host(self, host):
         """Clean up anything that is necessary for the driver gracefully stop,
         including ending remote sessions. This is optional.
+
+        This is called synchronously during graceful shutdown and with no
+        timeout of its own. If the cleanup takes time then service graceful
+        shutdown may interrupt it as this is run in a daemon thread bounded
+        by manager_shutdown_timeout/graceful_shutdown_timeout, so a hang here
+        will not block the process from exiting.
         """
         pass
 
@@ -916,7 +935,8 @@ class ComputeDriver(object):
 
     def finish_migration(self, context, migration, instance, disk_info,
                          network_info, image_meta, resize_instance,
-                         allocations, block_device_info=None, power_on=True):
+                         allocations, block_device_info=None, power_on=True,
+                         share_info=None):
         """Completes a resize/migration.
 
         :param context: the context for the migration/resize
@@ -934,6 +954,7 @@ class ComputeDriver(object):
         :param block_device_info: instance volume block device info
         :param power_on: True if the instance should be powered on, False
                          otherwise
+        :param share_info: ShareMappingList for the instance, or None
         """
         raise NotImplementedError()
 
@@ -946,7 +967,7 @@ class ComputeDriver(object):
 
     def finish_revert_migration(self, context, instance, network_info,
                                 migration, block_device_info=None,
-                                power_on=True):
+                                power_on=True, share_info=None):
         """Finish reverting a resize/migration.
 
         :param context: the context for the finish_revert_migration
@@ -956,6 +977,7 @@ class ComputeDriver(object):
         :param block_device_info: instance volume block device info
         :param power_on: True if the instance should be powered on, False
                          otherwise
+        :param share_info: ShareMappingList for the instance, or None
         """
         raise NotImplementedError()
 
@@ -1126,6 +1148,15 @@ class ComputeDriver(object):
         :param share_mapping: nova.objects.share_mapping.ShareMapping object
             that define the share
         :returns: True if the mountpoint is still in used by another instance
+        """
+        raise NotImplementedError()
+
+    def is_share_mounted(self, share_mapping):
+        """Return whether a manila share is mounted on this compute node.
+
+        :param share_mapping: nova.objects.share_mapping.ShareMapping object
+            that define the share
+        :returns: True if the share's mountpoint is present on this host
         """
         raise NotImplementedError()
 

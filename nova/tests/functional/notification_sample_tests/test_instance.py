@@ -75,8 +75,13 @@ class TestInstanceNotificationSampleWithMultipleCompute(
             }
         }
         self.admin_api.post_server_action(server['id'], post)
+        # NOTE(gibi): the two end notifications come from two different
+        # computes so their order is not fully defined. Let's wait for both
+        # before we assert.
         self._wait_for_notification(
             'instance.live_migration_rollback_dest.end')
+        self._wait_for_notification(
+            'instance.live_migration_rollback.end')
 
         # 0. scheduler.select_destinations.start
         # 1. scheduler.select_destinations.end
@@ -93,24 +98,33 @@ class TestInstanceNotificationSampleWithMultipleCompute(
                 'reservation_id': server['reservation_id'],
                 'uuid': server['id']},
             actual=self.notifier.versioned_notifications[2])
+        end = self._get_notifications(
+            'instance.live_migration_rollback.end')
+        self.assertEqual(1, len(end))
         self._verify_notification(
             'instance-live_migration_rollback-end',
             replacements={
                 'reservation_id': server['reservation_id'],
                 'uuid': server['id']},
-            actual=self.notifier.versioned_notifications[3])
+            actual=end[0])
+        dest_start = self._get_notifications(
+            'instance.live_migration_rollback_dest.start')
+        self.assertEqual(1, len(dest_start))
         self._verify_notification(
             'instance-live_migration_rollback_dest-start',
             replacements={
                 'reservation_id': server['reservation_id'],
                 'uuid': server['id']},
-            actual=self.notifier.versioned_notifications[4])
+            actual=dest_start[0])
+        dest_end = self._get_notifications(
+            'instance.live_migration_rollback_dest.end')
+        self.assertEqual(1, len(dest_end))
         self._verify_notification(
             'instance-live_migration_rollback_dest-end',
             replacements={
                 'reservation_id': server['reservation_id'],
                 'uuid': server['id']},
-            actual=self.notifier.versioned_notifications[5])
+            actual=dest_end[0])
 
     def _test_live_migration_success(self, server):
         post = {
@@ -143,6 +157,9 @@ class TestInstanceNotificationSampleWithMultipleCompute(
         migrations = self.admin_api.get_active_migrations(server['id'])
         self.assertEqual(1, len(migrations))
 
+        # The two notifications come from two different compute service so
+        # their order is not deterministic.
+        self._wait_for_notification('instance.live_migration_post_dest.end')
         self._wait_for_notification('instance.live_migration_post.end')
         # 0. scheduler.select_destinations.start
         # 1. scheduler.select_destinations.end
@@ -167,18 +184,22 @@ class TestInstanceNotificationSampleWithMultipleCompute(
                 'reservation_id': server['reservation_id'],
                 'uuid': server['id']},
             actual=self.notifier.versioned_notifications[5])
+        dest_end = self._get_notifications(
+            'instance.live_migration_post_dest.end')[0]
         self._verify_notification(
             'instance-live_migration_post_dest-end',
             replacements={
                 'reservation_id': server['reservation_id'],
                 'uuid': server['id']},
-            actual=self.notifier.versioned_notifications[6])
+            actual=dest_end)
+        post_end = self._get_notifications(
+            'instance.live_migration_post.end')[0]
         self._verify_notification(
             'instance-live_migration_post-end',
             replacements={
                 'reservation_id': server['reservation_id'],
                 'uuid': server['id']},
-            actual=self.notifier.versioned_notifications[7])
+            actual=post_end)
 
     def _test_live_migration_abort(self, server):
         post = {
@@ -320,18 +341,25 @@ class TestInstanceNotificationSampleWithMultipleCompute(
         # 5. instance.live_migration_force_complete.end
         self.assertGreaterEqual(len(self.notifier.versioned_notifications), 6,
                                 self.notifier.versioned_notifications)
+        # Note that instance.live_migration_post.start can arrive in between
+        # these notifications so we cannot check the received notification
+        # by index.
+        force_start = self._get_notifications(
+            'instance.live_migration_force_complete.start')[0]
         self._verify_notification(
             'instance-live_migration_force_complete-start',
             replacements={
                 'reservation_id': server['reservation_id'],
                 'uuid': server['id']},
-            actual=self.notifier.versioned_notifications[4])
+            actual=force_start)
+        force_end = self._get_notifications(
+            'instance.live_migration_force_complete.end')[0]
         self._verify_notification(
             'instance-live_migration_force_complete-end',
             replacements={
                 'reservation_id': server['reservation_id'],
                 'uuid': server['id']},
-            actual=self.notifier.versioned_notifications[5])
+            actual=force_end)
 
 
 class TestInstanceNotificationSample(
@@ -1244,7 +1272,7 @@ class TestInstanceNotificationSample(
                     'nova_object.data': {},
                     'nova_object.name': 'ImageMetaPropsPayload',
                     'nova_object.namespace': 'nova',
-                    'nova_object.version': '1.18',
+                    'nova_object.version': '1.20',
                 },
                 'image.size': 58145823,
                 'image.tags': [],
@@ -1340,7 +1368,7 @@ class TestInstanceNotificationSample(
                     'nova_object.data': {},
                     'nova_object.name': 'ImageMetaPropsPayload',
                     'nova_object.namespace': 'nova',
-                    'nova_object.version': '1.18',
+                    'nova_object.version': '1.20',
                 },
                 'image.size': 58145823,
                 'image.tags': [],
@@ -2066,7 +2094,7 @@ class TestInstanceNotificationSample(
         # 0: instance-share_detach-start
         # 1: instance-share_detach-error
         # 2: compute.exception
-        self.assertEqual(2, len(self.notifier.versioned_notifications),
+        self.assertEqual(3, len(self.notifier.versioned_notifications),
                             self.notifier.versioned_notifications)
         expected_shares[0]["nova_object.data"]["status"] = "detaching"
         self._verify_notification(
@@ -2190,6 +2218,7 @@ class TestInstanceNotificationSample(
         self.api.post_server_volume(server['id'], post)
 
         self._wait_for_notification('instance.volume_attach.error')
+        self._wait_for_notification('compute.exception')
 
         block_devices = [
             # Add by default at boot
@@ -2214,9 +2243,7 @@ class TestInstanceNotificationSample(
         # 0. volume_attach-start
         # 1. volume_attach-error
         # 2. compute.exception
-        # We only rely on the first 2 notifications, in this case we don't
-        # care about the exception notification.
-        self.assertLessEqual(2, len(self.notifier.versioned_notifications))
+        self.assertEqual(3, len(self.notifier.versioned_notifications))
         self._verify_notification(
             'instance-volume_attach-start',
             replacements={

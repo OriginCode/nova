@@ -24,6 +24,7 @@
 from nova import monkey_patch; monkey_patch.patch()  # noqa
 # autopep8: on
 
+import atexit
 import collections
 from contextlib import contextmanager
 import functools
@@ -3570,8 +3571,8 @@ class LimitsCommands():
                 s for s in flavor.extra_specs if s.startswith('resources:')]:
             resources.add('class:' + spec.lstrip('resources:'))
         try:
-            for resource in scheduler_utils.resources_for_limits(flavor,
-                                                                 is_bfv=False):
+            for resource in scheduler_utils.resources_from_flavor_and_bfv(
+                flavor, is_bfv=False):
                 resources.add('class:' + resource)
         except Exception as e:
             # This is to be resilient about potential extra spec translation
@@ -3849,3 +3850,14 @@ def main():
         else:
             print(_("An error has occurred:\n%s") % traceback.format_exc())
         return 255
+
+
+# NOTE(gibi): This is needed for >= py3.14 and eventlet otherwise when the
+# CLI exists the logging module prints and ugly stack trace with the message
+#     RuntimeError: greenlet is being finalized
+# Drop this when eventlet is finally removed
+@atexit.register
+def _at_exit():
+    if not utils.concurrency_mode_threading():
+        import logging
+        logging._handlerList = []

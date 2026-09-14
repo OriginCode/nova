@@ -115,7 +115,8 @@ class InstanceMapping(base.NovaTimestampObject, base.NovaObject):
 
         return db_mapping
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_instance_uuid(cls, context, instance_uuid):
         db_mapping = cls._get_by_instance_uuid_from_db(context, instance_uuid)
         return cls._from_db_object(context, cls(), db_mapping)
@@ -323,12 +324,12 @@ class InstanceMappingList(base.ObjectListBase, base.NovaObject):
             .options(orm.joinedload(api_models.InstanceMapping.cell_mapping))\
             .filter(api_models.InstanceMapping.project_id == project_id).all()
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_project_id(cls, context, project_id):
         db_mappings = cls._get_by_project_id_from_db(context, project_id)
 
-        return base.obj_make_list(context, cls(), objects.InstanceMapping,
-                db_mappings)
+        return base.obj_make_list(context, cls(), db_mappings)
 
     @staticmethod
     @api_db_api.context_manager.reader
@@ -337,11 +338,11 @@ class InstanceMappingList(base.ObjectListBase, base.NovaObject):
             .options(orm.joinedload(api_models.InstanceMapping.cell_mapping))\
             .filter(api_models.InstanceMapping.cell_id == cell_id).all()
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_cell_id(cls, context, cell_id):
         db_mappings = cls._get_by_cell_id_from_db(context, cell_id)
-        return base.obj_make_list(context, cls(), objects.InstanceMapping,
-                db_mappings)
+        return base.obj_make_list(context, cls(), db_mappings)
 
     @staticmethod
     @api_db_api.context_manager.reader
@@ -351,11 +352,11 @@ class InstanceMappingList(base.ObjectListBase, base.NovaObject):
             .filter(api_models.InstanceMapping.instance_uuid.in_(uuids))\
             .all()
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_instance_uuids(cls, context, uuids):
         db_mappings = cls._get_by_instance_uuids_from_db(context, uuids)
-        return base.obj_make_list(context, cls(), objects.InstanceMapping,
-                db_mappings)
+        return base.obj_make_list(context, cls(), db_mappings)
 
     @staticmethod
     @api_db_api.context_manager.writer
@@ -408,8 +409,7 @@ class InstanceMappingList(base.ObjectListBase, base.NovaObject):
         """
         db_mappings = cls._get_not_deleted_by_cell_and_project_from_db(
             context, cell_uuid, project_id, limit)
-        return base.obj_make_list(context, cls(), objects.InstanceMapping,
-                db_mappings)
+        return base.obj_make_list(context, cls(), db_mappings)
 
     @staticmethod
     @api_db_api.context_manager.reader
@@ -425,7 +425,8 @@ class InstanceMappingList(base.ObjectListBase, base.NovaObject):
             counts['user'] = {'instances': user_result}
         return counts
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_counts(cls, context, project_id, user_id=None):
         """Get the counts of InstanceMapping objects in the database.
 

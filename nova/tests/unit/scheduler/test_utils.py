@@ -2342,6 +2342,14 @@ class TestEncryptedMemoryTranslation(TestUtilsBase):
         elif mem_encryption_model == 'amd-sev-es':
             expected_resources[orc.MEM_ENCRYPTION_CONTEXT] = 1
             required_traits |= {'HW_CPU_X86_AMD_SEV_ES'}
+        elif mem_encryption_model == 'amd-sev-snp':
+            expected_resources[orc.MEM_ENCRYPTION_CONTEXT] = 1
+            required_traits |= {'COMPUTE_SECURITY_STATELESS_FIRMWARE',
+                                'HW_CPU_X86_AMD_SEV_SNP'}
+        elif mem_encryption_model == 'intel-tdx':
+            expected_resources[orc.MEM_ENCRYPTION_CONTEXT] = 1
+            required_traits |= {'COMPUTE_SECURITY_STATELESS_FIRMWARE',
+                                'HW_CPU_X86_INTEL_TDX'}
         elif mem_encryption_model is not None:
             self.fail('invalid mem_encryption_model: %s'
                       % mem_encryption_model)
@@ -2471,6 +2479,10 @@ class TestEncryptedMemoryTranslation(TestUtilsBase):
         me_trait = 'HW_CPU_X86_AMD_SEV'
         if model == 'amd-sev-es':
             me_trait = 'HW_CPU_X86_AMD_SEV_ES'
+        if model == 'amd-sev-snp':
+            me_trait = 'HW_CPU_X86_AMD_SEV_SNP'
+        if model == 'intel-tdx':
+            me_trait = 'HW_CPU_X86_INTEL_TDX'
         mock_log.debug.assert_has_calls([
             mock.call('Requiring memory encryption model %s via trait %s',
                       model, me_trait)
@@ -2520,38 +2532,63 @@ class TestEncryptedMemoryTranslation(TestUtilsBase):
                     hw_mem_encryption=image_prop))
         )
 
-    @ddt.data('amd-sev', 'amd-sev-es')
+    @ddt.data('amd-sev', 'amd-sev-es', 'amd-sev-snp', 'intel-tdx')
     def test_encrypted_memory_model_extra_spec(self, model):
+        image_props = {
+            'hw_machine_type': 'q35',
+            'hw_firmware_type': 'uefi'
+        }
+        if model in ('amd-sev-snp', 'intel-tdx'):
+            image_props['hw_firmware_stateless'] = 'true'
+        if model == 'intel-tdx':
+            image_props['hw_video_model'] = 'none'
+
         self._test_encrypted_memory_support_required(
             'hw:mem_encryption extra spec',
             {'hw:mem_encryption': 'true',
              'hw:mem_encryption_model': model},
             image=objects.ImageMeta(
                 id='005249be-3c2f-4351-9df7-29bb13c21b14',
-                properties=objects.ImageMetaProps(
-                    hw_machine_type='q35',
-                    hw_firmware_type='uefi')),
+                properties=objects.ImageMetaProps(**image_props)),
             model=model
         )
 
-    @ddt.data('amd-sev', 'amd-sev-es')
+    @ddt.data('amd-sev', 'amd-sev-es', 'amd-sev-snp', 'intel-tdx')
     def test_encrypted_memory_model_image_prop(self, model):
+        image_props = {
+            'hw_machine_type': 'q35',
+            'hw_firmware_type': 'uefi',
+            'hw_mem_encryption': 'true',
+            'hw_mem_encryption_model': model,
+        }
+        if model in ('amd-sev-snp', 'intel-tdx'):
+            image_props['hw_firmware_stateless'] = 'true'
+        if model == 'intel-tdx':
+            image_props['hw_video_model'] = 'none'
+
         self._test_encrypted_memory_support_required(
             'hw_mem_encryption image property',
             {},
             image=objects.ImageMeta(
                 id='005249be-3c2f-4351-9df7-29bb13c21b14',
                 name=self.image_name,
-                properties=objects.ImageMetaProps(
-                    hw_machine_type='q35',
-                    hw_firmware_type='uefi',
-                    hw_mem_encryption='true',
-                    hw_mem_encryption_model=model)),
+                properties=objects.ImageMetaProps(**image_props)),
             model=model
         )
 
-    @ddt.data('amd-sev', 'amd-sev-es')
+    @ddt.data('amd-sev', 'amd-sev-es', 'amd-sev-snp', 'intel-tdx')
     def test_encrypted_memory_model_both_required(self, model):
+        image_props = {
+            'hw_machine_type': 'q35',
+            'hw_firmware_type': 'uefi',
+            'hw_mem_encryption': 'true',
+            'hw_mem_encryption_model': model,
+        }
+        if model in ('amd-sev-snp', 'intel-tdx'):
+            image_props['hw_firmware_stateless'] = 'true'
+        if model == 'intel-tdx':
+            image_props['hw_video_model'] = 'none'
+
         self._test_encrypted_memory_support_required(
             'hw:mem_encryption extra spec and '
             'hw_mem_encryption image property',
@@ -2560,18 +2597,24 @@ class TestEncryptedMemoryTranslation(TestUtilsBase):
             image=objects.ImageMeta(
                 id='005249be-3c2f-4351-9df7-29bb13c21b14',
                 name=self.image_name,
-                properties=objects.ImageMetaProps(
-                    hw_machine_type='q35',
-                    hw_firmware_type='uefi',
-                    hw_mem_encryption='true',
-                    hw_mem_encryption_model=model)),
+                properties=objects.ImageMetaProps(**image_props)),
             model=model
         )
 
     @ddt.unpack
     @ddt.data(
         ('amd-sev', 'amd-sev-es'),
-        ('amd-sev-es', 'amd-sev'))
+        ('amd-sev', 'amd-sev-snp'),
+        ('amd-sev', 'intel-tdx'),
+        ('amd-sev-es', 'amd-sev'),
+        ('amd-sev-es', 'amd-sev-snp'),
+        ('amd-sev-es', 'intel-tdx'),
+        ('amd-sev-snp', 'amd-sev'),
+        ('amd-sev-snp', 'amd-sev-es'),
+        ('amd-sev-snp', 'intel-tdx'),
+        ('intel-tdx', 'amd-sev'),
+        ('intel-tdx', 'amd-sev-es'),
+        ('intel-tdx', 'amd-sev-snp'))
     def test_encrypted_memory_model_conflict_1(self, f_model, i_model):
         image = objects.ImageMeta(
             name=self.image_name,
@@ -2590,6 +2633,43 @@ class TestEncryptedMemoryTranslation(TestUtilsBase):
             image=image)
         self.assertRaises(
             exception.FlavorImageConflict,
+            utils.ResourceRequest.from_request_spec, reqspec
+        )
+
+    def test_encrypted_memory_model_snp_but_stateful(self):
+        # When image properties are used
+        image = objects.ImageMeta(
+            name=self.image_name,
+            properties=objects.ImageMetaProps(
+                hw_machine_type='q35',
+                hw_firmware_type='uefi',
+                hw_mem_encryption='true',
+                hw_mem_encryption_model='amd-sev-snp'
+            )
+        )
+        reqspec = self._get_request_spec(
+            extra_specs={}, image=image)
+        self.assertRaises(
+            exception.StatelessFirmwareRequired,
+            utils.ResourceRequest.from_request_spec, reqspec
+        )
+
+        # When flavor extra specs are used
+        image = objects.ImageMeta(
+            name=self.image_name,
+            properties=objects.ImageMetaProps(
+                hw_machine_type='q35',
+                hw_firmware_type='uefi',
+            )
+        )
+        reqspec = self._get_request_spec(
+            extra_specs={
+                'hw:mem_encryption': 'true',
+                'hw:mem_encryption_model': 'amd-sev-snp',
+            },
+            image=image)
+        self.assertRaises(
+            exception.StatelessFirmwareRequired,
             utils.ResourceRequest.from_request_spec, reqspec
         )
 

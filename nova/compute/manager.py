@@ -40,7 +40,6 @@ import traceback
 from cinderclient import exceptions as cinder_exception
 from cursive import exception as cursive_exception
 from keystoneauth1 import exceptions as keystone_exception
-from openstack import exceptions as sdk_exc
 import os_traits
 from oslo_log import log as logging
 import oslo_messaging as messaging
@@ -60,6 +59,7 @@ from nova.compute import claims
 from nova.compute import power_state
 from nova.compute import resource_tracker
 from nova.compute import rpcapi as compute_rpcapi
+from nova.compute import share_management
 from nova.compute import task_states
 from nova.compute import utils as compute_utils
 from nova.compute.utils import wrap_instance_event
@@ -88,6 +88,7 @@ from nova.scheduler.client import query
 from nova.scheduler.client import report
 from nova.scheduler import utils as scheduler_utils
 from nova.share import manila
+from nova import thread_pool_factory
 from nova import utils
 from nova.virt import block_device as driver_block_device
 from nova.virt import configdrive
@@ -666,61 +667,45 @@ class ComputeManager(manager.Manager):
         self.compute_task_api = conductor.ComputeTaskAPI()
         self.query_client = query.SchedulerQueryClient()
         self.instance_events = InstanceEvents()
-        self._sync_power_executor = nova.utils.create_executor(
-            max_workers=CONF.sync_power_state_pool_size)
         self._syncs_in_progress: set[str] = set()
         self._syncs_in_progress_lock = threading.Lock()
         self.send_instance_updates = (
             CONF.filter_scheduler.track_instance_changes)
 
-        max_builds = self._get_max_concurrent_builds()
-        max_snapshots = self._get_max_concurrent_snapshots()
-
         if utils.concurrency_mode_threading():
-            max_tasks = max(max_builds, max_snapshots)
-
-            if max_builds != max_snapshots:
-                LOG.warning(
-                    "In native threading mode the number of concurrent "
-                    "builds, and snapshots should be limited to the "
-                    "same number. The current configuration has differing "
-                    "limits: max_concurrent_builds: %d, "
-                    "max_concurrent_snapshots: %d. "
-                    "Nova will use a single, overall limit of %d for these "
-                    "tasks.",
-                    max_builds, max_snapshots, max_tasks)
-
-            self._long_task_executor = utils.get_long_task_executor(max_tasks)
-
             # In threading mode we want to use the size of the executor to
             # act as the limit of concurrent execution. So neuter the
             # semaphores here.
             # TODO(gibi): remove the semaphores once eventlet mode is removed
             self._build_semaphore = compute_utils.UnlimitedSemaphore()
             self._snapshot_semaphore = compute_utils.UnlimitedSemaphore()
-
         else:
             # In eventlet mode we use the individual semaphores to limit
             # the concurrent tasks, so just create a big Executor to
             # potentially host all of them
-            self._long_task_executor = utils.get_long_task_executor(
-                max_builds + max_snapshots)
-
-            self._build_semaphore = threading.Semaphore(max_builds)
-            self._snapshot_semaphore = threading.Semaphore(max_snapshots)
-
-        # While live migration is a long-running task we cannot put it into
-        # the same long_task_executor as build and snapshot as we need:
-        # 1. a very small limit of concurrent live migrations compared to
-        #    builds and snapshots
-        # 2. a way to cancel live migrations easily that are waiting due to the
-        #    limit
-        self._live_migration_executor = nova.utils.create_executor(
-            max_workers=self._get_max_concurrent_live_migrations())
+            self._build_semaphore = threading.Semaphore(
+                thread_pool_factory.get_max_concurrent_builds())
+            self._snapshot_semaphore = threading.Semaphore(
+                thread_pool_factory.get_max_concurrent_snapshots())
 
         # This is a dict, keyed by instance uuid, to a two-item tuple of
         # migration object and Future for the queued live migration.
         self._waiting_live_migrations = {}
+
+        # Live migration operations invokes multiple RPC request on destination
+        # compute and at different time. This dict tracks the live migration
+        # in-progress tasks on destination compute. The operation is kept
+        # in-progress until complete set of required tasks are performed on
+        # destination. Once RPC call for pre_live_migration is finished on
+        # dest, the migration is still in-progress and is only completed when
+        # post_live_migration_at_destination or a rollback is completed. This
+        # let graceful shutdown to wait for live migration complete operation.
+        self._pending_dest_live_migrations = {}
+
+        # Similar to live migration, resize/cold migration also involves
+        # multiple RPC calls on destination. This dict tracks full life cycle
+        # of resizes/cold migration on destination compute.
+        self._pending_dest_resizes = {}
 
         super(ComputeManager, self).__init__(service_name="compute",
                                              *args, **kwargs)
@@ -733,70 +718,10 @@ class ComputeManager(manager.Manager):
         # initialized before that happens.
         self.service_ref = None
         self.driver = driver.load_compute_driver(self.virtapi, compute_driver)
+        self.share_manager = share_management.ShareManager(
+            self.manila_api, self.driver)
         self.rt = resource_tracker.ResourceTracker(
             self.host, self.driver, reportclient=self.reportclient)
-
-    def _get_max_concurrent_builds(self):
-        if CONF.max_concurrent_builds > 0:
-            return CONF.max_concurrent_builds
-
-        # setting CONF.max_concurrent_builds to 0 (unlimited)
-        # is deprecated but still supported, so we need to use a sane
-        # default values for each threading mode
-        LOG.warning("Nova compute deprecated the support of unlimited "
-                    "parallel instance builds so "
-                    "[DEFAULT]max_concurrent_builds configured "
-                    "with value 0 is deprecated and will not be supported "
-                    "in future releases. Please set an explicit positive "
-                    "value to this config option instead.")
-        if utils.concurrency_mode_threading():
-            # Fall back to the default of the config
-            return 10
-        else:
-            # In eventlet mode we need to keep backward compatibility, and
-            # we use 1000 to emulate unlimited
-            return 1000
-
-    def _get_max_concurrent_snapshots(self):
-        if CONF.max_concurrent_snapshots > 0:
-            return CONF.max_concurrent_snapshots
-
-        # setting CONF.max_concurrent_snapshots to 0 (unlimited)
-        # is deprecated but still supported, so we need to use a sane
-        # default values for each threading mode
-        LOG.warning("Nova compute deprecated the support of unlimited "
-                    "parallel instance snapshots so "
-                    "[DEFAULT]max_concurrent_snapshots configured "
-                    "with value 0 is deprecated and will not be supported "
-                    "in future releases. Please set an explicit positive "
-                    "value to this config option instead.")
-        if utils.concurrency_mode_threading():
-            # Fall back to the default of the config
-            return 5
-        else:
-            # In eventlet mode we need to keep backward compatibility, and
-            # we use 1000 to emulate unlimited
-            return 1000
-
-    def _get_max_concurrent_live_migrations(self):
-        if CONF.max_concurrent_live_migrations > 0:
-            return CONF.max_concurrent_live_migrations
-
-        # setting CONF.max_concurrent_live_migrations to 0 (unlimited)
-        # is deprecated but still supported, so we need to use a sane
-        # default values for each threading mode
-        LOG.warning("Nova compute deprecated the support of unlimited "
-                    "parallel live migration so "
-                    "[DEFAULT]max_concurrent_live_migrations configured "
-                    "with value 0 is deprecated and will not be supported "
-                    "in future releases. Please set an explicit positive"
-                    "value to this config option instead.")
-        if utils.concurrency_mode_threading():
-            return 5
-        else:
-            # In eventlet mode we need to keep backward compatibility and
-            # 1000 greenthreads to emulate unlimited
-            return 1000
 
     @contextlib.contextmanager
     def syncs_in_progress(self) -> Iterator[set[str]]:
@@ -1065,107 +990,6 @@ class ComputeManager(manager.Manager):
 
         # Delete the vTPM secret in the key manager service if needed.
         self._complete_deletion_vtpm(context, instance)
-
-    def _validate_pinning_configuration(self, instances):
-        if not self.driver.capabilities.get('supports_pcpus', False):
-            return
-
-        for instance in instances:
-            # ignore deleted instances
-            if instance.deleted:
-                continue
-
-            # if this is an unpinned instance and the host only has
-            # 'cpu_dedicated_set' configured, we need to tell the operator to
-            # correct their configuration
-            if not instance.numa_topology or (
-                instance.numa_topology.cpu_policy in (
-                    None, fields.CPUAllocationPolicy.SHARED
-                )
-            ):
-                # we don't need to check 'vcpu_pin_set' since it can't coexist
-                # alongside 'cpu_dedicated_set'
-                if (CONF.compute.cpu_dedicated_set and
-                        not CONF.compute.cpu_shared_set):
-                    msg = _("This host has unpinned instances but has no CPUs "
-                            "set aside for this purpose; configure '[compute] "
-                            "cpu_shared_set' instead of, or in addition to, "
-                            "'[compute] cpu_dedicated_set'")
-                    raise exception.InvalidConfiguration(msg)
-
-                continue
-
-            # ditto for pinned instances if only 'cpu_shared_set' is configured
-            if (CONF.compute.cpu_shared_set and
-                    not CONF.compute.cpu_dedicated_set and
-                    not CONF.vcpu_pin_set):
-                msg = _("This host has pinned instances but has no CPUs "
-                        "set aside for this purpose; configure '[compute] "
-                        "cpu_dedicated_set' instead of, or in addition to, "
-                        "'[compute] cpu_shared_set'.")
-                raise exception.InvalidConfiguration(msg)
-
-            # if this is a mixed instance with both pinned and unpinned CPUs,
-            # the host must have both 'cpu_dedicated_set' and 'cpu_shared_set'
-            # configured. check if 'cpu_shared_set' is set.
-            if (instance.numa_topology.cpu_policy ==
-                    fields.CPUAllocationPolicy.MIXED and
-                    not CONF.compute.cpu_shared_set):
-                msg = _("This host has mixed instance requesting both pinned "
-                        "and unpinned CPUs but hasn't set aside unpinned CPUs "
-                        "for this purpose; Configure "
-                        "'[compute] cpu_shared_set'.")
-                raise exception.InvalidConfiguration(msg)
-
-            # for mixed instance check if 'cpu_dedicated_set' is set.
-            if (instance.numa_topology.cpu_policy ==
-                    fields.CPUAllocationPolicy.MIXED and
-                    not CONF.compute.cpu_dedicated_set):
-                msg = _("This host has mixed instance requesting both pinned "
-                        "and unpinned CPUs but hasn't set aside pinned CPUs "
-                        "for this purpose; Configure "
-                        "'[compute] cpu_dedicated_set'")
-                raise exception.InvalidConfiguration(msg)
-
-            # also check to make sure the operator hasn't accidentally
-            # dropped some cores that instances are currently using
-            available_dedicated_cpus = (hardware.get_vcpu_pin_set() or
-                                        hardware.get_cpu_dedicated_set())
-            pinned_cpus = instance.numa_topology.cpu_pinning
-            if available_dedicated_cpus and (
-                    pinned_cpus - available_dedicated_cpus):
-                # we can't raise an exception because of bug #1289064,
-                # which meant we didn't recalculate CPU pinning information
-                # when we live migrated a pinned instance
-                LOG.warning(
-                    "Instance is pinned to host CPUs %(cpus)s "
-                    "but one or more of these CPUs are not included in "
-                    "either '[compute] cpu_dedicated_set' or "
-                    "'vcpu_pin_set'; you should update these "
-                    "configuration options to include the missing CPUs "
-                    "or rebuild or cold migrate this instance.",
-                    {'cpus': list(pinned_cpus)},
-                    instance=instance)
-
-    def _validate_vtpm_configuration(self, instances):
-        if self.driver.capabilities.get('supports_vtpm', False):
-            return
-
-        for instance in instances:
-            if instance.deleted:
-                continue
-
-            # NOTE(stephenfin): We don't have an attribute on the instance to
-            # check for this, so we need to inspect the flavor/image metadata
-            if hardware.get_vtpm_constraint(
-                instance.flavor, instance.image_meta,
-            ):
-                msg = _(
-                    'This host has instances with the vTPM feature enabled, '
-                    'but the host is not correctly configured; enable '
-                    'vTPM support.'
-                )
-                raise exception.InvalidConfiguration(msg)
 
     def _reset_live_migration(self, context, instance):
         migration = None
@@ -1454,8 +1278,14 @@ class ComputeManager(manager.Manager):
         block_device_info = \
             self._get_instance_block_device_info(context, instance)
 
-        share_info = self._get_share_info(context, instance)
-        self._mount_all_shares(context, instance, share_info)
+        share_info = self.share_manager.get_share_info(context, instance)
+        try:
+            self.share_manager.mount_all(context, instance, share_info)
+        except Exception:
+            LOG.exception('Failed to mount shares for instance',
+                          instance=instance)
+            self._set_instance_obj_error_state(instance)
+            return
 
         try:
             self.driver.resume_state_on_host_boot(
@@ -1466,8 +1296,8 @@ class ComputeManager(manager.Manager):
         except Exception:
             # NOTE(vish): The instance failed to resume, so we set the
             #             instance to error and attempt to continue.
-            LOG.warning('Failed to resume instance',
-                        instance=instance)
+            LOG.exception('Failed to resume instance',
+                          instance=instance)
             self._set_instance_obj_error_state(instance)
 
     def _retry_reboot(self, instance, current_power_state):
@@ -1781,38 +1611,48 @@ class ComputeManager(manager.Manager):
         # startup before we start mucking with instances we think are
         # ours.
         self._check_for_host_rename(nodes_by_uuid)
-
+        expected_attrs = ['info_cache', 'metadata', 'system_metadata',
+                          'numa_topology', 'flavor']
+        LOG.debug('Loading instances for host %s with expected_attrs: %s',
+                  self.host, ', '.join(expected_attrs))
         instances = objects.InstanceList.get_by_host(
-            context, self.host,
-            expected_attrs=['info_cache', 'metadata', 'numa_topology'])
+            context, self.host, expected_attrs=expected_attrs)
+        LOG.debug('Loaded %d instances for host', len(instances))
 
         self.init_virt_events()
 
-        self._validate_pinning_configuration(instances)
-        self._validate_vtpm_configuration(instances)
-
-        # NOTE(gibi): If ironic and vcenter virt driver slow start time
-        # becomes problematic here then we should consider adding a config
-        # option or a driver flag to tell us if we should thread
-        # _destroy_evacuated_instances and
-        # _error_out_instances_whose_build_was_interrupted out in the
-        # background on startup
+        # NOTE(gibi): Evacuation cleanup is skipped for drivers that do not
+        # support evacuation. If generic interrupted-build cleanup becomes a
+        # demonstrated startup bottleneck, it could be moved to background
+        # processing separately.
         try:
-            # checking that instance was not already evacuated to other host
-            evacuated_instances = self._destroy_evacuated_instances(
-                context, nodes_by_uuid)
+            evacuated_instances = {}
+            if self.driver.capabilities.get('supports_evacuate', False):
+                # Check that instances were not already evacuated to another
+                # host before asking the driver to process their state.
+                evacuated_instances = self._destroy_evacuated_instances(
+                    context, nodes_by_uuid)
 
-            # Initialise instances on the host that are not evacuating
-            for instance in instances:
-                if instance.uuid not in evacuated_instances:
-                    self._init_instance(context, instance)
+            # Allow the virt driver to validate and normalize the persisted
+            # state of local instances before recovering them. This must stay
+            # after the host rename check as drivers may mutate instance
+            # records.
+            instances_to_process = objects.InstanceList(
+                context, objects=[
+                    instance for instance in instances
+                    if instance.uuid not in evacuated_instances])
+            instances_to_process = self.driver.process_instances_at_startup(
+                context, instances_to_process)
 
-            # NOTE(gibi): collect all the instance uuids that is in some way
-            # was already handled above. Either by init_instance or by
-            # _destroy_evacuated_instances. This way we can limit the scope of
-            # the _error_out_instances_whose_build_was_interrupted call to look
-            # only for instances that have allocations on this node and not
-            # handled by the above calls.
+            # Initialise instances on the host that are not evacuating.
+            for instance in instances_to_process:
+                self._init_instance(context, instance)
+
+            # NOTE(gibi): Collect all instance UUIDs that were handled above,
+            # either by init_instance or _destroy_evacuated_instances. This
+            # limits _error_out_instances_whose_build_was_interrupted to
+            # instances that have allocations on this node but were not
+            # handled above.
             already_handled = {instance.uuid for instance in instances}.union(
                 evacuated_instances)
             self._error_out_instances_whose_build_was_interrupted(
@@ -1827,6 +1667,16 @@ class ComputeManager(manager.Manager):
                 # instances on this host will update the scheduler, or the
                 # _sync_scheduler_instance_info periodic task will.
                 self._update_scheduler_instance_info(context, instances)
+
+        # Revoke any Manila share access rules left behind by a cold
+        # migration or resize whose confirm/revert failed to clean them up.
+        # Non-fatal: manila may be down at startup and the periodic task
+        # retries.
+        try:
+            self.share_manager.reconcile_stale_share_access(context)
+        except Exception:
+            LOG.exception(
+                "Failed to reconcile stale share access rules at startup")
 
     def _error_out_instances_whose_build_was_interrupted(
             self, context, already_handled_instances, node_uuids):
@@ -1888,27 +1738,30 @@ class ComputeManager(manager.Manager):
                 self._set_instance_obj_error_state(
                     instance, clean_task_state=True)
 
-    def graceful_shutdown(self):
+    def graceful_shutdown(self, timeout):
         """Gracefully shutdown the manager.
 
         This will be called during graceful shutdown (SIGTERM) and manager
         should transit the in-progress tasks to safe termination point. The
         safe termination point can be either complete or abort them.
         """
-        # TODO(gmaan) Time based wait is temporary solution and it will be
-        # replaced by the better solution to finish in-progress tasks.
-        if CONF.manager_shutdown_timeout > CONF.graceful_shutdown_timeout:
-            LOG.warning('manager_shutdown_timeout (%s) is higher than '
-                        'graceful_shutdown_timeout (%s); the service may be '
-                        'killed before the manager finishes waiting.',
-                        CONF.manager_shutdown_timeout,
-                        CONF.graceful_shutdown_timeout)
-            sleep_time = max(0, CONF.graceful_shutdown_timeout - 10)
-        else:
-            sleep_time = CONF.manager_shutdown_timeout
-        LOG.debug('Compute service manager is waiting for %s seconds to '
-                  'finish in-progress tasks', sleep_time)
-        time.sleep(sleep_time)
+
+        # NOTE(gmaan): This method does two things 1. wait for in-progress
+        # tasks to complete 2. self.cleanup_host where it perform more
+        # cleanup on instance events, live migration cleanup etc. So we need
+        # to divide the overall timeout into two part so that we make sure
+        # in-progress tasks will not consume all the time and would not let
+        # cleanup_host to perform. That is why we need to reserve some time
+        # for that and 20 sec is the max time are reserving out of total
+        # timeout. This is a rough estimated time for cleanup which we can
+        # change if we get to know that it is less.
+        cleanup_reserved_time = min(20, timeout)
+
+        wait_timeout = max(0, timeout - cleanup_reserved_time)
+        LOG.info('Compute manager waiting up to %s seconds for in-progress '
+                  'tasks to complete (%s seconds reserved for cleanup_host).',
+                  wait_timeout, cleanup_reserved_time)
+        self._wait_for_in_progress_tasks(wait_timeout)
 
         # Cleanup host will be the last step of manager graceful_shutdown
         self.cleanup_host()
@@ -1917,17 +1770,22 @@ class ComputeManager(manager.Manager):
         self.driver.register_event_listener(None)
         self.instance_events.cancel_all_events()
         self.driver.cleanup_host(host=self.host)
+        # At this stage, manager has done with all the tasks/cleanup
+        # and safe to shutdown all the executors so that no new things
+        # can run now.
+        # shutdown_all_executors is done after self.driver.cleanup_host
+        # as that shutdown(wait=True) the delayed_executors which will
+        # need the main executor to be up to finish the in-progress things.
+        try:
+            thread_pool_factory.shutdown_all_executors()
+        except Exception:
+            LOG.exception(
+                '%s service failed to shutdown all thread pool executors.',
+                self.service_name)
+
         self._cleanup_live_migrations_in_pool()
-        # NOTE: graceful shutdown needs to take care of the executors
-        # self._sync_power_executor.shutdown()
-        # utils.destroy_long_task_executor()
-        # utils.destroy_default_executor()
 
     def _cleanup_live_migrations_in_pool(self):
-        # Shutdown the pool so we don't get new requests.
-        self._live_migration_executor.shutdown(wait=False)
-        # For any queued migrations, cancel the migration and update
-        # its status.
         for migration, future in self._waiting_live_migrations.values():
             # If we got here before the Future was submitted then we need
             # to move on since there isn't anything we can do.
@@ -2115,7 +1973,8 @@ class ComputeManager(manager.Manager):
             return
 
         filters = {'vm_state': vm_states.BUILDING,
-                   'host': self.host}
+                   'host': self.host,
+                   'deleted': False}
 
         building_insts = objects.InstanceList.get_by_filters(context,
                            filters, expected_attrs=[], use_slave=True)
@@ -2494,6 +2353,37 @@ class ComputeManager(manager.Manager):
     def _build_succeeded(self, node):
         self.rt.build_succeeded(node)
 
+    def _start_recorded_task(self, executor_type, task_name, instance,
+                             context, func, *args, **kwargs):
+        """Spawn func on executor while tracking it as an in-progress task.
+
+        Wraps the common pattern of recording a task as started, spawning
+        it on an executor, recording it as failed and ended if spawning
+        itself raises, and arranging for it to be recorded as completed or
+        failed (based on the Future's outcome) when it finishes.
+
+        :param executor_type: the thread_pool_factory.ExecutorType to spawn
+            func on
+        :param task_name: task name, most of time it is RPC method name
+        :param instance: the nova.objects.Instance the task is for
+        :param context: the request context, used for the request id
+        :param func: the callable to spawn
+        :param args: positional arguments passed to func
+        :param kwargs: keyword arguments passed to func
+        :returns: the Future returned by thread_pool_factory.spawn_on()
+        """
+        key = self._record_task_start(
+            task_name, instance.uuid, context.request_id)
+        try:
+            future = thread_pool_factory.spawn_on(
+                executor_type, func, *args, **kwargs)
+        except Exception:
+            self._record_task_end(key, failed=True)
+            raise
+        future.add_done_callback(
+            functools.partial(self._record_task_end, key))
+        return future
+
     # NOTE(gibi): The normal RPC handler decorators are here but please note
     # that build_and_run_instance immediately spawns and returns. So any
     # error from the real work is not propagated back to these decorators.
@@ -2502,6 +2392,7 @@ class ComputeManager(manager.Manager):
     @wrap_exception()
     @reverts_task_state
     @wrap_instance_fault
+    @manager.skip_automatic_rpc_tracking
     def build_and_run_instance(self, context, instance, image, request_spec,
                      filter_properties, accel_uuids, admin_password=None,
                      injected_files=None, requested_networks=None,
@@ -2544,26 +2435,35 @@ class ComputeManager(manager.Manager):
                         # self._do_build_and_run_instance().
                         self.reportclient.delete_allocation_for_instance(
                             context, instance.uuid, force=True)
-
-                    if result in (build_results.FAILED_BY_POLICY,
-                                  build_results.RESCHEDULED_BY_POLICY):
-                        return
-                    if result in (build_results.FAILED,
-                                  build_results.RESCHEDULED):
                         self._build_failed(node)
-                    else:
-                        self._build_succeeded(node)
+
+                if result in (
+                    build_results.FAILED_BY_POLICY,
+                    build_results.RESCHEDULED_BY_POLICY,
+                    build_results.FAILED,
+                ):
+                    # NOTE(pas-ha): FAILED already handled above, so there's
+                    # nothing more to do for it
+                    return
+                elif result == build_results.RESCHEDULED:
+                    self._build_failed(node)
+                else:
+                    self._build_succeeded(node)
 
         # NOTE(danms): We spawn here to return the RPC worker thread back to
         # the pool. Since what follows could take a really long time, we don't
         # want to tie up RPC workers.
-        utils.spawn_on(self._long_task_executor,
-                    _locked_do_build_and_run_instance,
-                    context, instance, image, request_spec,
-                    filter_properties, admin_password, injected_files,
-                    requested_networks, security_groups,
-                    block_device_mapping, node, limits, host_list,
-                    accel_uuids)
+        # NOTE(gmaan): Track this task so that graceful_shutdown() can wait for
+        # the build to complete.
+        self._start_recorded_task(
+            thread_pool_factory.ExecutorType.LONG_TASK, 'build_instance',
+            instance, context,
+            _locked_do_build_and_run_instance,
+            context, instance, image, request_spec,
+            filter_properties, admin_password, injected_files,
+            requested_networks, security_groups,
+            block_device_mapping, node, limits, host_list,
+            accel_uuids)
 
     def _check_device_tagging(self, requested_networks, block_device_mapping):
         tagging_requested = False
@@ -3276,12 +3176,17 @@ class ComputeManager(manager.Manager):
 
     def _power_off_instance(self, context, instance, clean_shutdown=True):
         """Power off an instance on this host."""
-        share_info = self._get_share_info(context, instance)
+        share_info = self.share_manager.get_share_info(context, instance)
         timeout, retry_interval = self._get_power_off_values(
             instance, clean_shutdown)
         self.driver.power_off(instance, timeout, retry_interval)
         share_info.deactivate_all()
-        self._umount_all_shares(context, instance, share_info)
+        try:
+            self.share_manager.umount_all(context, instance, share_info)
+        except Exception:
+            LOG.exception(
+                "Failed to unmount shares during power off",
+                instance=instance)
 
     def _shutdown_instance(self, context, instance,
                            bdms, requested_networks=None, notify=True,
@@ -3311,7 +3216,7 @@ class ComputeManager(manager.Manager):
 
         network_info = instance.get_network_info()
 
-        share_info = self._get_share_info(
+        share_info = self.share_manager.get_share_info(
             context, instance, check_status=False
         )
 
@@ -3358,7 +3263,7 @@ class ComputeManager(manager.Manager):
             # dangling share_mapping in the DB (share_mapping entry with an
             # instance that does not exist anymore).
             try:
-                self._umount_share(context, instance, share)
+                self.share_manager.umount(context, instance, share)
                 share.deactivate()
                 self.deny_share(context, instance, share)
             except (
@@ -3638,9 +3543,13 @@ class ComputeManager(manager.Manager):
                                                                  instance)
         accel_info = self._get_accel_info(context, instance)
 
-        share_info = self._get_share_info(context, instance)
+        share_info = self.share_manager.get_share_info(context, instance)
 
-        self._mount_all_shares(context, instance, share_info)
+        try:
+            self.share_manager.mount_all(context, instance, share_info)
+        except Exception:
+            with excutils.save_and_reraise_exception():
+                self._set_instance_obj_error_state(instance)
         self.driver.power_on(context, instance,
                              network_info,
                              block_device_info, accel_info, share_info)
@@ -4490,50 +4399,6 @@ class ComputeManager(manager.Manager):
         for bdm in bdms_to_delete:
             bdms.objects.remove(bdm)
 
-    def _get_share_info(self, context, instance, check_status=True):
-        share_info = objects.ShareMappingList(context)
-
-        for share_mapping in objects.ShareMappingList.get_by_instance_uuid(
-            context, instance.uuid
-        ):
-            share_info.objects.append(share_mapping)
-
-            if check_status:
-                fsm = fields.ShareMappingStatus
-                if (
-                    share_mapping.status == fsm.ATTACHING or
-                    share_mapping.status == fsm.DETACHING
-                ):
-                    # If the share status is attaching it means we are racing
-                    # with the compute node. The mount is not completed yet or
-                    # something really bad happened. So we set the instance in
-                    # error state.
-                    LOG.error(
-                        "Share id '%s' attached to server id '%s' is "
-                        "still in '%s' state. Setting the instance "
-                        "in error.",
-                        share_mapping.share_id,
-                        instance.id,
-                        share_mapping.status,
-                    )
-                    self._set_instance_obj_error_state(
-                        instance, clean_task_state=True
-                    )
-                    raise exception.ShareErrorUnexpectedStatus(
-                        share_id=share_mapping.share_id,
-                        instance_uuid=instance.id,
-                    )
-
-                if share_mapping.status == fsm.ERROR:
-                    LOG.warning(
-                        "Share id '%s' attached to server id '%s' is in "
-                        "error state.",
-                        share_mapping.share_id,
-                        instance.id
-                    )
-
-        return share_info
-
     @messaging.expected_exceptions(exception.VTPMSecretForbidden)
     @wrap_exception()
     @reverts_task_state
@@ -4574,7 +4439,7 @@ class ComputeManager(manager.Manager):
 
         accel_info = self._get_accel_info(context, instance)
 
-        share_info = self._get_share_info(context, instance)
+        share_info = self.share_manager.get_share_info(context, instance)
 
         self._notify_about_instance_usage(context, instance, "reboot.start")
         compute_utils.notify_about_instance_action(
@@ -4621,7 +4486,7 @@ class ComputeManager(manager.Manager):
             # so it is safe to ignore the re-mounting of the share for
             # soft reboot.
             if reboot_type == "HARD":
-                self._mount_all_shares(context, instance, share_info)
+                self.share_manager.mount_all(context, instance, share_info)
 
             self.driver.reboot(context, instance,
                                network_info,
@@ -4700,6 +4565,7 @@ class ComputeManager(manager.Manager):
     @wrap_instance_event(prefix='compute')
     @wrap_instance_fault
     @delete_image_on_error
+    @manager.skip_automatic_rpc_tracking
     def snapshot_instance(self, context, image_id, instance):
         """Snapshot an instance on this host.
 
@@ -4737,9 +4603,11 @@ class ComputeManager(manager.Manager):
         # NOTE(gibi): We spawn a separate task as this can be a long-running
         # operation, and we want to return the RPC worker to its executor to
         # avoid blocking RPC traffic.
-        return utils.spawn_on(
-            self._long_task_executor, do_snapshot_instance, context,
-            image_id, instance, task_states.IMAGE_SNAPSHOT)
+        # Track this as an active task for graceful shutdown.
+        return self._start_recorded_task(
+            thread_pool_factory.ExecutorType.LONG_TASK, 'snapshot_instance',
+            instance, context, do_snapshot_instance, context, image_id,
+            instance, task_states.IMAGE_SNAPSHOT)
 
     @wrap_exception()
     @reverts_task_state
@@ -4838,362 +4706,14 @@ class ComputeManager(manager.Manager):
     @wrap_instance_event(prefix='compute')
     @wrap_instance_fault
     def allow_share(self, context, instance, share_mapping):
-
-        @utils.synchronized(share_mapping.share_id)
-        def _allow_share(context, instance, share_mapping):
-            def _apply_policy():
-                # self.manila_api.lock(share_mapping.share_id)
-                # Explicitly locking the share is not needed as
-                # create_access_rule() from the sdk will do it if the
-                # lock_visibility and lock_deletion flags are passed
-                self.manila_api.allow(
-                    context,
-                    share_mapping.share_id,
-                    share_mapping.access_type,
-                    share_mapping.access_to,
-                    "rw",
-                )
-
-            def _wait_policy_to_be_applied():
-                # Ensure the share policy is updated, this will avoid
-                # a race condition mounting the share if it is not the case.
-                max_retries = CONF.manila.share_apply_policy_timeout
-                attempt_count = 0
-                while attempt_count < max_retries:
-                    if self.manila_api.has_access(
-                        context,
-                        share_mapping.share_id,
-                        share_mapping.access_type,
-                        share_mapping.access_to,
-                    ):
-                        LOG.debug(
-                            "Allow policy set on share %s ",
-                            share_mapping.share_id,
-                        )
-                        break
-                    else:
-                        LOG.debug(
-                            "Waiting policy to be set on share %s ",
-                            share_mapping.share_id,
-                        )
-                        time.sleep(1)
-                        attempt_count += 1
-
-                if attempt_count >= max_retries:
-                    raise exception.ShareAccessGrantError(
-                        share_id=share_mapping.share_id,
-                        reason="Failed to set allow policy on share, "
-                        "too many retries",
-                    )
-
-            try:
-                compute_utils.notify_about_share_attach_detach(
-                    context,
-                    instance,
-                    instance.host,
-                    action=fields.NotificationAction.SHARE_ATTACH,
-                    phase=fields.NotificationPhase.START,
-                    share_id=share_mapping.share_id
-                )
-
-                share_mapping.set_access_according_to_protocol()
-
-                if not self.manila_api.has_access(
-                    context,
-                    share_mapping.share_id,
-                    share_mapping.access_type,
-                    share_mapping.access_to,
-                ):
-                    _apply_policy()
-                    _wait_policy_to_be_applied()
-
-                # Set the share from attaching to inactive
-                self._set_share_mapping_status(
-                    share_mapping, fields.ShareMappingStatus.INACTIVE
-                )
-
-                compute_utils.notify_about_share_attach_detach(
-                    context,
-                    instance,
-                    instance.host,
-                    action=fields.NotificationAction.SHARE_ATTACH,
-                    phase=fields.NotificationPhase.END,
-                    share_id=share_mapping.share_id
-                )
-
-            except (
-                exception.ShareNotFound,
-                exception.ShareProtocolNotSupported,
-                exception.ShareAccessGrantError,
-            ) as e:
-                self._set_share_mapping_status(
-                    share_mapping, fields.ShareMappingStatus.ERROR
-                )
-                compute_utils.notify_about_share_attach_detach(
-                    context,
-                    instance,
-                    instance.host,
-                    action=fields.NotificationAction.SHARE_ATTACH,
-                    phase=fields.NotificationPhase.ERROR,
-                    share_id=share_mapping.share_id,
-                    exception=e
-                )
-                LOG.error(e.format_message())
-                raise
-            except (
-                sdk_exc.BadRequestException,
-            ) as e:
-                self._set_share_mapping_status(
-                    share_mapping, fields.ShareMappingStatus.ERROR
-                )
-                compute_utils.notify_about_share_attach_detach(
-                    context,
-                    instance,
-                    instance.host,
-                    action=fields.NotificationAction.SHARE_ATTACH,
-                    phase=fields.NotificationPhase.ERROR,
-                    share_id=share_mapping.share_id,
-                    exception=e
-                )
-                LOG.error(
-                    "%s: %s error from url: %s, %s",
-                    e.message,
-                    e.source,
-                    e.url,
-                    e.details,
-                )
-                raise
-            except keystone_exception.http.Unauthorized as e:
-                self._set_share_mapping_status(
-                    share_mapping, fields.ShareMappingStatus.ERROR
-                )
-                compute_utils.notify_about_share_attach_detach(
-                    context,
-                    instance,
-                    instance.host,
-                    action=fields.NotificationAction.SHARE_ATTACH,
-                    phase=fields.NotificationPhase.ERROR,
-                    share_id=share_mapping.share_id,
-                    exception=e
-                )
-                LOG.error(e)
-                raise
-
-        _allow_share(context, instance, share_mapping)
+        self.share_manager.allow_share(context, instance, share_mapping)
 
     @messaging.expected_exceptions(NotImplementedError)
     @wrap_exception()
     @wrap_instance_event(prefix='compute')
     @wrap_instance_fault
     def deny_share(self, context, instance, share_mapping):
-
-        @utils.synchronized(share_mapping.share_id)
-        def _deny_share(context, instance, share_mapping):
-
-            def check_share_usage(context, instance_uuid):
-                share_mappings_used_by_share = (
-                    objects.share_mapping.ShareMappingList.get_by_share_id(
-                        context, share_mapping.share_id
-                    )
-                )
-
-                # Logic explanation:
-                #
-                # Warning: Here we have a list of share_mapping using our
-                # share (usually share_mappings is a list of share_mapping used
-                # by an instance).
-                # A share IS NOT used (detachable) if:
-                # - The share status is INACTIVE or ERROR on our instance.
-                # - The share status is DETACHING on all other instances.
-                #       +-- reverse the logic as the function check if a share
-                #       |   IS used.
-                #       v
-                return not all(
-                    (
-                        (
-                            sm.instance_uuid == instance_uuid and
-                            (
-                                sm.status
-                                in (
-                                    fields.ShareMappingStatus.INACTIVE,
-                                    fields.ShareMappingStatus.ERROR,
-                                )
-                            )
-                        ) or
-                        sm.status == fields.ShareMappingStatus.DETACHING
-                    )
-                    for sm in share_mappings_used_by_share
-                )
-
-            try:
-                compute_utils.notify_about_share_attach_detach(
-                    context,
-                    instance,
-                    instance.host,
-                    action=fields.NotificationAction.SHARE_DETACH,
-                    phase=fields.NotificationPhase.START,
-                    share_id=share_mapping.share_id,
-                )
-
-                still_used = check_share_usage(context, instance.uuid)
-
-                share_mapping.set_access_according_to_protocol()
-
-                if not still_used:
-                    # self.manila_api.unlock(share_mapping.share_id)
-                    # Explicit unlocking the share is not needed as
-                    # delete_access_rule() from the sdk will do it if the
-                    # "unrestrict" parameter is passed
-                    self.manila_api.deny(
-                        context,
-                        share_mapping.share_id,
-                        share_mapping.access_type,
-                        share_mapping.access_to,
-                    )
-
-                share_mapping.delete()
-
-                compute_utils.notify_about_share_attach_detach(
-                    context,
-                    instance,
-                    instance.host,
-                    action=fields.NotificationAction.SHARE_DETACH,
-                    phase=fields.NotificationPhase.END,
-                    share_id=share_mapping.share_id,
-                )
-
-            except (
-                exception.ShareAccessRemovalError,
-                exception.ShareProtocolNotSupported,
-            ) as e:
-                self._set_share_mapping_status(
-                    share_mapping, fields.ShareMappingStatus.ERROR
-                )
-                compute_utils.notify_about_share_attach_detach(
-                    context,
-                    instance,
-                    instance.host,
-                    action=fields.NotificationAction.SHARE_DETACH,
-                    phase=fields.NotificationPhase.ERROR,
-                    share_id=share_mapping.share_id,
-                    exception=e
-                )
-                LOG.error(e.format_message())
-                raise
-            except keystone_exception.http.Unauthorized as e:
-                self._set_share_mapping_status(
-                    share_mapping, fields.ShareMappingStatus.ERROR
-                )
-                compute_utils.notify_about_share_attach_detach(
-                    context,
-                    instance,
-                    instance.host,
-                    action=fields.NotificationAction.SHARE_DETACH,
-                    phase=fields.NotificationPhase.ERROR,
-                    share_id=share_mapping.share_id,
-                    exception=e
-                )
-                LOG.error(e)
-                raise
-            except (exception.ShareNotFound, exception.ShareAccessNotFound):
-                # Ignore the error if for any reason there is nothing to
-                # remove from manila, so we can still detach the share.
-                share_mapping.delete()
-                compute_utils.notify_about_share_attach_detach(
-                    context,
-                    instance,
-                    instance.host,
-                    action=fields.NotificationAction.SHARE_DETACH,
-                    phase=fields.NotificationPhase.END,
-                    share_id=share_mapping.share_id,
-                )
-
-        _deny_share(context, instance, share_mapping)
-
-    @wrap_exception()
-    def _mount_all_shares(self, context, instance, share_info):
-        for share_mapping in share_info:
-            self._mount_share(context, instance, share_mapping)
-
-    @wrap_exception()
-    def _umount_all_shares(self, context, instance, share_info):
-        for share_mapping in share_info:
-            self._umount_share(context, instance, share_mapping)
-
-    @wrap_exception()
-    def _mount_share(self, context, instance, share_mapping):
-
-        @utils.synchronized(share_mapping.share_id)
-        def _mount_share(context, instance, share_mapping):
-            try:
-                share_mapping.set_access_according_to_protocol()
-
-                if share_mapping.share_proto == (
-                    fields.ShareMappingProto.CEPHFS):
-                    share_mapping.enhance_with_ceph_credentials(context)
-
-                LOG.debug("Mounting share %s", share_mapping.share_id)
-                self.driver.mount_share(context, instance, share_mapping)
-
-            except (
-                exception.ShareNotFound,
-                exception.ShareProtocolNotSupported,
-                exception.ShareMountError,
-            ) as e:
-                self._set_share_mapping_and_instance_in_error(
-                    instance, share_mapping
-                )
-                LOG.error(e.format_message())
-                raise
-            except (sdk_exc.BadRequestException) as e:
-                self._set_share_mapping_and_instance_in_error(
-                    instance, share_mapping
-                )
-                LOG.error("%s: %s error from url: %s, %s", e.message, e.source,
-                          e.url, e.details)
-                raise
-
-        _mount_share(context, instance, share_mapping)
-
-    @wrap_exception()
-    def _umount_share(self, context, instance, share_mapping):
-
-        @utils.synchronized(share_mapping.share_id)
-        def _umount_share(context, instance, share_mapping):
-            try:
-                share_mapping.set_access_according_to_protocol()
-
-                if share_mapping.share_proto == (
-                    fields.ShareMappingProto.CEPHFS):
-                    share_mapping.enhance_with_ceph_credentials(context)
-
-                self.driver.umount_share(context, instance, share_mapping)
-
-            except (
-                exception.ShareNotFound,
-                exception.ShareUmountError,
-                exception.ShareProtocolNotSupported,
-            ) as e:
-                self._set_share_mapping_and_instance_in_error(
-                    instance, share_mapping
-                )
-                LOG.error(e.format_message())
-                raise
-
-        _umount_share(context, instance, share_mapping)
-
-    def _set_share_mapping_status(self, share_mapping, status):
-        share_mapping.status = status
-        share_mapping.save()
-
-    def _set_share_mapping_and_instance_in_error(
-        self, instance, share_mapping
-    ):
-        share_mapping.status = fields.ShareMappingStatus.ERROR
-        share_mapping.save()
-        self._set_instance_obj_error_state(
-            instance, clean_task_state=True
-        )
+        self.share_manager.deny_share(context, instance, share_mapping)
 
     @wrap_instance_fault
     def _rotate_backups(self, context, instance, backup_type, rotation):
@@ -5359,7 +4879,7 @@ class ComputeManager(manager.Manager):
         block_device_info = self._get_instance_block_device_info(
                                 context, instance, bdms=bdms)
 
-        share_info = self._get_share_info(context, instance)
+        share_info = self.share_manager.get_share_info(context, instance)
 
         extra_usage_info = {'rescue_image_name':
                             self._get_image_name(rescue_image_meta)}
@@ -5373,7 +4893,7 @@ class ComputeManager(manager.Manager):
         try:
             self._power_off_instance(context, instance, clean_shutdown)
 
-            self._mount_all_shares(context, instance, share_info)
+            self.share_manager.mount_all(context, instance, share_info)
 
             self.driver.rescue(context, instance, network_info,
                                rescue_image_meta, admin_password,
@@ -5561,6 +5081,10 @@ class ComputeManager(manager.Manager):
 
         self.driver.confirm_migration(context, migration, instance,
                                       network_info)
+
+        # Unmount shares and revoke Manila access on source host.
+        self.share_manager.cleanup_shares_after_migration(
+            context, instance, migration, "confirm resize")
 
         # Free up the old_flavor usage from the resource tracker for this host.
         self.rt.drop_move_claim_at_source(context, instance, migration)
@@ -6116,6 +5640,9 @@ class ComputeManager(manager.Manager):
             self.driver.destroy(context, instance, network_info,
                                 block_device_info, destroy_disks)
 
+            self.share_manager.cleanup_shares_after_migration(
+                context, instance, migration, "revert resize")
+
             self._terminate_volume_connections(context, instance, bdms)
 
             # Free up the new_flavor usage from the resource tracker for this
@@ -6212,9 +5739,16 @@ class ComputeManager(manager.Manager):
                     context, instance, refresh_conn_info=True, bdms=bdms)
 
             power_on = old_vm_state != vm_states.STOPPED
+
+            # Get share_info for domain XML regeneration. Shares are
+            # still mounted on the source (lazy cleanup), so no
+            # re-grant or re-mount is needed.
+            share_info = self.share_manager.get_share_info(
+                context, instance, check_status=False)
+
             self.driver.finish_revert_migration(
                 context, instance, network_info, migration, block_device_info,
-                power_on)
+                power_on, share_info=share_info)
 
             instance.drop_migration_context()
             instance.launched_at = timeutils.utcnow()
@@ -6417,6 +5951,7 @@ class ComputeManager(manager.Manager):
     @reverts_task_state
     @wrap_instance_event(prefix='compute')
     @wrap_instance_fault
+    @manager.skip_automatic_rpc_tracking
     def prep_resize(self, context, image, instance, flavor,
                     request_spec, filter_properties, node,
                     clean_shutdown, migration, host_list):
@@ -6430,7 +5965,28 @@ class ComputeManager(manager.Manager):
         destination host and making a claim for resources. If the claim fails
         then a reschedule to another host may be attempted which involves
         calling back to conductor to start the process over again.
+
         """
+        # NOTE(gmaan): This task start is recorded as part of resize operation
+        # but task is not recorded as completed at the end of this method
+        # because resize/cold migration operation is not completed. It will be
+        # recorded as completed in finish_resize where resize/cold migration
+        # is actually completed.
+        key = self._record_task_start(
+            'prep_resize_at_dest', instance.uuid, context.request_id)
+        self._pending_dest_resizes[instance.uuid] = key
+        self._do_prep_resize(
+            context, image, instance, flavor, request_spec,
+            filter_properties, node, clean_shutdown, migration, host_list)
+
+    def _end_pending_dest_resize_task(self, instance_uuid):
+        key = self._pending_dest_resizes.pop(instance_uuid, None)
+        if key is not None:
+            self._record_task_end(key)
+
+    def _do_prep_resize(self, context, image, instance, flavor,
+                        request_spec, filter_properties, node,
+                        clean_shutdown, migration, host_list):
         if node is None:
             node = self._get_nodename(instance, refresh=True)
 
@@ -6470,11 +6026,13 @@ class ComputeManager(manager.Manager):
                 # and fail the migration.
                 with excutils.save_and_reraise_exception():
                     self._revert_allocation(context, instance, migration)
+                    self._end_pending_dest_resize_task(instance.uuid)
             except Exception:
                 # Since we hit a failure, we're either rescheduling or dead
                 # and either way we need to cleanup any allocations created
                 # by the scheduler for the destination node.
                 self._revert_allocation(context, instance, migration)
+                self._end_pending_dest_resize_task(instance.uuid)
                 # try to re-schedule the resize elsewhere:
                 exc_info = sys.exc_info()
                 self._reschedule_resize_or_reraise(context, instance,
@@ -7018,13 +6576,42 @@ class ComputeManager(manager.Manager):
         allocations = self.reportclient.get_allocs_for_consumer(
             context, instance.uuid)['allocations']
 
+        # Grant Manila access and mount shares on the destination host.
+        # check_status=False because no concurrent attach/detach is
+        # possible while instance is in RESIZE state.
+        share_info = self.share_manager.get_share_info(
+            context, instance, check_status=False)
+        same_host = migration.source_compute == migration.dest_compute
+        if not same_host:
+            mounted_shares = []
+            try:
+                for share_mapping in share_info:
+                    self.share_manager.grant_access(context, share_mapping)
+                    self.share_manager.mount(context, instance, share_mapping)
+                    mounted_shares.append(share_mapping)
+            except Exception:
+                with excutils.save_and_reraise_exception():
+                    for sm in reversed(mounted_shares):
+                        try:
+                            self.share_manager.umount(context, instance, sm)
+                        except Exception:
+                            LOG.exception(
+                                "Failed to unmount share %s during "
+                                "cleanup", sm.share_id)
+                    # Don't revoke access here. instance.host already
+                    # points to the destination, so stop/start after
+                    # reset-state needs the access grants to remain.
+                    # Access is cleaned up by cleanup_shares_after_migration
+                    # during confirm or revert.
+
         try:
             self.driver.finish_migration(context, migration, instance,
                                          disk_info,
                                          network_info,
                                          image_meta, resize_instance,
                                          allocations,
-                                         block_device_info, power_on)
+                                         block_device_info, power_on,
+                                         share_info=share_info)
         except Exception:
             # Note that we do not rollback port bindings to the source host
             # because resize_instance (on the source host) updated the
@@ -7085,6 +6672,10 @@ class ComputeManager(manager.Manager):
                          migration.source_compute, instance=instance)
                 self._delete_allocation_after_move(
                     context, instance, migration)
+        finally:
+            # NOTE(gmaan): finish_resize is the final call for the resize
+            # operation so record its completion.
+            self._end_pending_dest_resize_task(instance.uuid)
 
     def _finish_resize_helper(self, context, disk_info, image, instance,
                               migration, request_spec):
@@ -7496,12 +7087,14 @@ class ComputeManager(manager.Manager):
             return 'enabled' if enabled else 'disabled'
 
     @wrap_exception()
+    @manager.skip_automatic_rpc_tracking
     def get_host_uptime(self, context):
         """Returns the result of calling "uptime" on the target host."""
         return self.driver.get_host_uptime()
 
     @wrap_exception()
     @wrap_instance_fault
+    @manager.skip_automatic_rpc_tracking
     def get_diagnostics(self, context, instance):
         """Retrieve diagnostics for an instance on this host."""
         current_power_state = self._get_power_state(instance)
@@ -7517,6 +7110,7 @@ class ComputeManager(manager.Manager):
 
     @wrap_exception()
     @wrap_instance_fault
+    @manager.skip_automatic_rpc_tracking
     def get_instance_diagnostics(self, context, instance):
         """Retrieve diagnostics for an instance on this host."""
         current_power_state = self._get_power_state(instance)
@@ -7577,7 +7171,7 @@ class ComputeManager(manager.Manager):
         # because suspending an instance with a share is not permitted
         # by libvirt. As a result, the suspend action involving a share
         # is blocked by the API.
-        share_info = self._get_share_info(context, instance)
+        share_info = self.share_manager.get_share_info(context, instance)
 
         compute_utils.notify_about_instance_action(context, instance,
             self.host, action=fields.NotificationAction.RESUME,
@@ -9468,6 +9062,7 @@ class ComputeManager(manager.Manager):
     @wrap_exception()
     @wrap_instance_event(prefix='compute')
     @wrap_instance_fault
+    @manager.skip_automatic_rpc_tracking
     def pre_live_migration(self, context, instance, disk, migrate_data):
         """Preparations for live migration at dest host.
 
@@ -9479,6 +9074,27 @@ class ComputeManager(manager.Manager):
                              storage.
         :returns: migrate_data containing additional migration info
         """
+        # NOTE(gmaan): This task start is recorded as part of live migration
+        # operation but task is not recorded as completed at the end of this
+        # method because live migration operation is not completed. It will be
+        # recorded as completed in post_live_migration_at_destination/rollback
+        # where live migration is actually completed.
+        key = self._record_task_start(
+            'live_migration_at_dest', instance.uuid, context.request_id)
+        self._pending_dest_live_migrations[instance.uuid] = key
+        try:
+            return self._do_pre_live_migration(
+                context, instance, disk, migrate_data)
+        except Exception:
+            self._end_pending_dest_live_migration_task(instance.uuid)
+            raise
+
+    def _end_pending_dest_live_migration_task(self, instance_uuid):
+        key = self._pending_dest_live_migrations.pop(instance_uuid, None)
+        if key is not None:
+            self._record_task_end(key)
+
+    def _do_pre_live_migration(self, context, instance, disk, migrate_data):
         LOG.debug('pre_live_migration data is %s', migrate_data)
 
         # Error out if this host cannot accept the new instance due
@@ -9849,6 +9465,7 @@ class ComputeManager(manager.Manager):
     @wrap_instance_event(prefix='compute')
     @errors_out_migration
     @wrap_instance_fault
+    @manager.skip_automatic_rpc_tracking
     def live_migration(self, context, dest, instance, block_migration,
                        migration, migrate_data):
         """Executing live migration.
@@ -9866,12 +9483,14 @@ class ComputeManager(manager.Manager):
         # put the returned Future object into dict mapped with migration.uuid
         # in order to be able to track and abort it in the future.
         self._waiting_live_migrations[instance.uuid] = (None, None)
+        # Track this as an active task for graceful shutdown. The key is
+        # decremented via callback when the future finishes.
         try:
-            future = nova.utils.spawn_on(
-                self._live_migration_executor,
-                self._do_live_migration, context, dest, instance,
-                block_migration, migration, migrate_data)
-            self._waiting_live_migrations[instance.uuid] = (migration, future)
+            future = self._start_recorded_task(
+                thread_pool_factory.ExecutorType.LIVE_MIGRATION,
+                'live_migration', instance, context, self._do_live_migration,
+                context, dest, instance, block_migration, migration,
+                migrate_data)
         except RuntimeError:
             # GreenThreadPoolExecutor.submit will raise RuntimeError if the
             # pool is shutdown, which happens in
@@ -9880,6 +9499,7 @@ class ComputeManager(manager.Manager):
                      'is shutting down.', migration.uuid, instance=instance)
             raise exception.LiveMigrationNotSubmitted(
                 migration_uuid=migration.uuid, instance_uuid=instance.uuid)
+        self._waiting_live_migrations[instance.uuid] = (migration, future)
 
     @wrap_exception()
     @wrap_instance_event(prefix='compute')
@@ -10336,6 +9956,16 @@ class ComputeManager(manager.Manager):
         :param block_migration: if true, prepare for block migration
 
         """
+        try:
+            self._do_post_live_migration_at_destination(
+                context, instance, block_migration)
+        finally:
+            # NOTE(gmaan): This method is the final call for the live migration
+            # operation so record the operation completion.
+            self._end_pending_dest_live_migration_task(instance.uuid)
+
+    def _do_post_live_migration_at_destination(self, context, instance,
+                                               block_migration):
         LOG.info('Post operation of migration started',
                  instance=instance)
 
@@ -10667,6 +10297,18 @@ class ComputeManager(manager.Manager):
         :param destroy_disks: whether to destroy volumes or not
         :param migrate_data: contains migration info
         """
+        try:
+            self._do_rollback_live_migration_at_destination(
+                context, instance, destroy_disks, migrate_data)
+        finally:
+            # NOTE(gmaan): This method is the final call(in case of failure)
+            # for the live migration operation so record the operation
+            # completion.
+            self._end_pending_dest_live_migration_task(instance.uuid)
+
+    def _do_rollback_live_migration_at_destination(self, context, instance,
+                                                    destroy_disks,
+                                                    migrate_data):
         network_info = self.network_api.get_instance_nw_info(context, instance)
         self._notify_about_instance_usage(
                       context, instance, "live_migration.rollback.dest.start",
@@ -11010,7 +10652,6 @@ class ComputeManager(manager.Manager):
             if timeutils.is_older_than(shelved_at, CONF.shelved_offload_time):
                 to_gc.append(instance)
 
-        cyclient = cyborg.get_client(context)
         for instance in to_gc:
             try:
                 instance.task_state = task_states.SHELVING_OFFLOADING
@@ -11020,6 +10661,7 @@ class ComputeManager(manager.Manager):
                     # TODO(brinzhang): After cyborg support batch query ARQs
                     # for more than one instances, we will improve efficiency
                     # with this implementation.
+                    cyclient = cyborg.get_client(context)
                     accel_uuids = cyclient.get_arq_uuids_for_instance(instance)
                 self.shelve_offload_instance(
                     context, instance, clean_shutdown=False,
@@ -11193,8 +10835,9 @@ class ComputeManager(manager.Manager):
                 else:
                     LOG.debug('Triggering sync for uuid %s', uuid)
                     syncs.add(uuid)
-                    nova.utils.spawn_on(
-                        self._sync_power_executor, _sync, db_instance)
+                    thread_pool_factory.spawn_on(
+                        thread_pool_factory.ExecutorType.SYNC_POWER,
+                        _sync, db_instance)
 
     def _query_driver_power_state_and_sync(self, context, db_instance):
         if db_instance.task_state is not None:
@@ -11243,9 +10886,12 @@ class ComputeManager(manager.Manager):
                          'vm_power_state': vm_power_state},
                         instance=db_instance)
             try:
-                # Note(maoy): here we call the API instead of
+                # NOTE(maoy): here we call the API instead of
                 # brutally updating the vm_state in the database
                 # to allow all the hooks and checks to be performed.
+                # TODO(stephenfin): Nothing can set this attribute any more,
+                # but there might be legacy instances with it set. When we drop
+                # that field, we can remove this code
                 if db_instance.shutdown_terminate:
                     self.compute_api.delete(context, db_instance)
                 else:
@@ -11559,9 +11205,40 @@ class ComputeManager(manager.Manager):
                             "Failed to delete compute node resource provider "
                             "for compute node %s: %s", cn.uuid, str(e))
 
-        for nodename in nodenames:
-            self._update_available_resource_for_node(context, nodename,
-                                                     startup=startup)
+        # Run per-node updates in parallel.  Each node's update touches
+        # only its own ResourceTracker state and its own ProviderTree
+        # subtree (protected by the report client's lock), so concurrent
+        # execution is safe.
+        futures = [
+            (
+                nodename,
+                thread_pool_factory.spawn_on(
+                    thread_pool_factory.ExecutorType.UPDATE_RESOURCES,
+                    self._update_available_resource_for_node,
+                    context, nodename, startup=startup),
+            )
+            for nodename in nodenames
+        ]
+        # Drain all futures so errors are re-raised in this thread rather
+        # than being silently lost. Keep draining after the first failure
+        # so all scheduled per-node updates finish before we preserve the
+        # sequential path's exception propagation semantics.
+        first_exc: Exception | None = None
+        failed_nodes = []
+        for nodename, fut in futures:
+            try:
+                fut.result()
+            except Exception as exc:
+                failed_nodes.append(nodename)
+                if first_exc is None:
+                    first_exc = exc
+
+        if first_exc is not None:
+            LOG.error(
+                "update_available_resource failed for %(count)d nodes; "
+                "re-raising the first failure from node %(node)s.",
+                {'count': len(failed_nodes), 'node': failed_nodes[0]})
+            raise first_exc
 
     def _get_compute_nodes_in_db(self, context, nodenames, use_slave=False,
                                  startup=False):
@@ -11802,9 +11479,6 @@ class ComputeManager(manager.Manager):
                          'rp_uuid': rps,
                          'server_uuid': instance.uuid})
 
-                del network_info[index]
-                neutron.update_instance_cache_with_nw_info(
-                    self.network_api, context, instance, nw_info=network_info)
                 try:
                     self.driver.detach_interface(context, instance, vif)
                 except NotImplementedError:
@@ -11822,6 +11496,11 @@ class ComputeManager(manager.Manager):
                             "port_id=%(port_id)s, reason: %(msg)s",
                             {'port_id': deleted_vif_id, 'msg': ex},
                             instance=instance)
+                    break
+
+                del network_info[index]
+                neutron.update_instance_cache_with_nw_info(
+                    self.network_api, context, instance, nw_info=network_info)
                 break
 
     @wrap_instance_event(prefix='compute')
@@ -12039,6 +11718,7 @@ class ComputeManager(manager.Manager):
 
         self.driver.manage_image_cache(context, filtered_instances)
 
+    @manager.skip_automatic_rpc_tracking
     def cache_images(self, context, image_ids):
         """Ask the virt driver to pre-cache a set of base images.
 
@@ -12161,6 +11841,17 @@ class ComputeManager(manager.Manager):
                                 migration.id,
                                 instance=instance)
                 break
+
+    @periodic_task.periodic_task(
+        spacing=CONF.stale_share_access_reconcile_interval
+            if CONF.stale_share_access_reconcile_interval != 0
+            else -1)
+    def _reconcile_stale_share_access(self, context):
+        """Periodically revoke Manila share access rules left behind by a
+        cold migration or resize whose confirm/revert failed to clean them
+        up.
+        """
+        self.share_manager.reconcile_stale_share_access(context)
 
     @messaging.expected_exceptions(exception.InstanceQuiesceNotSupported,
                                    exception.QemuGuestAgentNotEnabled,

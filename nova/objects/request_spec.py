@@ -504,6 +504,9 @@ class RequestSpec(base.NovaObject):
         if not CONF.filter_scheduler.pci_in_placement:
             return False
 
+        if self.requested_resources is None:
+            self.requested_resources = []
+
         for pci_request in self.pci_requests.requests:
             if pci_request.source == objects.InstancePCIRequest.NEUTRON_PORT:
                 # TODO(gibi): Handle neutron based PCI requests here in a later
@@ -787,7 +790,8 @@ class RequestSpec(base.NovaObject):
                     instance_uuid=instance_uuid)
         return db_spec
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_instance_uuid(cls, context, instance_uuid):
         db_spec = cls._get_by_instance_uuid_from_db(context, instance_uuid)
         return cls._from_db_object(context, cls(), db_spec)
@@ -799,7 +803,8 @@ class RequestSpec(base.NovaObject):
             api_models.RequestSpec.instance_uuid.in_(instance_uuids)).all()
         return db_specs
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_instance_uuids(cls, context, instance_uuids):
         req_specs = []
         if not instance_uuids:

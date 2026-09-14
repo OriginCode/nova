@@ -596,9 +596,9 @@ class UnableToMigrateToSelf(Invalid):
                 "to current host (%(host)s).")
 
 
-class OperationNotSupportedForSEV(NotSupported):
-    msg_fmt = _("Operation '%(operation)s' not supported for SEV-enabled "
-                "instance (%(instance_uuid)s).")
+class OperationNotSupportedForMemEncryption(NotSupported):
+    msg_fmt = _("Operation '%(operation)s' not supported for mem encryption "
+                "enabled instance (%(instance_uuid)s).")
 
 
 class OperationNotSupportedForVTPM(NotSupported):
@@ -2012,15 +2012,9 @@ class MemoryPageSizeNotSupported(Invalid):
     msg_fmt = _("Page size %(pagesize)s is not supported by the host.")
 
 
-class LockMemoryForbidden(Forbidden):
+class LockMemoryForbidden(Invalid):
     msg_fmt = _("locked_memory value in image or flavor is forbidden when "
                 "mem_page_size is not set.")
-
-
-class FlavorImageLockedMemoryConflict(NovaException):
-    msg_fmt = _("locked_memory value in image (%(image)s) and flavor "
-                "(%(flavor)s) conflict. A consistent value is expected if "
-                "both specified.")
 
 
 class CPUPinningInvalid(Invalid):
@@ -2109,6 +2103,10 @@ class SecureBootNotSupported(Invalid):
 
 class FirmwareSMMNotSupported(Invalid):
     msg_fmt = _("This firmware doesn't require (support) SMM")
+
+
+class StatelessFirmwareRequired(Invalid):
+    msg_fmt = _("%(feature)s requires stateless firmware")
 
 
 class TriggerCrashDumpNotSupported(Invalid):
@@ -2460,9 +2458,10 @@ class FlavorImageConflict(NovaException):
                 "(%(flavor_val)s) and the image (%(image_val)s).")
 
 
-class MissingDomainCapabilityFeatureException(NovaException):
-    msg_fmt = _("Guest config could not be built without domain capabilities "
-                "including <%(feature)s> feature.")
+class FlavorImageLockedMemoryConflict(FlavorImageConflict):
+    msg_fmt = _("locked_memory value in image (%(image)s) and flavor "
+                "(%(flavor)s) conflict. A consistent value is expected if "
+                "both specified.")
 
 
 class HealAllocationException(NovaException):

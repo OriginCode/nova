@@ -30,6 +30,7 @@ import uuid
 
 import fixtures
 import os_resource_classes as orc
+import os_traits
 from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils.fixture import uuidsentinel as uuids
@@ -266,7 +267,7 @@ class FakeDriver(driver.ComputeDriver):
 
     def finish_revert_migration(self, context, instance, network_info,
                                 migration, block_device_info=None,
-                                power_on=True):
+                                power_on=True, share_info=None):
         state = power_state.RUNNING if power_on else power_state.SHUTDOWN
         self.instances[instance.uuid] = FakeInstance(
             instance.name, state, instance.uuid)
@@ -302,6 +303,9 @@ class FakeDriver(driver.ComputeDriver):
 
     def umount_share(self, context, instance, share_mapping):
         pass
+
+    def is_share_mounted(self, share_mapping):
+        return False
 
     def trigger_crash_dump(self, instance):
         pass
@@ -617,7 +621,8 @@ class FakeDriver(driver.ComputeDriver):
 
     def finish_migration(self, context, migration, instance, disk_info,
                          network_info, image_meta, resize_instance,
-                         allocations, block_device_info=None, power_on=True):
+                         allocations, block_device_info=None, power_on=True,
+                         share_info=None):
         injected_files = admin_password = None
         # Finish migration is just like spawning the guest on a destination
         # host during resize/cold migrate, so reuse the spawn() fake to
@@ -777,6 +782,8 @@ class MediumFakeDriverWithNestedCustomResources(MediumFakeDriver):
 
         provider_tree.update_inventory(nodename + '-child',
                                        self.child_resources)
+        provider_tree.add_traits(
+            nodename + '-child', os_traits.OWNER_NOVA)
 
 
 class FakeFinishMigrationFailDriver(FakeDriver):

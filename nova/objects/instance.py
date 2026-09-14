@@ -429,26 +429,23 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         if 'pci_devices' in expected_attrs:
             pci_devices = base.obj_make_list(
                     context, objects.PciDeviceList(context),
-                    objects.PciDevice, db_inst['pci_devices'])
+                    db_inst['pci_devices'])
             instance['pci_devices'] = pci_devices
 
         # TODO(stephenfin): Remove this as it's related to nova-network
         if 'security_groups' in expected_attrs:
             sec_groups = base.obj_make_list(
-                    context, objects.SecurityGroupList(context),
-                    objects.SecurityGroup, [])
+                    context, objects.SecurityGroupList(context), [])
             instance['security_groups'] = sec_groups
 
         if 'tags' in expected_attrs:
             tags = base.obj_make_list(
-                context, objects.TagList(context),
-                objects.Tag, db_inst['tags'])
+                    context, objects.TagList(context), db_inst['tags'])
             instance['tags'] = tags
 
         if 'services' in expected_attrs:
             services = base.obj_make_list(
-                    context, objects.ServiceList(context),
-                    objects.Service, db_inst['services'])
+                    context, objects.ServiceList(context), db_inst['services'])
             instance['services'] = services
 
         instance._extra_attributes_from_db_object(instance, db_inst,
@@ -529,7 +526,8 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         return db.instance_get_by_uuid(context, uuid,
                                        columns_to_join=columns_to_join)
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_uuid(cls, context, uuid, expected_attrs=None, use_slave=False):
         if expected_attrs is None:
             expected_attrs = ['info_cache']
@@ -539,7 +537,8 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
         return cls._from_db_object(context, cls(), db_inst,
                                    expected_attrs)
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_id(cls, context, inst_id, expected_attrs=None):
         if expected_attrs is None:
             expected_attrs = ['info_cache']
@@ -1419,7 +1418,8 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
                 marker=marker, columns_to_join=_expected_cols(expected_attrs))
         return db_inst_list
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_filters(cls, context, filters,
                        sort_key='created_at', sort_dir='desc', limit=None,
                        marker=None, expected_attrs=None, use_slave=False,
@@ -1443,7 +1443,8 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
         return db.instance_get_all_by_host(context, host,
                                            columns_to_join=columns_to_join)
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_host(cls, context, host, expected_attrs=None, use_slave=False):
         db_inst_list = cls._db_instance_get_all_by_host(
             context, host, columns_to_join=_expected_cols(expected_attrs),
@@ -1451,7 +1452,8 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
         return _make_instance_list(context, cls(), db_inst_list,
                                    expected_attrs)
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_host_and_node(cls, context, host, node, expected_attrs=None):
         db_inst_list = db.instance_get_all_by_host_and_node(
             context, host, node,
@@ -1466,7 +1468,8 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
             models.Instance.uuid).filter_by(
             host=host).filter_by(node=node).filter_by(deleted=0).all()
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_uuids_by_host_and_node(cls, context, host, node):
         """Return non-deleted instance UUIDs for the given host and node.
 
@@ -1477,7 +1480,8 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
         """
         return cls._get_uuids_by_host_and_node(context, host, node)
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_host_and_not_type(cls, context, host, type_id=None,
                                  expected_attrs=None):
         db_inst_list = db.instance_get_all_by_host_and_not_type(
@@ -1485,7 +1489,8 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
         return _make_instance_list(context, cls(), db_inst_list,
                                    expected_attrs)
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_all(cls, context, expected_attrs=None):
         """Returns all instances on all nodes."""
         db_instances = db.instance_get_all(
@@ -1493,7 +1498,8 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
         return _make_instance_list(context, cls(), db_instances,
                                    expected_attrs)
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_hung_in_rebooting(cls, context, reboot_window,
                               expected_attrs=None):
         db_inst_list = db.instance_get_all_hung_in_rebooting(context,
@@ -1510,7 +1516,8 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
             context, begin, end, project_id, host,
             columns_to_join=columns_to_join, limit=limit, marker=marker)
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def _get_active_by_window_joined(cls, context, begin, end=None,
                                     project_id=None, host=None,
                                     expected_attrs=None, use_slave=False,
@@ -1557,7 +1564,8 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
                                                 limit=limit, marker=marker)
 
     # TODO(stephenfin): Remove this as it's related to nova-network
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_security_group_id(cls, context, security_group_id):
         raise NotImplementedError()
 
@@ -1567,7 +1575,8 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
         raise NotImplementedError()
 
     # TODO(stephenfin): Remove this as it's related to nova-network
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_grantee_security_group_ids(cls, context, security_group_ids):
         raise NotImplementedError()
 
@@ -1625,11 +1634,13 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
                 inst.system_metadata = utils.instance_sys_meta(
                     updated[inst.uuid])
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_uuids_by_host(cls, context, host):
         return db.instance_get_all_uuids_by_hosts(context, [host])[host]
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_uuids_by_hosts(cls, context, hosts):
         """Returns a dict, keyed by hypervisor hostname, of a list of instance
         UUIDs associated with that compute node.
@@ -1646,7 +1657,8 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
             filter_by(vm_state=vm_state).\
             count()
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_count_by_vm_state(cls, context, project_id, user_id, vm_state):
         return cls._get_count_by_vm_state_in_db(context, project_id, user_id,
                                                 vm_state)
@@ -1689,7 +1701,8 @@ class InstanceList(base.ObjectListBase, base.NovaObject):
             counts['user'] = user_counts
         return counts
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_counts(cls, context, project_id, user_id=None):
         """Get the counts of Instance objects in the database.
 

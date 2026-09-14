@@ -79,9 +79,17 @@ def get_traits(traits_str: str) -> set[str]:
 def _get_traits_for_dev(
     dev_spec_tags: dict[str, str],
 ) -> set[str]:
-    return get_traits(dev_spec_tags.get("traits", "")) | {
+    traits = get_traits(dev_spec_tags.get("traits", "")) | {
         os_traits.COMPUTE_MANAGED_PCI_DEVICE
     }
+
+    # Add HW_PCI_LIVE_MIGRATABLE trait if live_migratable is set in the
+    # device specification tags.
+    if strutils.bool_from_string(
+            dev_spec_tags.get("live_migratable", "false")):
+        traits.add(os_traits.HW_PCI_LIVE_MIGRATABLE)
+
+    return traits
 
 
 def _normalize_resource_class(rc: str) -> str:
@@ -351,6 +359,7 @@ class PciResourceProvider:
             self._get_inventories(),
         )
         provider_tree.update_traits(self.name, self.traits)
+        provider_tree.add_traits(self.name, os_traits.OWNER_NOVA)
 
         # Here we are sure the RP exists in the provider_tree. So, we can
         # record the RP UUID in each PciDevice this RP represents

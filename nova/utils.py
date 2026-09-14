@@ -21,9 +21,7 @@ import datetime
 import functools
 import hashlib
 import inspect
-import multiprocessing
 import os
-import queue
 import random
 import re
 import shutil
@@ -32,8 +30,6 @@ import threading
 import time
 import typing as ty
 
-from eventlet import tpool
-import futurist
 from keystoneauth1 import loading as ks_loading
 import netaddr
 from openstack import connection
@@ -42,10 +38,8 @@ import os_resource_classes as orc
 from os_service_types import service_types
 from oslo_concurrency import lockutils
 from oslo_concurrency import processutils
-from oslo_context import context as common_context
 from oslo_log import log as logging
 from oslo_utils import encodeutils
-from oslo_utils import importutils
 from oslo_utils import strutils
 from oslo_utils import timeutils
 
@@ -53,9 +47,6 @@ import nova.conf
 from nova import exception
 from nova.i18n import _
 from nova import safe_utils
-
-profiler = importutils.try_import('osprofiler.profiler')
-
 
 CONF = nova.conf.CONF
 
@@ -82,13 +73,6 @@ _FILE_CACHE: dict[str, dict] = {}
 
 _SERVICE_TYPES = service_types.ServiceTypes()
 
-# NOTE(gibi): futurist does not expose the common based class.
-# NOTE(gibi): we can simplify this when eventlet is removed.
-Executor: ty.TypeAlias = (
-    futurist.GreenThreadPoolExecutor | futurist.ThreadPoolExecutor)
-
-DEFAULT_EXECUTOR: Executor | None = None
-
 
 def cooperative_yield():
     # TODO(ksambor) Remove all cooperative_yield calls after dropping Eventlet
@@ -97,46 +81,12 @@ def cooperative_yield():
         time.sleep(0)  # noqa: N374
 
 
-def destroy_default_executor():
-    """Closes the executor and resets the global to None to allow forked worker
-    processes to properly init it.
-    """
-    global DEFAULT_EXECUTOR
-    if DEFAULT_EXECUTOR:
-        LOG.info(
-            "The default thread pool %s is shutting down",
-            DEFAULT_EXECUTOR.name)
-        DEFAULT_EXECUTOR.shutdown()
-        LOG.info(
-            "The default thread pool %s is closed", DEFAULT_EXECUTOR.name)
-
-    DEFAULT_EXECUTOR = None
-
-
-def create_executor(max_workers) -> Executor:
+def get_eventlet():
     if concurrency_mode_threading():
-        executor = futurist.ThreadPoolExecutor(max_workers)
-    else:
-        executor = futurist.GreenThreadPoolExecutor(max_workers)
-    return executor
+        return None
 
-
-def _get_default_executor() -> Executor:
-    global DEFAULT_EXECUTOR
-
-    if not DEFAULT_EXECUTOR:
-        max_workers = (
-            CONF.default_thread_pool_size if concurrency_mode_threading()
-            else CONF.default_green_pool_size
-            )
-        DEFAULT_EXECUTOR = create_executor(max_workers)
-        pname = multiprocessing.current_process().name
-        executor_name = f"{pname}.default"
-        DEFAULT_EXECUTOR.name = executor_name
-
-        LOG.info("The default thread pool %s is initialized", executor_name)
-
-    return DEFAULT_EXECUTOR
+    import eventlet  # noqa
+    return eventlet
 
 
 # NOTE(mikal): this seems to have to stay for now to handle os-brick
@@ -555,85 +505,6 @@ def validate_integer(value, name, min_value=None, max_value=None):
         raise exception.InvalidInput(reason=str(e))
 
 
-def _serialize_profile_info():
-    if not profiler:
-        return None
-    prof = profiler.get()
-    trace_info = None
-    if prof:
-        # FIXME(DinaBelova): we'll add profiler.get_info() method
-        # to extract this info -> we'll need to update these lines
-        trace_info = {
-            "hmac_key": prof.hmac_key,
-            "base_id": prof.get_base_id(),
-            "parent_id": prof.get_id()
-        }
-    return trace_info
-
-
-def spawn(
-    func: ty.Callable[..., ty.Any], *args: ty.Any, **kwargs: ty.Any
-) -> futurist.Future:
-    """Passthrough method for eventlet.spawn.
-
-    This utility exists so that it can be stubbed for testing without
-    interfering with the service spawns.
-
-    It will also grab the context from the threadlocal store and add it to
-    the store on the new thread.  This allows for continuity in logging the
-    context when using this method to spawn a new thread.
-    """
-
-    return spawn_on(_get_default_executor(), func, *args, **kwargs)
-
-
-def _executor_is_full(executor: Executor) -> bool:
-    if concurrency_mode_threading():
-        # TODO(gibi): Move this whole logic to futurist ThreadPoolExecutor
-        # so that we can avoid accessing the internals of the executor
-        with executor._shutdown_lock:
-            idle_workers = len([w for w in executor._workers if w.idle]) > 0
-            queued_tasks = executor._work_queue.qsize() > 0
-            return queued_tasks and not idle_workers
-
-    return False
-
-
-def spawn_on(
-    executor: Executor,
-    func: ty.Callable[..., ty.Any],
-    *args: ty.Any, **kwargs: ty.Any,
-) -> futurist.Future:
-    """Passthrough method to run func on a thread in a given executor.
-
-    It will also grab the context from the threadlocal store and add it to
-    the store on the new thread.  This allows for continuity in logging the
-    context when using this method to spawn a new thread.
-    """
-    _log_executor_stats(executor)
-    if _executor_is_full(executor):
-        LOG.warning(
-            "The %s pool does not have free threads so the task %s will be "
-            "queued. If this happens repeatedly then the size of the pool is "
-            "too small for the load or there are stuck threads filling the "
-            "pool.", getattr(executor, "name", "unknown"), func)
-
-    _context = common_context.get_current()
-    profiler_info = _serialize_profile_info()
-
-    @functools.wraps(func)
-    def context_wrapper(*args, **kwargs):
-        # NOTE: If update_store is not called after spawning a thread, it won't
-        # be available for the logger to pull from threadlocal storage.
-        if _context is not None:
-            _context.update_store()
-        if profiler_info and profiler:
-            profiler.init(**profiler_info)
-        return func(*args, **kwargs)
-
-    return executor.submit(context_wrapper, *args, **kwargs)
-
-
 def is_none_string(val):
     """Check if a string represents a None value.
     """
@@ -899,7 +770,7 @@ def get_ksa_adapter(service_type, ksa_auth=None, ksa_session=None,
 
 def get_sdk_adapter(
     service_type, admin, check_service=False, conf_group=None,
-    context=None, **kwargs
+    context=None, ksa_auth=None, **kwargs
 ):
     """Construct an openstacksdk-brokered Adapter for a given service type.
 
@@ -909,13 +780,18 @@ def get_sdk_adapter(
 
     :param service_type: String name of the service type for which the Adapter
                          is to be constructed.
-    :param admin: If set to true, the service will use Nova's service user
-                  and password; otherwise, it will use the user's token.
+    :param admin: If True, use Nova's service credentials from config.
+                  If False, use the user's token from context.
+                  Ignored if ksa_auth is provided.
     :param check_service: If True, we will query the endpoint to make sure the
             service is alive, raising ServiceUnavailable if it is not.
     :param conf_group: String name of the conf group to use, otherwise the name
             of the service_type will be used.
-    :param context: Use to get user's token, if admin is set to False.
+    :param context: Required when admin=False and ksa_auth=None to get the
+                    user's token.
+    :param ksa_auth: Optional auth plugin to use instead of admin/context.
+                     Use this to send both user and service tokens via
+                     ServiceTokenAuthWrapper, or to provide any custom auth.
     :param kwargs: Additional arguments to pass to the Adapter constructor.
                    Mainly used to pass microversion to a specific service,
                    e.g. shared_file_system_api_version="2.82".
@@ -927,34 +803,45 @@ def get_sdk_adapter(
     confgrp = conf_group or _get_conf_group(service_type)
 
     try:
-        if admin is False:
-            if context is None:
-                raise ValueError(
-                    "If admin is set to False then context cannot be None.")
-
-            # NOTE(gibi): this is only needed to make sure
-            # CONF.service_user.auth_url config is registered
-            ks_loading.load_auth_from_conf_options(
-                CONF, nova.conf.service_token.service_user.name)
-
-            # Create a connection using the user's token instead of nova's
-            # service user/pass.
+        if ksa_auth is not None:
+            # Create a connection based on a provided auth plugin (example:
+            # ServiceTokenAuthWrapper for user+service tokens, or any custom
+            # auth).
+            sess = _get_auth_and_session(confgrp, ksa_auth=ksa_auth)[1]
             conn = connection.Connection(
-                token=context.auth_token,
-                auth_type="v3token",
-                project_id=context.project_id,
-                project_domain_id=context.project_domain_id,
-                auth_url=CONF.service_user.auth_url,
-                service_types={service_type},
-                strict_proxies=check_service,
-                **kwargs,
-            )
-        else:
+                session=sess, oslo_conf=CONF, service_types={service_type},
+                strict_proxies=check_service, **kwargs)
+        elif admin:
             # Create a connection based on nova's service user/pass
             sess = _get_auth_and_session(confgrp)[1]
             conn = connection.Connection(
                 session=sess, oslo_conf=CONF, service_types={service_type},
                 strict_proxies=check_service, **kwargs)
+        else:
+            # Create a connection using the user's token instead of nova's
+            # service user/pass.
+            if context is None:
+                raise ValueError(
+                    "If admin is set to False then context cannot be None.")
+
+            # NOTE(stephenfin): We get auth_url as a side-effect of the auth
+            # plugin registered, but a user could conceivably register an
+            # auth_type that doesn't use auth_url. We might want to allowlist
+            # specific auth types in the future.
+            svc_auth = ks_loading.load_auth_from_conf_options(
+                CONF, nova.conf.service_token.service_user.name)
+            auth_url = svc_auth.auth_url if svc_auth else None
+
+            conn = connection.Connection(
+                token=context.auth_token,
+                auth_type="v3token",
+                project_id=context.project_id,
+                project_domain_id=context.project_domain_id,
+                auth_url=auth_url,
+                service_types={service_type},
+                strict_proxies=check_service,
+                **kwargs,
+            )
 
     except sdk_exc.ServiceDiscoveryException as e:
         raise exception.ServiceUnavailable(
@@ -965,36 +852,6 @@ def get_sdk_adapter(
     # e.g. service name --> sdk attribute
     #      'shared-file-system' --> 'shared_file_system'
     return getattr(conn, service_type.replace('-', '_'))
-
-
-def get_endpoint(ksa_adapter):
-    """Get the endpoint URL represented by a keystoneauth1 Adapter.
-
-    This method is equivalent to what
-
-        ksa_adapter.get_endpoint()
-
-    should do, if it weren't for a panoply of bugs.
-
-    :param ksa_adapter: keystoneauth1.adapter.Adapter, appropriately set up
-                        with an endpoint_override; or service_type, interface
-                        (list) and auth/service_catalog.
-    :return: String endpoint URL.
-    :raise EndpointNotFound: If endpoint discovery fails.
-    """
-    # TODO(efried): This will be unnecessary once bug #1707993 is fixed.
-    # (At least for the non-image case, until 1707995 is fixed.)
-    if ksa_adapter.endpoint_override:
-        return ksa_adapter.endpoint_override
-    # TODO(efried): Remove this once bug #1707995 is fixed.
-    if ksa_adapter.service_type == 'image':
-        try:
-            return ksa_adapter.get_endpoint_data().catalog_url
-        except AttributeError:
-            # ksa_adapter.auth is a _ContextAuthPlugin, which doesn't have
-            # get_endpoint_data.  Fall through to using get_endpoint().
-            pass
-    return ksa_adapter.get_endpoint()
 
 
 def generate_hostid(host, project_id):
@@ -1341,117 +1198,6 @@ def concurrency_mode_threading():
     return not monkey_patch.is_patched()
 
 
-SCATTER_GATHER_EXECUTOR: Executor | None = None
-
-
-def get_scatter_gather_executor() -> Executor:
-    """Returns the executor used for scatter/gather operations."""
-    global SCATTER_GATHER_EXECUTOR
-
-    if not SCATTER_GATHER_EXECUTOR:
-        max_workers = (
-            CONF.cell_worker_thread_pool_size
-            if concurrency_mode_threading() else 1000
-            )
-        SCATTER_GATHER_EXECUTOR = create_executor(max_workers)
-
-        pname = multiprocessing.current_process().name
-        executor_name = f"{pname}.cell_worker"
-        SCATTER_GATHER_EXECUTOR.name = executor_name
-
-        LOG.info("The cell worker thread pool %s is initialized",
-                 executor_name)
-
-    return SCATTER_GATHER_EXECUTOR
-
-
-def destroy_scatter_gather_executor():
-    """Closes the executor and resets the global to None to allow forked worker
-    processes to properly init it.
-    """
-    global SCATTER_GATHER_EXECUTOR
-    if SCATTER_GATHER_EXECUTOR:
-        LOG.info(
-            "The cell worker thread pool %s is shutting down",
-            SCATTER_GATHER_EXECUTOR.name)
-        SCATTER_GATHER_EXECUTOR.shutdown()
-        LOG.info(
-            "The cell worker thread pool %s is closed",
-            SCATTER_GATHER_EXECUTOR.name)
-
-    SCATTER_GATHER_EXECUTOR = None
-
-
-CACHE_IMAGES_EXECUTOR: Executor | None = None
-
-
-def get_cache_images_executor() -> Executor:
-    """Returns the executor used for cache images operations."""
-    global CACHE_IMAGES_EXECUTOR
-
-    if not CACHE_IMAGES_EXECUTOR:
-        max_workers = CONF.image_cache.precache_concurrency
-        CACHE_IMAGES_EXECUTOR = create_executor(max_workers)
-
-        pname = multiprocessing.current_process().name
-        executor_name = f"{pname}.cache_images"
-        CACHE_IMAGES_EXECUTOR.name = executor_name
-
-        LOG.info("The cache images executor %s is initialized", executor_name)
-
-    return CACHE_IMAGES_EXECUTOR
-
-
-def destroy_cache_images_executor():
-    """Closes the executor and resets the global to None to allow forked worker
-    processes to properly init it.
-    """
-    global CACHE_IMAGES_EXECUTOR
-    if CACHE_IMAGES_EXECUTOR:
-        LOG.info(
-            "The cache images thread pool %s is shutting down",
-            CACHE_IMAGES_EXECUTOR.name)
-        CACHE_IMAGES_EXECUTOR.shutdown()
-        LOG.info(
-            "The cache images thread pool %s is closed",
-            CACHE_IMAGES_EXECUTOR.name)
-
-    CACHE_IMAGES_EXECUTOR = None
-
-
-def _log_executor_stats(executor: Executor) -> None:
-    if CONF.thread_pool_statistic_period < 0:
-        return
-
-    last_stats = getattr(executor, "last_stats", None)
-    name = getattr(executor, "name", "unknown")
-
-    allowed_stat_age = time.monotonic() - CONF.thread_pool_statistic_period
-    if last_stats and last_stats > allowed_stat_age:
-        return
-
-    executor.last_stats = time.monotonic()
-
-    stats: futurist.ExecutorStatistics = executor.statistics
-
-    if isinstance(executor, futurist.ThreadPoolExecutor):
-        LOG.debug(
-            "State of %s ThreadPoolExecutor when submitting a new task: "
-            "max_workers: %d, workers: %d, idle workers: %d, queued work: %d, "
-            "stats: %s",
-            name,
-            executor._max_workers, len(executor._workers),
-            len([w for w in executor._workers if w.idle]),
-            executor._work_queue.qsize(), stats)
-    elif isinstance(executor, futurist.GreenThreadPoolExecutor):
-        LOG.debug(
-            "State of %s GreenThreadPoolExecutor when submitting a new task: "
-            "workers: %d, max_workers: %d, work queued length: %d, stats: %s",
-            name,
-            len(executor._pool.coroutines_running), executor._pool.size,
-            executor._delayed_work.unfinished_tasks, stats)
-
-
 def tpool_wrap(target, autowrap=()):
     """Wrap the target into an eventlet Tpool Proxy object if running
     in eventlet mode. In threading mode no wrapping is applied.
@@ -1459,252 +1205,5 @@ def tpool_wrap(target, autowrap=()):
     if concurrency_mode_threading():
         return target
     else:
-        return tpool.Proxy(target, autowrap=autowrap)
 
-
-class StaticallyDelayingCancellableTaskExecutorWrapper:
-    """Executor wrapper that submit work to another executor but delays each
-    task's submission with a statically defined delay and supports cancelling
-    the task during such delay.
-
-    Note that tasks that are actually started running in the real executor
-    might not be cancellable anymore depending on that executor and the
-    concurrency mode used. See
-    https://docs.python.org/3.12/library/concurrent.futures.html#concurrent.futures.Future.cancel
-
-    Note that shutting down the wrapper only shuts down its own scheduler
-    thread but does not shut down the real executor that is passed in __init__.
-
-    Note that this class does not support a different delay length for
-    different tasks.
-    """
-
-    class Task:
-        def __init__(
-            self,
-            delay: float,
-            fn: ty.Callable[..., ty.Any],
-            args: tuple,
-            kwargs: dict
-        ):
-            self.deadline = time.monotonic() + delay
-            self.future = futurist.Future()
-            self.fn = fn
-            self.args = args
-            self.kwargs = kwargs
-
-        @property
-        def remaining_delay(self):
-            return self.deadline - time.monotonic()
-
-        def __str__(self):
-            return (
-                f"Task(fn={self.fn}, "
-                f"remaining_delay={self.remaining_delay} "
-                f"future={self.future})")
-
-    def __init__(self, delay: float, executor: Executor):
-        """Initialize the wrapper
-
-        :param delay: delay length in seconds
-        :param executor: executor object to run each task. It supports both
-            native threading and eventlet based executors.
-        """
-
-        self._queue: queue.Queue = queue.Queue()
-        self._executor = executor
-        self._delay = delay
-        self._shutdown = threading.Condition()
-        self._shutdown_requested = False
-        self._sentinel = self.Task(0, lambda: None, (), {})
-        # We are intentionally not running our _run() in the executor
-        # as we cannot assume that the executor has more than one worker
-        # and our logic never finishes so it would consume one worker
-        # constantly.
-        self._thread = threading.Thread(target=self._run)
-        self._thread.daemon = True
-        self._thread.start()
-
-    @staticmethod
-    def _log(msg, *args):
-        LOG.debug(msg, *args)
-
-    @staticmethod
-    def _task_wrapper(task) -> None:
-        """This wraps the original task so when it finishes in the real
-        executor the result of the task can be copied to the Future object
-        already returned to our caller from submit_with_delay(). So
-        the caller can get the result or exception from the task.
-        """
-        try:
-            task.future.set_result(task.fn(*task.args, **task.kwargs))
-        except BaseException as e:
-            task.future.set_exception(e)
-
-    def _wait_for_deadline_then_set_running(self, task) -> bool:
-        """Waiting for the task's deadline then mark it running
-
-        Wait can be interrupted by shutdown of the wrapper in such a case
-        the task's state is checked. If the task is cancelled then return
-        immediately with False. If the task is not cancelled then wait for
-        its deadline and eventually return True if the task is still not
-        cancelled.
-
-        If True is returned the future in the task is also atomically set to
-        running state and the future cannot be cancelled anymore.
-        """
-        if task.remaining_delay <= 0:
-            return task.future.set_running_or_notify_cancel()
-
-        self._log("Waitig for the deadline of %s", task)
-        with self._shutdown:
-            shutdown = self._shutdown.wait_for(
-                lambda: self._shutdown_requested, task.remaining_delay)
-
-        if shutdown:
-            self._log(
-                "Shutdown is requested while waiting "
-                "for the deadline of %s", task)
-
-            if task.future.cancelled():
-                return False
-
-            self._log(
-                "%s is not cancelled so still waiting for its "
-                "deadline", task)
-            if task.remaining_delay > 0:
-                # Blocking here is fine as we have the assumption that
-                # no new task can arrive that has a deadline that is sooner
-                # than the deadline of the oldest task in the queue due to
-                # our static delay (and we assume that time travel is not
-                # allowed).
-                time.sleep(task.remaining_delay)
-
-        return task.future.set_running_or_notify_cancel()
-
-    def _run(self):
-        while True:
-            self._log("Waiting for the next task")
-            task: StaticallyDelayingCancellableTaskExecutorWrapper.Task = (
-                self._queue.get())
-            self._log("Received %s", task)
-
-            if task is self._sentinel:
-                # We are asked to terminate so exit the loop.
-                self._queue.task_done()
-                self._log("Sentinel received, thread is exiting")
-                return
-
-            if task.future.cancelled():
-                # The task was cancelled while it was in the queue.
-                # We don't need to run it. Just move on to the next task
-                self._log("%s was cancelled while queued, skipping", task)
-                self._queue.task_done()
-                continue
-
-            # The task is still valid, wait for its deadline
-            run_it = self._wait_for_deadline_then_set_running(task)
-            if not run_it:
-                # The task was cancelled during the delay period.
-                # We don't need to run it. Just move on to the next task.
-                self._log(
-                    "%s was cancelled during its delay period, skipping", task)
-                self._queue.task_done()
-                continue
-
-            # Push the task to the real executor. We don't need to wait
-            # for the result here as the client can do that
-            # via the task.future we already returned from submit_with_delay()
-            try:
-                self._executor.submit(self._task_wrapper, task)
-            except BaseException as e:
-                # If for any reason we cannot submit a task then we should not
-                # let the exception escape as that will prevent our thread
-                # to terminate cleanly. Instead, we log and propagate back.
-                LOG.exception(
-                    "Failed to submit %s to executor %s", task, self._executor)
-                task.future.set_exception(e)
-                self._queue.task_done()
-                continue
-
-            self._log("%s submitted to %s", task, self._executor)
-            # The task is not done from the executor perspective, but it is
-            # done from the _run() logic perspective. Signal it, so shutdown()
-            # can use Queue.join()
-            self._queue.task_done()
-
-    def submit_with_delay(
-        self, fn: ty.Callable[..., ty.Any], *args: ty.Any, **kwargs: ty.Any
-    ) -> futurist.Future:
-        """Submit work with delay."""
-        # We need this wide locking as we don't want to queue a task behind
-        # the sentinel as that task will never be processed.
-        with self._shutdown:
-            if self._shutdown_requested:
-                raise RuntimeError(
-                    "Cannot schedule new tasks after being shutdown")
-
-            task = self.Task(self._delay, fn, args, kwargs)
-            self._queue.put(task)
-            self._log("Queued %s", task)
-            return task.future
-
-    def shutdown(self, wait: bool = True):
-        """Shutdown the executor"""
-        with self._shutdown:
-            if not self._shutdown_requested:
-                # Ensure that our thread wakes at least one more time to allow
-                # it to exit by queuing up a sentinel task after the shutdown
-                # condition is set. This task won't be executed.
-                self._queue.put(self._sentinel)
-                self._log("Sentinel is queued")
-                self._shutdown_requested = True
-                self._shutdown.notify_all()
-                self._log("Shutdown is set")
-
-        # If wait is set we need to wait for our sentinel to be processed and
-        # therefore our thread to exit.
-        # NOTE(gibi): We are intentionally not shutting down the real executor
-        # as we are not the one created it or owning it so it might be shared
-        # between different callers.
-        if wait:
-            self._queue.join()
-            self._log("Queue joined")
-            self._thread.join()
-            self._log("Scheduler thread joined")
-
-    @property
-    def is_alive(self) -> bool:
-        return self._thread.is_alive()
-
-
-LONG_TASK_EXECUTOR: Executor | None = None
-
-
-def get_long_task_executor(max_workers) -> Executor:
-    """Returns the executor used for long compute operations."""
-    global LONG_TASK_EXECUTOR
-
-    if not LONG_TASK_EXECUTOR:
-        LONG_TASK_EXECUTOR = create_executor(max_workers)
-
-        pname = multiprocessing.current_process().name
-        executor_name = f"{pname}.long_task"
-        LONG_TASK_EXECUTOR.name = executor_name
-
-        LOG.info("The long task thread pool %s is initialized",
-                 executor_name)
-
-    return LONG_TASK_EXECUTOR
-
-
-def destroy_long_task_executor():
-    """Closes the executor and resets the global to None"""
-    global LONG_TASK_EXECUTOR
-    if LONG_TASK_EXECUTOR:
-        LOG.info(
-            "The thread pool %s is shutting down", LONG_TASK_EXECUTOR.name)
-        LONG_TASK_EXECUTOR.shutdown()
-        LOG.info("The thread pool %s is closed", LONG_TASK_EXECUTOR.name)
-
-    LONG_TASK_EXECUTOR = None
+        return get_eventlet().tpool.Proxy(target, autowrap=autowrap)

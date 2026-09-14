@@ -28,6 +28,7 @@ from nova import test
 from nova.tests.unit import fake_pci_device_pools as fake_pci
 from nova.tests.unit.image.fake import fake_image_obj
 from nova.virt import hardware as hw
+import os_traits as ot
 
 CONF = nova.conf.CONF
 
@@ -2909,11 +2910,12 @@ class NumberOfSerialPortsTest(test.NoDBTestCase):
 
 
 class VirtLockMemoryTestCase(test.NoDBTestCase):
-    def _test_get_locked_memory_constraint(self, spec=None, props=None):
-        flavor = objects.Flavor(vcpus=16, memory_mb=2048,
+    def _test_get_locked_memory_constraint(self, spec=None, props=None,
+                                           mach_type=None):
+        flavor = objects.Flavor(name='m1.faketiny', vcpus=16, memory_mb=2048,
                                 extra_specs=spec or {})
         image_meta = objects.ImageMeta.from_dict({"properties": props or {}})
-        return hw.get_locked_memory_constraint(flavor, image_meta)
+        return hw.get_locked_memory_constraint(flavor, image_meta, mach_type)
 
     def test_get_locked_memory_constraint_image(self):
         self.assertTrue(
@@ -2954,6 +2956,24 @@ class VirtLockMemoryTestCase(test.NoDBTestCase):
             self._test_get_locked_memory_constraint(
                 spec=None,
                 props={"hw_locked_memory": "False"}))
+
+    def test_get_locked_memory_constraint_mem_enc_accepted(self):
+        self.assertTrue(
+            self._test_get_locked_memory_constraint(
+                spec={"hw:mem_encryption": "True",
+                      "hw:mem_encryption_model": "amd-sev"},
+                props={"hw_firmware_type": "uefi"},
+                mach_type='q35'))
+
+    def test_get_locked_memory_constraint_mem_enc_matched(self):
+        self.assertTrue(
+            self._test_get_locked_memory_constraint(
+                spec={"hw:locked_memory": "True",
+                      "hw:mem_page_size": "small"},
+                props={"hw_mem_encryption": "True",
+                       "hw_mem_encryption_model": "amd-sev",
+                       "hw_firmware_type": "uefi"},
+                mach_type='q35'))
 
 
 class VirtMemoryPagesTestCase(test.NoDBTestCase):
@@ -5364,6 +5384,46 @@ class MemEncryptionNotRequiredTestCase(test.NoDBTestCase):
                 )
 
 
+class GetMemEncryptionConfigTestCase(test.NoDBTestCase):
+    def test_invalid(self):
+        self.assertRaisesRegex(
+            exception.Invalid, "Invalid memory encryption model 'encr'",
+            hw.MemEncryptionConfig.create, 'encr')
+
+    def test_sev(self):
+        me_config = hw.MemEncryptionConfig.create(
+            fields.MemEncryptionModel.AMD_SEV)
+        self.assertIs(hw.MemEncryptionConfigSev, type(me_config))
+        self.assertTrue(me_config.needs_locked_memory)
+        self.assertEqual(fields.MemEncryptionModel.AMD_SEV, me_config.model)
+        self.assertEqual(ot.HW_CPU_X86_AMD_SEV, me_config.required_trait)
+
+    def test_sev_es(self):
+        me_config = hw.MemEncryptionConfig.create(
+            fields.MemEncryptionModel.AMD_SEV_ES)
+        self.assertIs(hw.MemEncryptionConfigSevEs, type(me_config))
+        self.assertTrue(me_config.needs_locked_memory)
+        self.assertEqual(fields.MemEncryptionModel.AMD_SEV_ES, me_config.model)
+        self.assertEqual(ot.HW_CPU_X86_AMD_SEV_ES, me_config.required_trait)
+
+    def test_sev_snp(self):
+        me_config = hw.MemEncryptionConfig.create(
+            fields.MemEncryptionModel.AMD_SEV_SNP)
+        self.assertIs(hw.MemEncryptionConfigSevSnp, type(me_config))
+        self.assertFalse(me_config.needs_locked_memory)
+        self.assertEqual(fields.MemEncryptionModel.AMD_SEV_SNP,
+                         me_config.model)
+        self.assertEqual(ot.HW_CPU_X86_AMD_SEV_SNP, me_config.required_trait)
+
+    def test_tdx(self):
+        me_config = hw.MemEncryptionConfig.create(
+            fields.MemEncryptionModel.INTEL_TDX)
+        self.assertIs(hw.MemEncryptionConfigTDX, type(me_config))
+        self.assertFalse(me_config.needs_locked_memory)
+        self.assertEqual(fields.MemEncryptionModel.INTEL_TDX, me_config.model)
+        self.assertEqual(ot.HW_CPU_X86_INTEL_TDX, me_config.required_trait)
+
+
 class MemEncryptionFlavorImageConflictTestCase(test.NoDBTestCase):
     def _test_encrypted_memory_support_conflict(self, extra_spec,
                                                 image_prop_in, image_prop_out):
@@ -5422,6 +5482,7 @@ class MemEncryptionRequestedInvalidImagePropsTestCase(test.NoDBTestCase):
     flavor_name = 'm1.faketiny'
     image_name = 'fakecirros'
     image_id = '7ec4448e-f3fd-44b1-b172-9a7980f0f29f'
+    model = fields.MemEncryptionModel.AMD_SEV
 
     def _test_encrypted_memory_support_raises(self, enc_extra_spec,
                                               enc_image_prop, image_props,
@@ -5445,9 +5506,9 @@ class MemEncryptionRequestedWithoutUEFITestCase(
         MemEncryptionRequestedInvalidImagePropsTestCase):
     expected_exception = exception.FlavorImageConflict
     expected_error = (
-        "Memory encryption requested by %(requesters)s but image "
-        "%(image_name)s doesn't have 'hw_firmware_type' property "
-        "set to 'uefi' or volume-backed instance was requested"
+        "Memory encryption is requested by %(requesters)s but the image "
+        "metadata doesn't have the 'hw_firmware_type' property "
+        "set to 'uefi'"
     )
 
     def _test_encrypted_memory_support_no_uefi(self, enc_extra_spec,
@@ -5490,13 +5551,13 @@ class MemEncryptionRequestedWithInvalidMachineTypeTestCase(
     expected_exception = exception.InvalidMachineType
     expected_error = (
         "Machine type '%(mtype)s' is not compatible with image %(image_name)s "
-        "(%(image_id)s): q35 type is required for SEV to work")
+        "(%(image_id)s): q35 type is required for %(model)s to work")
 
     def _test_encrypted_memory_support_pc(self, enc_extra_spec,
                                               enc_image_prop):
         error_data = {'image_id': self.image_id,
                       'image_name': self.image_name,
-                      'mtype': 'pc'}
+                      'mtype': 'pc', 'model': self.model}
         image_props = {'hw_firmware_type': 'uefi',
                        'hw_machine_type': 'pc'}
         self._test_encrypted_memory_support_raises(enc_extra_spec,
@@ -5535,7 +5596,7 @@ class MemEncryptionRequestedWithInvalidMachineTypeTestCase(
             {'name': self.image_name}, {}, image_props)
         error_data = {'image_id': '<no-id>',
                       'image_name': self.image_name,
-                      'mtype': 'pc'}
+                      'mtype': 'pc', 'model': self.model}
         self._test_encrypted_memory_support_pc_image_id(image_meta,
                                                         error_data)
 
@@ -5548,9 +5609,48 @@ class MemEncryptionRequestedWithInvalidMachineTypeTestCase(
             {}, image_props)
         error_data = {'image_id': self.image_id,
                       'image_name': self.image_name,
-                      'mtype': 'pc'}
+                      'mtype': 'pc', 'model': self.model}
         self._test_encrypted_memory_support_pc_image_id(image_meta,
                                                         error_data)
+
+
+@ddt.ddt
+class MemEncryptionRequestedWithoutStatelessFirmware(
+       MemEncryptionRequestedInvalidImagePropsTestCase):
+    expected_exception = exception.StatelessFirmwareRequired
+    expected_error = (
+        "The %(model)s memory encryption model requires stateless firmware "
+        "but the image metadata doesn't have the 'hw_firmware_stateless' "
+        "property set to True")
+
+    @ddt.data('amd-sev-snp', 'intel-tdx')
+    def test_encrypted_memory_support_without_stateless(self, model):
+        error_data = {'model': model}
+        image_props = {'hw_firmware_type': 'uefi',
+                       'hw_machine_type': 'q35',
+                       'hw_mem_encryption': True,
+                       'hw_mem_encryption_model': model}
+        self._test_encrypted_memory_support_raises(None, None,
+                                                   image_props, error_data)
+
+
+class MemEncryptionRequestedWithoutDisabledVideoModel(
+        MemEncryptionRequestedInvalidImagePropsTestCase):
+    expected_exception = exception.InvalidVideoMode
+    expected_error = (
+        "The %(model)s memory encryption model is incompatible with an "
+        "attached video device. Set the 'hw_video_model' image property "
+        "to 'none' to disable it")
+
+    def test_encrypted_memory_support_without_disabled_video(self):
+        error_data = {'model': 'intel-tdx'}
+        image_props = {'hw_firmware_type': 'uefi',
+                        'hw_machine_type': 'q35',
+                        'hw_firmware_stateless': True,
+                        'hw_mem_encryption': True,
+                        'hw_mem_encryption_model': 'intel-tdx'}
+        self._test_encrypted_memory_support_raises(None, None,
+                                                    image_props, error_data)
 
 
 class MemEncryptionRequiredTestCase(test.NoDBTestCase):
@@ -5571,8 +5671,8 @@ class MemEncryptionRequiredTestCase(test.NoDBTestCase):
                 'id': self.image_id,
                 'name': self.image_name,
                 'properties': image_props})
-            expected = hw.MemEncryptionConfig(
-                model=fields.MemEncryptionModel.AMD_SEV)
+            expected = hw.MemEncryptionConfig.create(
+                fields.MemEncryptionModel.AMD_SEV)
             self.assertEqual(
                 expected, hw.get_mem_encryption_constraint(flavor, image_meta))
             mock_log.debug.assert_has_calls([
@@ -5645,8 +5745,8 @@ class MemEncryptionRequiredTestCase(test.NoDBTestCase):
             'size': 0,
             'status': 'active'})
 
-        expected = hw.MemEncryptionConfig(
-            model=fields.MemEncryptionModel.AMD_SEV)
+        expected = hw.MemEncryptionConfig.create(
+            fields.MemEncryptionModel.AMD_SEV)
         self.assertEqual(
             expected,
             hw.get_mem_encryption_constraint(flavor, image_meta))
@@ -6051,16 +6151,19 @@ class StatelessFirmwareConstraintTest(test.NoDBTestCase):
     @ddt.unpack
     @ddt.data(
         # pass: no configuration
-        (None, None, False),
+        (None, None, None, False),
+        # pass: non-uefi with stateless fiemware
+        (True, None, None, True),
+        # pass: non-uefi with statefull fiemware
+        (False, None, None, True),
         # pass: uefi with stateless firmware
-        (True, 'uefi', True),
-        # pass: non-uefi with non-stateless firmware
-        (False, None, False),
-        # fail: non-uefi with stateless fiemware
-        (True, None, exception.Invalid),
+        (True, 'uefi', True, False),
+        # pass: uefi with statefull firmware
+        (False, 'uefi', False, False),
     )
+    @mock.patch.object(hw, 'LOG')
     def test_get_stateless_firmware_constraint(
-        self, firmware_stateless, firmware_type, expected,
+        self, firmware_stateless, firmware_type, expected, warn, mock_log,
     ):
         image_meta_props = {}
         if firmware_stateless is not None:
@@ -6070,14 +6173,16 @@ class StatelessFirmwareConstraintTest(test.NoDBTestCase):
         image_meta = objects.ImageMeta.from_dict(
             {'name': 'bar', 'properties': image_meta_props})
 
-        if isinstance(expected, type) and issubclass(expected, Exception):
-            self.assertRaises(
-                expected, hw.get_stateless_firmware_constraint, image_meta,
-            )
+        self.assertEqual(
+            expected, hw.get_stateless_firmware_constraint(image_meta),
+        )
+
+        if warn:
+            mock_log.warning.assert_called_once_with(
+                "The image property 'hw_firmware_stateless' is set for "
+                "non UEFI firmware type. This property is ignored.")
         else:
-            self.assertEqual(
-                expected, hw.get_stateless_firmware_constraint(image_meta),
-            )
+            mock_log.warning.assert_not_called()
 
 
 @ddt.ddt

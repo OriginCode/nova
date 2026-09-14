@@ -513,6 +513,26 @@ Related options:
 disk stream) over libvirtd.
 
 """),
+    cfg.IntOpt('live_migration_monitor_interval',
+               default=5,
+               help="""
+Interval, in seconds, at which to save migration stats to the database.
+
+During a live migration, the live migration monitoring thread will periodically
+save migration stats about the memory and disk data transfer to the database.
+By default this will occur every 5 seconds and a message about the ongoing
+migration will also be logged at level DEBUG at the same time.
+
+Because nova-compute does not have direct access to the database, all database
+writes it initiates must go over RPC to nova-conductor and nova-conductor will
+connect to the database. In certain deployment environments, long running live
+migrations can produce a substantial number of database writes and if the
+writes are sufficiently frequent, the message queue could become overwhelmed
+and culminate in MessagingTimeout errors for nova-compute.
+
+This option provides a way to control the frequency of database writes during
+running live migrations to suit the deployment environment.
+"""),
     cfg.StrOpt('disk_prefix',
                help="""
 Override the default disk prefix for the devices attached to an instance.
@@ -865,55 +885,7 @@ Related options:
 
 * ``virt_type`` must be set to ``kvm`` or ``qemu``.
 * ``ram_allocation_ratio`` must be set to 1.0.
-"""),
-    cfg.IntOpt('num_memory_encrypted_guests',
-               default=None,
-               min=0,
-               deprecated_for_removal=True,
-               deprecated_since='32.0.0',
-               deprecated_reason="""
-This option is effective for only SEV and has no effect for SEV-ES. Libvirt
-is capable to present maximum number of SEV guests and one of SEV-ES guests
-since 8.0.0 and this option is no longer necessary.
-""",
-               help="""
-Maximum number of guests with encrypted memory which can run
-concurrently on this compute host.
-
-For now this is only relevant for AMD machines which support SEV
-(Secure Encrypted Virtualization).  Such machines have a limited
-number of slots in their memory controller for storing encryption
-keys.  Each running guest with encrypted memory will consume one of
-these slots.
-
-The option may be reused for other equivalent technologies in the
-future.  If the machine does not support memory encryption, the option
-will be ignored and inventory will be set to 0.
-
-If the machine does support memory encryption and this option is not set,
-the driver detects maximum number of SEV guests from the libvirt API which
-is available since v8.0.0. Setting this option overrides the detected limit,
-unless the given value is not larger than the detected limit.
-
-On the other hand, if an older version of libvirt is used, ``None`` means
-an effectively unlimited inventory, i.e. no limit will be imposed by Nova
-on the number of SEV guests which can be launched, even though the underlying
-hardware will enforce its own limit.
-
-.. note::
-
-   It is recommended to read :ref:`the deployment documentation's
-   section on this option <num_memory_encrypted_guests>` before
-   deciding whether to configure this setting or leave it at the
-   default.
-
-Related options:
-
-* :oslo.config:option:`libvirt.virt_type` must be set to ``kvm``.
-
-* It's recommended to consider including ``x86_64=q35`` in
-  :oslo.config:option:`libvirt.hw_machine_type`; see
-  :ref:`deploying-sev-capable-infrastructure` for more on this.
+* ``reserved_host_memory_mb`` must be set to 0.
 """),
     cfg.IntOpt('device_detach_attempts',
                default=8,
@@ -975,6 +947,27 @@ Related options:
 * ``my_ip``
 * ``live_migration_inbound_addr``
 
+"""),
+    cfg.IntOpt('num_intel_tdx_guests',
+        default=None,
+        min=0,
+        help="""
+Maximum number of guests with Intel TDX (Intel Trust Domain Extensions) memory
+encryption that this compute host can run concurrently.
+
+Intel TDX capacity is normally determined automatically by reading the number
+of available keys exposed by the kernel's misc cgroup controller (``tdx``
+entry in ``misc.capacity``), and this option does not need to be set in that
+case.
+
+However cgroup detection is not always possible, for example when nova-compute
+is deployed inside a container without visibility of the host's cgroup
+hierarchy. If the cgroup value cannot be read, this option becomes the only
+source of the limit and **must** be set, or Nova will assume the host does not
+support Intel TDX.
+
+If the cgroup value *can* be read and this option is also set, the lower
+of the two values is used.
 """),
 ]
 
@@ -1078,6 +1071,12 @@ Requires:
 * Qemu >= 1.5 (raw format)
 * Qemu >= 1.6 (qcow2 format)
 """),
+    cfg.IntOpt('images_cpu_time_limit',
+               default=30,
+               help='CPU time process limit in seconds for qemu-img'),
+    cfg.IntOpt('images_address_space_limit',
+               default=2,
+               help='Address space process limit in gigabytes for qemu-img'),
 ]
 
 libvirt_lvm_opts = [
@@ -1526,20 +1525,18 @@ Related options:
 # The queue size requires value to be a power of two from [256, 1024]
 # range.
 # https://libvirt.org/formatdomain.html#elementsDriverBackendOptions
-QueueSizeType = types.Integer(choices=(256, 512, 1024))
-
 libvirt_virtio_queue_sizes = [
-    cfg.Opt('rx_queue_size',
-            type=QueueSizeType,
-            help="""
+    cfg.IntOpt('rx_queue_size',
+               choices=(256, 512, 1024),
+               help="""
 Configure virtio rx queue size.
 
 This option is only usable for virtio-net device with vhost and
 vhost-user backend. Available only with QEMU/KVM. Requires libvirt
 v2.3 QEMU v2.7."""),
-    cfg.Opt('tx_queue_size',
-            type=QueueSizeType,
-            help="""
+    cfg.IntOpt('tx_queue_size',
+               choices=(256, 512, 1024),
+               help="""
 Configure virtio tx queue size.
 
 This option is only usable for virtio-net device with vhost-user

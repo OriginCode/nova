@@ -51,11 +51,11 @@ class MigrateServerPolicyTest(base.BasePolicyTest):
         # With legacy rule, any admin is able to migrate
         # the server.
         self.project_admin_authorized_contexts = [
-            self.legacy_admin_context, self.system_admin_context,
+            self.legacy_admin_context,
             self.project_admin_context]
 
         self.project_manager_authorized_contexts = [
-            self.legacy_admin_context, self.system_admin_context,
+            self.legacy_admin_context,
             self.project_admin_context, self.project_manager_context]
 
     @mock.patch('nova.compute.api.API.resize')
@@ -103,9 +103,9 @@ class MigrateServerPolicyTest(base.BasePolicyTest):
                                 body=body)
 
 
-class MigrateServerNoLegacyNoScopeTest(MigrateServerPolicyTest):
+class MigrateServerNoLegacyTest(MigrateServerPolicyTest):
     """Test Server Migrations API policies with deprecated rules
-    disabled, but scope checking still disabled.
+    disabled.
     """
 
     without_deprecated_rules = True
@@ -117,55 +117,14 @@ class MigrateServerNoLegacyNoScopeTest(MigrateServerPolicyTest):
     }
 
     def setUp(self):
-        super(MigrateServerNoLegacyNoScopeTest, self).setUp()
+        super(MigrateServerNoLegacyTest, self).setUp()
 
-        self.project_manager_authorized_contexts = (
-            self.project_manager_or_admin_with_no_scope_no_legacy)
-
-
-class MigrateServerScopeTypePolicyTest(MigrateServerPolicyTest):
-    """Test Migrate Server APIs policies with system scope enabled.
-
-    This class set the nova.conf [oslo_policy] enforce_scope to True
-    so that we can switch on the scope checking on oslo policy side.
-    It defines the set of context with scoped token
-    which are allowed and not allowed to pass the policy checks.
-    With those set of context, it will run the API operation and
-    verify the expected behaviour.
-    """
-
-    def setUp(self):
-        super(MigrateServerScopeTypePolicyTest, self).setUp()
-        self.flags(enforce_scope=True, group="oslo_policy")
-        # With scope enabled, system admin is not allowed.
-        self.project_admin_authorized_contexts = [
-            self.legacy_admin_context, self.project_admin_context]
-        self.project_manager_authorized_contexts = [
-            self.legacy_admin_context, self.project_admin_context,
-            self.project_manager_context]
-
-
-class MigrateServerScopeTypeNoLegacyPolicyTest(
-        MigrateServerScopeTypePolicyTest):
-    """Test Migrate Server APIs policies with system scope enabled,
-    and no more deprecated rules.
-    """
-    without_deprecated_rules = True
-    rules_without_deprecation = {
-        ms_policies.POLICY_ROOT % 'migrate':
-            base_policy.PROJECT_MANAGER_OR_ADMIN,
-        ms_policies.POLICY_ROOT % 'migrate_live':
-            base_policy.PROJECT_MANAGER_OR_ADMIN,
-    }
-
-    def setUp(self):
-        super(MigrateServerScopeTypeNoLegacyPolicyTest, self).setUp()
         self.project_manager_authorized_contexts = (
             self.project_manager_or_admin_with_scope_no_legacy)
 
 
 class MigrateServerOverridePolicyTest(
-        MigrateServerScopeTypeNoLegacyPolicyTest):
+        MigrateServerNoLegacyTest):
     """Test Migrate Server APIs policies with system and project scoped
     but default to system roles only are allowed for project roles
     if override by operators. This test is with system scope enable
@@ -181,10 +140,10 @@ class MigrateServerOverridePolicyTest(
         # NOTE(gmann): override the rule to project member and verify it
         # work as policy is system and project scoped.
         self.policy.set_rules({
-            rule_migrate: base_policy.PROJECT_MEMBER,
-            rule_migrate_host: base_policy.PROJECT_MEMBER,
-            rule_live_migrate: base_policy.PROJECT_MEMBER,
-            rule_live_migrate_host: base_policy.PROJECT_MEMBER},
+            rule_migrate: "rule:project_member_api",
+            rule_migrate_host: "rule:project_member_api",
+            rule_live_migrate: "rule:project_member_api",
+            rule_live_migrate_host: "rule:project_member_api"},
             overwrite=False)
 
         # Check that project member role as override above

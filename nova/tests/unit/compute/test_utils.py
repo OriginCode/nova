@@ -103,8 +103,9 @@ class ComputeValidateDeviceTestCase(test.NoDBTestCase):
         self.data = []
 
     def _validate_device(self, device=None):
-        bdms = base.obj_make_list(self.context,
-            objects.BlockDeviceMappingList(), objects.BlockDeviceMapping,
+        bdms = base.obj_make_list(
+            self.context,
+            objects.BlockDeviceMappingList(),
             self.data)
         return compute_utils.get_device_name_for_instance(
             self.instance, bdms, device)
@@ -1160,6 +1161,10 @@ class ComputeUtilsTestCase(test.NoDBTestCase):
 
     @mock.patch('psutil.net_if_addrs')
     def test_get_machine_ips(self, mock_addrs):
+        if not hasattr(socket, 'AF_PACKET'):
+            # AF_PACKET is linux-specific
+            self.skipTest('AF_PACKET not supported on this system')
+
         fakeaddr = collections.namedtuple('fakeaddr', ['family', 'address'])
         mock_addrs.return_value = {
             'eth0': [
@@ -1738,13 +1743,18 @@ class AcceleratorRequestTestCase(test.NoDBTestCase):
         compute_utils.delete_arqs_if_needed(self.context, instance)
         mock_del_arq.assert_called_once_with(instance.uuid)
 
+    @mock.patch('nova.accelerator.cyborg.get_client')
     @mock.patch.object(cyborgclient, 'delete_arqs_for_instance')
-    def test_delete_with_no_device_profile(self, mock_del_arq):
+    def test_delete_with_no_device_profile(self, mock_del_arq,
+                                           mock_get_client):
         flavor = objects.Flavor(**test_flavor.fake_flavor)
         flavor['extra_specs'] = {}
         instance = fake_instance.fake_instance_obj(self.context, flavor=flavor)
         compute_utils.delete_arqs_if_needed(self.context, instance)
         mock_del_arq.assert_not_called()
+        # With no device profile and no ARQ uuids we should not even
+        # create a Cyborg client.
+        mock_get_client.assert_not_called()
 
     @mock.patch('nova.compute.utils.LOG.exception')
     @mock.patch.object(cyborgclient, 'delete_arqs_for_instance')

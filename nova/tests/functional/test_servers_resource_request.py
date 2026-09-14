@@ -1839,7 +1839,12 @@ class ServerMoveWithPortResourceRequestTest(
                     server['id'], {'resize': {"flavorRef": new_flavor['id']}})
             else:
                 self.api.post_server_action(server['id'], {'migrate': None})
-            self._wait_for_state_change(server, 'VERIFY_RESIZE')
+            # Use a higher max_retries value to allow enough time for
+            # finish_resize to complete after multiple reschedules,
+            # especially under coverage (testenv:cover) where
+            # instrumentation overhead slows things down.
+            self._wait_for_state_change(
+                server, "VERIFY_RESIZE", max_retries=30)
 
         # ensure that resize is tried on two hosts, so we had a re-schedule
         self.assertEqual(['host2', 'host3'], prep_resize_calls)
@@ -2254,6 +2259,7 @@ class ServerMoveWithPortResourceRequestTest(
             server,
             {'OS-EXT-SRV-ATTR:host': 'host2',
              'status': 'ACTIVE'})
+        self._wait_for_migration_status(server, ['completed'])
 
         self._check_allocation(
             server, self.compute2_rp_uuid, non_qos_normal_port,
@@ -2310,6 +2316,7 @@ class ServerMoveWithPortResourceRequestTest(
                 server,
                 {'OS-EXT-SRV-ATTR:host': 'host3',
                  'status': 'ACTIVE'})
+            self._wait_for_migration_status(server, ['completed'])
 
         self._check_allocation(
             server, compute3_rp_uuid, non_qos_normal_port,

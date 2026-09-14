@@ -87,6 +87,7 @@ from nova.tests.unit.objects import test_flavor
 from nova.tests.unit.objects import test_instance_numa
 from nova.tests.unit.objects import test_migration
 from nova.tests.unit import utils as test_utils
+from nova import thread_pool_factory
 from nova import utils
 from nova.virt import block_device as driver_block_device
 from nova.virt.block_device import DriverVolumeBlockDevice as driver_bdm_volume
@@ -405,8 +406,7 @@ class ComputeVolumeTestCase(BaseTestCase):
                        lambda *a, **kw: None)
         self.stub_out('nova.volume.cinder.API.check_availability_zone',
                        lambda *a, **kw: None)
-        self.stub_out('eventlet.greenthread.sleep',
-                       lambda *a, **kw: None)
+        self.useFixture(fixtures.NoSleepRetryDecoratorFixture())
 
         def store_cinfo(context, *args, **kwargs):
             self.cinfo = jsonutils.loads(args[-1].get('connection_info'))
@@ -1662,7 +1662,6 @@ class ComputeTestCase(BaseTestCase,
                       fake_resource_tracker.RTMockMixin):
     def setUp(self):
         super(ComputeTestCase, self).setUp()
-        self.compute._live_migration_executor = futurist.SynchronousExecutor()
         # NOTE(gibi): the _sync_power_states periodic task in the
         # ComputeManager spawning concurrent tasks and uses a lock to
         # synchronize a shared data structure. As the spawn is made
@@ -1693,7 +1692,6 @@ class ComputeTestCase(BaseTestCase,
         share_info = objects.base.obj_make_list(
             self.context,
             objects.ShareMappingList(self.context),
-            objects.ShareMapping,
             [share_mapping])
         return share_info
 
@@ -2567,7 +2565,7 @@ class ComputeTestCase(BaseTestCase,
 
         self.compute.terminate_instance(self.context, instance, [])
 
-    @mock.patch('nova.compute.manager.ComputeManager._get_share_info')
+    @mock.patch('nova.compute.share_management.ShareManager.get_share_info')
     @mock.patch.object(nova.compute.manager.ComputeManager,
                        '_get_instance_block_device_info')
     @mock.patch.object(fake.FakeDriver, 'power_off')
@@ -2603,7 +2601,7 @@ class ComputeTestCase(BaseTestCase,
                                             share_info)
 
     @mock.patch.object(nova.virt.fake.FakeDriver, "mount_share")
-    @mock.patch('nova.compute.manager.ComputeManager._get_share_info')
+    @mock.patch('nova.compute.share_management.ShareManager.get_share_info')
     @mock.patch.object(nova.compute.manager.ComputeManager,
                        '_get_instance_block_device_info')
     @mock.patch.object(image_api.API, "get")
@@ -2640,8 +2638,10 @@ class ComputeTestCase(BaseTestCase,
                                        share_info)
         self.compute.terminate_instance(ctxt, instance, [])
 
+    @mock.patch('nova.share.manila.API.deny')
     @mock.patch.object(nova.virt.fake.FakeDriver, "mount_share")
-    @mock.patch('nova.compute.manager.ComputeManager._get_share_info')
+    @mock.patch('nova.compute.share_management.ShareManager.grant_access')
+    @mock.patch('nova.compute.share_management.ShareManager.get_share_info')
     @mock.patch.object(nova.compute.manager.ComputeManager,
                        '_get_instance_block_device_info')
     @mock.patch.object(image_api.API, "get")
@@ -2649,7 +2649,7 @@ class ComputeTestCase(BaseTestCase,
     @mock.patch.object(nova.virt.fake.FakeDriver, "rescue")
     def test_rescue_with_image_specified_and_share(
         self, mock_rescue, mock_power_off, mock_image_get, mock_get_block_info,
-            mock_get_share_info, mock_drv_mount):
+            mock_get_share_info, mock_grant, mock_drv_mount, mock_manila_deny):
         image_ref = uuids.image_instance
         rescue_image_meta = {}
         params = {"task_state": task_states.RESCUING}
@@ -2684,9 +2684,10 @@ class ComputeTestCase(BaseTestCase,
         )
         self.compute.terminate_instance(ctxt, instance, [])
 
+    @mock.patch('nova.share.manila.API.deny')
     @mock.patch('nova.objects.instance_fault.InstanceFault.create')
     @mock.patch.object(nova.virt.fake.FakeDriver, "mount_share")
-    @mock.patch('nova.compute.manager.ComputeManager._get_share_info')
+    @mock.patch('nova.compute.share_management.ShareManager.get_share_info')
     @mock.patch.object(nova.compute.manager.ComputeManager,
                        '_get_instance_block_device_info')
     @mock.patch.object(image_api.API, "get")
@@ -2694,7 +2695,8 @@ class ComputeTestCase(BaseTestCase,
     @mock.patch.object(nova.virt.fake.FakeDriver, "rescue")
     def test_rescue_with_image_specified_and_mount_error(
         self, mock_rescue, mock_power_off, mock_image_get, mock_get_block_info,
-            mock_get_share_info, mock_drv_mount, mock_db_fault):
+            mock_get_share_info, mock_drv_mount, mock_db_fault,
+            mock_manila_deny):
         image_ref = uuids.image_instance
         rescue_image_meta = {}
         params = {"task_state": task_states.RESCUING}
@@ -2729,7 +2731,7 @@ class ComputeTestCase(BaseTestCase,
         self.assertEqual(instance.vm_state, 'error')
         self.compute.terminate_instance(ctxt, instance, [])
 
-    @mock.patch('nova.compute.manager.ComputeManager._get_share_info')
+    @mock.patch('nova.compute.share_management.ShareManager.get_share_info')
     @mock.patch.object(nova.compute.manager.ComputeManager,
                        '_get_instance_block_device_info')
     @mock.patch.object(image_api.API, "get")
@@ -2803,10 +2805,11 @@ class ComputeTestCase(BaseTestCase,
     @mock.patch('nova.network.neutron.API.get_instance_nw_info')
     @mock.patch.object(fake.FakeDriver, 'power_on')
     @mock.patch('nova.objects.share_mapping.ShareMapping.activate')
-    @mock.patch('nova.compute.manager.ComputeManager._mount_share')
-    @mock.patch('nova.compute.manager.ComputeManager._get_share_info')
-    def test_power_on_with_share(self, mock_share, mock_mount, mock_activate,
-            mock_power_on, mock_nw_info, mock_blockdev):
+    @mock.patch('nova.compute.share_management.ShareManager.mount')
+    @mock.patch('nova.compute.share_management.ShareManager.grant_access')
+    @mock.patch('nova.compute.share_management.ShareManager.get_share_info')
+    def test_power_on_with_share(self, mock_share, mock_grant, mock_mount,
+            mock_activate, mock_power_on, mock_nw_info, mock_blockdev):
         instance = self._create_fake_instance_obj()
 
         share_info = self.fake_share_info()
@@ -2834,8 +2837,8 @@ class ComputeTestCase(BaseTestCase,
     @mock.patch('nova.network.neutron.API.get_instance_nw_info')
     @mock.patch.object(fake.FakeDriver, 'power_on')
     @mock.patch('nova.objects.share_mapping.ShareMapping.activate')
-    @mock.patch('nova.compute.manager.ComputeManager._mount_share')
-    @mock.patch('nova.compute.manager.ComputeManager._get_share_info')
+    @mock.patch('nova.compute.share_management.ShareManager.mount')
+    @mock.patch('nova.compute.share_management.ShareManager.get_share_info')
     def test_power_on_with_no_share(self, mock_shares, mock_mount,
             mock_activate, mock_power_on, mock_nw_info, mock_blockdev):
         instance = self._create_fake_instance_obj()
@@ -2858,7 +2861,7 @@ class ComputeTestCase(BaseTestCase,
         mock_mount.assert_not_called()
         mock_activate.assert_not_called()
 
-    @mock.patch('nova.compute.manager.ComputeManager._get_share_info')
+    @mock.patch('nova.compute.share_management.ShareManager.get_share_info')
     @mock.patch.object(compute_manager.ComputeManager,
                        '_get_instance_block_device_info')
     @mock.patch('nova.network.neutron.API.get_instance_nw_info')
@@ -2917,8 +2920,8 @@ class ComputeTestCase(BaseTestCase,
     @mock.patch('nova.network.neutron.API.get_instance_nw_info')
     @mock.patch.object(fake.FakeDriver, 'power_off')
     @mock.patch('nova.objects.share_mapping.ShareMapping.deactivate')
-    @mock.patch('nova.compute.manager.ComputeManager._umount_share')
-    @mock.patch('nova.compute.manager.ComputeManager._get_share_info')
+    @mock.patch('nova.compute.share_management.ShareManager.umount')
+    @mock.patch('nova.compute.share_management.ShareManager.get_share_info')
     def test_power_off_with_share(self, mock_share, mock_umount,
             mock_deactivate, mock_power_off, mock_nw_info, mock_blockdev):
         instance = self._create_fake_instance_obj()
@@ -2945,8 +2948,8 @@ class ComputeTestCase(BaseTestCase,
     @mock.patch('nova.network.neutron.API.get_instance_nw_info')
     @mock.patch.object(fake.FakeDriver, 'power_off')
     @mock.patch('nova.objects.share_mapping.ShareMapping.deactivate')
-    @mock.patch('nova.compute.manager.ComputeManager._umount_share')
-    @mock.patch('nova.compute.manager.ComputeManager._get_share_info')
+    @mock.patch('nova.compute.share_management.ShareManager.umount')
+    @mock.patch('nova.compute.share_management.ShareManager.get_share_info')
     def test_power_off_with_no_share(self, mock_share, mock_umount,
             mock_deactivate, mock_power_off, mock_nw_info, mock_blockdev):
         instance = self._create_fake_instance_obj()
@@ -3011,7 +3014,7 @@ class ComputeTestCase(BaseTestCase,
         self.compute.terminate_instance(self.context, instance, [])
 
     @mock.patch('nova.virt.fake.FakeDriver.resume')
-    @mock.patch('nova.compute.manager.ComputeManager._get_share_info')
+    @mock.patch('nova.compute.share_management.ShareManager.get_share_info')
     @mock.patch('nova.compute.utils.notify_about_instance_action')
     @mock.patch('nova.context.RequestContext.elevated')
     def test_suspend(self, mock_context, mock_notify, mock_get_share_info,
@@ -3054,7 +3057,7 @@ class ComputeTestCase(BaseTestCase,
 
     @mock.patch('nova.compute.manager.ComputeManager.deny_share')
     @mock.patch('nova.virt.fake.FakeDriver.resume')
-    @mock.patch('nova.compute.manager.ComputeManager._get_share_info')
+    @mock.patch('nova.compute.share_management.ShareManager.get_share_info')
     @mock.patch('nova.compute.utils.notify_about_instance_action')
     @mock.patch('nova.context.RequestContext.elevated')
     def test_suspend_with_share(self, mock_context, mock_notify,
@@ -3399,7 +3402,7 @@ class ComputeTestCase(BaseTestCase,
 
     @mock.patch.object(compute_manager.ComputeManager,
                            '_delete_dangling_bdms')
-    @mock.patch('nova.compute.manager.ComputeManager._get_share_info')
+    @mock.patch('nova.compute.share_management.ShareManager.get_share_info')
     @mock.patch.object(objects.BlockDeviceMappingList, 'get_by_instance_uuid')
     @mock.patch.object(compute_manager.ComputeManager,
                            '_get_instance_block_device_info')
@@ -3635,7 +3638,7 @@ class ComputeTestCase(BaseTestCase,
 
     @mock.patch.object(compute_manager.ComputeManager,
                            '_delete_dangling_bdms')
-    @mock.patch('nova.compute.manager.ComputeManager._get_share_info')
+    @mock.patch('nova.compute.share_management.ShareManager.get_share_info')
     @mock.patch('nova.virt.fake.FakeDriver.reboot')
     @mock.patch('nova.objects.instance.Instance.save')
     @mock.patch.object(objects.BlockDeviceMappingList, 'get_by_instance_uuid')
@@ -3691,7 +3694,7 @@ class ComputeTestCase(BaseTestCase,
         self._test_reboot_with_accels(extra_specs=None, accel_info=None)
         mock_get_arqs.assert_not_called()
 
-    @mock.patch('nova.compute.manager.ComputeManager._mount_all_shares')
+    @mock.patch('nova.compute.share_management.ShareManager.mount_all')
     @mock.patch('nova.virt.fake.FakeDriver.reboot')
     @mock.patch('nova.objects.instance.Instance.save')
     @mock.patch.object(objects.BlockDeviceMappingList, 'get_by_instance_uuid')
@@ -3703,7 +3706,7 @@ class ComputeTestCase(BaseTestCase,
     @mock.patch.object(db, 'instance_update_and_get_original')
     @mock.patch.object(compute_manager.ComputeManager, '_get_power_state')
     @mock.patch('nova.compute.utils.notify_about_instance_action')
-    @mock.patch('nova.compute.manager.ComputeManager._get_share_info')
+    @mock.patch('nova.compute.share_management.ShareManager.get_share_info')
     def test_soft_reboot_with_share_info(
         self,
         mock_shares,
@@ -3739,7 +3742,7 @@ class ComputeTestCase(BaseTestCase,
 
         return instance['uuid']
 
-    @mock.patch('nova.compute.manager.ComputeManager._mount_all_shares')
+    @mock.patch('nova.compute.share_management.ShareManager.mount_all')
     @mock.patch('nova.virt.fake.FakeDriver.reboot')
     @mock.patch('nova.objects.instance.Instance.save')
     @mock.patch.object(objects.BlockDeviceMappingList, 'get_by_instance_uuid')
@@ -3751,7 +3754,7 @@ class ComputeTestCase(BaseTestCase,
     @mock.patch.object(db, 'instance_update_and_get_original')
     @mock.patch.object(compute_manager.ComputeManager, '_get_power_state')
     @mock.patch('nova.compute.utils.notify_about_instance_action')
-    @mock.patch('nova.compute.manager.ComputeManager._get_share_info')
+    @mock.patch('nova.compute.share_management.ShareManager.get_share_info')
     def test_hard_reboot_with_share_info(
         self,
         mock_shares,
@@ -3787,7 +3790,7 @@ class ComputeTestCase(BaseTestCase,
 
         return instance['uuid']
 
-    @mock.patch('nova.compute.manager.ComputeManager._mount_all_shares')
+    @mock.patch('nova.compute.share_management.ShareManager.mount_all')
     @mock.patch('nova.virt.fake.FakeDriver.reboot')
     @mock.patch('nova.objects.instance.Instance.save')
     @mock.patch.object(objects.BlockDeviceMappingList, 'get_by_instance_uuid')
@@ -3799,7 +3802,7 @@ class ComputeTestCase(BaseTestCase,
     @mock.patch.object(db, 'instance_update_and_get_original')
     @mock.patch.object(compute_manager.ComputeManager, '_get_power_state')
     @mock.patch('nova.compute.utils.notify_about_instance_action')
-    @mock.patch('nova.compute.manager.ComputeManager._get_share_info')
+    @mock.patch('nova.compute.share_management.ShareManager.get_share_info')
     def test_hard_reboot_with_share_info_error(
         self,
         mock_shares,
@@ -5213,6 +5216,7 @@ class ComputeTestCase(BaseTestCase,
         for operation in actions:
             if 'revert_resize' in operation:
                 migration.source_compute = 'fake-mini'
+                migration.dest_compute = 'fake-mini'
                 migration.source_node = 'fake-mini'
 
             def fake_migration_save(*args, **kwargs):
@@ -5418,7 +5422,7 @@ class ComputeTestCase(BaseTestCase,
             mock_virt_mig.assert_called_once_with(self.context, migration,
                 instance, disk_info, 'fake-nwinfo1',
                 test.MatchType(objects.ImageMeta), resize_instance, mock.ANY,
-                'fake-bdminfo', power_on)
+                'fake-bdminfo', power_on, share_info=mock.ANY)
             mock_get_blk.assert_called_once_with(self.context, instance,
                                                  refresh_conn_info=True,
                                                  bdms=fake_bdms)
@@ -6081,7 +6085,7 @@ class ComputeTestCase(BaseTestCase,
         instance.numa_topology = numa_topology
         instance.save()
 
-        new_flavor_ref = flavors.get_flavor_by_flavor_id(3)
+        new_flavor_ref = flavors.get_flavor_by_flavor_id(self.context, 3)
         self.compute.prep_resize(self.context,
                 instance=instance,
                 flavor=new_flavor_ref,
@@ -6421,7 +6425,7 @@ class ComputeTestCase(BaseTestCase,
         instance.numa_topology = numa_topology
         instance.save()
 
-        new_flavor_ref = flavors.get_flavor_by_flavor_id(3)
+        new_flavor_ref = flavors.get_flavor_by_flavor_id(self.context, 3)
         self.compute.prep_resize(self.context,
                 instance=instance,
                 flavor=new_flavor_ref,
@@ -6464,7 +6468,7 @@ class ComputeTestCase(BaseTestCase,
             new_flavor_ref.memory_mb)
 
         # Prove that the instance size is now the new size
-        flavor_ref = flavors.get_flavor_by_flavor_id(3)
+        flavor_ref = flavors.get_flavor_by_flavor_id(self.context, 3)
         self.assertEqual(flavor_ref['flavorid'], '3')
         # Prove that the NUMA topology has also been updated to that of the new
         # flavor - meaning None
@@ -6557,7 +6561,7 @@ class ComputeTestCase(BaseTestCase,
                                             request_spec, {},
                                             [], block_device_mapping=[])
 
-        new_flavor_ref = flavors.get_flavor_by_flavor_id(3)
+        new_flavor_ref = flavors.get_flavor_by_flavor_id(self.context, 3)
         self.compute.prep_resize(self.context,
                 instance=instance,
                 flavor=new_flavor_ref,
@@ -6604,7 +6608,7 @@ class ComputeTestCase(BaseTestCase,
         self.assertEqual(NODENAME2, migration.dest_compute)
 
     def test_get_by_flavor_id(self):
-        flavor_type = flavors.get_flavor_by_flavor_id(1)
+        flavor_type = flavors.get_flavor_by_flavor_id(self.context, 1)
         self.assertEqual(flavor_type['name'], 'm1.tiny')
 
     def test_resize_instance_handles_migration_error(self):
@@ -8066,7 +8070,8 @@ class ComputeTestCase(BaseTestCase,
         ctxt = context.get_admin_context()
         created_at = timeutils.utcnow() + datetime.timedelta(seconds=-60)
 
-        filters = {'vm_state': vm_states.BUILDING, 'host': CONF.host}
+        filters = {'vm_state': vm_states.BUILDING, 'host': CONF.host,
+                   'deleted': False}
         # these are the ones that are expired
         old_instances = []
         for x in range(4):
@@ -8418,7 +8423,7 @@ class ComputeTestCase(BaseTestCase,
                        '_complete_partial_deletion',
                        fake_partial_deletion)
         with mock.patch(
-            "nova.compute.manager.ComputeManager._get_share_info",
+            "nova.compute.share_management.ShareManager.get_share_info",
             return_value=objects.ShareMappingList(),
         ):
             self.compute._init_instance(admin_context, instance)
@@ -8573,7 +8578,8 @@ class ComputeTestCase(BaseTestCase,
 
         self.compute._sync_power_states(ctxt)
         # wait for sync to finish
-        self.compute._sync_power_executor.shutdown(wait=True)
+        thread_pool_factory.get_executor(
+            thread_pool_factory.ExecutorType.SYNC_POWER).shutdown(wait=True)
 
         mock_get.assert_has_calls([mock.call(mock.ANY), mock.call(mock.ANY),
                                    mock.call(mock.ANY)])
@@ -8673,7 +8679,7 @@ class ComputeTestCase(BaseTestCase,
             self, mock_pci_mapping):
         instance = self._create_fake_instance_obj()
         old_type = instance.flavor
-        new_type = flavors.get_flavor_by_flavor_id('4')
+        new_type = flavors.get_flavor_by_flavor_id(self.context, '4')
 
         instance.flavor = new_type
         instance.old_flavor = old_type
@@ -9345,8 +9351,7 @@ class ComputeAPITestCase(BaseTestCase):
             1,
             security_groups=objects.SecurityGroupList(),
             flavor=self.tiny_flavor,
-            num_instances=num_instances,
-            shutdown_terminate=False)
+            num_instances=num_instances)
         self.assertEqual(str(base_options['image_ref']),
                          instance['system_metadata']['image_base_image_ref'])
         self.assertEqual(vm_states.BUILDING, instance['vm_state'])
@@ -9380,8 +9385,7 @@ class ComputeAPITestCase(BaseTestCase):
             index,
             security_groups=objects.SecurityGroupList(),
             flavor=self.tiny_flavor,
-            num_instances=num_instances,
-            shutdown_terminate=False)
+            num_instances=num_instances)
         self.assertIsNotNone(instance.ephemeral_key_uuid)
 
     def test_default_hostname_generator(self):
@@ -11140,7 +11144,7 @@ class ComputeAPITestCase(BaseTestCase):
             wrapped_exc, exception.NetworkInterfaceTaggedAttachNotSupported)
 
     def test_attach_interface_failed(self):
-        new_type = flavors.get_flavor_by_flavor_id('4')
+        new_type = flavors.get_flavor_by_flavor_id(self.context, '4')
         instance = objects.Instance(
                        id=42,
                        uuid=uuids.interface_failed_instance,
@@ -11205,7 +11209,7 @@ class ComputeAPITestCase(BaseTestCase):
             self.assertEqual([], pci_reqs.requests)
 
     def test_attach_sriov_interface_failed_in_driver(self):
-        new_type = flavors.get_flavor_by_flavor_id('4')
+        new_type = flavors.get_flavor_by_flavor_id(self.context, '4')
         instance = objects.Instance(
             id=42,
             uuid=uuids.interface_failed_instance,
@@ -13783,11 +13787,11 @@ class DisabledInstanceTypesTestCase(BaseTestCase):
         orig_get_flavor_by_flavor_id =\
                 flavors.get_flavor_by_flavor_id
 
-        def fake_get_flavor_by_flavor_id(flavor_id, ctxt=None,
+        def fake_get_flavor_by_flavor_id(ctxt, flavor_id,
                                                 read_deleted="yes"):
-            flavor = orig_get_flavor_by_flavor_id(flavor_id,
-                                                                ctxt,
-                                                                read_deleted)
+            flavor = orig_get_flavor_by_flavor_id(ctxt,
+                                                  flavor_id,
+                                                  read_deleted)
             flavor['disabled'] = False
             return flavor
 
@@ -13804,10 +13808,10 @@ class DisabledInstanceTypesTestCase(BaseTestCase):
         orig_get_flavor_by_flavor_id = flavors.get_flavor_by_flavor_id
 
         def fake_get_flavor_by_flavor_id(
-            flavor_id, ctxt=None, read_deleted="yes"
+            ctxt, flavor_id, read_deleted="yes"
         ):
             flavor = orig_get_flavor_by_flavor_id(
-                flavor_id, ctxt, read_deleted)
+                ctxt, flavor_id, read_deleted)
             flavor['disabled'] = True
             return flavor
 

@@ -27,6 +27,7 @@ from urllib import parse as urlparse
 
 from oslo_log import log as logging
 from oslo_utils import encodeutils
+from oslo_utils import netutils
 import websockify
 from websockify import websockifyserver
 
@@ -36,6 +37,8 @@ from nova import context
 from nova import exception
 from nova.i18n import _
 from nova import objects
+from nova import utils
+
 
 from oslo_utils import timeutils
 import threading
@@ -163,10 +166,10 @@ class NovaProxyRequestHandler(websockify.ProxyRequestHandler):
 
     def new_websocket_client(self):
         """Called after a new WebSocket connection has been established."""
-        # Reopen the eventlet hub to make sure we don't share an epoll
-        # fd with parent and/or siblings, which would be bad
-        from eventlet import hubs
-        hubs.use_hub()
+        if not utils.concurrency_mode_threading():
+            # Reopen the eventlet hub to make sure we don't share an epoll
+            # fd with parent and/or siblings, which would be bad
+            utils.get_eventlet().hubs.use_hub()
 
         # The nova expected behavior is to have token
         # passed to the method GET of the request
@@ -197,13 +200,9 @@ class NovaProxyRequestHandler(websockify.ProxyRequestHandler):
 
         # Verify Origin
         expected_origin_hostname = self.headers.get('Host')
-        if ':' in expected_origin_hostname:
-            e = expected_origin_hostname
-            if '[' in e and ']' in e:
-                expected_origin_hostname = e.split(']')[0][1:]
-            else:
-                expected_origin_hostname = e.split(':')[0]
-        expected_origin_hostnames = CONF.console.allowed_origins
+        expected_origin_hostname = netutils.parse_host_port(
+            expected_origin_hostname)[0]
+        expected_origin_hostnames = list(CONF.console.allowed_origins)
         expected_origin_hostnames.append(expected_origin_hostname)
         origin_url = self.headers.get('Origin')
         # missing origin header indicates non-browser client which is OK
@@ -246,12 +245,12 @@ class NovaProxyRequestHandler(websockify.ProxyRequestHandler):
             if path:
                 tsock.send(encodeutils.safe_encode(
                     'CONNECT %s HTTP/1.1\r\n\r\n' % path))
-                end_token = "\r\n\r\n"
+                end_token = b"\r\n\r\n"
                 while True:
                     data = tsock.recv(4096, socket.MSG_PEEK)
                     token_loc = data.find(end_token)
                     if token_loc != -1:
-                        if data.split("\r\n")[0].find("200") == -1:
+                        if data.split(b"\r\n")[0].find(b"200") == -1:
                             raise exception.InvalidConnectionInfo()
                         # remove the response from recv buffer
                         tsock.recv(token_loc + len(end_token))

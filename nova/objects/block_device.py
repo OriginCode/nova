@@ -267,7 +267,8 @@ class BlockDeviceMapping(base.NovaPersistentObject, base.NovaObject,
 
     # NOTE(danms): This method is deprecated and will be removed in
     # v2.0 of the object
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_volume_id(cls, context, volume_id,
                          instance_uuid=None, expected_attrs=None):
         if expected_attrs is None:
@@ -290,7 +291,8 @@ class BlockDeviceMapping(base.NovaPersistentObject, base.NovaObject,
         return cls._from_db_object(context, cls(), db_bdm,
                                    expected_attrs=expected_attrs)
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_volume_and_instance(cls, context, volume_id, instance_uuid,
                                    expected_attrs=None):
         if expected_attrs is None:
@@ -303,7 +305,8 @@ class BlockDeviceMapping(base.NovaPersistentObject, base.NovaObject,
         return cls._from_db_object(context, cls(), db_bdm,
                                    expected_attrs=expected_attrs)
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_volume(cls, context, volume_id, expected_attrs=None):
         if expected_attrs is None:
             expected_attrs = []
@@ -431,12 +434,12 @@ class BlockDeviceMappingList(base.ObjectListBase, base.NovaObject):
         return db.block_device_mapping_get_all_by_instance_uuids(
                 context, instance_uuids)
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_instance_uuids(cls, context, instance_uuids, use_slave=False):
         db_bdms = cls._db_block_device_mapping_get_all_by_instance_uuids(
             context, instance_uuids, use_slave=use_slave)
-        return base.obj_make_list(
-                context, cls(), objects.BlockDeviceMapping, db_bdms or [])
+        return base.obj_make_list(context, cls(), db_bdms or [])
 
     @staticmethod
     @db.select_db_reader_mode
@@ -445,12 +448,12 @@ class BlockDeviceMappingList(base.ObjectListBase, base.NovaObject):
         return db.block_device_mapping_get_all_by_instance(
             context, instance_uuid)
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_instance_uuid(cls, context, instance_uuid, use_slave=False):
         db_bdms = cls._db_block_device_mapping_get_all_by_instance(
             context, instance_uuid, use_slave=use_slave)
-        return base.obj_make_list(
-                context, cls(), objects.BlockDeviceMapping, db_bdms or [])
+        return base.obj_make_list(context, cls(), db_bdms or [])
 
     @staticmethod
     @db.select_db_reader_mode
@@ -459,14 +462,14 @@ class BlockDeviceMappingList(base.ObjectListBase, base.NovaObject):
         return db.block_device_mapping_get_all_by_volume_id(
                 context, volume_id)
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_volume(cls, context, volume_id, use_slave=False):
         db_bdms = cls._db_block_device_mapping_get_all_by_volume(
             context, volume_id, use_slave=use_slave)
         if not db_bdms:
             raise exception.VolumeBDMNotFound(volume_id=volume_id)
-        return base.obj_make_list(
-            context, cls(), objects.BlockDeviceMapping, db_bdms)
+        return base.obj_make_list(context, cls(), db_bdms)
 
     def root_bdm(self):
         """It only makes sense to call this method when the
@@ -491,7 +494,7 @@ class BlockDeviceMappingList(base.ObjectListBase, base.NovaObject):
 def block_device_make_list(context, db_list, **extra_args):
     return base.obj_make_list(context,
                               objects.BlockDeviceMappingList(context),
-                              objects.BlockDeviceMapping, db_list,
+                              db_list,
                               **extra_args)
 
 

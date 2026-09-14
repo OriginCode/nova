@@ -9,21 +9,20 @@ authors = [
     {name = "OpenStack", email = "openstack-discuss@lists.openstack.org"},
 ]
 readme = {file = "README.rst", content-type = "text/x-rst"}
-license = {text = "Apache-2.0"}
+license = "Apache-2.0"
 dynamic = ["version", "dependencies"]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Environment :: OpenStack",
     "Intended Audience :: Information Technology",
     "Intended Audience :: System Administrators",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: Implementation :: CPython",
 ]
@@ -91,10 +90,8 @@ vmware = "nova.api.validation.extra_specs.vmware"
 [project.entry-points."nova.compute.monitors.cpu"]
 virt_driver = "nova.compute.monitors.cpu.virt_driver:Monitor"
 
-[tool.setuptools]
-packages = [
-    "nova"
-]
+[tool.setuptools.packages.find]
+include = ["nova*"]
 
 [tool.setuptools.data-files]
 "etc/nova" = [
@@ -125,7 +122,8 @@ concurrency = ["eventlet"]
 ignore_errors = true
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
+platform = "linux"
 show_column_numbers = true
 show_error_context = true
 ignore_missing_imports = true

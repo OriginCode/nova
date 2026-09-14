@@ -35,6 +35,7 @@ import sys
 from unittest import mock
 
 import fixtures
+import futurist
 from oslo_cache import core as cache
 from oslo_concurrency import lockutils
 from oslo_config import cfg
@@ -67,6 +68,7 @@ from nova.tests import fixtures as nova_fixtures
 from nova.tests.unit import matchers
 from nova import utils
 from nova.virt import images
+from nova.virt.libvirt import driver as libvirt_driver
 
 CONF = cfg.CONF
 
@@ -185,12 +187,19 @@ class TestCase(base.BaseTestCase):
         with fixtures.EnvironmentVariable('OS_LOG_CAPTURE', '0'):
             super(TestCase, self).setUp()
 
+        # XXX(gibi):Hack until https://bugs.launchpad.net/futurist/+bug/2160159
+        # is properly fixed to speed up the functional test in threading mode
+        futurist._thread.ThreadWorker.MAX_IDLE_FOR = 0.01
+
+        # TODO(gibi): reimplement it to selectively support eventlet and
+        # native threading as well
         self.useFixture(
             nova_fixtures.PropagateTestCaseIdToChildEventlets(self.id()))
 
         # Ensure that the pci alias is reset between test cases running in
         # the same process
         request.get_alias_from_config.cache_clear()
+        libvirt_driver.LibvirtDriver._get_pci_passthrough_devices.cache_clear()
 
         # How many of which service we've started. {$service-name: $count}
         self._service_fixture_count = collections.defaultdict(int)

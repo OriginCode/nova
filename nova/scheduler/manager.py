@@ -22,7 +22,6 @@ Scheduler Service
 import collections
 import copy
 import random
-import time
 
 from keystoneauth1 import exceptions as ks_exc
 from oslo_log import log as logging
@@ -46,6 +45,7 @@ from nova.scheduler import host_manager
 from nova.scheduler import request_filter
 from nova.scheduler import utils
 from nova import servicegroup
+from nova import thread_pool_factory
 
 CONF = nova.conf.CONF
 LOG = logging.getLogger(__name__)
@@ -70,7 +70,6 @@ class SchedulerManager(manager.Manager):
         self.host_manager = host_manager.HostManager()
         self.servicegroup_api = servicegroup.API()
         self.notifier = rpc.get_notifier('scheduler')
-        self._placement_client = None
 
         try:
             # Test our placement client during initialization
@@ -157,27 +156,33 @@ class SchedulerManager(manager.Manager):
         # cell.
         self.host_manager.refresh_cells_caches()
 
-    def graceful_shutdown(self):
+    def graceful_shutdown(self, timeout):
         """Gracefully shutdown the manager.
 
         This will be called during graceful shutdown (SIGTERM) and manager
         should transit the in-progress tasks to safe termination point. The
         safe termination point can be either complete or abort them.
         """
-        # TODO(gmaan) Time based wait is temporary solution and it will be
-        # replaced by the better solution to finish in-progress tasks.
-        if CONF.manager_shutdown_timeout > CONF.graceful_shutdown_timeout:
-            LOG.warning('manager_shutdown_timeout (%s) is higher than '
-                        'graceful_shutdown_timeout (%s); the service may be '
-                        'killed before the manager finishes waiting.',
-                        CONF.manager_shutdown_timeout,
-                        CONF.graceful_shutdown_timeout)
-            sleep_time = max(0, CONF.graceful_shutdown_timeout - 10)
-        else:
-            sleep_time = CONF.manager_shutdown_timeout
-        LOG.debug('Scheduler service manager is waiting for %s seconds to '
-                  'finish in-progress tasks', sleep_time)
-        time.sleep(sleep_time)
+        # NOTE(gmaan): We reserve some time out of the total timeout to
+        # shutdown all the thread pool executors so that in-progress tasks
+        # waiting does not consume all the time and leave nothing for the
+        # executors to shutdown gracefully. 20 sec is the max time we are
+        # reserving for that, which is a rough estimate we can change if we
+        # get to know that it is less.
+        shutdown_executors_reserved_time = min(20, timeout)
+        wait_timeout = max(0, timeout - shutdown_executors_reserved_time)
+        LOG.debug('Scheduler manager waiting up to %s seconds for '
+                  'in-progress tasks to complete (%s seconds reserved for '
+                  'shutting down all thread pool executors).',
+                  wait_timeout, shutdown_executors_reserved_time)
+        self._wait_for_in_progress_tasks(wait_timeout)
+
+        try:
+            thread_pool_factory.shutdown_all_executors()
+        except Exception:
+            LOG.exception(
+                '%s service failed to shutdown all thread pool executors.',
+                self.service_name)
 
     @messaging.expected_exceptions(exception.NoValidHost)
     def select_destinations(

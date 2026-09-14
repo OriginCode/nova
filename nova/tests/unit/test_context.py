@@ -16,7 +16,6 @@ import threading
 from unittest import mock
 
 import ddt
-import futurist.waiters
 from keystoneauth1.fixture import plugin as ks_plugin_fixture
 from keystoneauth1 import loading as ks_loading
 from oslo_config import cfg
@@ -30,6 +29,7 @@ from nova import exception
 from nova import objects
 from nova import service_auth
 from nova import test
+from nova import thread_pool_factory
 from nova import utils
 
 
@@ -144,6 +144,31 @@ class ContextTestCase(test.NoDBTestCase):
         ctxt = context.RequestContext('111', '222',
                 service_catalog=service_catalog)
         self.assertEqual(volume_catalog, ctxt.service_catalog)
+
+    @mock.patch('keystoneauth1.plugin.BaseAuthPlugin.get_endpoint_data')
+    @mock.patch('nova.context._ContextAuthPlugin.get_endpoint')
+    def test_context_auth_plugin_get_endpoint_data(
+            self, mock_get_endpoint, mock_super_get_endpoint_data):
+        # _ContextAuthPlugin resolves the endpoint from the service
+        # catalog and passes it as endpoint_override so the base class
+        # can run version discovery. Without this, openstacksdk gets
+        # None and raises NotSupported during proxy creation.
+        mock_get_endpoint.return_value = 'http://cyborg.example.com/v2'
+        ctxt = context.RequestContext(
+            '111', '222',
+            service_catalog=[{'type': 'accelerator', 'name': 'cyborg'}])
+        auth_plugin = ctxt.get_auth_plugin()
+
+        result = auth_plugin.get_endpoint_data(
+            mock.sentinel.session, service_type='accelerator')
+
+        mock_get_endpoint.assert_called_once_with(
+            mock.sentinel.session, service_type='accelerator')
+        mock_super_get_endpoint_data.assert_called_once_with(
+            mock.sentinel.session,
+            endpoint_override='http://cyborg.example.com/v2',
+            discover_versions=True, service_type='accelerator')
+        self.assertEqual(mock_super_get_endpoint_data.return_value, result)
 
     def test_to_dict_from_dict_no_log(self):
         warns = []
@@ -481,7 +506,9 @@ class ContextTestCase(test.NoDBTestCase):
         # the leaked thread check at the test case cleanup
         def cleanup():
             work.release()
-            utils.SCATTER_GATHER_EXECUTOR.shutdown(wait=True)
+            thread_pool_factory.get_executor(
+                thread_pool_factory.ExecutorType.SCATTER_GATHER).shutdown(
+                    wait=True)
 
         self.addCleanup(cleanup)
 
@@ -511,8 +538,10 @@ class ContextTestCase(test.NoDBTestCase):
     def test_scatter_gather_cells_queued_task_cancelled(self, mock_warning):
         # ensure that only one task can run at a time so we can simulate
         # queued tasks
-        utils.SCATTER_GATHER_EXECUTOR = futurist.GreenThreadPoolExecutor(
-            max_workers=1)
+        executor = thread_pool_factory.FACTORY._new_executor(
+            1, thread_pool_factory.ExecutorType.SCATTER_GATHER.value)
+        thread_pool_factory.FACTORY._all_executors[
+            thread_pool_factory.ExecutorType.SCATTER_GATHER] = executor
 
         work = threading.Event()
 
@@ -521,7 +550,7 @@ class ContextTestCase(test.NoDBTestCase):
         # cleanup
         def cleanup():
             work.set()
-            utils.SCATTER_GATHER_EXECUTOR.shutdown(wait=True)
+            executor.shutdown(wait=True)
 
         self.addCleanup(cleanup)
 
@@ -550,22 +579,33 @@ class ContextTestCase(test.NoDBTestCase):
         # let the started task eventually finish so the thread leak check at
         # the test case cleanup is satisfied.
         work.set()
-        utils.SCATTER_GATHER_EXECUTOR.shutdown(wait=True)
+        executor.shutdown(wait=True)
 
-        stats = utils.SCATTER_GATHER_EXECUTOR.statistics
+        stats = executor.statistics
         # The task that wasn't started is cancelled when the scatter-gather
         # timed out.
         self.assertEqual(1, stats.cancelled)
         # The task that was started is finished after the scatter-gather
         # timeout
         self.assertEqual(1, stats.executed)
-
-        mock_warning.assert_has_calls([
+        mock_calls = [
             mock.call(
                 'Timed out waiting for response from cell %s. Left the cell '
-                'worker thread to finish in the background.', mock.ANY),
-            mock.call(
-                'Timed out waiting for response from cell %s.', mock.ANY)])
+                'worker thread to finish in the background.', mock.ANY)]
+
+        if utils.concurrency_mode_threading():
+            mock_calls.append(mock.call(
+                'Timed out waiting for response from cell %s. '
+                'The cell worker thread did not start and is now '
+                'cancelled. The cell_worker_thread_pool_size is too '
+                'small for the load or there are stuck worker threads '
+                'filling the pool.', mock.ANY))
+        else:
+            mock_calls.append(
+                mock.call(
+                    'Timed out waiting for response from cell %s.', mock.ANY))
+
+        mock_warning.assert_has_calls(mock_calls)
 
     @mock.patch('nova.context.LOG.exception')
     @mock.patch('nova.objects.InstanceList.get_by_filters')

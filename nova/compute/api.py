@@ -131,6 +131,8 @@ MIN_COMPUTE_USB_MODEL_TRAITS = 70
 
 MIN_COMPUTE_VTPM_LIVE_MIGRATION = 72
 
+MIN_COMPUTE_COLD_MIGRATE_WITH_SHARES = 74
+
 # FIXME(danms): Keep a global cache of the cells we find the
 # first time we look. This needs to be refreshed on a timer or
 # trigger.
@@ -251,10 +253,12 @@ def check_instance_lock(function):
     return inner
 
 
-def reject_sev_instances(operation):
-    """Reject requests to decorated function if instance has SEV enabled.
+def reject_mem_enc_instances(operation):
+    """Reject requests to decorated function if instance has mem encryption
+    enabled.
 
-    Raise OperationNotSupportedForSEV if instance has SEV enabled.
+    Raise OperationNotSupportedForMemEncryption if instance has mem encryption
+    enabled.
     """
 
     def outer(f):
@@ -262,7 +266,7 @@ def reject_sev_instances(operation):
         def inner(self, context, instance, *args, **kw):
             if hardware.get_mem_encryption_constraint(instance.flavor,
                                                       instance.image_meta):
-                raise exception.OperationNotSupportedForSEV(
+                raise exception.OperationNotSupportedForMemEncryption(
                     instance_uuid=instance.uuid,
                     operation=operation)
             return f(self, context, instance, *args, **kw)
@@ -1401,10 +1405,22 @@ class API:
                 'instance_az': instance_az, 'volume_az': volume_az}
             raise exception.MismatchVolumeAZException(reason=msg)
 
+    def _enforce_create_unified_limits(
+        self, context, flavor, is_bfv, port_resource_requests,
+        dp_request_groups, min_count, num_instances,
+    ):
+        if not limit_utils.use_unified_limits():
+            return num_instances
+
+        req_spec = scheduler_utils.request_spec_for_limits(
+            flavor, is_bfv, port_resource_requests, dp_request_groups)
+        return placement_limits.enforce_num_instances_and_resources(
+            context, context.project_id, req_spec, min_count, num_instances)
+
     def _provision_instances(
         self, context, flavor, min_count,
         max_count, base_options, boot_meta, security_groups,
-        block_device_mapping, shutdown_terminate,
+        block_device_mapping,
         instance_group, check_server_group_quota, filter_properties,
         key_pair, tags, trusted_certs, supports_multiattach,
         network_metadata=None, requested_host=None,
@@ -1433,15 +1449,17 @@ class API:
             # If we have no BDMs, we're clearly not BFV
             is_bfv = False
 
-        # NOTE(johngarbutt) when unified limits not used, this just
-        #   returns num_instances back again
-        # NOTE: If we want to enforce quota on port or cyborg resources in the
-        # future, this enforce call will need to move after we have populated
-        # the RequestSpec with all of the requested resources and use the real
-        # RequestSpec to get the overall resource usage of the instance.
-        num_instances = placement_limits.enforce_num_instances_and_flavor(
-                context, context.project_id, flavor,
-                is_bfv, min_count, num_instances)
+        extra_specs = flavor.extra_specs
+        dp_name = extra_specs.get('accel:device_profile')
+        dp_request_groups = []
+        if dp_name:
+            dp_request_groups = cyborg.get_device_profile_request_groups(
+                context, dp_name)
+
+        port_resource_requests = base_options.get('port_resource_requests')
+        num_instances = self._enforce_create_unified_limits(
+            context, flavor, is_bfv, port_resource_requests,
+            dp_request_groups, min_count, num_instances)
 
         security_groups = security_group_api.populate_security_groups(
             security_groups)
@@ -1464,12 +1482,6 @@ class API:
             # base_options to match the volume zone.
             base_options['availability_zone'] = volume_az
         LOG.debug("Going to run %s instances...", num_instances)
-        extra_specs = flavor.extra_specs
-        dp_name = extra_specs.get('accel:device_profile')
-        dp_request_groups = []
-        if dp_name:
-            dp_request_groups = cyborg.get_device_profile_request_groups(
-                context, dp_name)
         try:
             for idx in range(num_instances):
                 # Create a uuid for the instance so we can store the
@@ -1517,7 +1529,7 @@ class API:
                 self._populate_instance_for_create(
                     context, instance, boot_meta, idx,
                     security_groups, flavor,
-                    num_instances, shutdown_terminate)
+                    num_instances)
 
                 block_device_mapping = (
                     self._bdm_validate_set_size_and_instance(context,
@@ -1701,7 +1713,7 @@ class API:
                admin_password, access_ip_v4, access_ip_v6,
                requested_networks, config_drive,
                block_device_mapping, auto_disk_config, filter_properties,
-               reservation_id=None, legacy_bdm=True, shutdown_terminate=False,
+               reservation_id=None, legacy_bdm=True,
                check_server_group_quota=False, tags=None,
                supports_multiattach=False, trusted_certs=None,
                supports_port_resource_request=False,
@@ -1803,7 +1815,7 @@ class API:
         instances_to_build = self._provision_instances(
             context, flavor, min_count, max_count, base_options,
             boot_meta, security_groups, block_device_mapping,
-            shutdown_terminate, instance_group, check_server_group_quota,
+            instance_group, check_server_group_quota,
             filter_properties, key_pair, tags, trusted_certs,
             supports_multiattach, network_metadata,
             requested_host, requested_hypervisor_hostname)
@@ -2130,7 +2142,7 @@ class API:
 
     def _populate_instance_for_create(
         self, context, instance, image, index, security_groups, flavor,
-        num_instances, shutdown_terminate,
+        num_instances,
     ):
         """Build the beginning of a new instance."""
 
@@ -2182,7 +2194,7 @@ class API:
         instance.security_groups = objects.SecurityGroupList()
 
         self._populate_instance_names(instance, num_instances, index)
-        instance.shutdown_terminate = shutdown_terminate
+        instance.shutdown_terminate = False
 
         return instance
 
@@ -2242,7 +2254,7 @@ class API:
         admin_password=None, block_device_mapping=None,
         access_ip_v4=None, access_ip_v6=None, requested_networks=None,
         config_drive=None, auto_disk_config=None, scheduler_hints=None,
-        legacy_bdm=True, shutdown_terminate=False,
+        legacy_bdm=True,
         check_server_group_quota=False, tags=None,
         supports_multiattach=False, trusted_certs=None,
         supports_port_resource_request=False,
@@ -2290,7 +2302,6 @@ class API:
             block_device_mapping, auto_disk_config,
             filter_properties=filter_properties,
             legacy_bdm=legacy_bdm,
-            shutdown_terminate=shutdown_terminate,
             check_server_group_quota=check_server_group_quota,
             tags=tags, supports_multiattach=supports_multiattach,
             trusted_certs=trusted_certs,
@@ -2483,8 +2494,17 @@ class API:
 
                 cell, instance = self._lookup_instance(context, instance.uuid)
                 if cell and instance:
+                    bdms = instance.get_bdms()
+                    # If there are any block device mappings, clean them up.
+                    if len(bdms) > 0:
+                        # ensure any bdms and cinder attachments are cleaned up
+                        self._local_cleanup_bdm_volumes(
+                            bdms, instance, context)
                     try:
                         # Now destroy the instance from the cell it lives in.
+                        # The instance.destroy will wipe all related BDMs from
+                        # the database. Therefore we need to notify cinder with
+                        # the _local_cleanup_bdm_volumes() call before.
                         with compute_utils.notify_about_instance_delete(
                                 self.notifier, context, instance):
                             instance.destroy()
@@ -2805,8 +2825,9 @@ class API:
         compute_utils.check_num_instances_quota(context, flavor, 1, 1,
                 project_id=project_id, user_id=user_id)
         is_bfv = compute_utils.is_volume_backed_instance(context, instance)
-        placement_limits.enforce_num_instances_and_flavor(context, project_id,
-                                                         flavor, is_bfv, 1, 1)
+        req_spec = objects.RequestSpec(flavor=flavor, is_bfv=is_bfv)
+        placement_limits.enforce_num_instances_and_resources(
+            context, project_id, req_spec, 1, 1)
 
         self._record_action_start(context, instance, instance_actions.RESTORE)
 
@@ -3944,10 +3965,10 @@ class API:
         # But for revert resize, we are just removing claims in placement
         # so we can ignore the quota check
         if not is_revert:
-            placement_limits.enforce_num_instances_and_flavor(context,
-                                                              project_id,
-                                                              new_flavor,
-                                                              is_bfv, 1, 1)
+            req_spec = objects.RequestSpec(
+                flavor=new_flavor, is_bfv=is_bfv)
+            placement_limits.enforce_num_instances_and_resources(
+                context, project_id, req_spec, 1, 1)
 
         # Old quota system only looks at the change in size.
         # Deltas will be empty if the resize is not an upsize.
@@ -4263,7 +4284,6 @@ class API:
                     "other TPM secret security modes is not supported.")
             raise exception.OperationNotSupportedForVTPM(msg)
 
-    @block_shares_not_supported()
     # TODO(stephenfin): This logic would be so much easier to grok if we
     # finally split resize and cold migration into separate code paths
     @block_extended_resource_request
@@ -4286,6 +4306,14 @@ class API:
         # Only lookup the minimum compute version once
         min_comp_ver = objects.service.get_minimum_version_all_cells(
             context, ["nova-compute"])
+
+        if instance_has_share(context, instance):
+            if min_comp_ver < MIN_COMPUTE_COLD_MIGRATE_WITH_SHARES:
+                raise exception.ForbiddenWithShare(
+                    message=_("Cold migration and resize with shares "
+                              "requires all compute services to be at "
+                              "service version %d or later.")
+                    % MIN_COMPUTE_COLD_MIGRATE_WITH_SHARES)
 
         allow_cross_cell_resize = self._allow_cross_cell_resize(
             context, instance, min_comp_ver)
@@ -4315,7 +4343,7 @@ class API:
             new_flavor = current_flavor
         else:
             new_flavor = flavors.get_flavor_by_flavor_id(
-                flavor_id, ctxt=context, read_deleted="no")
+                context, flavor_id, read_deleted="no")
             # NOTE(wenping): We use this instead of the 'block_accelerator'
             # decorator since the operation can differ depending on args,
             # and for resize we have two flavors to worry about, we should
@@ -4679,8 +4707,8 @@ class API:
             check_user_id=instance.user_id,
         )
         # Do the same for unified limits.
-        placement_limits.enforce_num_instances_and_flavor(
-            context, context.project_id, instance.flavor, request_spec.is_bfv,
+        placement_limits.enforce_num_instances_and_resources(
+            context, context.project_id, request_spec,
             0, 0, delta_updates={'servers': 0})
 
     @block_extended_resource_request
@@ -4840,7 +4868,7 @@ class API:
         instance_actions.SUSPEND, until=MIN_COMPUTE_VDPA_HOTPLUG_LIVE_MIGRATION
     )
     @block_accelerators()
-    @reject_sev_instances(instance_actions.SUSPEND)
+    @reject_mem_enc_instances(instance_actions.SUSPEND)
     @check_instance_lock
     @check_instance_state(vm_state=[vm_states.ACTIVE])
     def suspend(self, context, instance):
@@ -5553,7 +5581,7 @@ class API:
     )
     @block_accelerators()
     @reject_legacy_vtpm_live_migration
-    @reject_sev_instances(instance_actions.LIVE_MIGRATION)
+    @reject_mem_enc_instances(instance_actions.LIVE_MIGRATION)
     @check_instance_lock
     @check_instance_state(vm_state=[vm_states.ACTIVE, vm_states.PAUSED])
     def live_migrate(self, context, instance, block_migration,

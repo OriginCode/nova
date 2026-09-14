@@ -2098,7 +2098,8 @@ class API:
             networks = networks + [
                 {'id': iface['network']['id'],
                  'name': iface['network']['label'],
-                 'tenant_id': iface['network']['meta']['tenant_id']}
+                 'tenant_id': iface['network']['meta']['tenant_id'],
+                 'mtu': iface['network']['meta'].get('mtu')}
                 for iface in ifaces
                 if _is_not_duplicate(iface['network']['id'],
                                      networks_ids,
@@ -3310,9 +3311,11 @@ class API:
                                       CONF.neutron.ovs_bridge)
             ovs_interfaceid = port['id']
         elif vif_type == network_model.VIF_TYPE_BRIDGE:
-            bridge = port_details.get(network_model.VIF_DETAILS_BRIDGE_NAME,
-                                      "brq" + port['network_id'])
-            should_create_bridge = True
+            # Linux bridge networking has been removed from Nova. Fail fast.
+            raise exception.NovaException(
+                "Neutron reported binding:vif_type=bridge, but Linux bridge "
+                "VIFs are no longer supported by Nova. Please migrate to a "
+                "supported backend (e.g. OVS/OVN) before upgrading.")
         elif vif_type == network_model.VIF_TYPE_DVS:
             # The name of the DVS port group will contain the neutron
             # network id
@@ -3529,16 +3532,19 @@ class API:
                                   'for port %s.', refresh_vif_id,
                                   instance=instance)
                 else:
-                    # This port is no longer associated with the instance, so
-                    # simply remove it from the nw_info cache.
-                    for index, vif in enumerate(nw_info):
+                    # This port is no longer associated with the instance in
+                    # Neutron, but the compute still needs the cached VIF
+                    # model to unplug the host-side interface when handling a
+                    # network-vif-deleted event or deleting the instance.
+                    for vif in nw_info:
                         if vif['id'] == refresh_vif_id:
                             LOG.info('Port %s from network info_cache is no '
                                      'longer associated with instance in '
-                                     'Neutron. Removing from network '
-                                     'info_cache.', refresh_vif_id,
+                                     'Neutron. Keeping it in network '
+                                     'info_cache until detach or instance '
+                                     'delete cleanup can unplug it.',
+                                     refresh_vif_id,
                                      instance=instance)
-                            del nw_info[index]
                             break
                 return nw_info
             # else there is no existing cache and we need to build it

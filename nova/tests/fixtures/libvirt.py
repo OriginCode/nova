@@ -29,7 +29,6 @@ from nova.objects import fields as obj_fields
 from nova.tests.fixtures import libvirt_data as fake_libvirt_data
 from nova.virt.libvirt import config as vconfig
 from nova.virt.libvirt import driver as libvirt_driver
-from nova.virt.libvirt import host
 
 
 # Allow passing None to the various connect methods
@@ -905,6 +904,25 @@ def _parse_disk_info(element):
         if not disk_info['source']:
             disk_info['source'] = source.get('path')
 
+        # Network-backed disks (e.g. rbd) use <source protocol='rbd'
+        # name='pool/image'> with optional <host name='...' port='...'/>
+        # children. Capture them so they can be re-rendered by XMLDesc.
+        protocol = source.get('protocol')
+        if protocol:
+            disk_info['source_protocol'] = protocol
+            disk_info['source_name'] = source.get('name')
+            disk_info['source_hosts'] = [
+                {'name': host.get('name'), 'port': host.get('port')}
+                for host in source.findall('./host')
+            ]
+            auth = element.find('./auth')
+            if auth is not None:
+                disk_info['auth_username'] = auth.get('username')
+                secret = auth.find('./secret')
+                if secret is not None:
+                    disk_info['auth_secret_type'] = secret.get('type')
+                    disk_info['auth_secret_uuid'] = secret.get('uuid')
+
         encryption = element.find('./source/encryption')
         if encryption is not None and len(encryption):
             disk_info['encryption_format'] = encryption.get('format')
@@ -1149,7 +1167,7 @@ class Domain(object):
         self._has_saved_state = False
         self._snapshots = {}
         self._id = self._connection._id_counter
-        self._job_type = VIR_DOMAIN_JOB_UNBOUNDED
+        self._job_type = VIR_DOMAIN_JOB_NONE
 
     def _parse_definition(self, xml):
         try:
@@ -1607,6 +1625,35 @@ class Domain(object):
             else:
                 source_attr = 'dev'
 
+            # Network-backed disks (e.g. rbd) need a different <source>
+            # element shape with optional <host> children and a sibling
+            # <auth> element. Render them up-front and skip the generic
+            # source_attr templating below.
+            if disk.get('source_protocol'):
+                auth_xml = ''
+                if disk.get('auth_username'):
+                    auth_xml = ('''
+    <auth username='%s'>
+      <secret type='%s' uuid='%s'/>
+    </auth>''') % (disk['auth_username'],
+                   disk.get('auth_secret_type', 'ceph'),
+                   disk.get('auth_secret_uuid', ''))
+
+                hosts_xml = ''.join('''<host name='%s' port='%s'/>''' % (
+                        h['name'], h['port'])
+                    for h in disk.get('source_hosts') or [])
+                disks += ('''
+    <disk type='%(type)s' device='%(device)s'>
+      <driver name='%(driver_name)s' type='%(driver_type)s'/>
+      <alias name='%(alias)s'/>%(auth_xml)s
+      <source protocol='%(source_protocol)s'
+       name='%(source_name)s'>%(hosts_xml)s
+      </source>
+      <target dev='%(target_dev)s' bus='%(target_bus)s'/>
+      <address type='drive' controller='0' bus='0' unit='0'/>
+    </disk>''') % dict(disk, auth_xml=auth_xml, hosts_xml=hosts_xml)
+                continue
+
             strformat = """
     <disk type='%(type)s' device='%(device)s'>
       <driver name='%(driver_name)s' type='%(driver_type)s'/>
@@ -1916,8 +1963,7 @@ class Domain(object):
         return [0] * 12
 
     def jobStats(self, flags=0):
-        # NOTE(artom) By returning VIR_DOMAIN_JOB_UNBOUNDED, we're pretending a
-        # job is constantly running. Tests are expected to call the
+        # Tests are expected to call the
         # complete_job or fail_job methods when they're ready for jobs (read:
         # live migrations) to "complete".
         return {'type': self._job_type}
@@ -2193,6 +2239,7 @@ class Connection(object):
             aliases = {'pc': 'pc-i440fx-2.11', 'q35': 'pc-q35-2.11'}
             return fake_libvirt_data.DOMCAPABILITIES_X86_64_TEMPLATE % \
                 {'devices': self._domain_capability_devices,
+                 'tpm': self._domain_capability_tpm,
                  'features': self._domain_capability_features,
                  'mtype': aliases.get(machine_type, machine_type)}
 
@@ -2314,8 +2361,7 @@ class Connection(object):
       </enum>
     </hostdev>'''
 
-    _domain_capability_devices_with_tpm_supported = \
-        _domain_capability_devices_default + '''
+    _domain_capability_tpm_supported = '''
     <tpm supported='yes'>
       <enum name='model'>
         <value>tpm-tis</value>
@@ -2329,15 +2375,11 @@ class Connection(object):
     </tpm>
 '''
 
-    # TODO(tkajinam): Merge this to the default value once libvirt >= 8.0.0 is
-    # required
-    _domain_capability_devices_with_tpm_unsupported = \
-        _domain_capability_devices_default + '''
+    _domain_capability_tpm_unsupported = '''
     <tpm supported='no'/>
 '''
 
-    _domain_capability_devices_with_no_emulator = \
-        _domain_capability_devices_default + '''
+    _domain_capability_tpm_with_no_emulator = '''
     <tpm supported='yes'>
       <enum name='model'>
         <value>tpm-tis</value>
@@ -2352,7 +2394,7 @@ class Connection(object):
 
     # TODO(tkajinam): Merge this to _supported value once libvirt >= 8.6.0 is
     # required
-    _domain_capability_devices_with_tpm_versions = \
+    _domain_capability_tpm_with_tpm_versions = \
         _domain_capability_devices_default + '''
     <tpm supported='yes'>
       <enum name='model'>
@@ -2373,32 +2415,77 @@ class Connection(object):
     # class variable with alternate values.
     _domain_capability_devices = _domain_capability_devices_default
 
+    # TPM is kept separately so that the tests can patch this class class
+    # variable with alternative values.
+    _domain_capability_tpm = _domain_capability_tpm_unsupported
+
     # Features are kept separately so that the tests can patch this
     # class variable with alternate values.
     _domain_capability_features = '''  <features>
     <gic supported='no'/>
   </features>'''
 
-    _domain_capability_features_with_SEV = '''  <features>
-    <gic supported='no'/>
-    <sev supported='yes'>
-      <cbitpos>47</cbitpos>
-      <reducedPhysBits>1</reducedPhysBits>
-    </sev>
-  </features>'''
-
-    _domain_capability_features_with_SEV_unsupported = \
-        _domain_capability_features_with_SEV.replace('yes', 'no')
-
-    _domain_capability_features_with_SEV_max_guests = '''  <features>
+    # TODO(tkajinam): Libvirt >= 10.0.0 always shows the sev feature.
+    # Merge this into the base template after the minimum libvirt version is
+    # bumped.
+    # https://gitlab.com/libvirt/libvirt/-/commit/6688393c6b2
+    _domain_capability_features_with_SEV_base = '''  <features>
     <gic supported='no'/>
     <sev supported='yes'>
       <cbitpos>47</cbitpos>
       <reducedPhysBits>1</reducedPhysBits>
       <maxGuests>100</maxGuests>
       <maxESGuests>15</maxESGuests>
-    </sev>
+    </sev>%s
   </features>'''
+
+    _domain_capability_features_with_SEV = \
+        _domain_capability_features_with_SEV_base % ''
+
+    _domain_capability_features_with_SEV_unsupported = '''  <features>
+    <gic supported='no'/>
+    <sev supported='no'/>
+  </features>'''
+
+    # TODO(tkajinam): Libvirt >= 10.5.0 always shows the launchSecurity
+    # feature. Merge this into the base template when minimum libvirt
+    # version is >= bumped.
+    # https://gitlab.com/libvirt/libvirt/-/commit/d460e17282b
+    _domain_capability_features_with_launch_security_SEV = \
+        _domain_capability_features_with_SEV_base % '''
+    <launchSecurity supported='yes'>
+      <enum name='sectype'>
+        <value>sev</value>
+      </enum>
+    </launchSecurity>'''
+
+    _domain_capability_features_with_launch_security_unsupported = \
+        '''  <features>
+    <gic supported='no'/>
+    <sev supported='no'/>
+    <launchSecurity supported='no'/>
+  </features>'''
+
+    _domain_capability_features_with_launch_security_SEV_SNP = \
+        _domain_capability_features_with_SEV_base % '''
+    <launchSecurity supported='yes'>
+      <enum name='sectype'>
+        <value>sev</value>
+        <value>sev-snp</value>
+      </enum>
+    </launchSecurity>'''
+
+    _domain_capability_features_with_TDX = '''\
+    <features>
+      <gic supported='no'/>
+      <tdx supported='yes'/>
+    </features>'''
+
+    _domain_capability_features_with_TDX_unsupported = '''\
+    <features>
+      <gic supported='no'/>
+      <tdx supported='no'/>
+    </features>'''
 
     def getCapabilities(self):
         """Return spoofed capabilities."""
@@ -2642,12 +2729,37 @@ class FakeHandler(object):
 _EventAddHandleFunc = FakeHandler
 
 
+class AmdSevFixture(fixtures.Fixture):
+    def __init__(self, sev=False, sev_es=False, sev_snp=False):
+        self.sev = sev
+        self.sev_es = sev_es
+        self.sev_snp = sev_snp
+
+    def setUp(self):
+        super().setUp()
+
+        def _mock_kernel_supports_amd_sev(model='sev'):
+            try:
+                return {
+                    'sev': self.sev,
+                    'sev-es': self.sev_es,
+                    'sev-snp': self.sev_snp,
+                }[model]
+            except KeyError:
+                raise RuntimeError('Invalid memory encryption model: %s')
+
+        self.useFixture(fixtures.MockPatch(
+            'nova.virt.libvirt.host.Host._kernel_supports_amd_sev',
+            side_effect=_mock_kernel_supports_amd_sev))
+
+
 class LibvirtFixture(fixtures.Fixture):
     """Performs global setup/stubbing for all libvirt tests.
     """
 
-    def __init__(self, stub_os_vif=True):
+    def __init__(self, stub_os_vif=True, stub_amd_sev=True):
         self.stub_os_vif = stub_os_vif
+        self.stub_amd_sev = stub_amd_sev
         self.pci_address_to_mac_map = collections.defaultdict(
             lambda: '52:54:00:1e:59:c6')
 
@@ -2721,16 +2833,10 @@ class LibvirtFixture(fixtures.Fixture):
         self.useFixture(fixtures.MonkeyPatch(
             'nova.virt.libvirt.driver.sys.platform', 'linux'))
 
-        real_exists = os.path.exists
-
-        def fake_exists(path):
-            if path == (host.SEV_KERNEL_PARAM_FILE % 'sev'):
-                return False
-            if path == (host.SEV_KERNEL_PARAM_FILE % 'sev-es'):
-                return False
-            return real_exists(path)
-
-        self.useFixture(fixtures.MonkeyPatch('os.path.exists', fake_exists))
+        # mock /proc/meminfo access
+        self.useFixture(fixtures.MockPatch(
+            'nova.virt.libvirt.host.Host._get_avail_memory_kb',
+            return_value=10 * 1024 * 1024))  # 10 GB
 
         disable_event_thread(self)
 
@@ -2744,6 +2850,10 @@ class LibvirtFixture(fixtures.Fixture):
             self.useFixture(fixtures.MonkeyPatch(
                 'nova.virt.libvirt.vif.LibvirtGenericVIFDriver._unplug_os_vif',
                 lambda *a, **kw: None))
+
+        self.amd_sev = None
+        if self.stub_amd_sev:
+            self.amd_sev = self.useFixture(AmdSevFixture())
 
         # os_vif.initialize is typically done in nova-compute startup
         # even if we are not planning to plug anything with os_vif in the test

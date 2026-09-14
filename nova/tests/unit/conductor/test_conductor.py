@@ -305,29 +305,37 @@ class ConductorTestCase(_BaseTestCase, test.TestCase):
             self.conductor.reset()
             mock_clear_cache.assert_called_once_with()
 
-    @mock.patch('time.sleep')
-    def test_graceful_shutdown(self, mock_sleep):
-        self.flags(manager_shutdown_timeout=10)
-        self.conductor.graceful_shutdown()
-        mock_sleep.assert_called_once_with(10)
+    @mock.patch('nova.thread_pool_factory.shutdown_all_executors')
+    @mock.patch('nova.conductor.manager.ConductorManager.'
+                '_wait_for_in_progress_tasks')
+    def test_graceful_shutdown(self, mock_wait, mock_shutdown_executors):
+        self.conductor.set_shutdown_in_progress()
+        timeout = 30
+        self.conductor.graceful_shutdown(timeout)
+        # shutdown_all_executors() should get the reserved 20 seconds
+        shutdown_executors_reserved_time = 20
+        wait = timeout - shutdown_executors_reserved_time
+        mock_wait.assert_called_once_with(wait)
+        mock_shutdown_executors.assert_called_once_with()
 
-    @mock.patch('nova.conductor.manager.LOG')
-    @mock.patch('time.sleep')
-    def test_graceful_shutdown_manager_timeout_higher(
-            self, mock_sleep, mock_log):
-        # manager_shutdown_timeout > graceful_shutdown_timeout:
-        # warning logged, sleep = graceful_shutdown_timeout - 10 = 20
-        self.flags(manager_shutdown_timeout=50, graceful_shutdown_timeout=30)
-        self.conductor.graceful_shutdown()
-        mock_log.warning.assert_called_once()
-        mock_sleep.assert_called_once_with(20)
+    @mock.patch('nova.thread_pool_factory.shutdown_all_executors')
+    @mock.patch('nova.conductor.manager.ConductorManager.'
+                '_wait_for_in_progress_tasks')
+    def test_graceful_shutdown_no_negative_wait_time(
+            self, mock_wait, mock_shutdown_executors):
+        self.conductor.graceful_shutdown(5)
+        mock_wait.assert_called_once_with(0)
+        mock_shutdown_executors.assert_called_once_with()
 
-    @mock.patch('time.sleep')
-    def test_graceful_shutdown_no_negative_sleep_time(self, mock_sleep):
-        # If sleep time end up with negative value, fallback to slep(0)
-        self.flags(manager_shutdown_timeout=50, graceful_shutdown_timeout=5)
-        self.conductor.graceful_shutdown()
-        mock_sleep.assert_called_once_with(0)
+    @mock.patch('nova.thread_pool_factory.shutdown_all_executors')
+    @mock.patch('nova.conductor.manager.ConductorManager.'
+                '_wait_for_in_progress_tasks')
+    def test_graceful_shutdown_handles_shutdown_all_executors_exception(
+            self, mock_wait, mock_shutdown_executors):
+        mock_shutdown_executors.side_effect = test.TestingException
+        # Should not raise even though shutdown_all_executors() raises.
+        self.conductor.graceful_shutdown(10)
+        mock_shutdown_executors.assert_called_once_with()
 
     def test_provider_fw_rule_get_all(self):
         result = self.conductor.provider_fw_rule_get_all(self.context)
@@ -580,10 +588,7 @@ class _BaseTaskTestCase(object):
             mock.call(mock.ANY, instances[1].uuid,
                       instances[1].flavor.extra_specs, 'node2', None),
             ])
-        mock_get_cyborg.assert_has_calls([
-             mock.call(self.context),
-             mock.call(self.context),
-        ])
+        mock_get_cyborg.assert_not_called()
 
     @mock.patch('nova.accelerator.cyborg.get_client')
     @mock.patch.object(conductor_manager.ComputeTaskManager,
@@ -645,10 +650,8 @@ class _BaseTaskTestCase(object):
             mock.call(mock.ANY, instances[1].uuid,
                       instances[1].flavor.extra_specs, 'node2', mock.ANY),
             ])
-        mock_get_cyborg.assert_has_calls([
-             mock.call(self.context),
-             mock.call(self.context),
-        ])
+        self.assertEqual(
+            [mock.call(self.context)] * 2, mock_get_cyborg.call_args_list)
         # Comparing instances fails because the instance objects have changed
         # in the above flow. So, we compare the fields instead.
         mock_cleanup.assert_has_calls([
@@ -2912,7 +2915,7 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
                     'image'):
             self.assertIn(key, request_spec_dict)
 
-    @mock.patch.object(placement_limit, 'enforce_num_instances_and_flavor')
+    @mock.patch.object(placement_limit, 'enforce_num_instances_and_resources')
     @mock.patch('nova.compute.utils.notify_about_compute_task_error')
     @mock.patch('nova.scheduler.rpcapi.SchedulerAPI.select_destinations')
     def test_schedule_and_build_over_quota_during_recheck_ul(self, mock_select,
@@ -2946,7 +2949,7 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
             self.conductor.schedule_and_build_instances, **self.params)
 
         mock_enforce.assert_called_once_with(
-            self.params['context'], project_id, mock.ANY, False, 0, 0)
+            self.params['context'], project_id, mock.ANY, 0, 0)
 
         # Verify we set the instance to ERROR state and set the fault message.
         instances = objects.InstanceList.get_all(self.ctxt)
@@ -3053,7 +3056,7 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
             instance.project_id, user_id=None,
             check_project_id=instance.project_id, check_user_id=None)
 
-    @mock.patch.object(placement_limit, 'enforce_num_instances_and_flavor')
+    @mock.patch.object(placement_limit, 'enforce_num_instances_and_resources')
     @mock.patch('nova.objects.quotas.Quotas.check_deltas', new=mock.Mock())
     def test_unshelve_over_quota_during_recheck_ul(self, mock_enforce):
         self.flags(driver="nova.quota.UnifiedLimitsDriver", group="quota")
@@ -3067,11 +3070,10 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
 
         # Verify we called the quota check function with expected args.
         mock_enforce.assert_called_once_with(
-            self.context, instance.project_id, instance.flavor,
-            req_spec.is_bfv, 0, 0)
+            self.context, instance.project_id, req_spec, 0, 0)
 
     @mock.patch('nova.compute.rpcapi.ComputeAPI.unshelve_instance')
-    @mock.patch.object(placement_limit, 'enforce_num_instances_and_flavor')
+    @mock.patch.object(placement_limit, 'enforce_num_instances_and_resources')
     @mock.patch('nova.objects.quotas.Quotas.check_deltas')
     @mock.patch('nova.scheduler.rpcapi.SchedulerAPI.select_destinations')
     @mock.patch('nova.objects.Instance.save', new=mock.Mock())
@@ -3104,7 +3106,7 @@ class ConductorTaskTestCase(_BaseTaskTestCase, test_compute.BaseTestCase):
         # check_deltas should not have been called
         mock_check.assert_not_called()
 
-        # Same for enforce_num_instances_and_flavor
+        # Same for enforce_num_instances_and_resources
         mock_enforce.assert_not_called()
 
         # We should have called the compute API unshelve()

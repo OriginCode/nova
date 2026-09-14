@@ -49,16 +49,26 @@ class PrivsepFilesystemHelpersTestCase(test.NoDBTestCase):
 
     @mock.patch('oslo_concurrency.processutils.execute')
     def test_lvcreate_simple(self, mock_execute):
-        nova.privsep.fs.lvcreate(1024, 'lv', 'vg')
-        mock_execute.assert_called_with('lvcreate', '-L', '1024b', '-n', 'lv',
-                                        'vg', attempts=3)
+        nova.privsep.fs.lvcreate(1024, "lv", "vg")
+        mock_execute.assert_called_with(
+            "lvcreate", "-y", "-L", "1024b", "-n", "lv", "vg", attempts=3
+        )
 
     @mock.patch('oslo_concurrency.processutils.execute')
     def test_lvcreate_preallocated(self, mock_execute):
-        nova.privsep.fs.lvcreate(1024, 'lv', 'vg', preallocated=512)
-        mock_execute.assert_called_with('lvcreate', '-L', '512b',
-                                        '--virtualsize', '1024b',
-                                        '-n', 'lv', 'vg', attempts=3)
+        nova.privsep.fs.lvcreate(1024, "lv", "vg", preallocated=512)
+        mock_execute.assert_called_with(
+            "lvcreate",
+            "-y",
+            "-L",
+            "512b",
+            "--virtualsize",
+            "1024b",
+            "-n",
+            "lv",
+            "vg",
+            attempts=3,
+        )
 
     @mock.patch('oslo_concurrency.processutils.execute')
     def test_vginfo(self, mock_execute):
@@ -177,7 +187,7 @@ class PrivsepFilesystemHelpersTestCase(test.NoDBTestCase):
     @mock.patch('oslo_concurrency.processutils.execute')
     def test_privileged_resize2fs_with_size(self, mock_execute):
         nova.privsep.fs.resize2fs('/path/nosuch', [0, 1, 2], 1024)
-        mock_execute.assert_called_with('resize2fs', '/path/nosuch', 1024,
+        mock_execute.assert_called_with('resize2fs', '/path/nosuch', '1024',
                                         check_exit_code=[0, 1, 2])
 
     @mock.patch('oslo_concurrency.processutils.execute')
@@ -189,52 +199,8 @@ class PrivsepFilesystemHelpersTestCase(test.NoDBTestCase):
     @mock.patch('oslo_concurrency.processutils.execute')
     def test_unprivileged_resize2fs_with_size(self, mock_execute):
         nova.privsep.fs.unprivileged_resize2fs('/path/nosuch', [0, 1, 2], 1024)
-        mock_execute.assert_called_with('resize2fs', '/path/nosuch', 1024,
+        mock_execute.assert_called_with('resize2fs', '/path/nosuch', '1024',
                                         check_exit_code=[0, 1, 2])
-
-    @mock.patch('oslo_concurrency.processutils.execute')
-    def test_create_partition_table(self, mock_execute):
-        nova.privsep.fs.create_partition_table('/dev/nosuch', 'style')
-        mock_execute.assert_called_with('parted', '--script', '/dev/nosuch',
-                                        'mklabel', 'style',
-                                        check_exit_code=True)
-
-    @mock.patch('oslo_concurrency.processutils.execute')
-    def test_create_partition(self, mock_execute):
-        nova.privsep.fs.create_partition('/dev/nosuch', 'style', 0, 100)
-        mock_execute.assert_called_with('parted', '--script', '/dev/nosuch',
-                                        '--', 'mkpart', 'style', 0, 100,
-                                        check_exit_code=True)
-
-    @mock.patch('oslo_concurrency.processutils.execute')
-    def _test_list_partitions(self, meth, mock_execute):
-        parted_return = "BYT;\n...\n"
-        parted_return += "1:2s:11s:10s:ext3::boot;\n"
-        parted_return += "2:20s:11s:10s::bob:;\n"
-        mock_execute.return_value = (parted_return, None)
-
-        partitions = meth("abc")
-
-        self.assertEqual(2, len(partitions))
-        self.assertEqual((1, 2, 10, "ext3", "", "boot"), partitions[0])
-        self.assertEqual((2, 20, 10, "", "bob", ""), partitions[1])
-
-    def test_privileged_list_partitions(self):
-        self._test_list_partitions(nova.privsep.fs.list_partitions)
-
-    def test_unprivileged_list_partitions(self):
-        self._test_list_partitions(
-            nova.privsep.fs.unprivileged_list_partitions)
-
-    @mock.patch('oslo_concurrency.processutils.execute')
-    def test_resize_partition(self, mock_execute):
-        nova.privsep.fs.resize_partition('/dev/nosuch', 0, 100, True)
-        mock_execute.assert_has_calls([
-            mock.call('parted', '--script', '/dev/nosuch', 'rm', '1'),
-            mock.call('parted', '--script', '/dev/nosuch', 'mkpart',
-                      'primary', '0s', '100s'),
-            mock.call('parted', '--script', '/dev/nosuch',
-                      'set', '1', 'boot', 'on')])
 
 
 class MkfsTestCase(test.NoDBTestCase):

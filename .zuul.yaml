@@ -2,12 +2,12 @@
 # for job naming conventions.
 
 - job:
-    name: nova-tox-functional-py310
-    parent: openstack-tox-functional-py310
+    name: nova-tox-functional-py311
+    parent: openstack-tox-functional-py311
     description: |
       Run tox-based functional tests for the OpenStack Nova project
       under cPython version 3.10 with Nova specific irrelevant-files list.
-      Uses tox with the ``functional-py310`` environment.
+      Uses tox with the ``functional-py311`` environment.
 
       This job also provides a parent for other projects to run the nova
       functional tests on their own changes.
@@ -26,7 +26,7 @@
       # explicitly stating the work dir makes this job reusable by other
       # projects
       zuul_work_dir: src/opendev.org/openstack/nova
-      bindep_profile: test py310
+      bindep_profile: test py311
     timeout: 3600
 
 - job:
@@ -52,12 +52,12 @@
     timeout: 3600
 
 - job:
-    name: nova-tox-py312-threading
-    parent: openstack-tox-py312
+    name: nova-tox-py313-threading
+    parent: openstack-tox-py313
     description: |
       Run tox-based unit tests for the OpenStack Nova project
-      under cPython version 3.12 with eventlet disabled.
-      Uses tox with the ``py312-threading`` environment.
+      under cPython version 3.13 with eventlet disabled.
+      Uses tox with the ``py313-threading`` environment.
 
     required-projects:
       # including nova here makes this job reusable by other projects and
@@ -68,8 +68,31 @@
       # explicitly stating the work dir makes this job reusable by other
       # projects
       zuul_work_dir: src/opendev.org/openstack/nova
-      bindep_profile: test py312
-      tox_envlist: py312-threading
+      bindep_profile: test py313
+      tox_envlist: py313-threading
+
+- job:
+    name: nova-tox-functional-py313-threading
+    parent: openstack-tox-functional-py313
+    description: |
+      Run tox-based functional tests for the OpenStack Nova project
+      under cPython version 3.13 with eventlet disabled (native threading).
+      Uses tox with the ``functional-py313-threading`` environment.
+
+      This job also provides a parent for other projects to run the nova
+      functional tests with threading on their own changes.
+    required-projects:
+      # including nova here makes this job reusable by other projects
+      - openstack/nova
+      - openstack/placement
+    irrelevant-files: *functional-irrelevant-files
+    vars:
+      # explicitly stating the work dir makes this job reusable by other
+      # projects
+      zuul_work_dir: src/opendev.org/openstack/nova
+      bindep_profile: test py313
+      tox_envlist: functional-py313-threading
+    timeout: 7200
 
 - job:
     name: nova-tox-validate-backport
@@ -139,44 +162,6 @@
     post-run: playbooks/nova-live-migration/post-run.yaml
 
 - job:
-    name: nova-graceful-shutdown
-    parent: devstack-multinode
-    description: |
-      Run Nova graceful shutdown tests.
-    run: playbooks/nova-graceful-shutdown/run.yaml
-    timeout: 10800
-    vars:
-      devstack_services:
-        neutron-trunk: true
-        openstack-cli-server: true
-        s-account: false
-        s-container: false
-        s-object: false
-        s-proxy: false
-        c-bak: false
-      tempest_test_regex: ''
-      devstack_localrc:
-        <<: *uec_image_vars
-        SERVICE_GRACEFUL_SHUTDOWN_TIMEOUT: 180
-        NOVA_ALLOW_MOVE_TO_SAME_HOST: false
-        LIVE_MIGRATION_AVAILABLE: true
-        USE_BLOCK_MIGRATION_FOR_LIVE_MIGRATION: true
-    group-vars:
-      subnode:
-        devstack_services:
-          openstack-cli-server: true
-          s-account: false
-          s-container: false
-          s-object: false
-          s-proxy: false
-          c-bak: false
-        devstack_localrc:
-          SERVICE_GRACEFUL_SHUTDOWN_TIMEOUT: 180
-          NOVA_ALLOW_MOVE_TO_SAME_HOST: false
-          LIVE_MIGRATION_AVAILABLE: true
-          USE_BLOCK_MIGRATION_FOR_LIVE_MIGRATION: true
-
-- job:
     name: nova-alt-configurations
     parent: tempest-multinode-full-py3
     nodeset: devstack-two-node-debian-bookworm
@@ -189,6 +174,8 @@
       This job also explicitly sets eventlet mode for all nova services to keep
       testing eventlet mode even after the default is set to native threading
       for some services.
+    required-projects:
+      - novnc/novnc
     irrelevant-files: &nova-base-irrelevant-files
       - ^api-.*$
       - ^(test-|)requirements.txt$
@@ -209,26 +196,25 @@
       tox_envlist: all
       # bug #1940425  only affect ml2/ovn so we execute
       # test_live_migration_with_trunk in this job to keep
-      tempest_test_regex: (^tempest\..*compute\..*(migration|resize|reboot|spice).*)
+      tempest_test_regex: (^tempest\..*compute\..*(migration|resize|reboot|spice|novnc).*)
       devstack_localrc:
         Q_AGENT: openvswitch
         Q_ML2_TENANT_NETWORK_TYPE: vxlan
         Q_ML2_PLUGIN_MECHANISM_DRIVERS: openvswitch
         ML2_L3_PLUGIN: router
-        NOVA_VNC_ENABLED: False
-        'SYSTEMD_ENV_VARS["n-sch"]': OS_NOVA_DISABLE_EVENTLET_PATCHING=false
-        'SYSTEMD_ENV_VARS["n-api"]': OS_NOVA_DISABLE_EVENTLET_PATCHING=false
-        'SYSTEMD_ENV_VARS["n-api-meta"]': OS_NOVA_DISABLE_EVENTLET_PATCHING=false
-        'SYSTEMD_ENV_VARS["n-cond-cell1"]': OS_NOVA_DISABLE_EVENTLET_PATCHING=false
-        'SYSTEMD_ENV_VARS["n-super-cond"]': OS_NOVA_DISABLE_EVENTLET_PATCHING=false
-        'SYSTEMD_ENV_VARS["n-cpu"]': OS_NOVA_DISABLE_EVENTLET_PATCHING=false
+        NOVA_VNC_ENABLED: True
+        NOVA_SPICE_ENABLED: True
+        # Enable TLS between the noVNC/SPICE proxy & compute nodes; this requires
+        # the tls-proxy service to be enabled.
+        NOVA_CONSOLE_PROXY_COMPUTE_TLS: True
+        NOVNC_FROM_PACKAGE: false
       devstack_services:
         # Disable OVN services
         br-ex-tcpdump: false
         br-int-flows: false
         ovn-controller: false
         ovn-northd: false
-        q-ovn-metadata-agent: false
+        q-ovn-agent: false
         # Neutron services
         q-agt: true
         q-dhcp: true
@@ -249,8 +235,9 @@
         s-object: false
         s-proxy: false
         openstack-cli-server: true
-        # disable vnc and enable spice
-        n-novnc: false
+        # Enable TLS infrastructure before console proxies
+        tls-proxy: true
+        n-novnc: true
         n-spice: true
       devstack_local_conf:
         post-config:
@@ -263,6 +250,13 @@
           $NOVA_CPU_CONF:
               compute:
                 heal_instance_info_cache_interval: 60
+          $NOVA_CONF:
+            vnc:
+              ssl_only: true
+            spice:
+              ssl_only: true
+            DEFAULT:
+              concurrency_backend: eventlet
     group-vars:
       subnode:
         devstack_localrc:
@@ -270,9 +264,10 @@
           Q_ML2_TENANT_NETWORK_TYPE: vxlan
           Q_ML2_PLUGIN_MECHANISM_DRIVERS: openvswitch
           ML2_L3_PLUGIN: router
-          NOVA_VNC_ENABLED: False
+          NOVA_CONSOLE_PROXY_COMPUTE_TLS: true
+          NOVA_VNC_ENABLED: true
           NOVA_SPICE_ENABLED: true
-          'SYSTEMD_ENV_VARS["n-cpu"]': OS_NOVA_DISABLE_EVENTLET_PATCHING=false
+          NOVNC_FROM_PACKAGE: false
         devstack_services:
           # Disable OVN services
           br-ex-tcpdump: false
@@ -281,7 +276,7 @@
           ovn-northd: false
           ovs-vswitchd: false
           ovsdb-server: false
-          q-ovn-metadata-agent: false
+          q-ovn-agent: false
           # Neutron services
           q-agt: true
           # NOTE(sean-k-mooney) this job is testing ml2/ovs with
@@ -298,6 +293,7 @@
           s-container: false
           s-object: false
           s-proxy: false
+          tls-proxy: true
         devstack_local_conf:
           post-config:
             "/$NEUTRON_CORE_PLUGIN_CONF":
@@ -309,7 +305,86 @@
             $NOVA_CPU_CONF:
               compute:
                 heal_instance_info_cache_interval: 60
+            $NOVA_CONF:
+              vnc:
+                ssl_only: true
+              spice:
+                ssl_only: true
+              DEFAULT:
+                concurrency_backend: eventlet
     post-run: playbooks/nova-live-migration/post-run.yaml
+
+- job:
+    name: nova-graceful-shutdown
+    parent: devstack-multinode
+    description: |
+      Run Nova graceful shutdown tests.
+    run: playbooks/nova-graceful-shutdown/run.yaml
+    timeout: 10800
+    irrelevant-files: *nova-base-irrelevant-files
+    vars:
+      graceful_shutdown_timeout: 180
+      service_report_interval: 10
+      devstack_services:
+        neutron-trunk: true
+        openstack-cli-server: true
+        s-account: false
+        s-container: false
+        s-object: false
+        s-proxy: false
+        c-bak: false
+      tempest_test_regex: ''
+      devstack_localrc:
+        <<: *uec_image_vars
+        SERVICE_GRACEFUL_SHUTDOWN_TIMEOUT: "{{ graceful_shutdown_timeout }}"
+        NOVA_SERVICE_REPORT_INTERVAL: "{{ service_report_interval }}"
+        NOVA_ALLOW_MOVE_TO_SAME_HOST: false
+        LIVE_MIGRATION_AVAILABLE: true
+        USE_BLOCK_MIGRATION_FOR_LIVE_MIGRATION: true
+      devstack_local_conf:
+        post-config:
+          $NOVA_CONF:
+            DEFAULT:
+              concurrency_backend: threading
+    group-vars:
+      subnode:
+        devstack_services:
+          openstack-cli-server: true
+          s-account: false
+          s-container: false
+          s-object: false
+          s-proxy: false
+          c-bak: false
+        devstack_localrc:
+          SERVICE_GRACEFUL_SHUTDOWN_TIMEOUT: "{{ graceful_shutdown_timeout }}"
+          NOVA_SERVICE_REPORT_INTERVAL: "{{ service_report_interval }}"
+          NOVA_ALLOW_MOVE_TO_SAME_HOST: false
+          LIVE_MIGRATION_AVAILABLE: true
+          USE_BLOCK_MIGRATION_FOR_LIVE_MIGRATION: true
+        devstack_local_conf:
+          post-config:
+            $NOVA_CONF:
+              DEFAULT:
+                concurrency_backend: threading
+
+- job:
+    name: nova-graceful-shutdown-eventlet
+    parent: nova-graceful-shutdown
+    description: |
+      Run Nova graceful shutdown tests in eventlet mode.
+    vars:
+      devstack_local_conf:
+        post-config:
+          $NOVA_CONF:
+            DEFAULT:
+              concurrency_backend: eventlet
+    group-vars:
+      subnode:
+        devstack_local_conf:
+          post-config:
+            $NOVA_CONF:
+              DEFAULT:
+                concurrency_backend: eventlet
 
 - job:
     name: nova-live-migration-ceph
@@ -421,12 +496,95 @@
     pre-run:
       - playbooks/nova-emulation/pre.yaml
 
+- job:
+    name: nova-whitebox
+    parent: whitebox-devstack-multinode
+    description: |
+      Run tempest whitebox vTPM and vGPU tests against local qcow2 ephemeral storage and shared
+      LVM/iSCSI cinder volumes.
+    irrelevant-files: *nova-base-irrelevant-files
+    vars:
+      tox_envlist: all
+      # NOTE(melwitt): These tests cannot run in parallel due to
+      # test_vtpm_creation_after_virtqemud_restart, which involves a libvirt
+      # restart, which can and will cause other tests to fail if the timing is
+      # unfortunate. Loss of libvirt connection will cause the
+      # COMPUTE_STATUS_DISABLED trait to be automatically added, which can
+      # result in NoValidHost, for example.
+      tempest_concurrency: 1
+      # Include vgpu whitebox tests to test vgpu functionality with mtty
+      tempest_test_regex: ^(tempest\.api\.compute\.admin\.test_live_migration\.LiveMigrationWithVTPMTest|whitebox_tempest_plugin\.api\.compute\.(test_vtpm|test_vgpu))
+      # revert the exclusion of test_live_migration_with_trunk when bug
+      # #1940425 is fixed in neutron
+      # only mtty is supported in libvirt so we can't run the VGPUMultiTypes
+      # tests since we can only use one mdev type per device
+      tempest_exclude_regex: (test_live_migration_with_trunk|VGPUMultiTypes)
+      devstack_services:
+        neutron-trunk: true
+        openstack-cli-server: true
+        c-bak: false
+        s-account: false
+        s-container: false
+        s-object: false
+        s-proxy: false
+        barbican: true
+      devstack_local_conf:
+        post-config:
+          $NOVA_CPU_CONF:
+            # Added in Hibiscus. Enable mtty devices
+            devices:
+              enabled_mdev_types: mtty-1
+            mdev_mtty-1:
+              device_addresses: mtty_mtty
+        test-config:
+          $TEMPEST_CONFIG:
+            # Added in Hibiscus
+            compute-feature-enabled:
+              vgpu_cold_migration_supported: True
+            whitebox-hardware:
+              vgpu_vendor_id: "4348"
+            whitebox:
+              # some vms were failing to boot with the default 64 value
+              flavor_ram_size: 128
+      devstack_localrc:
+        # Added in Hibiscus.
+        NOVA_COMPILE_MDEV_SAMPLES: True
+    group-vars:
+      # override devstack plugins defined in parent job via the tempest group
+      tempest:
+        devstack_plugins:
+          # Added in Hibiscus. Needed to compile the mtty kernel module
+          nova: https://opendev.org/openstack/nova
+      subnode:
+        devstack_services:
+          c-bak: false
+          s-account: false
+          s-container: false
+          s-object: false
+          s-proxy: false
+          barbican: false
+        devstack_localrc:
+          # Added in Hibiscus.
+          NOVA_COMPILE_MDEV_SAMPLES: True
+        devstack_local_conf:
+          post-config:
+            $NOVA_CPU_CONF:
+              # Added in Hibiscus. Enable mtty devices
+              devices:
+                enabled_mdev_types: mtty-1
+              mdev_mtty-1:
+                device_addresses: mtty_mtty
+        devstack_plugins:
+          # Added in Hibiscus. Needed to compile the mtty kernel module
+          nova: https://opendev.org/openstack/nova
+
 # TODO(lucasagomes): Move this job to ML2/OVN when QoS Minimum Bandwidth
 # support is implemented.
 # See: https://docs.openstack.org/neutron/latest/ovn/gaps.html
 - job:
     name: nova-next
     parent: tempest-multinode-full-py3
+    nodeset: openstack-two-node-noble
     description: |
       This job was added in Newton when placement and cellsv2
       were optional. Placement and cellsv2 are required starting in Ocata. In
@@ -445,6 +603,8 @@
       Starting in Gazpacho, the job test placement with
       allocation_candidates_generation_strategy=breadth-first and
       optimize_for_wide_provider_trees=True.
+      Starting in Hibiscus, the job tests nova-manage and nova-status CLIs with
+      native threading mode (OS_NOVA_DISABLE_EVENTLET_PATCHING=true).
       Runs all tempest compute API and most scenario tests concurrently.
     irrelevant-files: *nova-base-irrelevant-files
     # Run post-tempest tests like for nova-manage commands.
@@ -452,14 +612,17 @@
     pre-run: playbooks/nova-next/pre.yaml
     required-projects:
         - novnc/novnc
-    nodeset: openstack-two-node-noble
     vars:
       # We use the "all" environment for tempest_test_regex and
       # tempest_exclude_regex.
       tox_envlist: all
+      # Test nova-manage and nova-status CLIs in threading mode via post_test_hook.sh
+      nova_cli_threading_mode: "true"
       # Run all compute API tests and most scenario tests at the default
       # concurrency (nproc/2 which is normally 4 in the gate).
-      tempest_test_regex: ^tempest\.(scenario|api\.compute)
+      # Explicitly include console tests (novnc, spice) to ensure
+      # console proxy services are tested in threading mode.
+      tempest_test_regex: ^tempest\.((scenario|api\.compute)|(.*\.(novnc|spice).*))
       # The tempest.scenario.test_network* tests are skipped because they
       # (1) take a long time and (2) are already covered in the
       # tempest-slow* job. If this regex gets more complicated use
@@ -552,24 +715,23 @@
         FORCE_CONFIG_DRIVE: True
         # Added in Yoga.
         NOVNC_FROM_PACKAGE: False
+        NOVA_SPICE_ENABLED: True
         NOVA_USE_UNIFIED_LIMITS: True
-        # Added in Caracal.
-        # Temporarly disabled due to
-        # https://bugs.launchpad.net/nova/+bug/2110545
-        NOVA_COMPILE_MDEV_SAMPLES: False
         'SYSTEMD_ENV_VARS["n-sch"]': OS_NOVA_DISABLE_EVENTLET_PATCHING=true
         'SYSTEMD_ENV_VARS["n-api"]': OS_NOVA_DISABLE_EVENTLET_PATCHING=true
         'SYSTEMD_ENV_VARS["n-api-meta"]': OS_NOVA_DISABLE_EVENTLET_PATCHING=true
         'SYSTEMD_ENV_VARS["n-cond-cell1"]': OS_NOVA_DISABLE_EVENTLET_PATCHING=true
         'SYSTEMD_ENV_VARS["n-super-cond"]': OS_NOVA_DISABLE_EVENTLET_PATCHING=true
         'SYSTEMD_ENV_VARS["n-cpu"]': OS_NOVA_DISABLE_EVENTLET_PATCHING=true
+        'SYSTEMD_ENV_VARS["n-novnc-cell1"]': OS_NOVA_DISABLE_EVENTLET_PATCHING=true
+        'SYSTEMD_ENV_VARS["n-spice-cell1"]': OS_NOVA_DISABLE_EVENTLET_PATCHING=true
       devstack_services:
         # Disable OVN services
         br-ex-tcpdump: false
         br-int-flows: false
         ovn-controller: false
         ovn-northd: false
-        q-ovn-metadata-agent: false
+        q-ovn-agent: false
         # Neutron services
         q-agt: true
         q-dhcp: true
@@ -583,10 +745,11 @@
         # Disable non-essential services that we don't need for this job.
         c-bak: false
         openstack-cli-server: true
+        n-spice: true
+        n-novnc: true
       devstack_plugins:
         # Needed for QoS port heal allocation testing.
         neutron: https://opendev.org/openstack/neutron
-        nova: https://opendev.org/openstack/nova
     group-vars:
       subnode:
         devstack_localrc:
@@ -599,6 +762,7 @@
           FORCE_CONFIG_DRIVE: True
           # Added in Yoga.
           NOVNC_FROM_PACKAGE: False
+          NOVA_SPICE_ENABLED: True
           'SYSTEMD_ENV_VARS["n-cpu"]': OS_NOVA_DISABLE_EVENTLET_PATCHING=true
         devstack_services:
           # Disable OVN services
@@ -608,7 +772,7 @@
           ovn-northd: false
           ovs-vswitchd: false
           ovsdb-server: false
-          q-ovn-metadata-agent: false
+          q-ovn-agent: false
           # Neutron services
           q-agt: true
           tls-proxy: true
@@ -757,7 +921,6 @@
       # will refuse because we set never_download_image_if_on_rbd in this job.
       # Just skip these tests for this case.
       devstack_localrc:
-        GLANCE_STANDALONE: True
         GLANCE_USE_IMPORT_WORKFLOW: True
         DEVSTACK_PARALLEL: True
         GLANCE_LIMIT_IMAGE_SIZE_TOTAL: 2048
@@ -837,7 +1000,7 @@
       devstack_services:
         openstack-cli-server: true
       devstack_localrc:
-        NOVA_ENFORCE_SCOPE: false
+        NOVA_ENFORCE_NEW_DEFAULTS: false
 
 - project:
     # Please try to keep the list of job names sorted alphabetically.
@@ -859,14 +1022,8 @@
             irrelevant-files: *nova-base-irrelevant-files
         - nova-ceph-multistore:
             irrelevant-files: *nova-base-irrelevant-files
-        - neutron-linuxbridge-tempest:
-            files:
-              # NOTE(mriedem): This job has its own irrelevant-files section
-              # so that we only run it on changes to networking and libvirt/vif
-              # code; we don't need to run this on all changes.
-              - ^nova/network/.*$
-              - nova/virt/libvirt/vif.py
         - nova-live-migration
+        - nova-whitebox
         # NOTE(gmaan): We will be running the graceful shutdown testing in
         # check pipeline only and not required to test in gate as such.
         - nova-graceful-shutdown
@@ -877,8 +1034,9 @@
         - nova-alt-configurations
         - nova-tox-validate-backport:
             voting: false
-        - nova-tox-functional-py310
+        - nova-tox-functional-py311
         - nova-tox-functional-py313
+        - nova-tox-functional-py313-threading
         - tempest-integrated-compute:
            # NOTE(gmann): Policies changes do not need to run all the
            # integration test jobs. Running only tempest and grenade
@@ -893,33 +1051,30 @@
             irrelevant-files: *nova-base-irrelevant-files
         - openstacksdk-functional-devstack:
             irrelevant-files: *nova-base-irrelevant-files
-        - cyborg-tempest:
+        - cyborg-tempest-py3:
             irrelevant-files: *nova-base-irrelevant-files
             voting: false
         - barbican-tempest-plugin-simple-crypto:
             irrelevant-files: *nova-base-irrelevant-files
             voting: false
-        - nova-tox-py312-threading
+        - nova-tox-py313-threading
         - openstack-tox-cover:
             # Allow more time for unit and functional tests to run.
             timeout: 6000
+            # Temporary make it non-voting to unblock RC1 while we fix
+            # https://bugs.launchpad.net/nova/+bug/2167088
+            voting: false
     gate:
       jobs:
         - nova-live-migration
-        - nova-tox-functional-py310
+        - nova-tox-functional-py311
         - nova-tox-functional-py313
+        - nova-tox-functional-py313-threading
         - nova-multi-cell
         - nova-next
         - nova-tox-validate-backport
         - nova-ceph-multistore:
             irrelevant-files: *nova-base-irrelevant-files
-        - neutron-linuxbridge-tempest:
-            files:
-              # NOTE(mriedem): This job has its own irrelevant-files section
-              # so that we only run it on changes to networking and libvirt/vif
-              # code; we don't need to run this on all changes.
-              - ^nova/network/.*$
-              - nova/virt/libvirt/vif.py
         - tempest-integrated-compute:
             irrelevant-files: *policies-irrelevant-files
         - grenade-skip-level-always:
@@ -930,7 +1085,7 @@
             irrelevant-files: *nova-base-irrelevant-files
         - openstacksdk-functional-devstack:
             irrelevant-files: *nova-base-irrelevant-files
-        - nova-tox-py312-threading
+        - nova-tox-py313-threading
         - nova-alt-configurations
     periodic-weekly:
       jobs:
@@ -941,6 +1096,7 @@
         - tempest-centos9-stream-fips
         - whitebox-devstack-multinode
         - tempest-integrated-compute-rbac-old-defaults
+        - nova-graceful-shutdown-eventlet
     experimental:
       jobs:
         - ironic-tempest-bfv:
@@ -950,8 +1106,6 @@
         - devstack-plugin-nfs-tempest-full:
             irrelevant-files: *nova-base-irrelevant-files
         - nova-osprofiler-redis
-        - tempest-pg-full:
-            irrelevant-files: *nova-base-irrelevant-files
         - nova-tempest-full-oslo.versionedobjects:
             irrelevant-files: *nova-base-irrelevant-files
         - nova-tempest-v2-api:
@@ -974,3 +1128,4 @@
         - whitebox-devstack-multinode
         - tempest-integrated-compute-rbac-old-defaults:
             irrelevant-files: *policies-irrelevant-files
+        - nova-graceful-shutdown-eventlet

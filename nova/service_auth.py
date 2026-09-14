@@ -26,6 +26,7 @@ import nova.conf
 CONF = nova.conf.CONF
 LOG = logging.getLogger(__name__)
 
+
 # Auth plugins and auth sessions keyed by configuration group name
 _AUTHS = {}
 _SESSIONS = {}

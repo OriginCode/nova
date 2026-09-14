@@ -3004,10 +3004,9 @@ class TestAPI(TestAPIBase):
         self.assertIsNone(iid)
 
     def test_nw_info_build_network_bridge(self):
-        net, iid = self._test_nw_info_build_network(model.VIF_TYPE_BRIDGE)
-        self.assertEqual('brqnet-id', net['bridge'])
-        self.assertTrue(net['should_create_bridge'])
-        self.assertIsNone(iid)
+        self.assertRaises(exception.NovaException,
+                          self._test_nw_info_build_network,
+                          model.VIF_TYPE_BRIDGE)
 
     def test_nw_info_build_network_tap(self):
         net, iid = self._test_nw_info_build_network(model.VIF_TYPE_TAP)
@@ -3145,7 +3144,9 @@ class TestAPI(TestAPIBase):
                 extra_details={model.VIF_DETAILS_VHOSTUSER_OVS_PLUG: True})
 
     def test_nw_info_build_custom_lb_bridge(self):
-        self._test_nw_info_build_custom_bridge(model.VIF_TYPE_BRIDGE)
+        self.assertRaises(exception.NovaException,
+                          self._test_nw_info_build_custom_bridge,
+                          model.VIF_TYPE_BRIDGE)
 
     @mock.patch.object(neutronapi.API, '_get_physnet_tunneled_info',
                        return_value=(None, False))
@@ -3174,7 +3175,7 @@ class TestAPI(TestAPIBase):
              'status': 'ACTIVE',
              'fixed_ips': [{'ip_address': '1.1.1.1'}],
              'mac_address': 'de:ad:be:ef:00:01',
-             'binding:vif_type': model.VIF_TYPE_BRIDGE,
+             'binding:vif_type': model.VIF_TYPE_OVS,
              'binding:vnic_type': model.VNIC_TYPE_NORMAL,
              'binding:vif_details': {},
              },
@@ -3185,7 +3186,7 @@ class TestAPI(TestAPIBase):
              'status': 'DOWN',
              'fixed_ips': [{'ip_address': '1.1.1.1'}],
              'mac_address': 'de:ad:be:ef:00:02',
-             'binding:vif_type': model.VIF_TYPE_BRIDGE,
+             'binding:vif_type': model.VIF_TYPE_OVS,
              'binding:vnic_type': model.VNIC_TYPE_NORMAL,
              'binding:vif_details': {},
              },
@@ -3196,7 +3197,7 @@ class TestAPI(TestAPIBase):
              'status': 'DOWN',
              'fixed_ips': [{'ip_address': '1.1.1.1'}],
              'mac_address': 'de:ad:be:ef:00:03',
-             'binding:vif_type': model.VIF_TYPE_BRIDGE,
+             'binding:vif_type': model.VIF_TYPE_OVS,
              'binding:vnic_type': model.VNIC_TYPE_NORMAL,
              'binding:vif_details': {},
              },
@@ -3236,7 +3237,7 @@ class TestAPI(TestAPIBase):
              'status': 'ACTIVE',
              'fixed_ips': [{'ip_address': '1.1.1.1'}],
              'mac_address': 'de:ad:be:ef:00:06',
-             'binding:vif_type': model.VIF_TYPE_BRIDGE,
+             'binding:vif_type': model.VIF_TYPE_OVS,
              # No binding:vnic_type
              'binding:vif_details': {},
              },
@@ -3290,11 +3291,15 @@ class TestAPI(TestAPIBase):
             self.assertEqual(requested_ports[index]['mac_address'],
                              nw_info['address'])
             self.assertEqual('tapport' + str(index), nw_info['devname'])
-            self.assertIsNone(nw_info['ovs_interfaceid'])
+            # For OVS VIF types, ovs_interfaceid should be set to the port ID
+            if (requested_ports[index]['binding:vif_type'] ==
+                    model.VIF_TYPE_OVS):
+                self.assertEqual(requested_ports[index]['id'],
+                                 nw_info['ovs_interfaceid'])
+            else:
+                self.assertIsNone(nw_info['ovs_interfaceid'])
             self.assertEqual(requested_ports[index]['binding:vif_type'],
                              nw_info['type'])
-            if nw_info['type'] == model.VIF_TYPE_BRIDGE:
-                self.assertEqual('brqnet-id', nw_info['network']['bridge'])
             self.assertEqual(requested_ports[index].get('binding:vnic_type',
                                 model.VNIC_TYPE_NORMAL), nw_info['vnic_type'])
             self.assertEqual(requested_ports[index].get('binding:vif_details'),
@@ -3374,7 +3379,7 @@ class TestAPI(TestAPIBase):
              'status': 'ACTIVE',
              'fixed_ips': [{'ip_address': '1.1.1.1'}],
              'mac_address': 'de:ad:be:ef:00:01',
-             'binding:vif_type': model.VIF_TYPE_BRIDGE,
+             'binding:vif_type': model.VIF_TYPE_OVS,
              'binding:vnic_type': model.VNIC_TYPE_NORMAL,
              'binding:vif_details': {},
              },
@@ -3431,7 +3436,7 @@ class TestAPI(TestAPIBase):
                 "status": "ACTIVE",
                 "fixed_ips": [{"ip_address": "1.1.1.1"}],
                 "mac_address": "de:ad:be:ef:00:01",
-                "binding:vif_type": model.VIF_TYPE_BRIDGE,
+                "binding:vif_type": model.VIF_TYPE_OVS,
                 "binding:vnic_type": model.VNIC_TYPE_DIRECT,
                 "binding:vif_details": {},
             },
@@ -3500,7 +3505,7 @@ class TestAPI(TestAPIBase):
                 "status": "ACTIVE",
                 "fixed_ips": [{"ip_address": "1.1.1.1"}],
                 "mac_address": "de:ad:be:ef:00:01",
-                "binding:vif_type": model.VIF_TYPE_BRIDGE,
+                "binding:vif_type": model.VIF_TYPE_OVS,
                 "binding:vnic_type": model.VNIC_TYPE_DIRECT,
                 "binding:vif_details": {},
             },
@@ -3938,7 +3943,8 @@ class TestAPI(TestAPIBase):
 
         instance_networks = [{"id": "instance_network_1",
                               "name": "fake_network",
-                              "tenant_id": "fake_tenant_id"}]
+                              "tenant_id": "fake_tenant_id",
+                              "mtu": 1450}]
         instance_port_ids = ["instance_port_1"]
 
         network_info = model.NetworkInfo(
@@ -3948,7 +3954,10 @@ class TestAPI(TestAPIBase):
               'network': model.Network(
                   id=instance_networks[0]["id"],
                   label=instance_networks[0]["name"],
-                  meta={"tenant_id": instance_networks[0]["tenant_id"]})}]
+                  meta={
+                     "tenant_id": instance_networks[0]["tenant_id"],
+                     "mtu": 1450
+                  })}]
         )
 
         instance_uuid = uuids.fake
@@ -10103,10 +10112,10 @@ class TestGetInstanceNetworkInfo(test.NoDBTestCase):
         self.assertIsNotNone(new_vif)
         self.assertFalse(new_vif['active'])
 
-    def test_get_nw_info_refresh_vif_id_remove_vif(self):
+    def test_get_nw_info_refresh_vif_id_preserves_missing_vif(self):
         """Tests that a network-changed event occurred on a single port
-        which is already in the cache but not in the current list of ports
-        for the instance, so it's removed from the cache.
+        which is already in the cache but not in the current list of ports for
+        the instance, so it is kept for detach or delete cleanup.
         """
         # The cache has two existing VIFs.
         self.instance.info_cache = self._get_fake_info_cache(
@@ -10120,11 +10129,13 @@ class TestGetInstanceNetworkInfo(test.NoDBTestCase):
                 new_callable=mock.NonCallableMock):
             nwinfo = self.api._get_instance_nw_info(
                 self.context, self.instance, refresh_vif_id=uuids.removed_port)
-        # Assert that only the old port is still in the cache.
+        # Assert that both ports are still in the cache. The removed port is
+        # preserved so compute can still unplug it if a network-vif-deleted
+        # event arrives or the instance is deleted.
         old_vif = self._get_vif_in_cache(nwinfo, uuids.old_port)
         self.assertIsNotNone(old_vif)
         removed_vif = self._get_vif_in_cache(nwinfo, uuids.removed_port)
-        self.assertIsNone(removed_vif)
+        self.assertIsNotNone(removed_vif)
 
     def test_get_instance_nw_info_force_refresh(self):
         """Tests a full refresh of the instance info cache using information

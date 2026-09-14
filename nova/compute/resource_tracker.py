@@ -1280,6 +1280,7 @@ class ResourceTracker(object):
         # unrelated to nova or even OpenStack) find and distinguish these
         # providers easily.
         traits.add(os_traits.COMPUTE_NODE)
+        traits.add(os_traits.OWNER_NOVA)
 
         self._sync_compute_service_disabled_trait(context, traits)
 
@@ -1310,7 +1311,7 @@ class ResourceTracker(object):
         # Retrieve the provider tree associated with this compute node.  If
         # it doesn't exist yet, this will create it with a (single, root)
         # provider corresponding to the compute node.
-        prov_tree = self.reportclient.get_provider_tree_and_ensure_root(
+        prov_tree = self.reportclient.get_provider_subtree_and_ensure_root(
             context, compute_node.uuid, name=compute_node.hypervisor_hostname)
         # Let the virt driver rearrange the provider tree and set/update
         # the inventory, traits, and aggregates throughout.
@@ -2037,6 +2038,9 @@ class ResourceTracker(object):
 
                     provider_tree.update_inventory(
                         provider.uuid, merged_inventory)
+
+                provider_tree.add_traits(
+                    provider.uuid, os_traits.OWNER_NOVA)
 
                 processed_providers[current_uuid] = source_file_name
 

@@ -21,7 +21,6 @@ import copy
 import functools
 import sys
 import threading
-import time
 
 from keystoneauth1 import exceptions as ks_exc
 from oslo_config import cfg
@@ -63,6 +62,7 @@ from nova.scheduler.client import query
 from nova.scheduler.client import report
 from nova.scheduler import utils as scheduler_utils
 from nova import servicegroup
+from nova import thread_pool_factory
 from nova import utils
 from nova.volume import cinder
 
@@ -203,27 +203,33 @@ class ConductorManager(manager.Manager):
     def reset(self):
         objects.Service.clear_min_version_cache()
 
-    def graceful_shutdown(self):
+    def graceful_shutdown(self, timeout):
         """Gracefully shutdown the manager.
 
         This will be called during graceful shutdown (SIGTERM) and manager
         should transit the in-progress tasks to safe termination point. The
         safe termination point can be either complete or abort them.
         """
-        # TODO(gmaan) Time based wait is temporary solution and it will be
-        # replaced by the better solution to finish in-progress tasks.
-        if CONF.manager_shutdown_timeout > CONF.graceful_shutdown_timeout:
-            LOG.warning('manager_shutdown_timeout (%s) is higher than '
-                        'graceful_shutdown_timeout (%s); the service may be '
-                        'killed before the manager finishes waiting.',
-                        CONF.manager_shutdown_timeout,
-                        CONF.graceful_shutdown_timeout)
-            sleep_time = max(0, CONF.graceful_shutdown_timeout - 10)
-        else:
-            sleep_time = CONF.manager_shutdown_timeout
-        LOG.debug('Conductor service manager is waiting for %s seconds to '
-                  'finish in-progress tasks', sleep_time)
-        time.sleep(sleep_time)
+        # NOTE(gmaan): We reserve some time out of the total timeout to
+        # shutdown all the thread pool executors so that in-progress tasks
+        # waiting does not consume all the time and leave nothing for the
+        # executors to shutdown gracefully. 20 sec is the max time we are
+        # reserving for that, which is a rough estimate we can change if we
+        # get to know that it is less.
+        shutdown_executors_reserved_time = min(20, timeout)
+        wait_timeout = max(0, timeout - shutdown_executors_reserved_time)
+        LOG.debug('Conductor manager waiting up to %s seconds for '
+                  'in-progress tasks to complete (%s seconds reserved for '
+                  'shutting down all thread pool executors).',
+                  wait_timeout, shutdown_executors_reserved_time)
+        self._wait_for_in_progress_tasks(wait_timeout)
+
+        try:
+            thread_pool_factory.shutdown_all_executors()
+        except Exception:
+            LOG.exception(
+                '%s service failed to shutdown all thread pool executors.',
+                self.service_name)
 
 
 @contextlib.contextmanager
@@ -928,9 +934,9 @@ class ComputeTaskManager:
         try:
             resource_provider_mapping = (
                 request_spec.get_request_group_mapping())
-            # Using nodename instead of hostname. See:
-            # http://lists.openstack.org/pipermail/openstack-discuss/2019-November/011044.html  # noqa
-            cyclient = cyborg.get_client(context)
+            dp_name = instance.flavor.extra_specs.get('accel:device_profile')
+            cyclient = cyborg.get_client(
+                    context) if dp_name or requested_networks else None
             bindings = {}
             port_bindings = {}
 
@@ -1019,8 +1025,8 @@ class ComputeTaskManager:
             compute_utils.check_num_instances_quota(
                 context, flavor, 0, 0, project_id=project_id,
                 user_id=user_id, orig_num_req=orig_num_req)
-            placement_limits.enforce_num_instances_and_flavor(
-                context, project_id, flavor, request_spec.is_bfv, 0, 0)
+            placement_limits.enforce_num_instances_and_resources(
+                context, project_id, request_spec, 0, 0)
 
     # TODO(mriedem): Make request_spec required in ComputeTaskAPI RPC v2.0.
     @targets_cell
@@ -2094,7 +2100,6 @@ class ComputeTaskManager:
             fields.NotificationPhase.START)
 
         clock = timeutils.StopWatch()
-        cache_image_executor = utils.get_cache_images_executor()
         futures = []
 
         hosts_by_cell = {}
@@ -2166,9 +2171,9 @@ class ComputeTaskManager:
                             {'host': host})
                         skipped_host(target_ctxt, host, image_ids)
                         continue
-                    future = utils.spawn_on(cache_image_executor,
-                                    wrap_cache_images,
-                                    target_ctxt, host, image_ids)
+                    future = thread_pool_factory.spawn_on(
+                        thread_pool_factory.ExecutorType.CACHE_IMAGES,
+                        wrap_cache_images, target_ctxt, host, image_ids)
                     futures.append(future)
         # Wait until all those things finish
         concurrent.futures.wait(futures)

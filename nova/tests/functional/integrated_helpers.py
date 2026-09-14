@@ -24,6 +24,7 @@ import re
 import string
 import time
 
+import os_traits
 from oslo_concurrency import lockutils
 from oslo_log import log as logging
 import oslo_messaging as messaging
@@ -123,27 +124,48 @@ class InstanceHelperMixin:
             time.sleep(0.5)
 
     def _wait_for_server_parameter(
-            self, server, expected_params, max_retries=10, api=None):
+        self, server, expected_params, max_retries=10,
+        api=None, wait_for_fault_key=True,
+    ):
         api = api or getattr(self, 'admin_api', self.api)
+
+        wait_for_fault = False
+
+        if (wait_for_fault_key and
+            expected_params.get('status', None) == "ERROR"):
+            # Nova sets the ERROR state on the instance before recording the
+            # actual fault in the DB or sending the error notification. So
+            # most of the cases when a test needs to wait for an instance to
+            # reach ERROR state is actually also wants to assert the fault.
+            # To avoid occasional test failure where a test sees the ERROR
+            # state but fails to found the fault in the server response we
+            # wait for the fault key to appear in the response.
+            wait_for_fault = True
 
         retry_count = 0
         while True:
             server = api.get_server(server['id'])
             if all([server[attr] == expected_params[attr]
                     for attr in expected_params]):
-                break
+                if not wait_for_fault or 'fault' in server:
+                    break
+
             retry_count += 1
             if retry_count == max_retries:
                 self.fail('Wait for state change failed, '
-                          'expected_params=%s, server=%s' % (
-                              expected_params, server))
+                          'expected_params=%s, server=%s, wait_for_fault=%s'
+                          % (expected_params, server, wait_for_fault))
             time.sleep(0.5)
 
         return server
 
-    def _wait_for_state_change(self, server, expected_status, max_retries=10):
+    def _wait_for_state_change(
+        self, server, expected_status, max_retries=10,
+        wait_for_fault_key=True,
+    ):
         return self._wait_for_server_parameter(
-            server, {'status': expected_status}, max_retries)
+            server, {'status': expected_status}, max_retries,
+            wait_for_fault_key=wait_for_fault_key)
 
     def _wait_until_deleted(self, server):
         initially_in_error = server.get('status') == 'ERROR'
@@ -576,6 +598,7 @@ class InstanceHelperMixin:
             server['id'], {"share": {"share_id": share_id}})
         self.notifier.wait_for_versioned_notifications(
             'instance.share_attach.error')
+        self.notifier.wait_for_versioned_notifications('compute.exception')
 
     def _detach_share(self, server, share_id):
         self.api.delete_server_share(server['id'], share_id)
@@ -586,6 +609,7 @@ class InstanceHelperMixin:
         self.api.delete_server_share(server['id'], share_id)
         self.notifier.wait_for_versioned_notifications(
             'instance.share_detach.error')
+        self.notifier.wait_for_versioned_notifications('compute.exception')
 
     def _attach_volume(self, server, volume_id):
         """attach a cinder volume to a server."""
@@ -646,13 +670,16 @@ class InstanceHelperMixin:
     def _live_migrate(
         self, server, migration_expected_state='completed',
         server_expected_state='ACTIVE', api=None, host=None,
+        wait_for_fault_key=True
     ):
         api = api or self.api
         api.post_server_action(
             server['id'],
             {'os-migrateLive': {'host': host, 'block_migration': 'auto'}})
         self._wait_for_migration_status(server, [migration_expected_state])
-        return self._wait_for_state_change(server, server_expected_state)
+        return self._wait_for_state_change(
+            server, server_expected_state,
+            wait_for_fault_key=wait_for_fault_key)
 
     _live_migrate_server = _live_migrate
 
@@ -872,15 +899,34 @@ class PlacementHelperMixin:
             '/resource_providers/%s/traits' % rp_uuid, version='1.6'
         ).body['traits']
 
+    # Infrastructure traits that the resource tracker always sets
+    # on root resource providers (compute nodes).
+    _INFRA_TRAITS = frozenset({
+        os_traits.OWNER_NOVA,
+        os_traits.COMPUTE_NODE,
+    })
+
     def _set_provider_traits(self, rp_uuid, traits):
         """Set traits for the specified provider.
 
-        This will overwrite any existing traits.
+        This will overwrite any existing traits, but preserves
+        infrastructure traits (OWNER_NOVA, COMPUTE_NODE) that the
+        resource tracker always sets on root compute node
+        providers. This matches production behavior where the RT
+        periodic re-adds these traits after any external change.
+
+        For non-root providers (e.g. child device RPs), these
+        infrastructure traits were never set, so nothing extra
+        is preserved.
 
         :param rp_uuid: UUID of the resource provider to update.
         :param traits: List of trait strings to set on the provider.
         :returns: APIResponse object with the results.
         """
+        current_traits = set(self._get_provider_traits(rp_uuid))
+        preserved = current_traits & self._INFRA_TRAITS
+        all_traits = list(set(traits) | preserved)
+
         provider = self.placement.get(
             '/resource_providers/%s' % rp_uuid
         ).body
@@ -888,7 +934,7 @@ class PlacementHelperMixin:
             '/resource_providers/%s/traits' % rp_uuid,
             {
                 'resource_provider_generation': provider['generation'],
-                'traits': traits
+                'traits': all_traits
             },
             version='1.6',
         )

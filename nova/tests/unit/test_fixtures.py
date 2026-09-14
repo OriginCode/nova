@@ -17,6 +17,7 @@
 import copy
 import datetime
 import io
+import unittest
 from unittest import mock
 
 import fixtures as fx
@@ -43,6 +44,7 @@ from nova.objects import service as service_obj
 from nova import test
 from nova.tests import fixtures
 from nova.tests.unit import fake_instance
+from nova import thread_pool_factory
 from nova import utils
 
 CONF = cfg.CONF
@@ -132,6 +134,9 @@ class TestOSAPIFixture(testtools.TestCase):
 
 class TestDatabaseFixture(testtools.TestCase):
     def test_fixture_reset(self):
+        # Fixture.reset() runs cleanUp() then setUp(). With file-backed
+        # SQLite in threading mode, setUp() provisions a new temp database
+        # file so the fixture starts empty again.
         # because this sets up reasonable db connection strings
         self.useFixture(fixtures.ConfFixture())
         db_fixture = fixtures.Database()
@@ -195,7 +200,14 @@ class TestDatabaseFixture(testtools.TestCase):
         rows = result.fetchall()
         self.assertEqual(0, len(rows), "Rows %s" % rows)
 
+    @unittest.skipIf(
+        utils.concurrency_mode_threading(),
+        'file-backed SQLite keeps data at the same path after cleanup(); '
+        'use db_fixture.reset() for a fresh database in threading mode')
     def test_fixture_cleanup(self):
+        # In-memory SQLite only: cleanup() disposes the engine and reconnecting
+        # yields an empty database. File-backed temp files are removed when
+        # NestedTempfile tears down at the end of the test.
         # because this sets up reasonable db connection strings
         self.useFixture(fixtures.ConfFixture())
         fix = fixtures.Database()
@@ -210,6 +222,10 @@ class TestDatabaseFixture(testtools.TestCase):
         schema = "".join(line for line in conn.connection.iterdump())
         self.assertEqual(schema, "BEGIN TRANSACTION;COMMIT;")
 
+    @unittest.skipIf(
+        utils.concurrency_mode_threading(),
+        'file-backed SQLite keeps data at the same path after cleanup(); '
+        'use db_fixture.reset() for a fresh database in threading mode')
     def test_api_fixture_cleanup(self):
         # This sets up reasonable db connection strings
         self.useFixture(fixtures.ConfFixture())
@@ -247,16 +263,19 @@ class TestDefaultFlavorsFixture(testtools.TestCase):
         self.useFixture(fixtures.Database(database='api'))
 
         engine = api_db_api.get_engine()
-        conn = engine.connect()
-        result = conn.execute(sa.text("SELECT * FROM flavors"))
-        rows = result.fetchall()
-        self.assertEqual(0, len(rows), "Rows %s" % rows)
+        with engine.connect() as conn:
+            result = conn.execute(sa.text("SELECT * FROM flavors"))
+            rows = result.fetchall()
+            self.assertEqual(0, len(rows), "Rows %s" % rows)
 
         self.useFixture(fixtures.DefaultFlavorsFixture())
 
-        result = conn.execute(sa.text("SELECT * FROM flavors"))
-        rows = result.fetchall()
-        self.assertEqual(6, len(rows), "Rows %s" % rows)
+        # File-backed SQLite (threading) uses a new connection per checkout;
+        # start a new connection so the flavors insert is visible.
+        with engine.connect() as conn:
+            result = conn.execute(sa.text("SELECT * FROM flavors"))
+            rows = result.fetchall()
+            self.assertEqual(6, len(rows), "Rows %s" % rows)
 
 
 class TestIndirectionAPIFixture(testtools.TestCase):
@@ -278,27 +297,27 @@ class TestIndirectionAPIFixture(testtools.TestCase):
 
 class TestSpawnIsSynchronousFixture(testtools.TestCase):
     def test_spawn_patch(self):
-        orig_spawn = utils.spawn
+        orig_spawn = thread_pool_factory.spawn
 
         fix = fixtures.SpawnIsSynchronousFixture()
         self.useFixture(fix)
-        self.assertNotEqual(orig_spawn, utils.spawn)
+        self.assertNotEqual(orig_spawn, thread_pool_factory.spawn)
 
     def test_spawn_passes_through(self):
         self.useFixture(fixtures.SpawnIsSynchronousFixture())
         tester = mock.MagicMock()
-        utils.spawn(tester.function, 'foo', bar='bar')
+        thread_pool_factory.spawn(tester.function, 'foo', bar='bar')
         tester.function.assert_called_once_with('foo', bar='bar')
 
     def test_spawn_return_has_result(self):
         self.useFixture(fixtures.SpawnIsSynchronousFixture())
-        future = utils.spawn(lambda x: '%s' % x, 'foo')
+        future = thread_pool_factory.spawn(lambda x: '%s' % x, 'foo')
         foo = future.result()
         self.assertEqual('foo', foo)
 
     def test_spawn_callback(self):
         self.useFixture(fixtures.SpawnIsSynchronousFixture())
-        future = utils.spawn(mock.MagicMock)
+        future = thread_pool_factory.spawn(mock.MagicMock)
         call_count = []
 
         def fake(thread):

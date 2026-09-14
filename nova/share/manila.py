@@ -251,6 +251,13 @@ class API(object):
                 return Access.from_manila_access(access)
         return None
 
+    @translate_share_exception
+    def get_access_rules(self, context, share_id):
+        LOG.debug("Get all access rules for share id:'%s'", share_id)
+        access_list = _manilaclient(
+            context, admin=True).access_rules(share_id)
+        return [Access.from_manila_access(access) for access in access_list]
+
     @translate_allow_exception
     def allow(
         self,
@@ -259,6 +266,7 @@ class API(object):
         access_type,
         access_to,
         access_level,
+        lock_reason="Lock by nova",
     ):
         """Allow share access
 
@@ -266,6 +274,7 @@ class API(object):
         :param access_type: the type of access ("ip", "cert", "user")
         :param access_to: ip:cidr or cert:cn or user:group or user name
         :param access_level: "ro" for read only or "rw" for read/write
+        :param lock_reason: text stored on the Manila resource lock.
         :raises: ShareNotFound if the share_id specified is not available.
         :raises: BadRequest if the share already exists.
         :raises: ShareAccessGrantError if the answer from manila allow API is
@@ -291,7 +300,7 @@ class API(object):
             access_level=access_level,
             lock_visibility=True,
             lock_deletion=True,
-            lock_reason="Lock by nova",
+            lock_reason=lock_reason,
         )
 
         access = Access.from_manila_access(access)

@@ -10,17 +10,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from requests import Response
+from unittest import mock
 
 import fixtures
-from keystoneauth1 import loading as ks_loading
-
-import nova.conf
-from nova import context as nova_context
-from nova import exception
-from nova.share import manila
-from nova import test
-
 from openstack import exceptions as sdk_exc
 from openstack.shared_file_system.v2 import (
     resource_locks as sdk_resource_locks
@@ -33,10 +25,16 @@ from openstack.shared_file_system.v2 import (
     share_export_locations as sdk_share_export_locations
 )
 from openstack.shared_file_system.v2 import share as sdk_share
-
 from openstack import utils
-from unittest import mock
+from oslo_utils.fixture import uuidsentinel as uuids
+from requests import Response
 
+import nova.conf
+from nova import context as nova_context
+from nova import exception
+from nova.share import manila
+from nova import test
+from nova.tests.fixtures.manila import ManilaAccess
 from nova.tests.unit.api.openstack import fakes
 
 CONF = nova.conf.CONF
@@ -195,24 +193,12 @@ class BaseManilaTestCase(object):
 
         super(BaseManilaTestCase, self).setUp()
 
-        self.mock_get_confgrp = self.useFixture(fixtures.MockPatch(
-            'nova.utils._get_conf_group')).mock
-
-        self.mock_ks_loading = self.useFixture(
-            fixtures.MockPatchObject(ks_loading, 'load_auth_from_conf_options')
-        ).mock
-
         self.service_type = 'shared-file-system'
         self.mock_connection = self.useFixture(
             fixtures.MockPatch(
                 "nova.utils.connection.Connection", side_effect=self.fake_conn
             )
         ).mock
-
-        # We need to stub the CONF global in nova.utils to assert that the
-        # Connection constructor picks it up.
-        self.mock_conf = self.useFixture(fixtures.MockPatch(
-            'nova.utils.CONF')).mock
 
         self.api = manila.API()
 
@@ -429,6 +415,45 @@ class ManilaTestCase(BaseManilaTestCase, test.NoDBTestCase):
 
         self.assertIsNone(access)
 
+    @mock.patch(
+        'nova.utils.get_sdk_adapter', side_effect=nova.utils.get_sdk_adapter)
+    def test_get_access_rules(self, mock_get_sdk_adapter):
+        """Tests that we manage to list every access rule of a share.
+        """
+        access_rules = self.api.get_access_rules(self.context, '1234')
+        mock_get_sdk_adapter.assert_called_once_with(
+            "shared-file-system",
+            admin=True,
+            check_service=True,
+            context=self.context,
+            shared_file_system_api_version="2.82",
+            global_request_id=self.context.global_id,
+        )
+        self.assertEqual(1, len(access_rules))
+        access = access_rules[0]
+        self.assertIsInstance(access, manila.Access)
+        self.assertEqual('a25b2df3-90bd-4add-afa6-5f0dbbd50452', access.id)
+        self.assertEqual('ip', access.access_type)
+        self.assertEqual('0.0.0.0/0', access.access_to)
+
+    def test_get_access_rules_empty(self):
+        """Tests that a share with no access rules returns an empty list.
+        """
+        access_rules = self.api.get_access_rules(self.context, '4567')
+        self.assertEqual([], access_rules)
+
+    def test_get_access_rules_fails_non_existing_share(self):
+        """Tests that we fail when listing rules of a non existing share.
+        """
+        exc = self.assertRaises(
+            exception.ShareNotFound,
+            self.api.get_access_rules,
+            self.context,
+            "nonexisting",
+        )
+
+        self.assertIn("Share nonexisting could not be found.", exc.message)
+
     def test_allow_access_fails_non_existing_share(self):
         """Tests that we fail if trying to allow an
         non existing share.
@@ -465,6 +490,20 @@ class ManilaTestCase(BaseManilaTestCase, test.NoDBTestCase):
         self.assertEqual('ip', access.access_type)
         self.assertEqual('0.0.0.0/0', access.access_to)
         self.assertIsNone(access.access_key)
+
+    @mock.patch('nova.share.manila._manilaclient')
+    def test_allow_access_sets_lock_reason(self, mock_client):
+        reason = "Lock by nova for instance %s" % uuids.instance
+        mock_create = mock_client.return_value.create_access_rule
+        mock_create.return_value = ManilaAccess(
+            access_type='cephx', access_to='nova-abc123')
+        self.api.allow(
+            self.context, '1234', 'cephx', 'nova-abc123', 'rw',
+            lock_reason=reason)
+        mock_create.assert_called_once_with(
+            '1234', access_type='cephx', access_to='nova-abc123',
+            access_level='rw', lock_visibility=True, lock_deletion=True,
+            lock_reason=reason)
 
     def test_allow_access_fails_already_exists(self):
         """Tests that we have an exception is the share already exists.

@@ -13,7 +13,6 @@
 #    under the License.
 
 import datetime
-import futurist
 import hashlib
 import os
 import os.path
@@ -23,19 +22,15 @@ from unittest import mock
 
 import fasteners
 import fixtures
-from keystoneauth1 import adapter as ks_adapter
 from keystoneauth1.identity import base as ks_identity
 from keystoneauth1 import session as ks_session
 import netaddr
 from openstack import exceptions as sdk_exc
 from oslo_config import cfg
-from oslo_context import context as common_context
-from oslo_context import fixture as context_fixture
 import oslo_service.backend as oslo_backend
 from oslo_utils import encodeutils
 from oslo_utils import fixture as utils_fixture
 
-from nova import context
 from nova import exception
 from nova import monkey_patch
 from nova.objects import base as obj_base
@@ -230,15 +225,17 @@ class GenericUtilsTestCase(test.NoDBTestCase):
         project_id = '9b9e3c847e904b0686e8ffb20e4c6381'
         self.assertEqual('', utils.generate_hostid(None, project_id))
 
-    @mock.patch('nova.utils.concurrency_mode_threading', return_value=False)
-    @mock.patch('nova.utils.tpool.Proxy')
-    def test_tpool_wrap_eventlet(self, mock_tpool, mock_concurrency_mode):
+    def test_tpool_wrap_eventlet(self):
+        if utils.concurrency_mode_threading():
+            self.skipTest(
+                "In native threading mode this case cannot be tested.")
+
         mock_target = mock.MagicMock()
-        target = utils.tpool_wrap(mock_target)
+        with mock.patch('eventlet.tpool.Proxy') as mock_tpool:
+            target = utils.tpool_wrap(mock_target)
 
         mock_tpool.assert_called_once_with(mock_target, autowrap=())
         self.assertEqual(mock_tpool.return_value, target)
-        mock_concurrency_mode.assert_called_once_with()
 
     @mock.patch('nova.utils.concurrency_mode_threading', return_value=True)
     def test_tpool_wrap_threading(self, mock_concurrency_mode):
@@ -764,66 +761,6 @@ class SafeTruncateTestCase(test.NoDBTestCase):
         self.assertEqual(254, len(byte_message))
 
 
-class SpawnTestCase(test.NoDBTestCase):
-    def setUp(self):
-        super(SpawnTestCase, self).setUp()
-        self.useFixture(context_fixture.ClearRequestContext())
-
-    def test_spawn_no_context(self):
-        self.assertIsNone(common_context.get_current())
-
-        def _fake_spawn(func, *args, **kwargs):
-            # call the method to ensure no error is raised
-            func(*args, **kwargs)
-            self.assertEqual('test', args[0])
-
-        def fake(arg):
-            pass
-        executor = utils._get_default_executor()
-        with mock.patch.object(executor, "submit", _fake_spawn):
-            getattr(utils, "spawn")(fake, 'test')
-        self.assertIsNone(common_context.get_current())
-
-    def test_spawn_context(self):
-        self.assertIsNone(common_context.get_current())
-        ctxt = context.RequestContext('user', 'project')
-
-        def _fake_spawn(func, *args, **kwargs):
-            # call the method to ensure no error is raised
-            func(*args, **kwargs)
-            self.assertEqual(ctxt, args[0])
-            self.assertEqual('test', kwargs['kwarg1'])
-
-        def fake(context, kwarg1=None):
-            pass
-
-        executor = utils._get_default_executor()
-        with mock.patch.object(executor, "submit", _fake_spawn):
-            getattr(utils, "spawn")(fake, ctxt, kwarg1='test')
-        self.assertEqual(ctxt, common_context.get_current())
-
-    def test_spawn_context_different_from_passed(self):
-        self.assertIsNone(common_context.get_current())
-        ctxt = context.RequestContext('user', 'project')
-        ctxt_passed = context.RequestContext('user', 'project',
-                overwrite=False)
-        self.assertEqual(ctxt, common_context.get_current())
-
-        def _fake_spawn(func, *args, **kwargs):
-            # call the method to ensure no error is raised
-            func(*args, **kwargs)
-            self.assertEqual(ctxt_passed, args[0])
-            self.assertEqual('test', kwargs['kwarg1'])
-
-        def fake(context, kwarg1=None):
-            pass
-
-        executor = utils._get_default_executor()
-        with mock.patch.object(executor, "submit", _fake_spawn):
-            getattr(utils, "spawn")(fake, ctxt_passed, kwarg1='test')
-        self.assertEqual(ctxt, common_context.get_current())
-
-
 class TestObjectCallHelpers(test.NoDBTestCase):
     def test_with_primitives(self):
         tester = mock.Mock()
@@ -888,7 +825,7 @@ class TestObjectCallHelpers(test.NoDBTestCase):
 
 
 class GetKSAAdapterTestCase(test.NoDBTestCase):
-    """Tests for nova.utils.get_endpoint_data()."""
+    """Tests for nova.utils.get_ksa_adapter()."""
 
     def setUp(self):
         super(GetKSAAdapterTestCase, self).setUp()
@@ -958,42 +895,6 @@ class GetKSAAdapterTestCase(test.NoDBTestCase):
         self.load_adap.assert_called_once_with(
             utils.CONF, 'cinder', session=self.sess, auth=self.auth,
             min_version=None, max_version=None, raise_exc=False)
-
-
-class GetEndpointTestCase(test.NoDBTestCase):
-    def setUp(self):
-        super(GetEndpointTestCase, self).setUp()
-        self.adap = mock.create_autospec(ks_adapter.Adapter, instance=True)
-        self.adap.endpoint_override = None
-        self.adap.service_type = 'stype'
-        self.adap.interface = ['admin', 'public']
-
-    def test_endpoint_override(self):
-        self.adap.endpoint_override = 'foo'
-        self.assertEqual('foo', utils.get_endpoint(self.adap))
-        self.adap.get_endpoint_data.assert_not_called()
-        self.adap.get_endpoint.assert_not_called()
-
-    def test_image_good(self):
-        self.adap.service_type = 'image'
-        self.adap.get_endpoint_data.return_value.catalog_url = 'url'
-        self.assertEqual('url', utils.get_endpoint(self.adap))
-        self.adap.get_endpoint_data.assert_called_once_with()
-        self.adap.get_endpoint.assert_not_called()
-
-    def test_image_bad(self):
-        self.adap.service_type = 'image'
-        self.adap.get_endpoint_data.side_effect = AttributeError
-        self.adap.get_endpoint.return_value = 'url'
-        self.assertEqual('url', utils.get_endpoint(self.adap))
-        self.adap.get_endpoint_data.assert_called_once_with()
-        self.adap.get_endpoint.assert_called_once_with()
-
-    def test_nonimage_good(self):
-        self.adap.get_endpoint.return_value = 'url'
-        self.assertEqual('url', utils.get_endpoint(self.adap))
-        self.adap.get_endpoint_data.assert_not_called()
-        self.adap.get_endpoint.assert_called_once_with()
 
 
 class TestResourceClassNormalize(test.NoDBTestCase):
@@ -1175,6 +1076,22 @@ class TestGetSDKAdapter(test.NoDBTestCase):
         self.assertEqual(
             self._test_get_sdk_adapter(admin=True), mock.sentinel.proxy
         )
+
+    def test_get_sdk_adapter_ksa_auth(self):
+        # When ksa_auth is provided it takes precedence over the admin
+        # flag: the session is built from the given auth plugin rather
+        # than from nova's service credentials or the user's token.
+        auth = mock.sentinel.auth
+        actual = utils.get_sdk_adapter(
+            self.service_type, admin=True, ksa_auth=auth)
+
+        self.mock_get_confgrp.assert_called_once_with(self.service_type)
+        self.mock_get_auth_sess.assert_called_once_with(
+            self.mock_get_confgrp.return_value, ksa_auth=auth)
+        self.mock_connection.assert_called_once_with(
+            session=mock.sentinel.session, oslo_conf=self.mock_conf,
+            service_types={'test_service'}, strict_proxies=False)
+        self.assertEqual(mock.sentinel.proxy, actual)
 
     def test_get_sdk_adapter_strict(self):
         self.assertEqual(
@@ -1436,277 +1353,6 @@ class LatchErrorOnRaiseTests(test.NoDBTestCase):
         self.assertIs(first, second)
 
 
-class ScatterGatherExecutorTestCase(test.NoDBTestCase):
-    def test_executor_is_named(self):
-        executor = utils.get_scatter_gather_executor()
-        # NOTE(gibi): The executor is name both in normal run and in the test
-        # env. During testing we use a test-case-specific name, outside
-        # of test we use process name specific name instead. The test case
-        # specific name is added to help troubleshooting leaked executors
-        # between test case.
-        self.assertRegex(executor.name,
-            "nova.tests.unit.test_utils.ScatterGatherExecutor.*"
-            "test_executor_is_named.cell_worker")
-
-    @mock.patch.object(
-        utils, 'concurrency_mode_threading', new=mock.Mock(return_value=False))
-    def test_executor_type_eventlet(self):
-        executor = utils.get_scatter_gather_executor()
-
-        self.assertEqual('GreenThreadPoolExecutor', type(executor).__name__)
-
-    @mock.patch.object(
-        utils, 'concurrency_mode_threading', new=mock.Mock(return_value=True))
-    def test_executor_type_and_size_threading(self):
-        self.flags(cell_worker_thread_pool_size=13)
-        executor = utils.get_scatter_gather_executor()
-
-        self.assertEqual('ThreadPoolExecutor', type(executor).__name__)
-        self.assertEqual(13, executor._max_workers)
-
-    def test_executor_destroy(self):
-        executor = utils.get_scatter_gather_executor()
-        self.assertIsNotNone(utils.SCATTER_GATHER_EXECUTOR)
-
-        utils.destroy_scatter_gather_executor()
-        self.assertIsNone(utils.SCATTER_GATHER_EXECUTOR)
-        self.assertFalse(executor.alive)
-
-
-class DefaultExecutorTestCase(test.NoDBTestCase):
-    def test_executor_is_named(self):
-        executor = utils._get_default_executor()
-        # NOTE(gibi): The executor is name both in normal run and in the test
-        # env. During testing we use a test-case-specific name, outside
-        # of test we use process name specific name instead. The test case
-        # specific name is added to help troubleshooting leaked executors
-        # between test case.
-        self.assertRegex(executor.name,
-            "nova.tests.unit.test_utils.DefaultExecutor.*"
-            "test_executor_is_named.default")
-
-    @mock.patch.object(
-        utils, 'concurrency_mode_threading', new=mock.Mock(return_value=False))
-    def test_executor_type_and_size_eventlet(self):
-        self.flags(default_green_pool_size=113)
-        executor = utils._get_default_executor()
-
-        self.assertEqual('GreenThreadPoolExecutor', type(executor).__name__)
-        self.assertEqual(113, executor._max_workers)
-
-    @mock.patch.object(
-        utils, 'concurrency_mode_threading', new=mock.Mock(return_value=True))
-    def test_executor_type_and_size_threading(self):
-        self.flags(default_thread_pool_size=13)
-        executor = utils._get_default_executor()
-
-        self.assertEqual('ThreadPoolExecutor', type(executor).__name__)
-        self.assertEqual(13, executor._max_workers)
-
-    def test_executor_destroy(self):
-        executor = utils._get_default_executor()
-        self.assertIsNotNone(utils.DEFAULT_EXECUTOR)
-
-        utils.destroy_default_executor()
-        self.assertIsNone(utils.DEFAULT_EXECUTOR)
-        self.assertFalse(executor.alive)
-
-
-class SpawnOnTestCase(test.NoDBTestCase):
-    def test_spawn_on_submits_work(self):
-        executor = utils.get_scatter_gather_executor()
-        task = mock.MagicMock()
-
-        future = utils.spawn_on(executor, task, 13, foo='bar')
-        future.result()
-
-        task.assert_called_once_with(13, foo='bar')
-
-    @mock.patch.object(
-        utils, 'concurrency_mode_threading', new=mock.Mock(return_value=True))
-    @mock.patch.object(utils.LOG, 'warning')
-    def test_spawn_on_warns_on_full_executor(self, mock_warning):
-        # Ensure we have executor for a single task only at a time
-        self.flags(cell_worker_thread_pool_size=1)
-        executor = utils.get_scatter_gather_executor()
-
-        work = threading.Event()
-        started = threading.Event()
-
-        # let the blocked tasks finish after the test case so that the leaked
-        # thread check is not triggered during cleanup
-        self.addCleanup(work.set)
-
-        def task():
-            started.set()
-            work.wait()
-
-        # Start two tasks that will wait, the first will execute the second
-        # will wait in the queue
-        utils.spawn_on(executor, task)
-        utils.spawn_on(executor, task)
-        # wait for the first task to consume the single executor thread
-        started.wait()
-        # start one more task to trigger the fullness check.
-        utils.spawn_on(executor, task)
-
-        # We expect that spawn_on will warn due to the second task being is
-        # waiting in the queue, and no idle worker thread exists.
-        mock_warning.assert_called_once_with(
-            'The %s pool does not have free threads so the task %s will be '
-            'queued. If this happens repeatedly then the size of the pool is '
-            'too small for the load or there are stuck threads filling the '
-            'pool.',
-            'nova.tests.unit.test_utils.SpawnOnTestCase.'
-            'test_spawn_on_warns_on_full_executor.cell_worker', task)
-
-    @mock.patch.object(
-        utils, 'concurrency_mode_threading', new=mock.Mock(return_value=True))
-    @mock.patch.object(utils.LOG, 'warning')
-    def test_spawn_on_warns_on_full_executor_noname(self, mock_warning):
-        # Ensure we have executor for a single task only at a time
-        executor = utils.create_executor(max_workers=1)
-
-        work = threading.Event()
-        started = threading.Event()
-
-        # let the blocked tasks finish after the test case so that the leaked
-        # thread check is not triggered during cleanup
-        self.addCleanup(work.set)
-
-        def task():
-            started.set()
-            work.wait()
-
-        # Start two tasks that will wait, the first will execute the second
-        # will wait in the queue
-        utils.spawn_on(executor, task)
-        utils.spawn_on(executor, task)
-        # wait for the first task to consume the single executor thread
-        started.wait()
-        # start one more task to trigger the fullness check.
-        utils.spawn_on(executor, task)
-
-        # We expect that spawn_on will warn due to the second task being is
-        # waiting in the queue, and no idle worker thread exists.
-        mock_warning.assert_called_once_with(
-            'The %s pool does not have free threads so the task %s will be '
-            'queued. If this happens repeatedly then the size of the pool is '
-            'too small for the load or there are stuck threads filling the '
-            'pool.', 'unknown', task)
-
-
-class ExecutorStatsTestCase(test.NoDBTestCase):
-
-    def setUp(self):
-        super().setUp()
-        self.work = threading.Event()
-
-    def _task_finishes(self):
-        return
-
-    def _task_fails(self):
-        raise ValueError()
-
-    def _task_running(self):
-        self.work.wait()
-
-    @mock.patch.object(
-        utils, 'concurrency_mode_threading', new=mock.Mock(return_value=False))
-    @mock.patch.object(utils.LOG, 'debug')
-    def test_stats_logged_eventlet(self, mock_debug):
-        # ensure that each task submission triggers stats printing
-        self.flags(thread_pool_statistic_period=0)
-
-        utils.spawn(self._task_finishes).result()
-        utils.spawn(self._task_fails).exception()
-        running = utils.spawn(self._task_running)
-
-        # avoid having a hanging thread leaking from the test case
-        def cleanup():
-            self.work.set()
-            running.result()
-
-        self.addCleanup(cleanup)
-
-        # The stats are printed *before* the work is submitted so we need an
-        # extra task submitted to get the stats from the above task.
-        utils.spawn(self._task_finishes).result()
-        print(mock_debug.mock_calls)
-
-        args = mock_debug.mock_calls[3][1]
-        self.assertEqual(
-            ('State of %s GreenThreadPoolExecutor when submitting a new task: '
-             'workers: %d, max_workers: %d, work queued length: %d, stats: %s',
-             'nova.tests.unit.test_utils.ExecutorStatsTestCase.'
-             'test_stats_logged_eventlet.default', 1, 1000, 0),
-            args[0:5])
-        stats = args[5]
-        self.assertEqual(1, stats.failures)
-        self.assertEqual(2, stats.executed)
-        self.assertEqual(0, stats.cancelled)
-
-    @mock.patch.object(
-        utils, 'concurrency_mode_threading', new=mock.Mock(return_value=True))
-    @mock.patch.object(utils.LOG, 'debug')
-    def test_stats_logged_threading(self, mock_debug):
-        # ensure that each task submission triggers stats printing
-        self.flags(thread_pool_statistic_period=0)
-        # make the tasks sequential to help simulating queued task
-        self.flags(default_thread_pool_size=1)
-
-        utils.spawn(self._task_finishes).result()
-        utils.spawn(self._task_fails).exception()
-        running = utils.spawn(self._task_running)
-
-        # avoid having a hanging thread leaking from the test case
-        def cleanup():
-            self.work.set()
-            running.result()
-
-        self.addCleanup(cleanup)
-
-        # this will be queued as the only worker thread is held up by the
-        # running task
-        utils.spawn(self._task_finishes)
-        # this is also queued so we can cancel it to dequeue it
-        utils.spawn(self._task_finishes).cancel()
-        # The stats are printed *before* the work is submitted so we need an
-        # extra task submitted to get the stats from the above task.
-        utils.spawn(self._task_finishes)
-
-        args = mock_debug.mock_calls[5][1]
-        self.assertEqual(
-            ('State of %s ThreadPoolExecutor when submitting a new task: '
-             'max_workers: %d, workers: %d, idle workers: %d, queued work: %d,'
-             ' stats: %s',
-             'nova.tests.unit.test_utils.ExecutorStatsTestCase.'
-             'test_stats_logged_threading.default',
-             1, 1, 1, 3),
-            args[0:6])
-        stats = args[6]
-        self.assertEqual(1, stats.failures)
-        self.assertEqual(2, stats.executed)
-        self.assertEqual(1, stats.cancelled)
-
-    @mock.patch.object(utils.LOG, 'debug')
-    def test_stats_skipped_if_too_frequent(self, mock_debug):
-        self.flags(thread_pool_statistic_period=10)
-        utils.spawn(self._task_finishes).result()
-        mock_debug.assert_called()
-        mock_debug.reset_mock()
-
-        utils.spawn(self._task_finishes).result()
-        mock_debug.assert_not_called()
-
-    @mock.patch.object(utils.LOG, 'debug')
-    def test_stats_skipped_disabled(self, mock_info):
-        self.flags(thread_pool_statistic_period=-1)
-
-        utils.spawn(self._task_finishes).result()
-        mock_info.assert_not_called()
-
-
 class OsloServiceBackendSelectionTestCase(test.NoDBTestCase):
     def setUp(self):
         # NOTE(gibi): We need this as the base test class would trigger
@@ -1724,27 +1370,43 @@ class OsloServiceBackendSelectionTestCase(test.NoDBTestCase):
 
     @mock.patch('oslo_service.backend.init_backend')
     def test_eventlet_selected(self, init_backend):
+        env = os.environ.get('OS_NOVA_DISABLE_EVENTLET_PATCHING', '').lower()
+        if env in ('1', 'true', 'yes'):
+            self.skipTest(
+                "In native threading mode this is covered by "
+                "test_threading_selected*")
+
         monkey_patch.patch()
 
         init_backend.assert_called_once_with(oslo_backend.BackendType.EVENTLET)
 
     @mock.patch('oslo_service.backend.init_backend')
-    @mock.patch.dict(os.environ, {"OS_NOVA_DISABLE_EVENTLET_PATCHING": "true"})
-    def test_threading_selected_monkey_patching_poisoned(self, init_backend):
-        monkey_patch.patch()
+    def test_threading_eventlet_poisoned(self, init_backend):
+        env = os.environ.get(
+            'OS_NOVA_DISABLE_EVENTLET_PATCHING', 'false').lower()
+        if env == 'false':
+            self.skipTest("This test can only be run in native threaded mode")
+
+        monkey_patch.patch(backend="threading")
 
         init_backend.assert_called_once_with(
             oslo_backend.BackendType.THREADING)
-        import eventlet
-        ex = self.assertRaises(RuntimeError, eventlet.monkey_patch)
+
+        def eventlet_import():
+            import eventlet  # noqa
+
+        ex = self.assertRaises(ImportError, eventlet_import)
         self.assertEqual(
-            "The service is started with native threading via "
-            "OS_NOVA_DISABLE_EVENTLET_PATCHING set to 'true', but then the "
-            "service tried to call eventlet.monkey_patch(). This is a bug.",
-            str(ex))
+            "The service started in native threading mode so it should not "
+            "import eventlet", str(ex))
 
     @mock.patch('oslo_service.backend.init_backend')
     def test_threading_selected_by_default(self, init_backend):
+        env = os.environ.get(
+            'OS_NOVA_DISABLE_EVENTLET_PATCHING', 'false').lower()
+        if env == 'false':
+            self.skipTest("This test can only be run in native threaded mode")
+
         with mock.patch.dict(os.environ):
             del os.environ["OS_NOVA_DISABLE_EVENTLET_PATCHING"]
             monkey_patch.patch(backend='threading')
@@ -1756,6 +1418,66 @@ class OsloServiceBackendSelectionTestCase(test.NoDBTestCase):
         ex = self.assertRaises(ValueError, monkey_patch.patch, backend='foo')
         self.assertEqual(
             "the backend can only be 'eventlet' or 'threading'", str(ex))
+
+    @mock.patch('nova.monkey_patch.poison_eventlet')
+    @mock.patch('oslo_service.backend.init_backend')
+    @mock.patch('nova.monkey_patch._get_concurrency_from_config',
+                return_value='threading')
+    def test_config_threading_overrides_eventlet_default(
+            self, mock_cfg, init_backend, mock_poison):
+        # When the env var is absent and concurrency_backend=threading in
+        # config, native threading must be selected even if the binary default
+        # is eventlet.
+        with mock.patch.dict(os.environ,
+                             {'OS_NOVA_DISABLE_EVENTLET_PATCHING': ''}):
+            monkey_patch.patch(backend='eventlet')
+
+        init_backend.assert_called_once_with(
+            oslo_backend.BackendType.THREADING)
+        mock_poison.assert_called_once()
+
+    @mock.patch('oslo_service.backend.init_backend')
+    @mock.patch('nova.monkey_patch._get_concurrency_from_config',
+                return_value='eventlet')
+    def test_config_eventlet_overrides_threading_default(
+            self, mock_cfg, init_backend):
+        # When the env var is absent and concurrency_backend=eventlet in
+        # config, eventlet must be selected even if the binary default is
+        # threading.
+        with mock.patch.dict(os.environ,
+                             {'OS_NOVA_DISABLE_EVENTLET_PATCHING': ''}):
+            monkey_patch.patch(backend='threading')
+
+        init_backend.assert_called_once_with(oslo_backend.BackendType.EVENTLET)
+
+    @mock.patch('nova.monkey_patch.poison_eventlet')
+    @mock.patch('oslo_service.backend.init_backend')
+    @mock.patch('nova.monkey_patch._get_concurrency_from_config',
+                return_value='auto')
+    def test_config_auto_defers_to_binary_default_threading(
+            self, mock_cfg, init_backend, mock_poison):
+        # When concurrency_backend=auto the per-binary default (backend=)
+        # must be honoured. Test the threading branch.
+        with mock.patch.dict(os.environ,
+                             {'OS_NOVA_DISABLE_EVENTLET_PATCHING': ''}):
+            monkey_patch.patch(backend='threading')
+
+        init_backend.assert_called_once_with(
+            oslo_backend.BackendType.THREADING)
+        mock_poison.assert_called_once()
+
+    @mock.patch('oslo_service.backend.init_backend')
+    @mock.patch('nova.monkey_patch._get_concurrency_from_config',
+                return_value='auto')
+    def test_config_auto_defers_to_binary_default_eventlet(
+            self, mock_cfg, init_backend):
+        # When concurrency_backend=auto the per-binary default (backend=)
+        # must be honoured. Test the eventlet branch.
+        with mock.patch.dict(os.environ,
+                             {'OS_NOVA_DISABLE_EVENTLET_PATCHING': ''}):
+            monkey_patch.patch(backend='eventlet')
+
+        init_backend.assert_called_once_with(oslo_backend.BackendType.EVENTLET)
 
 
 class TestFairLockGuard(test.NoDBTestCase):
@@ -2073,509 +1795,3 @@ class TestFairLockGuard(test.NoDBTestCase):
             self.assertFalse(lock_guard.is_locked())
 
         mock_fair_locks.get.assert_not_called()
-
-
-class StaticallyDelayingCancellableTaskExecutorWrapperTest(test.NoDBTestCase):
-    def test_submit_one(self):
-        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
-            0.01, utils._get_default_executor())
-        self.addCleanup(executor.shutdown)
-
-        task_done = threading.Event()
-
-        def task(num, foo):
-            self.assertEqual(12, num)
-            self.assertEqual("bar", foo)
-            task_done.set()
-            return foo + str(num)
-
-        future = executor.submit_with_delay(task, 12, foo="bar")
-
-        result = future.result()
-        self.assertTrue(task_done.is_set())
-        self.assertEqual("bar12", result)
-
-    def test_submit_one_exception_result(self):
-        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
-            0.01, utils._get_default_executor())
-        self.addCleanup(executor.shutdown)
-
-        task_done = threading.Event()
-        exc_to_raise = ValueError()
-
-        def task(num, foo):
-            self.assertEqual(12, num)
-            self.assertEqual("bar", foo)
-            task_done.set()
-            raise exc_to_raise
-
-        future = executor.submit_with_delay(task, 12, foo="bar")
-        exc = future.exception()
-
-        self.assertTrue(task_done.is_set())
-        self.assertEqual(exc_to_raise, exc)
-
-    def test_submit_two_non_overlapping(self):
-
-        def task1():
-            return 42
-
-        def task2():
-            return 13
-
-        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
-            0.01, utils._get_default_executor())
-        self.addCleanup(executor.shutdown, wait=True)
-
-        future1 = executor.submit_with_delay(task1)
-        self.assertEqual(42, future1.result())
-
-        future2 = executor.submit_with_delay(task2)
-        self.assertEqual(13, future2.result())
-
-        self.assertTrue(executor._queue.empty())
-
-    def test_submit_second_while_delaying_first(self):
-        task1_started = threading.Event()
-
-        def task1():
-            task1_started.set()
-            return 42
-
-        task2_started = threading.Event()
-
-        def task2():
-            task2_started.set()
-            return 13
-
-        # Create a "long" delay so the task will be actively managed by
-        # the wrapper while we submit the second task
-        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
-            2, utils._get_default_executor())
-        self.addCleanup(executor.shutdown, wait=True)
-
-        task1_start = time.monotonic()
-        future1 = executor.submit_with_delay(task1)
-        # wait a bit so the wrapper is picking it up and waiting for its
-        # deadline
-        time.sleep(1)
-        self.assertTrue(executor._queue.empty())
-        self.assertFalse(task1_started.is_set())
-
-        # now submit the second task, it will be queued
-        task2_start = time.monotonic()
-        future2 = executor.submit_with_delay(task2)
-        self.assertFalse(executor._queue.empty())
-        self.assertFalse(task1_started.is_set())
-
-        # eventually both tasks finishes
-        self.assertEqual(42, future1.result())
-        task1_end = time.monotonic()
-        self.assertEqual(13, future2.result())
-        task2_end = time.monotonic()
-
-        # and both tasks took about delay seconds individually, but the two
-        # tasks together took less than 2x delay seconds as they were
-        # overlapped.
-        task1_runtime = task1_end - task1_start
-        self.assertLess(task1_runtime, 2.5)
-        self.assertGreater(task1_runtime, 2.0)
-        task2_runtime = task2_end - task2_start
-        self.assertLess(task2_runtime, 2.5)
-        self.assertGreater(task2_runtime, 2.0)
-        total_runtime = task2_end - task1_start
-        self.assertLess(total_runtime, 4)
-
-    def test_submit_multiple(self):
-        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
-            0.1, utils._get_default_executor())
-
-        def task(i):
-            return 2 * i
-
-        futures = []
-        for i in range(20):
-            futures.append(executor.submit_with_delay(task, i))
-
-        for i, f in enumerate(futures):
-            self.assertEqual(2 * i, f.result())
-
-        executor.shutdown(wait=True)
-
-    def test_submit_multiple_executor_rejects_first_executes_second(self):
-        def task1():
-            return 42
-
-        def task2():
-            return 13
-
-        check_and_reject = mock.Mock(
-            side_effect=[futurist.RejectedSubmission(), None])
-
-        if utils.concurrency_mode_threading():
-            ex = futurist.ThreadPoolExecutor(
-                max_workers=1, check_and_reject=check_and_reject)
-        else:
-            ex = futurist.GreenThreadPoolExecutor(
-                max_workers=1, check_and_reject=check_and_reject)
-
-        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
-            0.1, ex)
-        self.addCleanup(executor.shutdown, wait=True)
-
-        future1 = executor.submit_with_delay(task1)
-        future2 = executor.submit_with_delay(task2)
-
-        self.assertEqual(
-            futurist.RejectedSubmission, type(future1.exception()))
-        self.assertEqual(13, future2.result())
-
-    def test_cancel_during_delay(self):
-        task1_started = threading.Event()
-
-        def task1():
-            task1_started.set()
-            return 42
-
-        def task2():
-            return 13
-
-        # Create a "long" delay so the task will be actively delayed by
-        # the wrapper when we cancel it
-        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
-            2, utils._get_default_executor())
-        self.addCleanup(executor.shutdown, wait=True)
-
-        future1 = executor.submit_with_delay(task1)
-        # wait a bit to let the task being picked up
-        time.sleep(1)
-        # it is not in the queue, so it is picked up
-        self.assertTrue(executor._queue.empty())
-        # but not executing yet so it is being delayed
-        self.assertFalse(task1_started.is_set())
-
-        # cancel the task
-        future1.cancel()
-
-        # Submit and wait for the execution of the second task to prove
-        # that the executor had time to finish waiting for the deadline of
-        # the first task, detected the cancellation and skipped the task,
-        # then executed the second task.
-        future2 = executor.submit_with_delay(task2)
-        self.assertEqual(13, future2.result())
-
-        # task1 is still not executed
-        self.assertFalse(task1_started.is_set())
-        self.assertTrue(future1.cancelled())
-        # no tasks remaining in the executor queue
-        self.assertTrue(executor._queue.empty())
-
-    def test_cancel_while_in_queue(self):
-        task1_started = threading.Event()
-
-        def task1():
-            task1_started.set()
-            return 42
-
-        task2_started = threading.Event()
-
-        def task2():
-            task2_started.set()
-            return 13
-
-        # Create a "long" delay so one task will be actively delayed while
-        # we submit a second task then cancel the second task.
-        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
-            2, utils._get_default_executor())
-
-        future1 = executor.submit_with_delay(task1)
-        # Wait a bit to let the task being picked up.
-        time.sleep(1)
-        # It is not in the queue, so it is picked up,
-        self.assertTrue(executor._queue.empty())
-        # but not executing yet, so it is being delayed
-        self.assertFalse(task1_started.is_set())
-
-        # Submit a second task that will be queued.
-        future2 = executor.submit_with_delay(task2)
-        self.assertFalse(executor._queue.empty())
-        self.assertFalse(task2_started.is_set())
-
-        # Cancel the second task while it is in the queue.
-        future2.cancel()
-
-        # The first task should finish normally
-        self.assertEqual(42, future1.result())
-
-        # But the second task should never be executed.
-        # To prove that we shutdown both the wrapper and the real executor
-        # then check the second task again.
-        executor.shutdown(wait=True)
-        utils._get_default_executor().shutdown(wait=True)
-        self.assertFalse(task2_started.is_set())
-        self.assertTrue(future2.cancelled())
-
-    def test_instantaneous_shutdown(self):
-        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
-            0.1, utils._get_default_executor())
-        self.addCleanup(executor.shutdown, wait=True)
-
-        executor.shutdown(wait=False)
-        self.assertTrue(executor._shutdown)
-
-    def test_shutdown_wait(self):
-        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
-            0.1, utils._get_default_executor())
-
-        executor.shutdown(wait=True)
-        self.assertTrue(executor._shutdown)
-        self.assertTrue(executor._queue.empty())
-        self.assertFalse(executor.is_alive)
-        # Shutting down the wrapper does not affect the real executor
-        self.assertTrue(executor._executor.alive)
-
-    def test_submit_after_shutdown_rejected(self):
-        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
-            0.1, utils._get_default_executor())
-
-        executor.shutdown()
-        self.assertTrue(executor._shutdown)
-        self.assertTrue(executor._queue.empty())
-        self.assertFalse(executor.is_alive)
-
-        exc = self.assertRaises(
-            RuntimeError, executor.submit_with_delay, lambda: None)
-        self.assertEqual(
-            "Cannot schedule new tasks after being shutdown", str(exc))
-
-    def test_submit_while_shutting_down(self):
-        task_started = threading.Event()
-
-        def task():
-            task_started.set()
-
-        # Create a "long" delay so the task will be actively managed by
-        # the wrapper while the test calls shutdown on it.
-        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
-            2, utils._get_default_executor())
-        self.addCleanup(executor.shutdown, wait=True)
-
-        executor.submit_with_delay(task)
-        executor.shutdown(wait=False)
-
-        # the task is actively managed, delayed, by our wrapper while we are
-        # shutting the executor down, we should not be able to add new tasks
-        # even if the shutdown is not finished yet
-        self.assertFalse(task_started.is_set())
-        exc = self.assertRaises(
-            RuntimeError, executor.submit_with_delay, lambda: None)
-        self.assertEqual(
-            "Cannot schedule new tasks after being shutdown", str(exc))
-
-    def test_shutdown_after_task_finished(self):
-        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
-            0.01, utils._get_default_executor())
-        self.addCleanup(executor.shutdown)
-
-        def task():
-            return
-
-        future = executor.submit_with_delay(task)
-        future.result()
-
-        executor.shutdown()
-
-        self.assertTrue(executor._shutdown)
-        self.assertTrue(executor._queue.empty())
-        self.assertFalse(executor.is_alive)
-
-    def test_no_wait_shutdown_task_finishes_normally(self):
-        task_started = threading.Event()
-
-        def task():
-            task_started.set()
-            return 42
-
-        # Create a "long" delay so the task will be actively managed by
-        # the wrapper while the test calls shutdown on it.
-        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
-            2, utils._get_default_executor())
-        self.addCleanup(executor.shutdown, wait=True)
-
-        future = executor.submit_with_delay(task)
-        # Task is not executing it is being delayed
-        self.assertFalse(task_started.is_set())
-
-        # We expect that shutdown returns even though there are tasks being
-        # actively managed, delayed, by the executor as we called it with
-        # wait=False
-        executor.shutdown(wait=False)
-
-        self.assertTrue(executor._shutdown)
-        self.assertFalse(executor._queue.empty())
-        self.assertTrue(executor.is_alive)
-
-        # Task is still delayed
-        self.assertFalse(task_started.is_set())
-        # and it is not cancelled
-        self.assertFalse(future.cancelled())
-        # and eventually executed
-        self.assertEqual(42, future.result())
-        # and eventually the executor is terminated. This also covers the case
-        # when multiple shutdown call is made to the same executor.
-        executor.shutdown(wait=True)
-        self.assertTrue(executor._queue.empty())
-        self.assertFalse(executor.is_alive)
-
-    def test_no_wait_shutdown_multiple_tasks_finishes_normally(self):
-        task1_started = threading.Event()
-
-        def task1():
-            task1_started.set()
-            return 42
-
-        task2_started = threading.Event()
-
-        def task2():
-            task2_started.set()
-            return 13
-
-        # Create a "long" delay so the task will be actively managed by
-        # the wrapper while the test calls shutdown on it.
-        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
-            2, utils._get_default_executor())
-
-        future1 = executor.submit_with_delay(task1)
-        future2 = executor.submit_with_delay(task2)
-        # Tasks are not executing they are being delayed
-        self.assertFalse(task1_started.is_set())
-        self.assertFalse(task2_started.is_set())
-
-        # wait a bit so the wrapper actually starts waiting for the deadline
-        # of task1
-        time.sleep(1)
-        # Task are still not executing
-        self.assertFalse(task1_started.is_set())
-        self.assertFalse(task2_started.is_set())
-        # task1 is already popped from the queue and the code is waiting for
-        # its deadline, while task2 is in the queue waiting
-        self.assertEqual(1, executor._queue.qsize())
-
-        # Shut down the executor. We expect that the tasks are still executed
-        executor.shutdown(wait=True)
-
-        self.assertEqual(42, future1.result())
-        self.assertEqual(13, future2.result())
-        # and our wrapper is in a shutdown state
-        self.assertTrue(executor._shutdown)
-        self.assertTrue(executor._queue.empty())
-        self.assertFalse(executor.is_alive)
-
-    def test_shutdown_wait_task_finishes_normally(self):
-        task_started = threading.Event()
-
-        def task():
-            task_started.set()
-            return 42
-
-        # Create a "long" delay so the task will be actively managed by
-        # the wrapper while the test calls shutdown on it.
-        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
-            2, utils._get_default_executor())
-
-        future = executor.submit_with_delay(task)
-        # Task is not executing it is being delayed
-        self.assertFalse(task_started.is_set())
-
-        # We expect that shutdown waits for the task to be submitted to the
-        # real executor after the delay
-        executor.shutdown(wait=True)
-        # Task is now submitted to the real executor so it can actually run
-        # and produce a result
-        result = future.result()
-        self.assertTrue(task_started.is_set())
-        self.assertEqual(42, result)
-        # but our wrapper is in a shutdown state
-        self.assertTrue(executor._shutdown)
-        self.assertTrue(executor._queue.empty())
-        self.assertFalse(executor.is_alive)
-
-    def test_shutdown_does_not_wait_for_cancelled_task(self):
-        task_started = threading.Event()
-
-        def task():
-            task_started.set()
-            return 42
-
-        # Create a very long delay so the task will be actively managed by
-        # the wrapper while the test calls shutdown on it and we can
-        # check that the wrapper detects cancelled tasks during shutdown and
-        # does not wait for the whole deadline.
-        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
-            2000, utils._get_default_executor())
-
-        future = executor.submit_with_delay(task)
-        # Task is not executing it is being delayed
-        self.assertFalse(task_started.is_set())
-
-        # Cancel the task, shutdown the executor. We expect that the cancelled
-        # task is not submitted for execution.
-        future.cancel()
-        executor.shutdown(wait=True)
-        self.assertFalse(task_started.is_set())
-        self.assertTrue(future.cancelled())
-        # and our wrapper is in a shutdown state
-        self.assertTrue(executor._shutdown)
-        self.assertTrue(executor._queue.empty())
-        self.assertFalse(executor.is_alive)
-
-    def test_shutdown_does_not_wait_for_multiple_cancelled_tasks(self):
-        task1_started = threading.Event()
-
-        def task1():
-            task1_started.set()
-            return 42
-
-        task2_started = threading.Event()
-
-        def task2():
-            task2_started.set()
-            return 13
-
-        # Create a very long delay so the task will be actively managed by
-        # the wrapper while the test calls shutdown on it and we can
-        # check that the wrapper detects cancelled tasks during shutdown and
-        # does not wait for the whole deadline.
-        executor = utils.StaticallyDelayingCancellableTaskExecutorWrapper(
-            2000, utils._get_default_executor())
-
-        future1 = executor.submit_with_delay(task1)
-        future2 = executor.submit_with_delay(task2)
-        # Tasks are not executing they are being delayed
-        self.assertFalse(task1_started.is_set())
-        self.assertFalse(task2_started.is_set())
-
-        # wait a bit so the wrapper actually starts waiting for the deadline
-        # of task1
-        time.sleep(1)
-        # Task are still not executing
-        self.assertFalse(task1_started.is_set())
-        self.assertFalse(task2_started.is_set())
-        # task1 is already popped from the queue and the code is waiting for
-        # its deadline, while task2 is in the queue waiting
-        self.assertEqual(1, executor._queue.qsize())
-
-        # Cancel both tasks then shutdown the executor and expect that no
-        # task will be executed.
-        future1.cancel()
-        future2.cancel()
-        executor.shutdown(wait=True)
-
-        self.assertFalse(task1_started.is_set())
-        self.assertTrue(future1.cancelled())
-        self.assertFalse(task2_started.is_set())
-        self.assertTrue(future2.cancelled())
-        # and our wrapper is in a shutdown state
-        self.assertTrue(executor._shutdown)
-        self.assertTrue(executor._queue.empty())
-        self.assertFalse(executor.is_alive)

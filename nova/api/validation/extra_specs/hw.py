@@ -420,6 +420,8 @@ feature_flag_validators = [
             'enum': [
                 'amd-sev',
                 'amd-sev-es',
+                'amd-sev-snp',
+                'intel-tdx',
             ],
         },
     ),

@@ -20,7 +20,7 @@ from oslo_serialization import jsonutils
 
 from nova import exception
 from nova.i18n import _
-from nova import utils
+from nova import thread_pool_factory
 
 
 # Constants for the 'vif_type' field in VIF class
@@ -28,6 +28,7 @@ VIF_TYPE_OVS = 'ovs'
 VIF_TYPE_IVS = 'ivs'
 VIF_TYPE_DVS = 'dvs'
 VIF_TYPE_IOVISOR = 'iovisor'
+# NOTE: No longer supported by Nova libvirt driver
 VIF_TYPE_BRIDGE = 'bridge'
 VIF_TYPE_802_QBG = '802.1qbg'
 VIF_TYPE_802_QBH = '802.1qbh'
@@ -582,7 +583,7 @@ class NetworkInfoAsyncWrapper(NetworkInfo):
     def __init__(self, async_method, *args, **kwargs):
         super(NetworkInfoAsyncWrapper, self).__init__()
 
-        self._future = utils.spawn(async_method, *args, **kwargs)
+        self._future = thread_pool_factory.spawn(async_method, *args, **kwargs)
         methods = ['json', 'fixed_ips', 'floating_ips']
         for method in methods:
             fn = getattr(self, method)

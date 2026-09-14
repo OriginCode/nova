@@ -281,12 +281,14 @@ class Aggregate(base.NovaPersistentObject, base.NovaObject):
                 action=action,
                 reason='hosts updated inline')
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_id(cls, context, aggregate_id):
         db_aggregate = _aggregate_get_from_db(context, aggregate_id)
         return cls._from_db_object(context, cls(), db_aggregate)
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_uuid(cls, context, aggregate_uuid):
         db_aggregate = _aggregate_get_from_db_by_uuid(context,
                                                       aggregate_uuid)
@@ -524,27 +526,28 @@ class AggregateList(base.ObjectListBase, base.NovaObject):
                     break
         return filtered_aggregates
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_all(cls, context):
         db_aggregates = _get_all_from_db(context)
-        return base.obj_make_list(context, cls(context), objects.Aggregate,
-                                  db_aggregates)
+        return base.obj_make_list(context, cls(context), db_aggregates)
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_host(cls, context, host, key=None):
         db_aggregates = _get_by_host_from_db(context, host, key=key)
-        return base.obj_make_list(context, cls(context), objects.Aggregate,
-                                  db_aggregates)
+        return base.obj_make_list(context, cls(context), db_aggregates)
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_metadata_key(cls, context, key, hosts=None):
         db_aggregates = _get_by_metadata_from_db(context, key=key)
         if hosts is not None:
             db_aggregates = cls._filter_db_aggregates(db_aggregates, hosts)
-        return base.obj_make_list(context, cls(context), objects.Aggregate,
-                                  db_aggregates)
+        return base.obj_make_list(context, cls(context), db_aggregates)
 
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_by_metadata(cls, context, key=None, value=None):
         """Return aggregates with a metadata key set to value.
 
@@ -553,8 +556,7 @@ class AggregateList(base.ObjectListBase, base.NovaObject):
         that key will qualify.
         """
         db_aggregates = _get_by_metadata_from_db(context, key=key, value=value)
-        return base.obj_make_list(context, cls(context), objects.Aggregate,
-                                  db_aggregates)
+        return base.obj_make_list(context, cls(context), db_aggregates)
 
     @classmethod
     def get_non_matching_by_metadata_keys(cls, context, ignored_keys,
@@ -592,4 +594,4 @@ class AggregateList(base.ObjectListBase, base.NovaObject):
         db_aggregates = _get_non_matching_by_metadata_keys_from_db(
             context, ignored_keys, key_prefix, value)
         return base.obj_make_list(context, objects.AggregateList(context),
-                                  objects.Aggregate, db_aggregates)
+                                  db_aggregates)

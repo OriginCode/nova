@@ -46,7 +46,8 @@ class TaskLog(base.NovaPersistentObject, base.NovaObject):
         return task_log
 
     @base.serialize_args
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get(cls, context, task_name, period_beginning, period_ending, host,
             state=None):
         db_task_log = db.task_log_get(context, task_name, period_beginning,
@@ -78,10 +79,11 @@ class TaskLogList(base.ObjectListBase, base.NovaObject):
     }
 
     @base.serialize_args
-    @base.remotable_classmethod
+    @classmethod
+    @base.remotable
     def get_all(cls, context, task_name, period_beginning, period_ending,
                 host=None, state=None):
         db_task_logs = db.task_log_get_all(context, task_name,
                                            period_beginning, period_ending,
                                            host=host, state=state)
-        return base.obj_make_list(context, cls(context), TaskLog, db_task_logs)
+        return base.obj_make_list(context, cls(context), db_task_logs)
