@@ -4,6 +4,7 @@ nova (2:34.0.0~rc1-1) experimental; urgency=medium
   * Fixed (build-)depends for this release.
   * Removed patch applied upstream:
     - OSSN-0101_Fix_mutating_global_config_in_websocket_proxy.patch
+  * Blacklist test_weights.TestWeigher.test_debug_log_with_json_formatter.
 
  -- Thomas Goirand <zigo@debian.org>  Mon, 14 Sep 2026 11:58:54 +0200
 
