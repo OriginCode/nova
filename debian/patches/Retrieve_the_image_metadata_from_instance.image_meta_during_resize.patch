@@ -20,7 +20,7 @@ Index: nova/nova/compute/rpcapi.py
 ===================================================================
 --- nova.orig/nova/compute/rpcapi.py
 +++ nova/nova/compute/rpcapi.py
-@@ -1054,9 +1054,6 @@ class ComputeAPI(object):
+@@ -1055,9 +1055,6 @@ class ComputeAPI(object):
                      migration, request_spec, filter_properties, node,
                      clean_shutdown, host_list):
          version = '6.0'
@@ -171,7 +171,7 @@ Index: nova/nova/tests/unit/conductor/test_conductor.py
 ===================================================================
 --- nova.orig/nova/tests/unit/conductor/test_conductor.py
 +++ nova/nova/tests/unit/conductor/test_conductor.py
-@@ -3953,7 +3953,7 @@ class ConductorTaskTestCase(_BaseTaskTes
+@@ -3955,7 +3955,7 @@ class ConductorTaskTestCase(_BaseTaskTes
      @mock.patch.object(objects.InstanceMapping, 'get_by_instance_uuid')
      @mock.patch.object(scheduler_utils, 'setup_instance_group')
      @mock.patch.object(objects.RequestSpec, 'from_components')
@@ -180,7 +180,7 @@ Index: nova/nova/tests/unit/conductor/test_conductor.py
      @mock.patch.object(query.SchedulerQueryClient, 'select_destinations')
      @mock.patch.object(conductor_manager.ComputeTaskManager,
                         '_set_vm_state_and_notify')
-@@ -3962,7 +3962,7 @@ class ConductorTaskTestCase(_BaseTaskTes
+@@ -3964,7 +3964,7 @@ class ConductorTaskTestCase(_BaseTaskTes
      @mock.patch.object(migrate.MigrationTask, '_preallocate_migration')
      def test_cold_migrate_exception_host_in_error_state_and_raise(
              self, _preallocate_migration, prep_resize_mock, rollback_mock,
@@ -189,7 +189,7 @@ Index: nova/nova/tests/unit/conductor/test_conductor.py
              sig_mock, im_mock, check_cell_mock):
          inst_obj = objects.Instance(
              image_ref='fake-image_ref',
-@@ -3976,7 +3976,8 @@ class ConductorTaskTestCase(_BaseTaskTes
+@@ -3978,7 +3978,8 @@ class ConductorTaskTestCase(_BaseTaskTes
              pci_requests=None,
              numa_topology=None,
              project_id=self.context.project_id)
@@ -199,7 +199,7 @@ Index: nova/nova/tests/unit/conductor/test_conductor.py
          fake_spec = objects.RequestSpec(image=objects.ImageMeta())
          spec_fc_mock.return_value = fake_spec
  
-@@ -3985,7 +3986,6 @@ class ConductorTaskTestCase(_BaseTaskTes
+@@ -3987,7 +3988,6 @@ class ConductorTaskTestCase(_BaseTaskTes
                                                           uuids.cell1))
  
          hosts = [dict(host='host1', nodename='node1', limits={})]
@@ -207,7 +207,7 @@ Index: nova/nova/tests/unit/conductor/test_conductor.py
          exc_info = test.TestingException('something happened')
          select_dest_mock.return_value = [[fake_selection1]]
  
-@@ -4004,13 +4004,12 @@ class ConductorTaskTestCase(_BaseTaskTes
+@@ -4006,13 +4006,12 @@ class ConductorTaskTestCase(_BaseTaskTes
                                           'hosts': [['host1', 'node1']]},
                                 'limits': {}}
  

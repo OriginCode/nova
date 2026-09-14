@@ -2,6 +2,8 @@ nova (2:34.0.0~rc1-1) experimental; urgency=medium
 
   * New upstream release.
   * Fixed (build-)depends for this release.
+  * Removed patch applied upstream:
+    - OSSN-0101_Fix_mutating_global_config_in_websocket_proxy.patch
 
  -- Thomas Goirand <zigo@debian.org>  Mon, 14 Sep 2026 11:58:54 +0200
 
