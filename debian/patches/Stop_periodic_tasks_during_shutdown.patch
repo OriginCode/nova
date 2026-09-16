@@ -1,0 +1,73 @@
+Description: Stop periodic tasks during shutdown
+ The oslo.service periodic tasks runner expects that tasks are returning
+ a number of seconds indicating when to run next time. During graceful
+ shutdown we want to stop the periodic tasks but we returned None which
+ breaks the protocol and triggers a stack trace. Instead this patch makes
+ sure we raise LoopingCallDone to signal that no more tasks needs to be
+ run during shutdown.
+Author: Balazs Gibizer <gibi@redhat.com>
+Date: Wed, 16 Sep 2026 15:33:31 +0200
+Bug: https://launchpad.net/bugs/2167481
+Change-Id: I44999b3354ae32f4cdf356b46d60d42e004e2ccc
+Signed-off-by: Balazs Gibizer <gibi@redhat.com>
+Origin: upstream, https://review.opendev.org/c/openstack/nova/+/1005880
+Last-Update: 2026-09-16
+
+diff --git a/nova/manager.py b/nova/manager.py
+index b9081e9..5eed009 100644
+--- a/nova/manager.py
++++ b/nova/manager.py
+@@ -55,6 +55,7 @@
+ import time
+ 
+ from oslo_log import log as logging
++from oslo_service import loopingcall
+ from oslo_service import periodic_task
+ 
+ import nova.conf
+@@ -128,7 +129,11 @@
+         """Tasks to be run at a periodic interval."""
+         if self._shutdown_in_progress.is_set():
+             LOG.debug('Skipping periodic tasks during graceful shutdown.')
+-            return
++            # We either need to return a value or raise LoopingCallDone
++            # to avoid a RuntimeError in DynamicLoopingCall. As we
++            # are shutting down, we don't want to run any periodic tasks any
++            # more, so we raise.
++            raise loopingcall.LoopingCallDone()
+         return self.run_periodic_tasks(context, raise_on_error=raise_on_error)
+ 
+     def init_host(self, service_ref):
+diff --git a/nova/tests/unit/test_manager.py b/nova/tests/unit/test_manager.py
+index 0e62334..ac96230 100644
+--- a/nova/tests/unit/test_manager.py
++++ b/nova/tests/unit/test_manager.py
+@@ -70,23 +70,19 @@
+         mock_run.assert_called_once_with(
+             mock.sentinel.context, raise_on_error=True)
+ 
+-    def test_periodic_tasks_none_return_breaks_dynamic_timer(self):
++    def test_periodic_tasks_skipped_cleanly_at_shutdown(self):
+         self.manager._shutdown_in_progress.set()
+ 
+-        self.assertIsNone(self.manager.periodic_tasks(mock.sentinel.context))
++        self.assertRaises(
++            loopingcall.LoopingCallDone,
++            self.manager.periodic_tasks, mock.sentinel.context)
+ 
+         call = loopingcall.DynamicLoopingCall(
+             self.manager.periodic_tasks, mock.sentinel.context)
+         # periodic_interval_max=None mirrors our default config
+         call.start(periodic_interval_max=None)
+ 
+-        # This is bug https://bugs.launchpad.net/nova/+bug/2167481 The
+-        # DynamicLoopingCall will raise a RuntimeError if the periodic_tasks()
+-        # returns None and periodic_interval_max is None.
+-        ex = self.assertRaises(RuntimeError, call.wait)
+-        self.assertIn(
+-            'should supply either an interval or periodic_interval_max',
+-            str(ex))
++        self.assertTrue(call.wait)
+ 
+     def test_record_task_start_assigns_increasing_keys(self):
+         key1 = self.manager._record_task_start(
