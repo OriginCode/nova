@@ -84,4 +84,6 @@ manage_nova_my_ip
 # Cinder os_region_name config
 pkgos_read_config -p high ${NOVA_CONF} cinder os_region_name nova/cinder_os_region_name
 
+#DEBHELPER#
+
 exit 0
