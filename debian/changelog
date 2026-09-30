@@ -1,8 +1,9 @@
-nova (2:34.0.0~rc1-4) UNRELEASED; urgency=medium
+nova (2:34.0.0-1) unstable; urgency=medium
 
   * Add missing #DEBHELPER# in debian/nova-common.config.in.
+  * New upstream release.
 
- -- Thomas Goirand <zigo@debian.org>  Thu, 24 Sep 2026 16:34:58 +0200
+ -- Thomas Goirand <zigo@debian.org>  Wed, 30 Sep 2026 21:19:12 +0200
 
 nova (2:34.0.0~rc1-3) unstable; urgency=medium
 
