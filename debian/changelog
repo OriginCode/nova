@@ -1,3 +1,12 @@
+nova (2:34.0.0-2) unstable; urgency=medium
+
+  * Add a debian/nova-doc.links symlink for _static/js/
+    jquery-3.2.1.min.js: the versioned_notifications doc extension
+    emits a script tag pointing at it, which openstackdocstheme
+    3.2.0-4 no longer ships.
+
+ -- Thomas Goirand <zigo@debian.org>  Fri, 09 Oct 2026 15:00:35 +0200
+
 nova (2:34.0.0-1) unstable; urgency=medium
 
   * Add missing #DEBHELPER# in debian/nova-common.config.in.
