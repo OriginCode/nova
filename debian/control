@@ -418,6 +418,7 @@ Package: nova-doc
 Architecture: all
 Section: doc
 Depends:
+ fonts-font-awesome-legacy | fonts-font-awesome,
  ${misc:Depends},
  ${sphinxdoc:Depends},
 Description: OpenStack Compute - documentation

@@ -4,6 +4,8 @@ nova (2:34.0.0-2) unstable; urgency=medium
     jquery-3.2.1.min.js: the versioned_notifications doc extension
     emits a script tag pointing at it, which openstackdocstheme
     3.2.0-4 no longer ships.
+  * Add a runtime dependency on the Font Awesome fonts to the -doc
+    package, as needed by docs built with openstackdocstheme 3.2.0-4.
 
  -- Thomas Goirand <zigo@debian.org>  Fri, 09 Oct 2026 15:00:35 +0200
 
