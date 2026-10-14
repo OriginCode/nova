@@ -1,3 +1,13 @@
+nova (2:34.0.0-3) unstable; urgency=medium
+
+  * Add a /healthcheck endpoint to the metadata and osapi_compute API
+    pipelines, with the disable_by_file backend, as needed by the
+    haproxy healthchecks. The disabling files are
+    /etc/nova/healthcheck_metadata_disable for nova-api-metadata and
+    /etc/nova/healthcheck_api_disable for nova-api.
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 14 Oct 2026 20:42:26 +0200
+
 nova (2:34.0.0-2) unstable; urgency=medium
 
   * Add a debian/nova-doc.links symlink for _static/js/

@@ -1,0 +1,43 @@
+Index: nova/etc/nova/api-paste.ini
+===================================================================
+--- nova.orig/etc/nova/api-paste.ini
++++ nova/etc/nova/api-paste.ini
+@@ -4,13 +4,30 @@
+ [composite:metadata]
+ use = egg:Paste#urlmap
+ /: meta
++/healthcheck: metadatahealthcheck
+ 
+ [pipeline:meta]
+ pipeline = cors http_proxy_to_wsgi metaapp
+ 
++[pipeline:metadatahealthcheck]
++pipeline = metadatahealthcheckapp
++
++[app:metadatahealthcheckapp]
++paste.app_factory = oslo_middleware:Healthcheck.app_factory
++backends = disable_by_file
++disable_by_file_path = /etc/nova/healthcheck_metadata_disable
++
+ [app:metaapp]
+ paste.app_factory = nova.api.metadata.handler:MetadataRequestHandler.factory
+ 
++[pipeline:healthcheck]
++pipeline = healthcheckapp
++
++[app:healthcheckapp]
++paste.app_factory = oslo_middleware:Healthcheck.app_factory
++backends = disable_by_file
++disable_by_file_path = /etc/nova/healthcheck_api_disable
++
+ #############
+ # OpenStack #
+ #############
+@@ -27,6 +44,7 @@ use = call:nova.api.openstack.urlmap:url
+ # v2 API feature set, but with some relaxed validation
+ /v2/+: openstack_compute_api_v21_legacy_v2_compatible
+ /v2.1/+: openstack_compute_api_v21
++/healthcheck: healthcheck
+ 
+ [composite:openstack_compute_api_v21]
+ use = call:nova.api.auth:pipeline_factory_v21

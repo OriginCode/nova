@@ -7,3 +7,4 @@ testtools-2.8.2-TestMatchersInterface-is-removed.patch
 weights_debug_log_stop_using_tuples_as_dict_keys.patch
 Retrieve_the_image_metadata_from_instance.image_meta_during_resize.patch
 Stop_periodic_tasks_during_shutdown.patch
+Add-a-healthcheck-endpoint-to-the-metadata-API.patch
