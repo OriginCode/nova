@@ -5,7 +5,7 @@ Uploaders:
  Thomas Goirand <zigo@debian.org>,
  Michal Arbet <michal.arbet@ultimum.io>,
 Build-Depends:
- debhelper-compat (= 11),
+ debhelper-compat (= 13),
  dh-python,
  openstack-pkg-tools (>= 141~),
  po-debconf,
