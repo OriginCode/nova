@@ -110,7 +110,7 @@ Build-Depends-Indep:
  subunit,
 Build-Conflicts:
  python3-cjson,
-Standards-Version: 4.4.1
+Standards-Version: 4.7.4
 Vcs-Browser: https://salsa.debian.org/openstack-team/services/nova
 Vcs-Git: https://salsa.debian.org/openstack-team/services/nova.git
 Homepage: https://opendev.org/openstack/nova/
