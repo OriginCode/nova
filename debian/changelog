@@ -1,6 +1,7 @@
 nova (2:34.0.0-4) UNRELEASED; urgency=medium
 
   * Update debian/watch to version=4 mode=git
+  * Remove the Priority: field from debian/control
 
  -- Thomas Goirand <zigo@debian.org>  Thu, 15 Oct 2026 16:15:22 +0200
 
