@@ -1,0 +1,41 @@
+Description: Lock the info cache row in instance_info_cache_update
+ MariaDB 11.x enables innodb_snapshot_isolation by default (MDEV-26642),
+ making InnoDB detect write-write conflicts under REPEATABLE-READ: an
+ UPDATE fails with ER_CHECKREAD (1020) when the row was modified by
+ another transaction after the current transaction took its snapshot.
+ .
+ instance_info_cache_update() reads the row then updates it in the same
+ transaction, so a concurrent cache update (for example the Neutron vif
+ events racing the delete flow) can commit in between. The failing
+ UPDATE also discards the nested savepoint, so the savepoint teardown
+ raises ER_SAVEPOINT_NOT_EXIST (1305), and that DBError escapes both the
+ DBDuplicateEntry handler and wrap_db_retry, leaving the server in
+ ERROR state during delete (observed in the OpenStack Debian CI against
+ MariaDB 11.8.6).
+Author: Thomas Goirand <zigo@debian.org>
+Forwarded: https://review.opendev.org/c/openstack/nova/+/1010847
+Last-Update: 2026-10-16
+
+Index: nova/nova/db/main/api.py
+===================================================================
+--- nova.orig/nova/db/main/api.py
++++ nova/nova/db/main/api.py
+@@ -2462,8 +2462,18 @@ def instance_info_cache_update(context,
+     """
+     convert_objects_related_datetimes(values)
+ 
++    # NOTE(zigo): Lock the row until the end of the transaction. Since
++    # MariaDB 11.x, innodb_snapshot_isolation is enabled by default and
++    # makes InnoDB abort an UPDATE with ER_CHECKREAD (1020) when the row
++    # was modified by another transaction after this transaction took
++    # its snapshot. The failing statement also discards the savepoint
++    # used below, and the savepoint teardown then fails with
++    # ER_SAVEPOINT_NOT_EXIST (1305), masking the original error. A
++    # locking read serializes concurrent writers instead, which also
++    # prevents the lost update.
+     info_cache = model_query(context, models.InstanceInfoCache).\
+                      filter_by(instance_uuid=instance_uuid).\
++                     with_for_update().\
+                      first()
+     needs_create = False
+     if info_cache and info_cache['deleted']:

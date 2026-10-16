@@ -4,6 +4,11 @@ nova (2:34.0.0-4) UNRELEASED; urgency=medium
   * Remove the Priority: field from debian/control
   * Upgrade the package to debhelper-compat (= 13)
   * Update Standards-Version to 4.7.4
+  * Lock the info cache row in instance_info_cache_update, so that
+    MariaDB 11.x's innodb_snapshot_isolation (enabled by default)
+    doesn't abort the UPDATE with ER_CHECKREAD (1020) when a concurrent
+    writer commits in between:
+    - Lock-the-info-cache-row-in-instance_info_cache_update.patch
 
  -- Thomas Goirand <zigo@debian.org>  Thu, 15 Oct 2026 16:15:22 +0200
 
