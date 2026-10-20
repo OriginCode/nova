@@ -1,3 +1,9 @@
+nova (2:33.0.2-1+loong1) unstable; urgency=medium
+
+  * Add loong64 definitions.
+
+ -- Kaiyang Wu <wukaiyang@loongfans.cn>  Tue, 20 Oct 2026 17:20:34 +0800
+
 nova (2:33.0.2-1) unstable; urgency=medium
 
   * New upstream release.

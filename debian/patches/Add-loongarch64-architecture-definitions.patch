@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kaiyang Wu <wukaiyang@loongfans.cn>
+Date: Tue, 20 Oct 2026 17:06:36 +0800
+Subject: [PATCH] Add loongarch64 architecture definitions
+
+Signed-off-by: Kaiyang Wu <wukaiyang@loongfans.cn>
+---
+ nova/virt/arch.py           | 2 ++
+ nova/virt/libvirt/driver.py | 4 ++++
+ 2 files changed, 6 insertions(+)
+
+diff --git a/nova/virt/arch.py b/nova/virt/arch.py
+index 7518ab9ab3..cd1bfe55b8 100644
+--- a/nova/virt/arch.py
++++ b/nova/virt/arch.py
+@@ -54,6 +54,8 @@ X86_64 = 'x86_64'
+ XTENSA = 'xtensa'
+ XTENSAEB = 'xtensaeb'
+ 
++LOONGARCH64 = 'loongarch64'
++
+ ALL = (
+     ALPHA, ARMV6, ARMV7, ARMV7B,
+     AARCH64, CRIS, I686, IA64, LM32,
+diff --git a/nova/virt/libvirt/driver.py b/nova/virt/libvirt/driver.py
+index e02f37bf3a..8768c00fc1 100644
+--- a/nova/virt/libvirt/driver.py
++++ b/nova/virt/libvirt/driver.py
+@@ -7350,6 +7350,10 @@ class LibvirtDriver(driver.ComputeDriver):
+         archs = (fields.Architecture.I686, fields.Architecture.X86_64)
+         return self._check_emulation_arch(image_meta) in archs
+ 
++    def _is_loongarch64_guest(self, image_meta: 'objects.ImageMeta') -> bool:
++        arch = fields.Architecture.LOONGARCH64
++        return self._check_emulation_arch(image_meta) == arch
++
+     def _create_consoles_qemu_kvm(self, guest_cfg, instance, flavor,
+                                   image_meta):
+         char_dev_cls = vconfig.LibvirtConfigGuestSerial
