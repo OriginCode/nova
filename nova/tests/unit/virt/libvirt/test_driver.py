@@ -159,6 +159,18 @@ _fake_cpu_info_aarch64 = {
     "features": ["feature1", "feature2"]
 }
 
+_fake_cpu_info_loongarch64 = {
+    "arch": fields.Architecture.LOONGARCH64,
+    "model": "test_model",
+    "vendor": "test_vendor",
+    "topology": {
+        "sockets": 1,
+        "cores": 8,
+        "threads": 16
+    },
+    "features": ["feature1", "feature2"]
+}
+
 eph_default_ext = utils.get_hash_str(nova.privsep.fs._DEFAULT_FILE_SYSTEM)[:7]
 
 _fake_qemu64_cpu_feature = """
@@ -8991,11 +9003,75 @@ class LibvirtConnTestCase(test.NoDBTestCase,
     @mock.patch.object(libvirt_driver.LibvirtDriver,
                        "_get_guest_storage_config")
     @mock.patch.object(libvirt_driver.LibvirtDriver, "_has_numa_support")
+    def test_get_guest_config_loongarch64(self, mock_numa, mock_storage):
+        TEST_AMOUNT_OF_PCIE_SLOTS = 8
+        CONF.set_override("num_pcie_ports", TEST_AMOUNT_OF_PCIE_SLOTS,
+                group='libvirt')
+
+        self.flags(virt_type="kvm", group="libvirt")
+        self.mock_uname.return_value = fakelibvirt.os_uname(
+            'Linux', '', '5.4.0-0-generic', '',
+            fields.Architecture.LOONGARCH64)
+
+        instance_ref = objects.Instance(**self.test_instance)
+        image_meta = objects.ImageMeta.from_dict(self.test_image_meta)
+
+        disk_info = blockinfo.get_disk_info(CONF.libvirt.virt_type,
+                                            instance_ref,
+                                            image_meta)
+
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        cfg = drvr._get_guest_config(instance_ref,
+                                     _fake_network_info(self),
+                                     image_meta, disk_info)
+        self.assertEqual(cfg.os_mach_type, "virt")
+
+        num_ports = 0
+        for device in cfg.devices:
+            try:
+                if (device.root_name == 'controller' and
+                        device.model == 'pcie-root-port'):
+                    num_ports += 1
+            except AttributeError:
+                pass
+
+        self.assertEqual(TEST_AMOUNT_OF_PCIE_SLOTS, num_ports)
+
+    @mock.patch.object(libvirt_driver.LibvirtDriver,
+                       "_get_guest_storage_config")
+    @mock.patch.object(libvirt_driver.LibvirtDriver, "_has_numa_support")
     def test_get_guest_config_aarch64_with_graphics(
         self, mock_numa, mock_storage,
     ):
         self.mock_uname.return_value = fakelibvirt.os_uname(
             'Linux', '', '5.4.0-0-generic', '', fields.Architecture.AARCH64)
+        self.flags(enabled=True, server_listen='10.0.0.1', group='vnc')
+        self.flags(virt_type='kvm', group='libvirt')
+        self.flags(enabled=False, group='spice')
+
+        cfg = self._get_guest_config_with_graphics()
+
+        self.assertEqual(cfg.os_mach_type, "virt")
+
+        usbhost_exists = False
+        keyboard_exists = False
+        for device in cfg.devices:
+            if device.root_name == 'controller' and device.type == 'usb':
+                usbhost_exists = True
+            if device.root_name == 'input' and device.type == 'keyboard':
+                keyboard_exists = True
+        self.assertTrue(usbhost_exists)
+        self.assertTrue(keyboard_exists)
+
+    @mock.patch.object(libvirt_driver.LibvirtDriver,
+                       "_get_guest_storage_config")
+    @mock.patch.object(libvirt_driver.LibvirtDriver, "_has_numa_support")
+    def test_get_guest_config_loongarch64_with_graphics(
+        self, mock_numa, mock_storage,
+    ):
+        self.mock_uname.return_value = fakelibvirt.os_uname(
+            'Linux', '', '5.4.0-0-generic', '',
+            fields.Architecture.LOONGARCH64)
         self.flags(enabled=True, server_listen='10.0.0.1', group='vnc')
         self.flags(virt_type='kvm', group='libvirt')
         self.flags(enabled=False, group='spice')
@@ -9348,6 +9424,23 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         self.assertIsInstance(conf.cpu, vconfig.LibvirtConfigGuestCPU)
         self.assertEqual(conf.cpu.mode, 'custom')
 
+    def test_get_guest_cpu_config_qemu_custom_loongarch64(self):
+        self.flags(cpu_mode='custom', group='libvirt', cpu_models=['max'])
+        self.mock_uname.return_value = fakelibvirt.os_uname(
+            'Linux', '', '5.4.0-0-generic', '',
+            fields.Architecture.LOONGARCH64)
+
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        instance_ref = objects.Instance(**self.test_instance)
+        image_meta = objects.ImageMeta.from_dict(self.test_image_meta)
+
+        disk_info = blockinfo.get_disk_info(
+            CONF.libvirt.virt_type, instance_ref, image_meta)
+        conf = drvr._get_guest_config(
+            instance_ref, _fake_network_info(self), image_meta, disk_info)
+        self.assertIsInstance(conf.cpu, vconfig.LibvirtConfigGuestCPU)
+        self.assertEqual(conf.cpu.mode, 'custom')
+
     def test_get_x86_64_hw_emulated_architecture_aarch64(self):
         drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
         image_meta = objects.ImageMeta.from_dict({
@@ -9361,6 +9454,20 @@ class LibvirtConnTestCase(test.NoDBTestCase,
 
         self.assertEqual(drvr._check_emulation_arch(image_meta),
                         'aarch64')
+
+    def test_get_x86_64_hw_emulated_architecture_loongarch64(self):
+        drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+        image_meta = objects.ImageMeta.from_dict({
+            "disk_format": "raw",
+            'properties': {
+                    'hw_architecture': 'x86_64',
+                    'hw_emulation_architecture': 'loongarch64',
+                    'hw_machine_type': 'virt',
+                    'hw_firmware_type': 'uefi',
+                    }})
+
+        self.assertEqual(drvr._check_emulation_arch(image_meta),
+                        'loongarch64')
 
     def test_get_x86_64_hw_emulated_architecture_ppc64(self):
         drvr = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
@@ -13069,6 +13176,30 @@ class LibvirtConnTestCase(test.NoDBTestCase,
         conn = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
         ret = conn._compare_cpu(None,
                                 jsonutils.dumps(_fake_cpu_info_aarch64),
+                                instance)
+        mock_compare.assert_called_once_with(caps.host.cpu.to_xml())
+        self.assertIsNone(ret)
+
+    @mock.patch.object(host.Host, 'get_capabilities')
+    @mock.patch.object(host.Host, 'compare_hypervisor_cpu')
+    def test_compare_cpu_host_loongarch64(self,
+                                          mock_compare,
+                                          mock_caps):
+        instance = objects.Instance(**self.test_instance)
+        mock_compare.return_value = 6
+        caps = vconfig.LibvirtConfigCaps()
+        caps.host = vconfig.LibvirtConfigCapsHost()
+        caps.host.cpu = vconfig.LibvirtConfigCPU()
+        caps.host.cpu.arch = fields.Architecture.LOONGARCH64
+        caps.host.topology = fakelibvirt.NUMATopology()
+
+        mock_caps.return_value = caps
+        self.mock_uname.return_value = fakelibvirt.os_uname(
+            'Linux', '', '5.4.0-0-generic', '',
+            fields.Architecture.LOONGARCH64)
+        conn = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
+        ret = conn._compare_cpu(None,
+                                jsonutils.dumps(_fake_cpu_info_loongarch64),
                                 instance)
         mock_compare.assert_called_once_with(caps.host.cpu.to_xml())
         self.assertIsNone(ret)

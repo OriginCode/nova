@@ -5996,28 +5996,30 @@ class LibvirtDriver(driver.ComputeDriver):
             CONF.libvirt.virt_type == "qemu"
         ):
             if mode is None:
-                # AArch64 lacks 'host-model' support because neither libvirt
-                # nor QEMU are able to tell what the host CPU model exactly is.
-                # And there is no CPU description code for ARM(64) at this
-                # point.
+                # AArch64 and LoongArch64 lack 'host-model' support because
+                # neither libvirt nor QEMU are able to tell what the host CPU
+                # model exactly is. And there is no CPU description code for
+                # ARM(64) and LoongArch64 at this point.
 
                 # Also worth noting: 'host-passthrough' mode will completely
                 # break live migration, *unless* all the Compute nodes (running
                 # libvirtd) have *identical* CPUs.
-                if arch == fields.Architecture.AARCH64:
+                if (arch in (fields.Architecture.AARCH64,
+                             fields.Architecture.LOONGARCH64)):
                     mode = "host-passthrough"
                     LOG.info('CPU mode "host-passthrough" was chosen. Live '
                              'migration can break unless all compute nodes '
-                             'have identical cpus. AArch64 does not support '
-                             'other modes.')
+                             'have identical cpus. AArch64 and LoongArch64 '
+                             'does not support other modes.')
                 else:
                     mode = "host-model"
             if mode == "none":
                 return vconfig.LibvirtConfigGuestCPU()
-            # On AArch64 platform the return of _get_cpu_model_mapping will not
-            # return the default CPU model.
+            # On AArch64 and LoonArch64 platforms the return of
+            # _get_cpu_model_mapping will not return the default CPU model.
             if mode == "custom":
-                if arch == fields.Architecture.AARCH64:
+                if (arch in (fields.Architecture.AARCH64,
+                             fields.Architecture.LOONGARCH64)):
                     if not models:
                         models = ['max']
 
@@ -6132,6 +6134,8 @@ class LibvirtDriver(driver.ComputeDriver):
             # tested.
             elif arch == fields.Architecture.MIPSEL:
                 cpu = None
+            elif arch == fields.Architecture.LOONGARCH64:
+                cpu.model = "la464"
 
         return cpu
 
@@ -7028,6 +7032,8 @@ class LibvirtDriver(driver.ComputeDriver):
             return 'virtio'
         elif guestarch == fields.Architecture.MIPSEL:
             return 'virtio'
+        elif guestarch == fields.Architecture.LOONGARCH64:
+            return 'virtio'
 
         # NOTE(lyarwood): Return None and default to the default of
         # LibvirtConfigGuestVideo.type that is currently virtio
@@ -7343,7 +7349,8 @@ class LibvirtDriver(driver.ComputeDriver):
             hw_firmware_stateless = hardware.get_stateless_firmware_constraint(
                 image_meta)
 
-            if arch == fields.Architecture.AARCH64:
+            if (arch in (fields.Architecture.AARCH64,
+                         fields.Architecture.LOONGARCH64)):
                 if not hw_firmware_type:
                     hw_firmware_type = fields.FirmwareType.UEFI
 
@@ -7489,6 +7496,10 @@ class LibvirtDriver(driver.ComputeDriver):
     def _is_x86_guest(self, image_meta: 'objects.ImageMeta') -> bool:
         archs = (fields.Architecture.I686, fields.Architecture.X86_64)
         return self._check_emulation_arch(image_meta) in archs
+
+    def _is_loongarch64_guest(self, image_meta: 'objects.ImageMeta') -> bool:
+        arch = fields.Architecture.LOONGARCH64
+        return self._check_emulation_arch(image_meta) == arch
 
     def _create_consoles_qemu_kvm(self, guest_cfg, instance, flavor,
                                   image_meta):
@@ -7708,8 +7719,8 @@ class LibvirtDriver(driver.ComputeDriver):
         # Only certain architectures and machine types can handle PCIe ports;
         # the latter will be handled by libvirt.utils.get_machine_type
 
-        if (
-            caps.host.cpu.arch == fields.Architecture.AARCH64 and
+        if (caps.host.cpu.arch in (fields.Architecture.AARCH64,
+                                   fields.Architecture.LOONGARCH64) and
             guest.os_mach_type.startswith('virt')
         ):
             return True
@@ -8219,13 +8230,14 @@ class LibvirtDriver(driver.ComputeDriver):
         bus = image_meta.properties.get('hw_input_bus')
 
         if not bus:
-            # AArch64 doesn't provide a default keyboard so we explicitly add
-            # one; for everything else we rely on default (e.g. for x86,
-            # libvirt will automatically add a PS2 keyboard)
+            # AArch64 and LoongArch64 doesn't provide a default keyboard so we
+            # explicitly add one; for everything else we rely on default (e.g.
+            # for x86, libvirt will automatically add a PS2 keyboard)
             # TODO(stephenfin): We might want to do this for other non-x86
             # architectures
             arch = self._check_emulation_arch(image_meta)
-            if arch != fields.Architecture.AARCH64:
+            if (arch not in (fields.Architecture.AARCH64,
+                            fields.Architecture.LOONGARCH64)):
                 return None
 
             bus = 'usb'
@@ -9596,7 +9608,8 @@ class LibvirtDriver(driver.ComputeDriver):
 
         if (caps.host.cpu.arch in (fields.Architecture.I686,
                                    fields.Architecture.X86_64,
-                                   fields.Architecture.AARCH64) and
+                                   fields.Architecture.AARCH64,
+                                   fields.Architecture.LOONGARCH64) and
                 self._host.has_min_version(hv_type=host.HV_DRIVER_QEMU)):
             return True
         elif (caps.host.cpu.arch in (fields.Architecture.PPC64,
@@ -11302,11 +11315,12 @@ class LibvirtDriver(driver.ComputeDriver):
             cpu = self._vcpu_model_to_cpu_config(guest_cpu)
 
         host_cpu = self._host.get_capabilities().host.cpu
-        if host_cpu.arch == fields.Architecture.AARCH64:
-            LOG.debug("On AArch64 hosts, source and destination host "
-                      "CPUs are compared to check if they're compatible"
-                      "(the only use-case supported by libvirt for "
-                      "Arm64/AArch64)")
+        if (host_cpu.arch in (fields.Architecture.AARCH64,
+                              fields.Architecture.LOONGARCH64)):
+            LOG.debug("On AArch64 and LoongArch64 hosts, source and"
+                      "destination host CPUs are compared to check if they're"
+                      "compatible (the only use-case supported by libvirt for"
+                      "Arm64/AArch64 and LoongArch64)")
             cpu = host_cpu
 
         u = ("http://libvirt.org/html/libvirt-libvirt-host.html#"
@@ -13924,8 +13938,10 @@ class LibvirtDriver(driver.ComputeDriver):
             models = [self._get_cpu_model_mapping(model)
                       for model in CONF.libvirt.cpu_models]
 
-            # Aarch64 platform doesn't return the default CPU models
-            if caps.host.cpu.arch == fields.Architecture.AARCH64:
+            # Aarch64 and LoongArch64 platform doesn't return the default CPU
+            # models
+            if (caps.host.cpu.arch in (fields.Architecture.AARCH64,
+                                       fields.Architecture.LOONGARCH64)):
                 if not models:
                     models = ['max']
             # For custom mode, iterate through cpu models

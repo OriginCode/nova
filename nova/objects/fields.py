@@ -167,6 +167,8 @@ class Architecture(BaseNovaEnum):
     XTENSA = arch.XTENSA
     XTENSAEB = arch.XTENSAEB
 
+    LOONGARCH64 = arch.LOONGARCH64
+
     ALL = arch.ALL
 
     @classmethod

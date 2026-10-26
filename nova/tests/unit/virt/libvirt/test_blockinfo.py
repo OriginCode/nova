@@ -658,6 +658,13 @@ class LibvirtBlockInfoTest(test.NoDBTestCase):
         self._test_get_disk_mapping_simple_configdrive('scsi', 'sda')
         mock_get_arch.assert_called()
 
+    @mock.patch(
+        'nova.virt.libvirt.utils.get_arch',
+        return_value=obj_fields.Architecture.LOONGARCH64)
+    def test_get_disk_mapping_simple_configdrive__loongarch64(self, mock_get_arch):
+        self._test_get_disk_mapping_simple_configdrive('scsi', 'sda')
+        mock_get_arch.assert_called()
+
     def _test_get_disk_mapping_cdrom_configdrive(self, expect_bus, expect_dev):
         # A simple disk mapping setup, with configdrive added as cdrom
         # It's necessary to check if the architecture is power, because
@@ -714,6 +721,13 @@ class LibvirtBlockInfoTest(test.NoDBTestCase):
         'nova.virt.libvirt.utils.get_arch',
         return_value=obj_fields.Architecture.AARCH64)
     def test_get_disk_mapping_cdrom_configdrive__aarch64(self, mock_get_arch):
+        self._test_get_disk_mapping_cdrom_configdrive('scsi', 'sda')
+        mock_get_arch.assert_called()
+
+    @mock.patch(
+        'nova.virt.libvirt.utils.get_arch',
+        return_value=obj_fields.Architecture.LOONGARCH64)
+    def test_get_disk_mapping_cdrom_configdrive__loongarch64(self, mock_get_arch):
         self._test_get_disk_mapping_cdrom_configdrive('scsi', 'sda')
         mock_get_arch.assert_called()
 
@@ -1042,7 +1056,9 @@ class LibvirtBlockInfoTest(test.NoDBTestCase):
                 (obj_fields.Architecture.S390X, 'disk', 'virtio'),
                 (obj_fields.Architecture.S390X, 'cdrom', 'scsi'),
                 (obj_fields.Architecture.AARCH64, 'disk', 'virtio'),
-                (obj_fields.Architecture.AARCH64, 'cdrom', 'scsi')
+                (obj_fields.Architecture.AARCH64, 'cdrom', 'scsi'),
+                (obj_fields.Architecture.LOONGARCH64, 'disk', 'virtio'),
+                (obj_fields.Architecture.LOONGARCH64, 'cdrom', 'scsi')
                 )
         image_meta = objects.ImageMeta.from_dict(self.test_image_meta)
         for guestarch, dev, res in expected:

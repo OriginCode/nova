@@ -386,6 +386,42 @@ CAPABILITIES_HOST_S390X_TEMPLATE = """
     <iommu support='no'/>
   </host>"""
 
+CAPABILITIES_HOST_LOONGARCH64_TEMPLATE = """
+  <host>
+    <uuid>9c8db2a1-490d-45f6-b934-2c2d197d228e</uuid>
+    <cpu>
+      <arch>loongarch64</arch>
+      <topology sockets="1" dies="1" clusters="1" cores="4" threads="2"/>
+      <pages unit="KiB" size="16"/>
+      <pages unit="KiB" size="32768"/>
+    </cpu>
+    <power_management>
+      <suspend_mem/>
+      <suspend_disk/>
+      <suspend_hybrid/>
+    </power_management>
+    <iommu support="no"/>
+    %(topology)s
+    <migration_features>
+      <live/>
+      <uri_transports>
+        <uri_transport>tcp</uri_transport>
+        <uri_transport>rdma</uri_transport>
+      </uri_transports>
+    </migration_features>
+    <secmodel>
+      <model>apparmor</model>
+      <doi>0</doi>
+    </secmodel>
+    <secmodel>
+      <model>dac</model>
+      <doi>0</doi>
+      <baselabel type="kvm">+64055:+64055</baselabel>
+      <baselabel type="qemu">+64055:+64055</baselabel>
+    </secmodel>
+  </host>"""
+
+
 CAPABILITIES_HOST_TEMPLATES = {
     Architecture.X86_64: CAPABILITIES_HOST_X86_64_TEMPLATE,
     Architecture.I686: CAPABILITIES_HOST_I686_TEMPLATE,
@@ -395,6 +431,7 @@ CAPABILITIES_HOST_TEMPLATES = {
     Architecture.PPC64: CAPABILITIES_HOST_PPC64_TEMPLATE,
     Architecture.PPC64LE: CAPABILITIES_HOST_PPC64LE_TEMPLATE,
     Architecture.S390X: CAPABILITIES_HOST_S390X_TEMPLATE,
+    Architecture.LOONGARCH64: CAPABILITIES_HOST_LOONGARCH64_TEMPLATE,
 }
 
 # NOTE(aspiers): HostTestCase has tests which assert that for any
@@ -696,6 +733,24 @@ CAPABILITIES_GUEST = {
             <machine maxCpus='1'>connex</machine>
             <machine maxCpus='1'>netduinoplus2</machine>
             <machine maxCpus='1'>collie</machine>
+            <domain type='qemu'/>
+          </arch>
+          <features>
+            <acpi default='on' toggle='yes'/>
+            <cpuselection/>
+            <deviceboot/>
+            <disksnapshot default='on' toggle='no'/>
+          </features>
+        </guest>''',
+
+    'loongarch64': '''
+        <guest>
+          <os_type>hvm</os_type>
+          <arch name='loongarch64'>
+            <wordsize>64</wordsize>
+            <emulator>/usr/bin/qemu-system-loongarch64</emulator>
+            <machine maxCpus='256'>virt-11.1</machine>
+            <machine canonical='virt-11.1' maxCpus='256'>virt</machine>
             <domain type='qemu'/>
           </arch>
           <features>
@@ -1186,6 +1241,127 @@ DOMCAPABILITIES_AARCH64 = """
 </domainCapabilities>
 """
 
+DOMCAPABILITIES_LOONGARCH64 = """
+<domainCapabilities>
+  <path>/usr/bin/qemu-system-loongarch64</path>
+  <domain>qemu</domain>
+  <machine>virt-11.1</machine>
+  <arch>loongarch64</arch>
+  <vcpu max='256'/>
+  <iothreads supported='yes'/>
+  <os supported='yes'>
+    <enum name='firmware'>
+      <value>efi</value>
+    </enum>
+    <loader supported='yes'>
+      <value>/usr/share/qemu-efi-loongarch64/QEMU_EFI.fd</value>
+      <enum name='type'>
+        <value>rom</value>
+        <value>pflash</value>
+      </enum>
+      <enum name='readonly'>
+        <value>yes</value>
+        <value>no</value>
+      </enum>
+      <enum name='secure'>
+        <value>no</value>
+      </enum>
+    </loader>
+  </os>
+  <cpu>
+    <mode name='host-passthrough' supported='yes'>
+      <enum name='hostPassthroughMigratable'>
+        <value>off</value>
+      </enum>
+    </mode>
+    <mode name='maximum' supported='yes'>
+      <enum name='maximumMigratable'>
+        <value>on</value>
+        <value>off</value>
+      </enum>
+    </mode>
+    <mode name='host-model' supported='no'/>
+    <mode name='custom' supported='yes'>
+      <model usable='unknown'>la132</model>
+      <model usable='unknown'>la464</model>
+      <model usable='unknown'>max</model>
+    </mode>
+  </cpu>
+  <devices>
+    <disk supported='yes'>
+      <enum name='diskDevice'>
+        <value>disk</value>
+        <value>cdrom</value>
+        <value>floppy</value>
+        <value>lun</value>
+      </enum>
+      <enum name='bus'>
+        <value>fdc</value>
+        <value>scsi</value>
+        <value>virtio</value>
+        <value>usb</value>
+        <value>sata</value>
+      </enum>
+      <enum name='model'>
+        <value>virtio</value>
+        <value>virtio-transitional</value>
+        <value>virtio-non-transitional</value>
+      </enum>
+    </disk>
+    <graphics supported='yes'>
+      <enum name='type'>
+        <value>sdl</value>
+        <value>vnc</value>
+        <value>spice</value>
+      </enum>
+    </graphics>
+    <video supported='yes'>
+      <enum name='modelType'>
+        <value>virtio</value>
+        <value>none</value>
+      </enum>
+    </video>
+    <hostdev supported='yes'>
+      <enum name='mode'>
+        <value>subsystem</value>
+      </enum>
+      <enum name='startupPolicy'>
+        <value>default</value>
+        <value>mandatory</value>
+        <value>requisite</value>
+        <value>optional</value>
+      </enum>
+      <enum name='subsysType'>
+        <value>usb</value>
+        <value>pci</value>
+        <value>scsi</value>
+      </enum>
+      <enum name='capsType'/>
+      <enum name='pciBackend'/>
+    </hostdev>
+    <rng supported='yes'>
+      <enum name='model'>
+        <value>virtio</value>
+        <value>virtio-transitional</value>
+        <value>virtio-non-transitional</value>
+      </enum>
+      <enum name='backendModel'>
+        <value>random</value>
+        <value>egd</value>
+        <value>builtin</value>
+      </enum>
+    </rng>
+  </devices>
+  <features>
+    <vmcoreinfo supported='yes'/>
+    <genid supported='no'/>
+    <backingStoreInput supported='yes'/>
+    <backup supported='no'/>
+    <sev supported='no'/>
+  </features>
+</domainCapabilities>
+"""
+
 DOMCAPABILITIES_PPC = """
 <domainCapabilities>
   <path>/usr/bin/qemu-system-ppc</path>
@@ -1586,6 +1762,7 @@ DOMCAPABILITIES_I686 = """
 STATIC_DOMCAPABILITIES = {
     Architecture.ARMV7: DOMCAPABILITIES_ARMV7,
     Architecture.AARCH64: DOMCAPABILITIES_AARCH64,
+    Architecture.LOONGARCH64: DOMCAPABILITIES_LOONGARCH64,
     Architecture.SPARC: DOMCAPABILITIES_SPARC,
     Architecture.PPC: DOMCAPABILITIES_PPC,
     Architecture.MIPS: DOMCAPABILITIES_MIPS,

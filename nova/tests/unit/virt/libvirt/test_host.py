@@ -747,6 +747,23 @@ class HostTestCase(test.NoDBTestCase):
             caps = self.host.get_capabilities()
             self.assertEqual(0, len(caps.host.cpu.features))
 
+    def test_get_capabilities_on_loongarch64(self):
+        """Tests that cpu features are not retrieved on loongarch64 platform.
+        """
+        fake_caps_xml = '''
+<capabilities>
+  <host>
+    <uuid>9c8db2a1-490d-45f6-b934-2c2d197d228e</uuid>
+    <cpu>
+      <arch>loongarch64</arch>
+    </cpu>
+  </host>
+</capabilities>'''
+        with mock.patch.object(fakelibvirt.virConnect, 'getCapabilities',
+                               return_value=fake_caps_xml):
+            caps = self.host.get_capabilities()
+            self.assertEqual(0, len(caps.host.cpu.features))
+
     def test__get_machine_types(self):
         expected = [
             # NOTE(aspiers): in the real world, i686 would probably
